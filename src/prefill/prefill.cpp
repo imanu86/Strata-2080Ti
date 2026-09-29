@@ -470,8 +470,11 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert) {
 
 bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, core::SessionState& ss,
                    core::ExpertSource* src, const core::ExpertCache* cache, const int32_t* host_res, int64_t chunk,
-                   void* stream, std::string& err, void* borrow, uint64_t borrow_bytes) {
+                   void* stream, std::string& err, void* borrow, uint64_t borrow_bytes, int64_t chunk_max) {
     Impl& m = *impl_;
+    // the host side is sized for the largest chunk a relayout may ask for; the device side (carved below from the
+    // borrowed slots) for this one
+    const int64_t cap_T = std::max<int64_t>(chunk, chunk_max);
     m.wt = &wt; m.g = &g; m.ss = &ss; m.src = src; m.cache = cache; m.host_res = host_res;
     m.T = chunk; m.cs = (cudaStream_t) stream; m.stats = &stats_;
     if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert < 1 || ss.k != K) {
@@ -484,7 +487,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         return false;
     }
     for (int b = 0; next_ != nullptr && b < 2; ++b)
-        if (!m.hand[b] && cudaHostAlloc((void**) &m.hand[b], (size_t) chunk * D * 4, cudaHostAllocPortable) != cudaSuccess) {
+        if (!m.hand[b] && cudaHostAlloc((void**) &m.hand[b], (size_t) cap_T * D * 4, cudaHostAllocPortable) != cudaSuccess) {
             err = "prefill: the layer split's hand-off buffers";
             return false;
         }
@@ -497,8 +500,8 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         m.tok_host.resize((size_t) chunk);
     }
     if (cudaStreamCreateWithFlags(&m.copy, cudaStreamNonBlocking) != cudaSuccess) { err = "prefill: copy stream"; return false; }
-    const size_t T = (size_t) chunk;
-    m.T_max = chunk;
+    const size_t T = (size_t) cap_T;   // the host buffers below; `carve` gets this chunk's own size
+    m.T_max = cap_T;
     m.borrowed = borrow != nullptr;
     bool ok = true;
     // one-time: events, the stager, the host buffers (for the largest chunk), the identity page table
@@ -567,7 +570,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         if (!ok) { err = "prefill: GEMM scratch does not fit"; return false; }
         if (!m.gemm.init_external(stream, gs, GEMM_SCRATCH, ws, GEMM_WS, err)) return false;
     }
-    if (!carve(T, &o)) {
+    if (!carve((size_t) chunk, &o)) {
         err = "prefill: device buffers for a chunk of " + std::to_string(chunk) + " tokens do not fit";
         return false;
     }
