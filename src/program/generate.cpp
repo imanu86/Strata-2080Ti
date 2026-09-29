@@ -627,6 +627,8 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, int64_t 
             static const float one[64] = {};   // k <= 64 in a verify window; zeros read as unit weights
             std::fwrite(one, sizeof(float), (size_t) k, t->routing);
         }
+        // fork «Strata adattivo»: flushed per layer - a served engine usually ends by being killed
+        std::fflush(t->routing);
     }
 }
 
