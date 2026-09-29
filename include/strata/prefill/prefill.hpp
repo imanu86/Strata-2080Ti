@@ -92,6 +92,13 @@ public:
     /// Checked before every chunk: true stops the prompt early (`run` returns false with err "cancelled").
     std::function<bool()> should_stop;
 
+    /// Chunk edges on a grid: a chunk that would cross the next point `align_origin + k * align_every` (absolute
+    /// positions) is cut there.  The conversation cache saves its checkpoints at chunk ends every
+    /// `--prompt-cache-every` tokens; with a chunk that does not divide it (6144 against 16384) they drifted to
+    /// 18432, 36864, ... and a follow-up on a 32K prompt re-read ~14.5K tokens.  0 (default) = the plain chunking.
+    int64_t align_every = 0;
+    int64_t align_origin = 0;
+
     /// The vision path: HOST rows (n_embd floats) indexed by absolute position, read in place of the token
     /// embedding where non-null (an image's <|image_pad|> cells).  Null (default): every position embeds its token.
     const float* const* embd_rows = nullptr;

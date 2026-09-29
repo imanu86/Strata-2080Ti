@@ -4457,6 +4457,10 @@ int main(int argc, char** argv) {
                 part_at.clear();
                 std::fill(part_next.begin(), part_next.end(), pp_next_check);
             }
+            // fork «Strata adattivo»: chunks cut on the same grid, so every checkpoint lands exactly on
+            // resume + k * prompt_cache_every (a layer split keeps the plain chunking: its stages hand chunks on)
+            sp.align_every = (reread_to > 0 || multi_gpu || o.prompt_cache_every <= 0) ? 0 : o.prompt_cache_every;
+            sp.align_origin = resume;
             std::printf("RESUME %lld\n", (long long) resume);   // before reading: this many prompt tokens are reused
             strata::core::progress_at("reading the prompt, from token", read_from);
             std::fflush(stdout);
