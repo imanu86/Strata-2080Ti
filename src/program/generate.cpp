@@ -4218,7 +4218,11 @@ int main(int argc, char** argv) {
             if (fr < el_reserve) {
                 // in steps: at most el_shrink_step per check, the next check takes the next step if still short;
                 // never below the core
-                const int64_t need = std::min(el_reserve - fr + (int64_t) xcache.chunk_bytes(), el_shrink_step);
+                // under WDDM a reading of ~0 only says "at least this short" (the startup sizing gives back a whole
+                // GiB for it too): take the full step, not reserve + one chunk
+                const int64_t need = fr < (16ll << 20) ? el_shrink_step
+                                                       : std::min(el_reserve - fr + (int64_t) xcache.chunk_bytes(),
+                                                                  el_shrink_step);
                 const uint64_t* off = xcache.slot_offsets();
                 const int64_t S = xcache.slots();
                 int64_t n = S;
