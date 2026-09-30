@@ -331,6 +331,262 @@ __device__ __forceinline__ float row_dot(const uint8_t* row, const block_q8_1* x
     return warp_sum(s);
 }
 
+// ---------------------------------------------------------------- fork «Strata adattivo»: several tokens per decode
+// The grouped expert kernels called row_dot once per (token, expert) entry of a group, so a verify window's 2-4 tokens
+// decoded every weight block of an expert 2-4 times (native_expert_bench: the time grew with the entries, not the bytes).
+// These decode a call's 32 weights once into w[] and take the dot with NT activations.  Per token the float operations
+// and their order are the ones of the single-token functions above, so every output is bit-identical to row_dot's.
+template<int NT>
+__device__ __forceinline__ void vdm_q2_0(const void* __restrict__ vbq, const block_q8_1* const* y, int kbx, int iqs,
+                                         float* acc) {
+    const block_q2_0* bq = (const block_q2_0*) vbq + kbx;
+    const float d2 = bq->d;
+    const int16_t* qs = (const int16_t*) bq->qs + iqs * 4;
+    int w[8];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int q = qs[j];
+        const int qe = __byte_perm(0x020100FF, 0x020100FF, q >> 0);
+        const int qo = __byte_perm(0x020100FF, 0x020100FF, q >> 2);
+        w[2 * j + 0] = __byte_perm(qe, qo, 0x5140);
+        w[2 * j + 1] = __byte_perm(qe, qo, 0x7362);
+    }
+#pragma unroll
+    for (int t = 0; t < NT; ++t) {
+        const block_q8_1* c = y[t] + iqs;
+        int sumi = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(get_int_b4(c->qs, j), w[j], sumi);
+        acc[t] += d2 * __low2float(c->ds) * sumi;
+    }
+}
+
+template<int NT>
+__device__ __forceinline__ void vdm_iq2_xxs(const void* __restrict__ vbq, const block_q8_1* const* y, int kbx, int iqs,
+                                            float* acc) {
+    const block_iq2_xxs* bq2 = (const block_iq2_xxs*) vbq + kbx;
+    const int q2 = get_int_b2(bq2->qs, iqs);
+    const uint8_t* aux8 = (const uint8_t*) &q2;
+    const uint32_t aux32 = get_int_b2(bq2->qs, iqs + 1);
+    int w[8];
+#pragma unroll
+    for (int k0 = 0; k0 < 8; k0 += 2) {
+        const uint2 grid_pos = ((const uint2*) iq2xxs_grid)[aux8[k0 / 2]];
+        const uint32_t signs = unpack_ksigns(aux32 >> (7 * k0 / 2));
+        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
+        w[k0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
+        w[k0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+    }
+    const int ls = aux32 >> 27 | 1;
+    const float dw = __half2float(bq2->d);
+#pragma unroll
+    for (int t = 0; t < NT; ++t) {
+        const block_q8_1* c = y[t] + iqs / 2;
+        int sumi = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(w[j], get_int_b4(c->qs, j), sumi);
+        sumi = sumi * ls / 8;
+        acc[t] += dw * __low2float(c->ds) * sumi;
+    }
+}
+
+// IQ2_XS and IQ2_S share the finish: two half-block partial sums with their own 4-bit scales
+template<int NT>
+__device__ __forceinline__ void vdm_iq2_finish(const int* w, int ls0, int ls1, float dw, const block_q8_1* const* y,
+                                               int iqs, float* acc) {
+#pragma unroll
+    for (int t = 0; t < NT; ++t) {
+        const block_q8_1* c = y[t] + iqs / 2;
+        int sumi0 = 0, sumi1 = 0;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) sumi0 = ggml_cuda_dp4a(w[j], get_int_b4(c->qs, j), sumi0);
+#pragma unroll
+        for (int j = 4; j < 8; ++j) sumi1 = ggml_cuda_dp4a(w[j], get_int_b4(c->qs, j), sumi1);
+        const int sumi = (sumi0 * ls0 + sumi1 * ls1 + (sumi0 + sumi1) / 2) / 4;
+        acc[t] += dw * __low2float(c->ds) * sumi;
+    }
+}
+
+template<int NT>
+__device__ __forceinline__ void vdm_iq2_xs(const void* __restrict__ vbq, const block_q8_1* const* y, int kbx, int iqs,
+                                           float* acc) {
+    const block_iq2_xs* bq2 = (const block_iq2_xs*) vbq + kbx;
+    const int2 q2_packed = make_int2(get_int_b2(bq2->qs, iqs + 0), get_int_b2(bq2->qs, iqs + 1));
+    const uint16_t* q2 = (const uint16_t*) &q2_packed;
+    int w[8];
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const uint2 grid_pos = ((const uint2*) iq2xs_grid)[q2[l0 / 2] & 0x1FF];
+        const uint32_t signs = unpack_ksigns(q2[l0 / 2] >> 9);
+        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
+        w[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
+        w[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+    }
+    vdm_iq2_finish<NT>(w, bq2->scales[iqs / 2] & 0x0F, bq2->scales[iqs / 2] >> 4, __half2float(bq2->d), y, iqs, acc);
+}
+
+template<int NT>
+__device__ __forceinline__ void vdm_iq2_s(const void* __restrict__ vbq, const block_q8_1* const* y, int kbx, int iqs,
+                                          float* acc) {
+    const block_iq2_s* bq2 = (const block_iq2_s*) vbq + kbx;
+    const int qs_packed = get_int_b2(bq2->qs, iqs / 2);
+    const uint8_t* qs = (const uint8_t*) &qs_packed;
+    const int qh = bq2->qh[iqs / 2];
+    const int signs_packed_32 = get_int_b2(bq2->qs, QK_K / 32 + iqs / 2);
+    const uint8_t* signs_packed_8 = (const uint8_t*) &signs_packed_32;
+    int w[8];
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int* grid_pos = (const int*) (iq2s_grid + (qs[l0 / 2] | ((qh << (8 - l0)) & 0x300)));
+        const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
+        const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
+        w[l0 + 0] = __vsub4(grid_pos[0] ^ signs0, signs0);
+        w[l0 + 1] = __vsub4(grid_pos[1] ^ signs1, signs1);
+    }
+    vdm_iq2_finish<NT>(w, bq2->scales[iqs / 2] & 0x0F, bq2->scales[iqs / 2] >> 4, __half2float(bq2->d), y, iqs, acc);
+}
+
+template<int NT>
+__device__ __forceinline__ void vdm_iq3_xxs(const void* __restrict__ vbq, const block_q8_1* const* y, int kbx, int iqs,
+                                            float* acc) {
+    const block_iq3_xxs* bq3 = (const block_iq3_xxs*) vbq + kbx;
+    const int2 q3_packed = make_int2(get_int_b2(bq3->qs, iqs), get_int_b2(bq3->qs, iqs + 1));
+    const uint8_t* q3 = (const uint8_t*) &q3_packed;
+    const uint32_t aux32 = get_int_b2(bq3->qs, QK_K / 16 + iqs / 2);
+    int w[8];
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int2 grid_pos = make_int2(iq3xxs_grid[q3[l0 + 0]], iq3xxs_grid[q3[l0 + 1]]);
+        const uint32_t signs = unpack_ksigns(aux32 >> (7 * l0 / 2));
+        const int signs0 = __vcmpne4(signs & 0x08040201, 0);
+        w[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
+        const int signs1 = __vcmpne4(signs & 0x80402010, 0);
+        w[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+    }
+    const int ls = aux32 >> 28;
+    const float dw = __half2float(bq3->d);
+#pragma unroll
+    for (int t = 0; t < NT; ++t) {
+        const block_q8_1* c = y[t] + iqs / 2;
+        int sumi = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(w[j], get_int_b4(c->qs, j), sumi);
+        sumi = (ls * sumi + sumi / 2) / 2;
+        acc[t] += dw * __low2float(c->ds) * sumi;
+    }
+}
+
+template<int NT>
+__device__ __forceinline__ void vdm_iq3_s(const void* __restrict__ vbq, const block_q8_1* const* y, int kbx, int iqs,
+                                          float* acc) {
+    const block_iq3_s* bq3 = (const block_iq3_s*) vbq + kbx;
+    const int2 qs_packed = make_int2(get_int_b2(bq3->qs, iqs + 0), get_int_b2(bq3->qs, iqs + 1));
+    const uint8_t* qs = (const uint8_t*) &qs_packed;
+    const int qh = bq3->qh[iqs / 2];
+    const int signs_packed_32 = get_int_b2(bq3->signs, iqs / 2);
+    const uint8_t* signs_packed_8 = (const uint8_t*) &signs_packed_32;
+    int w[8];
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int2 grid_pos = make_int2(iq3s_grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
+                                        iq3s_grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
+        const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
+        const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
+        w[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
+        w[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+    }
+    const int sc = 1 + 2 * ((bq3->scales[iqs / 4] >> ((iqs << 1) & 0x04)) & 0x0F);
+    const float dw = __half2float(bq3->d);
+#pragma unroll
+    for (int t = 0; t < NT; ++t) {
+        const block_q8_1* c = y[t] + iqs / 2;
+        int sumi = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(w[j], get_int_b4(c->qs, j), sumi);
+        sumi *= sc;
+        acc[t] += dw * __low2float(c->ds) * sumi;
+    }
+}
+
+template<int NT>
+__device__ __forceinline__ void vdm_iq4_nl(const void* __restrict__ vbq, const block_q8_1* const* y, int kbx, int iqs,
+                                           float* acc) {
+    const block_iq4_nl* bq4 = (const block_iq4_nl*) vbq + kbx;
+    int w[4];
+#pragma unroll
+    for (int l = 0; l < 2; ++l) {
+        const int2 v = get_int_from_table_16(get_int_b2(bq4->qs, iqs + l), kvalues_iq4nl);
+        w[2 * l + 0] = v.x;
+        w[2 * l + 1] = v.y;
+    }
+    const float dw = __half2float(bq4->d);
+#pragma unroll
+    for (int t = 0; t < NT; ++t) {
+        const int* q8 = (const int*) y[t]->qs + iqs;
+        int sumi = 0;
+#pragma unroll
+        for (int l = 0; l < 2; ++l) {
+            sumi = ggml_cuda_dp4a(w[2 * l + 0], q8[l + 0], sumi);
+            sumi = ggml_cuda_dp4a(w[2 * l + 1], q8[l + 4], sumi);
+        }
+        acc[t] += dw * __low2float(y[t]->ds) * sumi;
+    }
+}
+
+// the multi-token dot of a format: the decode-once versions above, else one token at a time (still correct)
+template<int TY, int NT> struct DotMulti {
+    __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) {
+#pragma unroll
+        for (int t = 0; t < NT; ++t) acc[t] += Fmt<TY>::dot(v, y[t], kbx, iqs);
+    }
+};
+template<int NT> struct DotMulti<16, NT> { __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) { vdm_iq2_xxs<NT>(v, y, kbx, iqs, acc); } };
+template<int NT> struct DotMulti<17, NT> { __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) { vdm_iq2_xs<NT>(v, y, kbx, iqs, acc); } };
+template<int NT> struct DotMulti<18, NT> { __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) { vdm_iq3_xxs<NT>(v, y, kbx, iqs, acc); } };
+template<int NT> struct DotMulti<20, NT> { __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) { vdm_iq4_nl<NT>(v, y, kbx, iqs, acc); } };
+template<int NT> struct DotMulti<21, NT> { __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) { vdm_iq3_s<NT>(v, y, kbx, iqs, acc); } };
+template<int NT> struct DotMulti<22, NT> { __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) { vdm_iq2_s<NT>(v, y, kbx, iqs, acc); } };
+template<int NT> struct DotMulti<42, NT> { __device__ static void run(const void* v, const block_q8_1* const* y, int kbx, int iqs, float* acc) { vdm_q2_0<NT>(v, y, kbx, iqs, acc); } };
+
+// row_dot for NT activations (x[t] = token t's q8_1 row): s[t] = row_dot(row, x[t]) bit for bit
+template<int TY, int NT>
+__device__ __forceinline__ void row_dot_multi(const uint8_t* row, const block_q8_1* const* x, int nb, int lane, float* s) {
+    using F = Fmt<TY>;
+#pragma unroll
+    for (int t = 0; t < NT; ++t) s[t] = 0.0f;
+    for (int k = lane; k < nb * F::ipb; k += 32) {
+        const int kbx = k / F::ipb, iqs = F::step * (k % F::ipb);
+        const block_q8_1* y[NT];
+#pragma unroll
+        for (int t = 0; t < NT; ++t) y[t] = x[t] + kbx * (F::qk / 32);
+        DotMulti<TY, NT>::run(row, y, kbx, iqs, s);
+    }
+#pragma unroll
+    for (int t = 0; t < NT; ++t) s[t] = warp_sum(s[t]);
+}
+
+// the entries e0..e1 of a group, up to 4 at a time: dot(e, t) for each, from one decode of the row per call
+template<int TY, typename XF, typename OUT>
+__device__ __forceinline__ void row_dot_entries(const uint8_t* row, int e0, int e1, int nb, int lane, XF xof, OUT put) {
+    for (int e = e0; e < e1; e += 4) {
+        const int n = min(4, e1 - e);
+        const block_q8_1* xs[4];
+#pragma unroll
+        for (int t = 0; t < 4; ++t) xs[t] = xof(t < n ? e + t : e);
+        float s[4];
+        switch (n) {   // warp-uniform: every lane of the warp has the same group
+            case 4: row_dot_multi<TY, 4>(row, xs, nb, lane, s); break;
+            case 3: row_dot_multi<TY, 3>(row, xs, nb, lane, s); break;
+            case 2: row_dot_multi<TY, 2>(row, xs, nb, lane, s); break;
+            default: row_dot_multi<TY, 1>(row, xs, nb, lane, s); break;
+        }
+        if (lane == 0)
+            for (int t = 0; t < n; ++t) put(e + t, s[t]);
+    }
+}
+
 template<int TY>
 __global__ void __launch_bounds__(128) mmvq_kernel(const uint8_t* __restrict__ w, size_t row_bytes,
                                                    const block_q8_1* __restrict__ x, float* __restrict__ y, int n_in,
@@ -401,6 +657,48 @@ __global__ void __launch_bounds__(256) native_down_kernel(const unsigned long lo
         const float s = row_dot<TD>(wr, hq + (size_t) e * hb, nb, lane);
         if (lane == 0) out[(size_t) ent_dst[e] * L.n_embd + r] = s;
     }
+}
+
+// fork «Strata adattivo»: the same two kernels, each row decoded once per call for up to 4 entries of its group
+template<int TG>
+__global__ void __launch_bounds__(256) native_gu_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                              const int32_t* __restrict__ grp_start,
+                                                              const int32_t* __restrict__ n_groups,
+                                                              const int32_t* __restrict__ ent_tok,
+                                                              const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                              float* __restrict__ gate, float* __restrict__ up) {
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int row = blockIdx.x * GU_ROWS + warp;
+    if (row >= 2 * L.n_ff) return;
+    const bool is_up = row >= L.n_ff;
+    const int r = is_up ? row - (int) L.n_ff : row;
+    const uint8_t* wr = (const uint8_t*) grp_ptr[g] + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
+    const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
+    float* dst = is_up ? up : gate;
+    row_dot_entries<TG>(wr, grp_start[g], grp_start[g + 1], nb, lane,
+                        [&](int e) { return xq + (size_t) ent_tok[e] * xb; },
+                        [&](int e, float s) { dst[(size_t) e * L.n_ff + r] = s; });
+}
+
+template<int TD>
+__global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                                const int32_t* __restrict__ grp_start,
+                                                                const int32_t* __restrict__ n_groups,
+                                                                const int32_t* __restrict__ ent_dst,
+                                                                const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                                float* __restrict__ out) {
+    const int g = blockIdx.y;
+    if (g >= *n_groups) return;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int r = blockIdx.x * 8 + warp;
+    if (r >= L.n_embd) return;
+    const uint8_t* wr = (const uint8_t*) grp_ptr[g] + L.down_off + (size_t) r * L.d_row;
+    const int nb = (int) (L.n_ff / Fmt<TD>::qk), hb = (int) (L.n_ff / 32);
+    row_dot_entries<TD>(wr, grp_start[g], grp_start[g + 1], nb, lane,
+                        [&](int e) { return hq + (size_t) e * hb; },
+                        [&](int e, float s) { out[(size_t) ent_dst[e] * L.n_embd + r] = s; });
 }
 
 // ---------------------------------------------------------------- q8_1 (quantize.cu)
@@ -708,10 +1006,22 @@ size_t native_expert_scratch_bytes(int64_t cap, int64_t n_ff) {
     return 3 * ((f + 255) & ~(size_t) 255) + (((size_t) cap * (size_t) (n_ff / 32) * sizeof(block_q8_1) + 255) & ~(size_t) 255);
 }
 
+// fork «Strata adattivo»: the decode-once grouped kernels (default), STRATA_EXPERT_MULTI=0 = the per-entry ones
+static int g_expert_multi = -1;
+void native_expert_set_multi(int on) { g_expert_multi = on; }
+static bool expert_multi() {
+    if (g_expert_multi < 0) {
+        const char* v = std::getenv("STRATA_EXPERT_MULTI");
+        g_expert_multi = (v != nullptr && std::atoi(v) == 0) ? 0 : 1;
+    }
+    return g_expert_multi != 0;
+}
+
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream) {
     if (cap_groups <= 0 || cap_entries <= 0) return;
+    const bool multi = expert_multi();
     cudaStream_t s = (cudaStream_t) stream;
     const size_t f = (size_t) cap_entries * (size_t) L.n_ff * sizeof(float), fa = (f + 255) & ~(size_t) 255;
     float* gate = (float*) scratch;
@@ -720,28 +1030,38 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     block_q8_1* hq = (block_q8_1*) ((uint8_t*) scratch + 3 * fa);
     const auto* X = (const block_q8_1*) x_q8_1;
     const dim3 ggu((unsigned) ((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS), (unsigned) cap_groups);
+#define STRATA_GU(T)                                                                                          \
+    if (multi) native_gu_multi_kernel<T><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); \
+    else native_gu_kernel<T><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);             \
+    break;
     switch (L.gu_type) {
-        case 16: native_gu_kernel<16><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        case 17: native_gu_kernel<17><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        case 18: native_gu_kernel<18><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        case 21: native_gu_kernel<21><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        case 22: native_gu_kernel<22><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        case 23: native_gu_kernel<23><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        case 29: native_gu_kernel<29><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        case 42: native_gu_kernel<42><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
+        case 16: STRATA_GU(16)
+        case 17: STRATA_GU(17)
+        case 18: STRATA_GU(18)
+        case 21: STRATA_GU(21)
+        case 22: STRATA_GU(22)
+        case 23: STRATA_GU(23)
+        case 29: STRATA_GU(29)
+        case 42: STRATA_GU(42)
         default: std::fprintf(stderr, "native_expert_grouped: gate/up type %d\n", L.gu_type); std::exit(1);
     }
+#undef STRATA_GU
     check("native_expert_grouped/gu");
     const long long nh = (long long) cap_entries * L.n_ff;
     swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);
     quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
     const dim3 gd((unsigned) ((L.n_embd + 7) / 8), (unsigned) cap_groups);
+#define STRATA_DOWN(T)                                                                                    \
+    if (multi) native_down_multi_kernel<T><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); \
+    else native_down_kernel<T><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);             \
+    break;
     switch (L.d_type) {
-        case 20: native_down_kernel<20><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
-        case 23: native_down_kernel<23><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
-        case 42: native_down_kernel<42><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        case 20: STRATA_DOWN(20)
+        case 23: STRATA_DOWN(23)
+        case 42: STRATA_DOWN(42)
         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
     }
+#undef STRATA_DOWN
     check("native_expert_grouped/down");
 }
 

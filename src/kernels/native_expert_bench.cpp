@@ -89,22 +89,35 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     cudaStreamCreate(&s);
     strata::kernels::quantize_q8_1_rows((const float*) dx, T, H, dxq, s);
-    for (int i = 0; i < 20; ++i)
-        strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
     cudaEvent_t a, b;
     cudaEventCreate(&a);
     cudaEventCreate(&b);
-    cudaEventRecord(a, s);
-    for (int i = 0; i < iters; ++i)
-        strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
-    cudaEventRecord(b, s);
-    cudaEventSynchronize(b);
-    float ms = 0;
-    cudaEventElapsedTime(&ms, a, b);
+    // both kernels on the same data: the per-entry original (0) and the decode-once one (1); outputs compared bit for bit
+    std::vector<float> res[2];
+    double us[2] = {0, 0};
+    for (int m = 0; m < 2; ++m) {
+        strata::kernels::native_expert_set_multi(m);
+        cudaMemset(dout, 0, (size_t) NE * H * 4);
+        for (int i = 0; i < 20; ++i)
+            strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
+        cudaEventRecord(a, s);
+        for (int i = 0; i < iters; ++i)
+            strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
+        cudaEventRecord(b, s);
+        cudaEventSynchronize(b);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, a, b);
+        us[m] = 1000.0 * ms / iters;
+        res[m].resize((size_t) NE * H);
+        cudaMemcpy(res[m].data(), dout, res[m].size() * 4, cudaMemcpyDeviceToHost);
+    }
     const cudaError_t e = cudaGetLastError();
-    const double us = 1000.0 * ms / iters, gb = (double) G * f.bytes / 1e9;
-    std::printf("layer %d gate/up type %d down type %d, %d experts x %.2f MB, %d tokens, %d entries: %.1f us per call, "
-                "%.0f GB/s%s\n", l, f.gu_type, f.d_type, G, f.bytes / 1e6, T, NE, us, gb / (us * 1e-6),
+    const bool same = std::memcmp(res[0].data(), res[1].data(), res[0].size() * 4) == 0;
+    const double gb = (double) G * f.bytes / 1e9;
+    std::printf("layer %d gate/up type %d down type %d, %d experts x %.2f MB, %d tokens, %d entries: per entry %.1f us "
+                "(%.0f GB/s), decode once %.1f us (%.0f GB/s), x%.2f, outputs %s%s\n", l, f.gu_type, f.d_type, G,
+                f.bytes / 1e6, T, NE, us[0], gb / (us[0] * 1e-6), us[1], gb / (us[1] * 1e-6), us[0] / us[1],
+                same ? "IDENTICAL" : "DIFFERENT",
                 e == cudaSuccess ? "" : (std::string(" - CUDA error: ") + cudaGetErrorString(e)).c_str());
-    return e == cudaSuccess ? 0 : 1;
+    return (e == cudaSuccess && same) ? 0 : 1;
 }
