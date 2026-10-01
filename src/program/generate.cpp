@@ -3566,6 +3566,8 @@ int main(int argc, char** argv) {
                     const int64_t k = part_slots(p, c);
                     if (k <= 0 || k + 128 > p.cache->slots()) return false;
                     if (cap && k * 100 > kAutoLendPct * p.cache->slots()) return false;
+                    // fork: with a two-zone cache only the tail is lent, never the core
+                    if (p.cache == &xcache && k > xcache.slots() - el_core) return false;
                 }
                 return true;
             };
@@ -4070,13 +4072,15 @@ int main(int argc, char** argv) {
         // (plan_lend: auto takes the largest chunk that lends at most its share of the slots), and the next lend lays
         // the buffers out again
         auto el_replan_lend = [&]() {
-            if (lend_first < 0) return;
+            if (pf_parts.empty() || pf_parts[0].first < 0) return;
             int64_t c = el_chunk_max;
             const int64_t k = plan_lend(c);
             if (k <= 0 || c > el_chunk_max) return;   // nothing fits (not above el_min_slots): keep the plan
-            lend_first_now = -1;
             o.prefill_chunk = c;
-            lend_first = (int32_t) (xcache.slots() - k);
+            // 0.1.30: the loan lives in the participant (CUDA0 is the first; the elastic cache is single-GPU)
+            pf_parts[0].first = (int32_t) (xcache.slots() - part_slots(pf_parts[0], c));
+            pf_parts[0].first_now = -1;               // the next lend lays the buffers out again
+            lend_first = pf_parts[0].first;
         };
         // SHRINK to `n` slots: in each layer the tail's experts, hottest first, move (a device copy) into the slots
         // below `n` that hold that layer's coldest experts, while they are clearly hotter; the rest leave the tier
