@@ -80,7 +80,11 @@ int main(int argc, char** argv) {
     cudaMemcpy(dblob, blobs.data(), blobs.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice);
     std::vector<unsigned long long> p((size_t) G);
-    for (int g = 0; g < G; ++g) p[(size_t) g] = (unsigned long long) ((uint8_t*) dblob + (size_t) g * stride);
+    // "same" as the 6th argument: every group reads the FIRST expert, so its weights stay in the GPU's L2 - what is
+    // left is the kernel's own cost (decode, launch, latency), not the memory's
+    const bool one_blob = argc > 6 && std::string(argv[6]) == "same";
+    for (int g = 0; g < G; ++g)
+        p[(size_t) g] = (unsigned long long) ((uint8_t*) dblob + (one_blob ? 0 : (size_t) g * stride));
     cudaMemcpy(dptr, p.data(), (size_t) G * 8, cudaMemcpyHostToDevice);
     cudaMemcpy(dstart, start.data(), (size_t) (G + 1) * 4, cudaMemcpyHostToDevice);
     cudaMemcpy(dn, &G, 4, cudaMemcpyHostToDevice);
@@ -98,16 +102,19 @@ int main(int argc, char** argv) {
     for (int m = 0; m < 2; ++m) {
         strata::kernels::native_expert_set_multi(m);
         cudaMemset(dout, 0, (size_t) NE * H * 4);
-        for (int i = 0; i < 20; ++i)
+        for (int i = 0; i < 200; ++i)   // long warm-up: the card's clocks ramp up from idle
             strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
-        cudaEventRecord(a, s);
-        for (int i = 0; i < iters; ++i)
-            strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
-        cudaEventRecord(b, s);
-        cudaEventSynchronize(b);
-        float ms = 0;
-        cudaEventElapsedTime(&ms, a, b);
-        us[m] = 1000.0 * ms / iters;
+        us[m] = 1e30;
+        for (int rep = 0; rep < 5; ++rep) {   // the best of 5 rounds: other programs share the card
+            cudaEventRecord(a, s);
+            for (int i = 0; i < iters; ++i)
+                strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
+            cudaEventRecord(b, s);
+            cudaEventSynchronize(b);
+            float ms = 0;
+            cudaEventElapsedTime(&ms, a, b);
+            us[m] = std::min(us[m], 1000.0 * (double) ms / iters);
+        }
         res[m].resize((size_t) NE * H);
         cudaMemcpy(res[m].data(), dout, res[m].size() * 4, cudaMemcpyDeviceToHost);
     }
