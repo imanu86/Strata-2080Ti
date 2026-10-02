@@ -3,6 +3,7 @@
 // Arithmetic transcribed from ggml/src/ggml-quants.c at the pinned llama.cpp (MIT License, Copyright (c) 2023-2026
 // The ggml authors): dequantize_row_q2_0/q4_0/q5_0/q8_0/q3_K/q4_K/q5_K/q6_K/iq4_nl/iq4_xs.
 #include "strata/kernels/dequant_bf16.hpp"
+#include "strata/core/tc_sm75.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 
 #include <cuda_fp16.h>
@@ -45,6 +46,7 @@ __device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row
         const float d = h2f(b);
         const int e0 = (gi_in_row % 2) * 32;
 #pragma unroll
+        #pragma unroll
         for (int j = 0; j < 32; ++j) {
             const int e = e0 + j;
             const int q = (b[2 + e / 4] >> ((e % 4) * 2)) & 3;
@@ -53,6 +55,7 @@ __device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row
     } else if constexpr (TYPE == 2) {                              // Q4_0
         const uint8_t* b = row_blocks + (size_t) gi_in_row * 18;
         const float d = h2f(b);
+        #pragma unroll
         for (int j = 0; j < 16; ++j) {
             put(out, j, (float) ((b[2 + j] & 0x0F) - 8) * d);
             put(out, j + 16, (float) ((b[2 + j] >> 4) - 8) * d);
@@ -61,6 +64,7 @@ __device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row
         const uint8_t* b = row_blocks + (size_t) gi_in_row * 22;
         const float d = h2f(b);
         const uint32_t qh = (uint32_t) b[2] | ((uint32_t) b[3] << 8) | ((uint32_t) b[4] << 16) | ((uint32_t) b[5] << 24);
+        #pragma unroll
         for (int j = 0; j < 16; ++j) {
             const int xh0 = ((qh >> j) << 4) & 0x10;
             const int xh1 = (qh >> (j + 12)) & 0x10;
@@ -74,6 +78,7 @@ __device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row
     } else if constexpr (TYPE == 20) {                             // IQ4_NL
         const uint8_t* b = row_blocks + (size_t) gi_in_row * 18;
         const float d = h2f(b);
+        #pragma unroll
         for (int j = 0; j < 16; ++j) {
             put(out, j, d * (float) kv_iq4nl[b[2 + j] & 0xf]);
             put(out, j + 16, d * (float) kv_iq4nl[b[2 + j] >> 4]);
@@ -147,6 +152,7 @@ __device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row
         const int ls = ((b[4 + ib / 2] >> (4 * (ib % 2))) & 0xf) | (((scales_h >> (2 * ib)) & 3) << 4);
         const float dl = d * (float) (ls - 32);
         const uint8_t* qs = b + 8 + 16 * ib;
+        #pragma unroll
         for (int j = 0; j < 16; ++j) {
             put(out, j, dl * (float) kv_iq4nl[qs[j] & 0xf]);
             put(out, j + 16, dl * (float) kv_iq4nl[qs[j] >> 4]);
@@ -154,13 +160,31 @@ __device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row
     }
 }
 
-template <int TYPE, typename T>
+/// `VEC` is the sm_75 form: the group is dequantised into a register buffer and flushed with 16-byte stores.
+/// The plain form writes each element where it is computed, which for a warp means 32 store instructions whose
+/// lanes are 64 bytes apart - 32 two-byte transactions per instruction.  **The values are identical** (the same
+/// arithmetic, the same order), only the stores are wider; the Turing build measured this kernel at 18% of the
+/// row's bandwidth.
+template <int TYPE, typename T, bool VEC>
 __global__ void dequant_kernel(const uint8_t* __restrict__ blocks, int64_t row_bytes, int64_t row0, int64_t rows,
                                int64_t groups_per_row, T* __restrict__ out) {
     const int64_t g = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (g >= rows * groups_per_row) return;
     const int64_t r = g / groups_per_row, gi = g % groups_per_row;
-    group32<TYPE>(blocks + (row0 + r) * row_bytes, (int) gi, out + r * groups_per_row * 32 + gi * 32);
+    T* dst = out + r * groups_per_row * 32 + gi * 32;
+    if constexpr (!VEC) {
+        group32<TYPE>(blocks + (row0 + r) * row_bytes, (int) gi, dst);
+    } else {
+        __align__(16) T buf[32];        // the uint4 flush below reads it as 16-byte vectors
+        group32<TYPE>(blocks + (row0 + r) * row_bytes, (int) gi, buf);
+        // 32 elements: 64 B for the 16-bit forms (4 x uint4), 128 B for the float one (8 x uint4)
+        constexpr int CHUNKS = (sizeof(T) == 2 ? 4 : 8);
+#pragma unroll
+        for (int c = 0; c < CHUNKS; ++c) {
+            const uint4 v = reinterpret_cast<const uint4*>(buf)[c];
+            reinterpret_cast<uint4*>(dst)[c] = v;
+        }
+    }
 }
 
 bool geometry(int type, int& block_elems, int& block_bytes) {
@@ -187,11 +211,21 @@ void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
                      (long long) cols);
         std::exit(1);
     }
+    // sm_75 (and only cc 7.5) takes the vectorised-store form; every other SM model keeps the plain kernel.
+    int dev = 0, cmaj = 0, cmin = 0;
+    const bool vec = cudaGetDevice(&dev) == cudaSuccess &&
+                     cudaDeviceGetAttribute(&cmaj, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+                     cudaDeviceGetAttribute(&cmin, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess &&
+                     strata::core::tc_sm75_enabled(cmaj, cmin);
+    if (!vec) cudaGetLastError();
     const int64_t row_bytes = cols / be * bb, gpr = cols / 32, total = rows * gpr;
     const unsigned grid = (unsigned) ((total + 255) / 256);
     const uint8_t* p = (const uint8_t*) blocks;
     cudaStream_t st = (cudaStream_t) stream;
-#define STRATA_DQ(TY) dequant_kernel<TY, T><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, out); break
+#define STRATA_DQ(TY)                                                                                       \
+    if (vec) dequant_kernel<TY, T, true><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, out);          \
+    else dequant_kernel<TY, T, false><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, out);             \
+    break
     switch (type) {
     case 2: STRATA_DQ(2);
     case 6: STRATA_DQ(6);

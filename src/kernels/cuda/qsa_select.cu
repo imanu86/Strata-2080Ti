@@ -578,4 +578,24 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }
 
+void qsa_block_topk_active(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks,
+                           int64_t cap, const QsaShapes& s, int32_t* ids, void* stream, int64_t active_blocks) {
+    if (nq <= 0) return;
+    // The caller supplies the batch's true upper bound. A captured decode graph
+    // must keep the original API: its input context can grow after capture.
+    if (active_blocks <= 0 || active_blocks > max_blocks || active_blocks > (int64_t)TK_T * TK_PER ||
+        std::getenv("STRATA_TOPK_CAPACITY_GUARD") || std::getenv("STRATA_TOPK_OLD")) {
+        qsa_block_topk(scores, steps, nq, max_blocks, cap, s, ids, stream);
+        return;
+    }
+    if (s.idx_block != R || cap < qsa_selection_width(kTopkMaxCells, s)) {
+        std::fprintf(stderr, "qsa_block_topk_active: unsupported geometry or cap\n");
+        std::exit(1);
+    }
+    block_topk_reg_kernel<<<(unsigned)nq, TK_T, 0, (cudaStream_t)stream>>>(
+        scores, steps, max_blocks, cap, ids);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk_active: %s\n", cudaGetErrorString(e)); std::exit(1); }
+}
+
 }  // namespace strata::kernels

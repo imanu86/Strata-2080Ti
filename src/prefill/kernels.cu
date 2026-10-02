@@ -56,7 +56,8 @@ unsigned blocks_for(int64_t n, int t = 256) { return (unsigned) ((n + t - 1) / t
 
 // ---------------------------------------------------------------- hyper-connection
 __global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restrict__ w, float eps,
-                               float* __restrict__ xn, uint16_t* __restrict__ xn16) {
+                               float* __restrict__ xn, uint16_t* __restrict__ xn16,
+                               uint16_t* __restrict__ xn16h) {
     __shared__ float sh[32];
     const int64_t row = blockIdx.x;                 // t * 4 + c
     const int c = (int) (row % HC);
@@ -68,12 +69,14 @@ __global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restr
         const float v = r[d] * rs * w[c * N + d];
         xn[row * N + d] = v;
         xn16[row * N + d] = bf(v);
+        if (xn16h) xn16h[row * N + d] = hf(v);      // sm_75: the fp16 image the tensor-core GEMMs read
     }
 }
 // F-1: the row scale only (and the BF16 image); gr_mix_r_kernel recomputes r * rs * w itself, in the same order,
 // so the FP32 copy of the normalized rows (T x 10240 floats) is neither written nor read
 __global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __restrict__ w, float eps,
-                                  float* __restrict__ rs_out, uint16_t* __restrict__ xn16) {
+                                  float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
+                                  uint16_t* __restrict__ xn16h) {
     __shared__ float sh[32];
     const int64_t row = blockIdx.x;                 // t * 4 + c
     const int c = (int) (row % HC);
@@ -82,7 +85,11 @@ __global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __re
     for (int d = threadIdx.x; d < N; d += blockDim.x) ss += r[d] * r[d];
     const float rs = rsqrtf(block_sum(ss, sh) / (float) N + eps);
     if (threadIdx.x == 0) rs_out[row] = rs;
-    for (int d = threadIdx.x; d < N; d += blockDim.x) xn16[row * N + d] = bf(r[d] * rs * w[c * N + d]);
+    for (int d = threadIdx.x; d < N; d += blockDim.x) {
+        const float v = r[d] * rs * w[c * N + d];
+        xn16[row * N + d] = bf(v);
+        if (xn16h) xn16h[row * N + d] = hf(v);
+    }
 }
 __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __restrict__ rs, const float* __restrict__ w,
                                 const float* __restrict__ g, float* __restrict__ mixed, uint16_t* __restrict__ mixed16,
@@ -109,7 +116,8 @@ constexpr int GRW_PER = (N + 255) / 256;
 __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict__ R, const float* __restrict__ bo,
                                                                const float* __restrict__ inj, int64_t inj_ld,
                                                                const float* __restrict__ w, float eps,
-                                                               float* __restrict__ rs_out, uint16_t* __restrict__ xn16) {
+                                                               float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
+                                                               uint16_t* __restrict__ xn16h) {
     __shared__ float sh[32];
     const int64_t row = blockIdx.x;                 // t * 4 + c
     const int64_t t = row / HC;
@@ -130,13 +138,20 @@ __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
     if (threadIdx.x == 0) rs_out[row] = rs;
     k = 0;
 #pragma unroll
-    for (int d = threadIdx.x; d < N; d += 256, ++k) xn16[row * N + d] = bf(v[k] * rs * w[c * N + d]);
+    for (int d = threadIdx.x; d < N; d += 256, ++k) {
+        const float x = v[k] * rs * w[c * N + d];
+        xn16[row * N + d] = bf(x);
+        if (xn16h) xn16h[row * N + d] = hf(x);   // sm_75: the fp16 image (a missing write here is a stale read)
+    }
 }
-__global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restrict__ lo16, int64_t n) {
+__global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restrict__ lo16, int64_t n,
+                               uint16_t* __restrict__ lo16h) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     const float x = lo[i] / (float) HC;
-    lo16[i] = bf(x / (1.0f + __expf(-x)));
+    const float s = x / (1.0f + __expf(-x));
+    lo16[i] = bf(s);
+    if (lo16h) lo16h[i] = hf(s);        // sm_75: the fp16 image (same expression, so the same rounding path)
 }
 __global__ void gr_mix_kernel(const float* __restrict__ xn, const float* __restrict__ g, float* __restrict__ mixed,
                               uint16_t* __restrict__ mixed16, int64_t T, uint16_t* __restrict__ mixed_h) {
@@ -612,6 +627,13 @@ __global__ void to_bf16_kernel(const float* __restrict__ x, uint16_t* __restrict
     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (int64_t) gridDim.x * blockDim.x)
         y[i] = bf(x[i]);
 }
+// sm_75: bf16 bits -> fp16 bits.  The value is unchanged whenever fp16 can hold it (checked when the pack is
+// loaded), and this is what lets the hyper-connection projections reach a tensor core on Turing: cuBLAS has no
+// bf16 GEMM kernel below sm_80 and runs an FFMA one, which measured 19.5% of the prompt's GPU time on this box.
+__global__ void bf16_to_f16_kernel(const uint16_t* __restrict__ x, uint16_t* __restrict__ y, int64_t n) {
+    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (int64_t) gridDim.x * blockDim.x)
+        y[i] = hf(__uint_as_float((uint32_t) x[i] << 16));
+}
 
 }  // namespace
 
@@ -629,6 +651,12 @@ void to_f16(const float* x, uint16_t* y, int64_t n, void* stream) {
     to_f16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, (cudaStream_t) stream>>>(x, y, n);
     check("to_f16");
 }
+void bf16_to_f16(const uint16_t* x, uint16_t* y, int64_t n, void* stream) {
+    if (n <= 0) return;
+    bf16_to_f16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0,
+                         (cudaStream_t) stream>>>(x, y, n);
+    check("bf16_to_f16");
+}
 void round_f16(const float* x, float* y, int64_t n, void* stream) {
     if (n <= 0) return;
     round_f16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, (cudaStream_t) stream>>>(x, y, n);
@@ -640,12 +668,14 @@ void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream) {
     check("to_bf16");
 }
 
-void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream) {
-    gr_norm_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, w_norm, eps, xn, xn16);
+void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream,
+             uint16_t* xn16h) {
+    gr_norm_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, w_norm, eps, xn, xn16, xn16h);
     check("gr_norm");
 }
-void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream) {
-    gr_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, w_norm, eps, rs, xn16);
+void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream,
+                uint16_t* xn16h) {
+    gr_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, w_norm, eps, rs, xn16, xn16h);
     check("gr_norm_rs");
 }
 void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
@@ -655,13 +685,13 @@ void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float*
     check("gr_mix_r");
 }
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
-                      float* rs, uint16_t* xn16, int64_t T, void* stream) {
+                      float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16h) {
     gr_write_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, bo, inj, inj_ld, w_norm_next, eps,
-                                                                                      rs, xn16);
+                                                                                      rs, xn16, xn16h);
     check("gr_write_norm_rs");
 }
-void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream) {
-    gr_silu_kernel<<<blocks_for(T * LR), 256, 0, (cudaStream_t) stream>>>(lo, lo16, T * LR);
+void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream, uint16_t* lo16h) {
+    gr_silu_kernel<<<blocks_for(T * LR), 256, 0, (cudaStream_t) stream>>>(lo, lo16, T * LR, lo16h);
     check("gr_silu");
 }
 void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16, int64_t T, void* stream,

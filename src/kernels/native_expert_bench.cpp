@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
     std::vector<float> res[2];
     double us[2] = {0, 0};
     for (int m = 0; m < 2; ++m) {
-        strata::kernels::native_expert_set_multi(m);
+        strata::kernels::iq_set_old_kernels(m == 0);
         cudaMemset(dout, 0, (size_t) NE * H * 4);
         for (int i = 0; i < 200; ++i)   // long warm-up: the card's clocks ramp up from idle
             strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, s);
