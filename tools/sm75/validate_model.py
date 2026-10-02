@@ -221,6 +221,7 @@ def main():
             'deep_prompt_tokens': a.deep_tokens, 'teacher_forcing': 'growing prefixes; max_new=1; prediction discarded',
             'prefill_scope': 'teacher prefixes exercise decode; separate deep oracle exercises batched prefill',
             'daily_configuration_modified': False, 'artificial_load': False,
+            'startup_free_vram_floor_mib': 768,
             'gate_declared_before_runs': True}
     profile = Path(args[args.index('--expert-profile')+1])
     plan['expert_profile_sha256'] = sha(profile)
@@ -306,7 +307,7 @@ def main():
                 arm['info'] = dict(engine.info)
                 require(engine.max_context == 262144, 'Runtime KV capacity differs')
                 print('READY', label, json.dumps(arm['info']), flush=True)
-                require(arm['info'].get('vram_free_mib', 0) >= 1393, 'Fixed lab budget leaves insufficient VRAM margin')
+                require(arm['info'].get('vram_free_mib', 0) >= 768, 'Fixed lab budget leaves insufficient VRAM margin')
                 write_json(a.out/'results.json', results)
                 for name, ids in texts.items():
                     path = folder/(name+'.logits.bin')

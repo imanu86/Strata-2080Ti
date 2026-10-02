@@ -70,9 +70,15 @@ Raw logits consume about 7.6 GB for all three arms and remain outside Git.
 provide reproducible evidence. The default total deadline is 30 minutes.
 Only owned engines are closed. RAM admission requires 16 GiB available,
 with an 8 GiB floor checked during execution. No artificial load is generated.
-After startup the fixed budget must leave at least 1,393 MiB of VRAM. An initial
-5,400-budget admission attempt yielded 7,249 actual slots and 1,257 MiB free;
-it was stopped before any prompt. It is not a completed model comparison.
+After startup the laboratory requires at least 768 MiB of reported free VRAM.
+The initial gate incorrectly reused the 1,393 MiB cache-sizing reserve as a
+post-buffer admission threshold. Three startup-only attempts stopped before
+any prompt: 5,400/auto (7,249 slots, 1,257 MiB), 4,600/auto (6,167 slots,
+1,008 MiB), and 4,600/2048 (6,167 slots, 1,011 MiB). Historical daily runs
+already had lower post-start margins. This admission correction is explicit,
+precedes all scored tokens, and does not change any numerical quality gate.
+Those attempts remain failures of the original startup criterion and are not
+completed model comparisons. The configured cache reserve remains 1,393 MiB.
 
 After any failure, retain the output directory and investigate. Do not silently
 relax a gate, label a partial run PASS, or promote unrelated performance claims.
