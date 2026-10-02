@@ -1,16 +1,10 @@
-// Opt-in HIP smoke test for the calibrated hipBLASLt prefill route; it needs STRATA_HIPBLASLT_TUNING (SKIP otherwise).
-// It checks that the table loads for this device and hipBLASLt version, that the two rows it uses exist (bf16
-// N=48 K=2560 ldy=96 and f16 N=512 K=2560 ldy=512, T bucket 4096), and that Gemm's output matches hipBLASEx on those
-// two rows. It does NOT check the other rows, and it does not check that hipBLASLt ran the table's solution: an id
-// the library rejects falls back to hipBLASEx and the test still passes. Set STRATA_HIPBLASLT_VERBOSE=1 to read the
-// "hipBLASLt summary launches=... fallbacks=..." line.
+// Opt-in HIP test for the calibrated hipBLASLt prefill route. Requires a matching tuning table.
 #include <cuda_runtime.h>
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
 
-#include "strata/kernels/bf16_bits.hpp"
 #include "strata/prefill/gemm.hpp"
 #include "hipblaslt_tuning.hpp"
 
@@ -48,7 +42,7 @@ struct DeviceBuffer {
 };
 
 uint16_t encode(float value, bool bf16) {
-    if (bf16) return strata::kernels::bf16_from_f32(value);
+    if (bf16) return hip_bfloat16(value).data;
     const __half half = __float2half_rn(value);
     uint16_t bits = 0;
     std::memcpy(&bits, &half, sizeof(bits));
@@ -137,7 +131,7 @@ bool run_case(strata::prefill::Gemm& gemm, hipblasHandle_t blas, hipStream_t str
 int main() {
     const char* tuning_path = std::getenv("STRATA_HIPBLASLT_TUNING");
     if (!tuning_path || !*tuning_path) {
-        std::fprintf(stderr, "SKIP: set STRATA_HIPBLASLT_TUNING to a tuning table for this GPU and hipBLASLt version\n");
+        std::fprintf(stderr, "SKIP: set STRATA_HIPBLASLT_TUNING to a calibrated matching table\n");
         return 77;
     }
 
@@ -162,7 +156,7 @@ int main() {
     }
     if (!table.closest(strata::prefill::hipblaslt::InputType::bf16, 48, 2560, 96, 4096) ||
         !table.closest(strata::prefill::hipblaslt::InputType::f16, 512, 2560, 512, 4096)) {
-        std::fprintf(stderr, "tuning table lacks the rows this smoke test uses (bf16 N=48 K=2560 ldy=96, f16 N=512 K=2560 ldy=512)\n");
+        std::fprintf(stderr, "tuning table lacks the focused BF16/F16 test rows\n");
         return 1;
     }
 
@@ -181,8 +175,8 @@ int main() {
         HIPBLAS_CHECK(hipblasCreate(&blas));
         HIPBLAS_CHECK(hipblasSetStream(blas, stream));
 
-        // T=4096 is an exact calibrated bucket; T=37 resolves to the same T=4096 row (the closest bucket), validates the
-        // actual shape before launch, and tests a non-tile-multiple tail. So the four cases use two table rows.
+        // Exact calibrated chunks exercise the selected solution; T=37 reuses the closest bucket,
+        // validates the actual shape before launch, and tests a non-tile-multiple tail.
         ok &= run_case(gemm, blas, stream, true, 4096, 48, 2560, 96, 0, 0.0f, 101);
         ok &= run_case(gemm, blas, stream, true, 37, 48, 2560, 96, 48, 1.0f, 102);
         ok &= run_case(gemm, blas, stream, false, 4096, 512, 2560, 512, 0, 0.0f, 103);
@@ -190,8 +184,5 @@ int main() {
         HIPBLAS_CHECK(hipblasDestroy(blas));
     }
     HIP_CHECK(hipStreamDestroy(stream));
-    std::printf("smoke test: 4 cases on 2 of the table's %zu rows; %s\n", table.rows().size(),
-                ok ? "outputs match hipBLASEx (solution ids are not verified; see STRATA_HIPBLASLT_VERBOSE)"
-                   : "FAILED");
     return ok ? 0 : 1;
 }

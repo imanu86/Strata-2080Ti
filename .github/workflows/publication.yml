@@ -1,0 +1,19 @@
+name: Source publication checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python tools/sm75/check_source.py
+      - run: python -m compileall -q tools/sm75
+      - run: python tools/sm75/configure.py --help
+      - run: python tests/sm75/test_configure.py

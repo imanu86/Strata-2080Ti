@@ -1,23 +1,17 @@
-# AGENTS.md
+# Working on Strata-2080Ti
 
-Strata runs the Qwen3.8-Flash-Next mixture-of-experts model (and its Coder, Swift 1.5 and Unsloth variants) on a
-normal PC: one NVIDIA or AMD graphics card plus system RAM, on Windows or Linux. It has a C++/CUDA/HIP engine
-(`src/`, `include/`), a Python server with an OpenAI- and Anthropic-compatible API and a web app (`serve/`), and a
-one-click installer (`setup.py`, started by `START-HERE.bat` / `setup.sh`).
+Work on main and preserve local changes. Use README.md and docs/sm75 for this
+validated snapshot. The inherited installer downloads upstream engines; this
+fork uses its release or explicit tools/sm75/build.py builder.
 
-## Installing Strata for a user
+Do not launch GPU/model tests or CUDA builds for documentation/publication work.
+Publication checks use CPU only and do not start the engine. Measurements must
+name hardware, actual context, cache and validation limits. The measured card
+is a modified 22 GB RTX 2080 Ti; stock 11 GB is unvalidated.
 
-Follow **[docs/AI_SETUP.md](docs/AI_SETUP.md)**: check the PC, pick the model by RAM, run setup non-interactively,
-start and verify the server, and connect the user's apps. Never expose the server beyond `127.0.0.1` without
-`--api-key`. As an alternative to shell commands, Strata's MCP server ([docs/MCP_SERVER.md](docs/MCP_SERVER.md))
-offers the same steps as tools.
-
-## Working on the code
-
-- How the engine works, every measured number, the API and all settings: [docs/DETAILS.md](docs/DETAILS.md) and
-  the [paper](docs/paper/Strata-Paper.pdf).
-- AMD (HIP) build and validation: [docs/AMD_HIP.md](docs/AMD_HIP.md); multi-GPU: [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
-- Setup's own tests run without a GPU or downloads: `python tools/test_setup_<name>.py` (for example
-  `tools/test_setup_amd.py`, `tools/test_setup_choices.py`).
-- Keep the docs' style: plain words, measured numbers with what they were measured on, no claims without a
-  measurement.
+Keep credentials in environment and local configs out of Git. Keep the server
+on loopback unless the user explicitly configures network access and authentication.
+The source manifest describes the original tested daily. Later core changes
+need new documented validation; do not silently replace provenance hashes.
+Preserve upstream MIT notices and community attribution. Keep claims measured
+and plain. Engine architecture and settings are documented in docs/DETAILS.md.
