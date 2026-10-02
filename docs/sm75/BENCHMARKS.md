@@ -79,4 +79,5 @@ topk_active.exe 131072 256 1
 Mode0=random,1=zero,2=ties,3=bound0,4=bound above stride. Numerical/model tests
 consume GPU time and are explicit actions. No new GPU test was run for
 publication. The previously installed exact daily passed startup in42.84s at
-KV262144, then stopped. Publication CI checks source/config only.
+KV262144, then stopped. Local publication checks cover source/config only;
+this fork has no automated workflow.

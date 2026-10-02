@@ -37,4 +37,4 @@ ignore rules and byte-preserving Git attributes; original README is kept in
 `docs/UPSTREAM_README.md`. These checks never launch CUDA or the model.
 
 See [BENCHMARKS.md](BENCHMARKS.md) for numerical targets and model evidence.
-GPU checks are explicit and are not part of the publication CI workflow.
+GPU checks are explicit. This fork has no automated build/test workflow.
