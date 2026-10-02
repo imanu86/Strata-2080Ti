@@ -1,3 +1,11 @@
+# Quality follow-up, 2 October 2026
+
+[Native IQ quality regression](QUALITY-0136.md): A/B/A full logits are
+byte-identical on 2,557 scored positions, and all three 131k retrievals pass.
+The combined answer gate fails on one arithmetic question in every arm;
+it also fails without drafts, and passes with reasoning enabled. The failed
+verdict is retained. These are controlled quality runs, not a new SOTA.
+
 # Main aligned to upstream 0.1.36, 2 October 2026
 
 Current source base: `36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca`. The tested SM75 executable SHA256 is

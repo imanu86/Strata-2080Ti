@@ -1,0 +1,767 @@
+{
+  "date": "2026-10-02",
+  "hardware": "modified RTX2080Ti22GB / Ryzen5800X AVX2 / Windows CUDA12.6",
+  "runner_commit": "95d76bc",
+  "numerical_regression_pass": true,
+  "overall_declared_gate_pass": false,
+  "reference_sha256": "f469e096e868e4579daaec71ceef63693790e300e7a4cc5b49a8853d075a1d34",
+  "candidate_sha256": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+  "comparison": {
+    "texts": {
+      "code": {
+        "A1_vs_B": {
+          "positions": 511,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "ppl_reference": 1.834109348743723,
+          "ppl_candidate": 1.834109348743723,
+          "nll_delta_mean": 0.0
+        },
+        "A1_vs_A2": {
+          "positions": 511,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "ppl_reference": 1.834109348743723,
+          "ppl_candidate": 1.834109348743723,
+          "nll_delta_mean": 0.0
+        },
+        "gate": {
+          "pass": true,
+          "checks": {
+            "nll": true,
+            "median_kl": true,
+            "p99_kl": true,
+            "top1": true
+          },
+          "limits": {
+            "nll_upper_nats": 0.01,
+            "median_kl": 0.001,
+            "p99_kl": 0.01,
+            "top1_min_pct": 99.0
+          },
+          "candidate_delta_nats": 0.0,
+          "candidate_block_half_interval": 0.0,
+          "reference_repeat_noise_bound": 0.0,
+          "uncertainty_note": "Approximate paired 32-token block interval; a limited regression corpus"
+        }
+      },
+      "doc": {
+        "A1_vs_B": {
+          "positions": 1023,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "ppl_reference": 1.8607315779254445,
+          "ppl_candidate": 1.8607315779254445,
+          "nll_delta_mean": 0.0
+        },
+        "A1_vs_A2": {
+          "positions": 1023,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "ppl_reference": 1.8607315779254445,
+          "ppl_candidate": 1.8607315779254445,
+          "nll_delta_mean": 0.0
+        },
+        "gate": {
+          "pass": true,
+          "checks": {
+            "nll": true,
+            "median_kl": true,
+            "p99_kl": true,
+            "top1": true
+          },
+          "limits": {
+            "nll_upper_nats": 0.01,
+            "median_kl": 0.001,
+            "p99_kl": 0.01,
+            "top1_min_pct": 99.0
+          },
+          "candidate_delta_nats": 0.0,
+          "candidate_block_half_interval": 0.0,
+          "reference_repeat_noise_bound": 0.0,
+          "uncertainty_note": "Approximate paired 32-token block interval; a limited regression corpus"
+        }
+      },
+      "chat": {
+        "A1_vs_B": {
+          "positions": 1023,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "ppl_reference": 2.290216567380514,
+          "ppl_candidate": 2.290216567380514,
+          "nll_delta_mean": 0.0
+        },
+        "A1_vs_A2": {
+          "positions": 1023,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "ppl_reference": 2.290216567380514,
+          "ppl_candidate": 2.290216567380514,
+          "nll_delta_mean": 0.0
+        },
+        "gate": {
+          "pass": true,
+          "checks": {
+            "nll": true,
+            "median_kl": true,
+            "p99_kl": true,
+            "top1": true
+          },
+          "limits": {
+            "nll_upper_nats": 0.01,
+            "median_kl": 0.001,
+            "p99_kl": 0.01,
+            "top1_min_pct": 99.0
+          },
+          "candidate_delta_nats": 0.0,
+          "candidate_block_half_interval": 0.0,
+          "reference_repeat_noise_bound": 0.0,
+          "uncertainty_note": "Approximate paired 32-token block interval; a limited regression corpus"
+        }
+      }
+    },
+    "policy": {
+      "description": "Local paired regression gate; not an upstream universal threshold",
+      "block_tokens": 32,
+      "nll_allowance_nats": 0.01,
+      "median_kl_floor": 0.001,
+      "p99_kl_floor": 0.01,
+      "baseline_kl_multiplier": 3.0,
+      "top1_allowance_percentage_points": 1.0
+    },
+    "aggregate_gate": {
+      "pass": true,
+      "checks": {
+        "nll": true,
+        "median_kl": true,
+        "p99_kl": true,
+        "top1": true
+      },
+      "limits": {
+        "nll_upper_nats": 0.01,
+        "median_kl": 0.001,
+        "p99_kl": 0.01,
+        "top1_min_pct": 99.0
+      },
+      "candidate_delta_nats": 0.0,
+      "candidate_block_half_interval": 0.0,
+      "reference_repeat_noise_bound": 0.0,
+      "uncertainty_note": "Approximate paired 32-token block interval; a limited regression corpus"
+    },
+    "oracle_pass": false,
+    "pass": false,
+    "limits": "Local fixed-residency corpus and 131k retrieval; not a general quality score, elastic-cache test, or isolated upstream PR benchmark."
+  },
+  "actual_expert_slots": 6167,
+  "kv_capacity": 262144,
+  "kv_resident": 32768,
+  "answers": {
+    "A1": [
+      {
+        "name": "binary_units",
+        "expected": {
+          "a_gib": 18,
+          "b_gib": 15.75
+        },
+        "output": "{\n  \"a_gib\": 18.0,\n  \"b_gib\": 15.75\n}",
+        "pass": true,
+        "generated": 30,
+        "prompt_tokens": 74,
+        "prompt_ms": 1054.9,
+        "decode_ms": 782.8,
+        "finish": "stop",
+        "drafts_accepted": 23,
+        "drafts_offered": 24,
+        "reused": 0,
+        "hits": 6025,
+        "lookups": 15840,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "stable_unique",
+        "expected": {
+          "result": [
+            7,
+            2,
+            1,
+            9
+          ]
+        },
+        "output": "{\n  \"result\": [7, 2, 1, 9]\n}",
+        "pass": true,
+        "generated": 21,
+        "prompt_tokens": 47,
+        "prompt_ms": 1015.7,
+        "decode_ms": 639.6,
+        "finish": "stop",
+        "drafts_accepted": 16,
+        "drafts_offered": 18,
+        "reused": 0,
+        "hits": 4121,
+        "lookups": 12000,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "ledger",
+        "expected": {
+          "balance": 1050
+        },
+        "output": "{\"balance\": 1050}",
+        "pass": true,
+        "generated": 10,
+        "prompt_tokens": 53,
+        "prompt_ms": 1204.1,
+        "decode_ms": 374.7,
+        "finish": "stop",
+        "drafts_accepted": 9,
+        "drafts_offered": 9,
+        "reused": 0,
+        "hits": 1902,
+        "lookups": 6240,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "dependency_order",
+        "expected": {
+          "order": [
+            "A",
+            "B",
+            "C",
+            "D"
+          ]
+        },
+        "output": "{\"order\": [\"A\", \"B\", \"C\", \"D\"]}",
+        "pass": true,
+        "generated": 16,
+        "prompt_tokens": 46,
+        "prompt_ms": 1020.1,
+        "decode_ms": 547.6,
+        "finish": "stop",
+        "drafts_accepted": 13,
+        "drafts_offered": 15,
+        "reused": 0,
+        "hits": 3331,
+        "lookups": 10080,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "read_record",
+        "expected": {
+          "code": "S482"
+        },
+        "output": "{\n  \"code\": \"S482\"\n}",
+        "pass": true,
+        "generated": 15,
+        "prompt_tokens": 46,
+        "prompt_ms": 1090.3,
+        "decode_ms": 426.8,
+        "finish": "stop",
+        "drafts_accepted": 12,
+        "drafts_offered": 12,
+        "reused": 0,
+        "hits": 2700,
+        "lookups": 8160,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "weighted_sum",
+        "expected": {
+          "total": 105
+        },
+        "output": "{\"total\": 92}",
+        "pass": false,
+        "generated": 8,
+        "prompt_tokens": 45,
+        "prompt_ms": 953.0,
+        "decode_ms": 286.6,
+        "finish": "stop",
+        "drafts_accepted": 6,
+        "drafts_offered": 6,
+        "reused": 0,
+        "hits": 1494,
+        "lookups": 4800,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "deep_three_records",
+        "expected": {
+          "north": "ARCO-731",
+          "south": "LUNA-482",
+          "west": "PORTO-916"
+        },
+        "output": "{\n  \"north\": \"ARCO-731\",\n  \"south\": \"LUNA-482\",\n  \"west\": \"PORTO-916\"\n}",
+        "pass": true,
+        "generated": 43,
+        "prompt_tokens": 131072,
+        "prompt_ms": 231653.0,
+        "decode_ms": 1328.4,
+        "finish": "stop",
+        "drafts_accepted": 31,
+        "drafts_offered": 36,
+        "reused": 0,
+        "hits": 8918,
+        "lookups": 23520,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      }
+    ],
+    "B": [
+      {
+        "name": "binary_units",
+        "expected": {
+          "a_gib": 18,
+          "b_gib": 15.75
+        },
+        "output": "{\n  \"a_gib\": 18.0,\n  \"b_gib\": 15.75\n}",
+        "pass": true,
+        "generated": 30,
+        "prompt_tokens": 74,
+        "prompt_ms": 1094.1,
+        "decode_ms": 828.3,
+        "finish": "stop",
+        "drafts_accepted": 23,
+        "drafts_offered": 24,
+        "reused": 0,
+        "hits": 6025,
+        "lookups": 15840,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0,
+        "prompt_read": 74
+      },
+      {
+        "name": "stable_unique",
+        "expected": {
+          "result": [
+            7,
+            2,
+            1,
+            9
+          ]
+        },
+        "output": "{\n  \"result\": [7, 2, 1, 9]\n}",
+        "pass": true,
+        "generated": 21,
+        "prompt_tokens": 47,
+        "prompt_ms": 1156.0,
+        "decode_ms": 614.2,
+        "finish": "stop",
+        "drafts_accepted": 16,
+        "drafts_offered": 18,
+        "reused": 0,
+        "hits": 4121,
+        "lookups": 12000,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0,
+        "prompt_read": 47
+      },
+      {
+        "name": "ledger",
+        "expected": {
+          "balance": 1050
+        },
+        "output": "{\"balance\": 1050}",
+        "pass": true,
+        "generated": 10,
+        "prompt_tokens": 53,
+        "prompt_ms": 1185.3,
+        "decode_ms": 366.3,
+        "finish": "stop",
+        "drafts_accepted": 9,
+        "drafts_offered": 9,
+        "reused": 0,
+        "hits": 1902,
+        "lookups": 6240,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0,
+        "prompt_read": 53
+      },
+      {
+        "name": "dependency_order",
+        "expected": {
+          "order": [
+            "A",
+            "B",
+            "C",
+            "D"
+          ]
+        },
+        "output": "{\"order\": [\"A\", \"B\", \"C\", \"D\"]}",
+        "pass": true,
+        "generated": 16,
+        "prompt_tokens": 46,
+        "prompt_ms": 990.9,
+        "decode_ms": 549.9,
+        "finish": "stop",
+        "drafts_accepted": 13,
+        "drafts_offered": 15,
+        "reused": 0,
+        "hits": 3331,
+        "lookups": 10080,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0,
+        "prompt_read": 46
+      },
+      {
+        "name": "read_record",
+        "expected": {
+          "code": "S482"
+        },
+        "output": "{\n  \"code\": \"S482\"\n}",
+        "pass": true,
+        "generated": 15,
+        "prompt_tokens": 46,
+        "prompt_ms": 1128.6,
+        "decode_ms": 496.8,
+        "finish": "stop",
+        "drafts_accepted": 12,
+        "drafts_offered": 12,
+        "reused": 0,
+        "hits": 2700,
+        "lookups": 8160,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0,
+        "prompt_read": 46
+      },
+      {
+        "name": "weighted_sum",
+        "expected": {
+          "total": 105
+        },
+        "output": "{\"total\": 92}",
+        "pass": false,
+        "generated": 8,
+        "prompt_tokens": 45,
+        "prompt_ms": 1064.3,
+        "decode_ms": 332.4,
+        "finish": "stop",
+        "drafts_accepted": 6,
+        "drafts_offered": 6,
+        "reused": 0,
+        "hits": 1494,
+        "lookups": 4800,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0,
+        "prompt_read": 45
+      },
+      {
+        "name": "deep_three_records",
+        "expected": {
+          "north": "ARCO-731",
+          "south": "LUNA-482",
+          "west": "PORTO-916"
+        },
+        "output": "{\n  \"north\": \"ARCO-731\",\n  \"south\": \"LUNA-482\",\n  \"west\": \"PORTO-916\"\n}",
+        "pass": true,
+        "generated": 43,
+        "prompt_tokens": 131072,
+        "prompt_ms": 231927.1,
+        "decode_ms": 1299.6,
+        "finish": "stop",
+        "drafts_accepted": 31,
+        "drafts_offered": 36,
+        "reused": 0,
+        "hits": 8918,
+        "lookups": 23520,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0,
+        "prompt_read": 131072
+      }
+    ],
+    "A2": [
+      {
+        "name": "binary_units",
+        "expected": {
+          "a_gib": 18,
+          "b_gib": 15.75
+        },
+        "output": "{\n  \"a_gib\": 18.0,\n  \"b_gib\": 15.75\n}",
+        "pass": true,
+        "generated": 30,
+        "prompt_tokens": 74,
+        "prompt_ms": 1263.9,
+        "decode_ms": 770.0,
+        "finish": "stop",
+        "drafts_accepted": 23,
+        "drafts_offered": 24,
+        "reused": 0,
+        "hits": 6025,
+        "lookups": 15840,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "stable_unique",
+        "expected": {
+          "result": [
+            7,
+            2,
+            1,
+            9
+          ]
+        },
+        "output": "{\n  \"result\": [7, 2, 1, 9]\n}",
+        "pass": true,
+        "generated": 21,
+        "prompt_tokens": 47,
+        "prompt_ms": 1026.6,
+        "decode_ms": 638.4,
+        "finish": "stop",
+        "drafts_accepted": 16,
+        "drafts_offered": 18,
+        "reused": 0,
+        "hits": 4121,
+        "lookups": 12000,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "ledger",
+        "expected": {
+          "balance": 1050
+        },
+        "output": "{\"balance\": 1050}",
+        "pass": true,
+        "generated": 10,
+        "prompt_tokens": 53,
+        "prompt_ms": 1171.0,
+        "decode_ms": 348.3,
+        "finish": "stop",
+        "drafts_accepted": 9,
+        "drafts_offered": 9,
+        "reused": 0,
+        "hits": 1902,
+        "lookups": 6240,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "dependency_order",
+        "expected": {
+          "order": [
+            "A",
+            "B",
+            "C",
+            "D"
+          ]
+        },
+        "output": "{\"order\": [\"A\", \"B\", \"C\", \"D\"]}",
+        "pass": true,
+        "generated": 16,
+        "prompt_tokens": 46,
+        "prompt_ms": 1044.9,
+        "decode_ms": 542.2,
+        "finish": "stop",
+        "drafts_accepted": 13,
+        "drafts_offered": 15,
+        "reused": 0,
+        "hits": 3331,
+        "lookups": 10080,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "read_record",
+        "expected": {
+          "code": "S482"
+        },
+        "output": "{\n  \"code\": \"S482\"\n}",
+        "pass": true,
+        "generated": 15,
+        "prompt_tokens": 46,
+        "prompt_ms": 1034.8,
+        "decode_ms": 421.3,
+        "finish": "stop",
+        "drafts_accepted": 12,
+        "drafts_offered": 12,
+        "reused": 0,
+        "hits": 2700,
+        "lookups": 8160,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "weighted_sum",
+        "expected": {
+          "total": 105
+        },
+        "output": "{\"total\": 92}",
+        "pass": false,
+        "generated": 8,
+        "prompt_tokens": 45,
+        "prompt_ms": 960.3,
+        "decode_ms": 309.1,
+        "finish": "stop",
+        "drafts_accepted": 6,
+        "drafts_offered": 6,
+        "reused": 0,
+        "hits": 1494,
+        "lookups": 4800,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      },
+      {
+        "name": "deep_three_records",
+        "expected": {
+          "north": "ARCO-731",
+          "south": "LUNA-482",
+          "west": "PORTO-916"
+        },
+        "output": "{\n  \"north\": \"ARCO-731\",\n  \"south\": \"LUNA-482\",\n  \"west\": \"PORTO-916\"\n}",
+        "pass": true,
+        "generated": 43,
+        "prompt_tokens": 131072,
+        "prompt_ms": 231931.5,
+        "decode_ms": 1306.2,
+        "finish": "stop",
+        "drafts_accepted": 31,
+        "drafts_offered": 36,
+        "reused": 0,
+        "hits": 8918,
+        "lookups": 23520,
+        "ram_blobs": 0,
+        "file_blobs": 0,
+        "file_mb": 0.0
+      }
+    ]
+  },
+  "logits_hashes": {
+    "A1": {
+      "code": {
+        "rows": 512,
+        "scored_positions": 511,
+        "sha256": "719c6d042f6e404ec548e75e49036b24e20d183afa6ae7c87e99ec8d4a9741db"
+      },
+      "doc": {
+        "rows": 1024,
+        "scored_positions": 1023,
+        "sha256": "f65216d04374babf72d8c9e4b035fbf1af5f93798bcc6a8d9bb5a1b7e0a97be1"
+      },
+      "chat": {
+        "rows": 1024,
+        "scored_positions": 1023,
+        "sha256": "9896ee4e20760fe6f6d5d8d3a3774aaebdcade383c4752dc5abf294d65f84695"
+      }
+    },
+    "B": {
+      "code": {
+        "rows": 512,
+        "scored_positions": 511,
+        "sha256": "719c6d042f6e404ec548e75e49036b24e20d183afa6ae7c87e99ec8d4a9741db"
+      },
+      "doc": {
+        "rows": 1024,
+        "scored_positions": 1023,
+        "sha256": "f65216d04374babf72d8c9e4b035fbf1af5f93798bcc6a8d9bb5a1b7e0a97be1"
+      },
+      "chat": {
+        "rows": 1024,
+        "scored_positions": 1023,
+        "sha256": "9896ee4e20760fe6f6d5d8d3a3774aaebdcade383c4752dc5abf294d65f84695"
+      }
+    },
+    "A2": {
+      "code": {
+        "rows": 512,
+        "scored_positions": 511,
+        "sha256": "719c6d042f6e404ec548e75e49036b24e20d183afa6ae7c87e99ec8d4a9741db"
+      },
+      "doc": {
+        "rows": 1024,
+        "scored_positions": 1023,
+        "sha256": "f65216d04374babf72d8c9e4b035fbf1af5f93798bcc6a8d9bb5a1b7e0a97be1"
+      },
+      "chat": {
+        "rows": 1024,
+        "scored_positions": 1023,
+        "sha256": "9896ee4e20760fe6f6d5d8d3a3774aaebdcade383c4752dc5abf294d65f84695"
+      }
+    }
+  },
+  "non_spec_probe": [
+    {
+      "thinking": false,
+      "content": "{\"total\": 92}",
+      "reasoning": "",
+      "generated": 8,
+      "prompt_tokens": 45,
+      "prompt_ms": 1446.5,
+      "decode_ms": 399.5,
+      "finish": "stop",
+      "drafts_accepted": 0,
+      "drafts_offered": 0,
+      "reused": 0,
+      "hits": 1290,
+      "lookups": 3840,
+      "ram_blobs": 0,
+      "file_blobs": 0,
+      "file_mb": 0.0,
+      "prompt_read": 45,
+      "pass": false
+    },
+    {
+      "thinking": true,
+      "content": "{\"total\": 105}",
+      "reasoning": "The user wants me to compute a total and return only JSON with the key \"total\".\n\nThree items at 17 each: 3 × 17 = 51\nTwo items at 23 each: 2 × 23 = 46\nShipping: 8\n\nTotal: 51 + 46 + 8 = 105\n",
+      "generated": 91,
+      "prompt_tokens": 73,
+      "prompt_ms": 1117.7,
+      "decode_ms": 3639.9,
+      "finish": "stop",
+      "drafts_accepted": 0,
+      "drafts_offered": 0,
+      "reused": 0,
+      "hits": 20604,
+      "lookups": 43680,
+      "ram_blobs": 0,
+      "file_blobs": 0,
+      "file_mb": 0.0,
+      "prompt_read": 73,
+      "pass": true
+    }
+  ],
+  "limits": "This validates limited numerical continuity and 131k retrieval, not 250k\nquality, elastic-cache parity, stock 11 GB hardware, or the isolated upstream\nPR on its current base. PR #512 stays draft. No speed record or drafting\nincrease is promoted from these controlled quality runs."
+}

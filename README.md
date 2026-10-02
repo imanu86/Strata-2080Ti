@@ -98,3 +98,5 @@ Fresh builds may have different executable hashes because toolchains, dependenci
 and linking vary. General model quality and physical DRAM bandwidth were not measured.
 
 MIT license and upstream/contributor notices preserved: [LICENSE](LICENSE).
+
+Model validation method and measured limits: [protocol](docs/sm75/VALIDATION.md), [0.1.36 quality results](docs/sm75/QUALITY-0136.md).
