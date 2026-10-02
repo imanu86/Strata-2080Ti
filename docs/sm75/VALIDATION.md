@@ -36,7 +36,7 @@ benchmark with three repetitions per configuration.
 ## Controlled laboratory settings
 
 KV capacity remains 262,144, int8, with 32,768 resident cells. The laboratory
-uses a fixed requested expert budget of 5,400; actual slots must match across
+uses a fixed requested expert budget of 4,600; actual slots must match across
 all arms. The expert profile remains the same. `--adapt-swaps 0`,
 `--pcie-frac 0`, `STRATA_IQ_MT_MIN=1`, suffix drafting off, MTP maximum 4 and
 serial intermediate quantization hold the compute path stable. Prefix reuse
@@ -66,6 +66,9 @@ Raw logits consume about 7.6 GB for all three arms and remain outside Git.
 provide reproducible evidence. The default total deadline is 30 minutes.
 Only owned engines are closed. RAM admission requires 16 GiB available,
 with an 8 GiB floor checked during execution. No artificial load is generated.
+After startup the fixed budget must leave at least 1,393 MiB of VRAM. An initial
+5,400-budget admission attempt yielded 7,249 actual slots and 1,257 MiB free;
+it was stopped before any prompt. It is not a completed model comparison.
 
 After any failure, retain the output directory and investigate. Do not silently
 relax a gate, label a partial run PASS, or promote unrelated performance claims.

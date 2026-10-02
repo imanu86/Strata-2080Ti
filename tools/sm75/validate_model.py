@@ -199,7 +199,7 @@ def main():
     ap.add_argument('--reference', type=Path, required=True)
     ap.add_argument('--candidate', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
-    ap.add_argument('--cache-slots', type=int, default=5400, help='Requested fixed lab budget; actual slots recorded')
+    ap.add_argument('--cache-slots', type=int, default=4600, help='Requested fixed lab budget; actual slots recorded')
     ap.add_argument('--deep-tokens', type=int, default=131072)
     ap.add_argument('--deadline-seconds', type=int, default=1800)
     ap.add_argument('--run', action='store_true')
