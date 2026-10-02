@@ -42,6 +42,10 @@ all arms. The expert profile remains the same. `--adapt-swaps 0`,
 serial intermediate quantization hold the compute path stable. Prefix reuse
 is required for teacher forcing; the daily retains automatic elastic cache.
 No daily configuration is written by the tool.
+The laboratory fixes prefill chunks at 2,048 tokens. Automatic 8,192-token
+chunks left less than the declared VRAM margin at startup even after lowering
+the requested cache budget to 4,600 (6,167 actual slots, 1,008 MiB free).
+Both startup-only attempts are retained; neither scored a model token.
 
 Local gates are declared in `POLICY` and saved before execution. Candidate NLL
 upper bound must not exceed 0.01 nats/token plus the reference-repeat noise

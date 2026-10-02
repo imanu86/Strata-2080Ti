@@ -208,7 +208,7 @@ def main():
     require(not a.out.exists(), 'Refusing an existing output directory')
     cfg = json.loads(a.config.read_text(encoding='utf-8-sig'))
     args = [x for x in cfg['args'] if x != '--elastic']
-    for key, value in [('--expert-cache', a.cache_slots), ('--prompt-cache', 6),
+    for key, value in [('--expert-cache', a.cache_slots), ('--prefill', 2048), ('--prompt-cache', 6),
                        ('--conversation-cache-mib', 0), ('--adapt-swaps', 0),
                        ('--pcie-frac', 0), ('--suffix-draft', 0), ('--mtp-max-t', 4)]:
         args = set_arg(args, key, value)
