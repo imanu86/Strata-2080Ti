@@ -1,3 +1,28 @@
+# Main aligned to upstream 0.1.36, 2 October 2026
+
+Current source base: `36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca`. The tested SM75 executable SHA256 is
+`c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a`. Windows, modified RTX2080Ti22GB, Ryzen5800X/AVX2, 96GB RAM,
+CUDA12.6, IQ3_XXS, KV262144/int8/resident32768, reserve1393MiB, automatic elastic
+cache, MTP. Two requests per arm: fresh131248 tokens, then131239 with131072
+reused; 1024 output tokens each. No artificial saturation.
+
+| Engine | Fresh 131k prefill t/s | Aggregate decode t/s | Initial elastic slots |
+|---|---:|---:|---:|
+| 0.1.31 reference | 974.05 | 41.255 | 6592 |
+| 0.1.36 serial (daily) | 972.68 | 40.123 | 6786 |
+| 0.1.36 parallel quant (opt-in) | 970.60 | 40.272 | 6034 |
+
+These are single sequential samples with real desktop activity, changing cache
+and MTP acceptance. They do not establish a causal gain from either upstream
+changes or parallel quantization. The daily keeps serial quantization; the
+parallel implementation is available for explicit controlled comparisons.
+16 top-k cases pass bitwise; the unchanged pool port retains 64 real-GGUF
+serial/parallel cases; the CMake-built HC test has zero failures. All100 upstream
+server mock tests pass. General model quality and a new250k retrieval are not
+covered by this comparison. Historical 0.1.31 evidence follows, including its
+separate top-k A/B/A and250k retrieval; those measurements do not describe the
+new executable.
+
 # Measured daily:2 October2026
 
 Modified RTX2080Ti22GB, Ryzen7 5800X,96GB RAM, Windows/CUDA12.6, PCIe3.0,

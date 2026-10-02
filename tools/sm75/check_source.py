@@ -8,6 +8,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main():
     manifest = json.loads((ROOT/'docs/sm75/source-manifest.json').read_text(encoding='utf-8'))
+    if 'previous_manifest_sha256' in manifest:
+        previous = ROOT/'docs/sm75'/manifest['previous_manifest']
+        if hashlib.sha256(previous.read_bytes()).hexdigest() != manifest['previous_manifest_sha256']:
+            raise SystemExit('Historical source manifest changed')
     overrides = set(manifest['publication_overrides'])
     bad, checked = [], 0
     for name, expected in manifest['files'].items():
@@ -23,7 +27,7 @@ def main():
             bad.append(name+' unexpected experiment')
     if bad:
         raise SystemExit('Source mismatch: '+', '.join(bad))
-    print(f'SOURCE_OK {checked} files; tested daily snapshot preserved')
+    print(f"SOURCE_OK {checked} files; current {manifest['snapshot_version']}; original provenance preserved")
 
 
 if __name__ == '__main__':

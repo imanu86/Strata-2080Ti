@@ -3,12 +3,25 @@
 A validated Windows snapshot of [Strata](https://github.com/Niko1221/Strata)
 for **RTX 2080 Ti / Turing SM75**, running Qwen3.8-Flash-Next IQ3_XXS.
 
-This release reproduces our tested **0.1.31 daily** with elastic expert caching,
-HC/GDN FP16, vector dequantization, PR315 and the prefill top-k active-block fix.
-Upstream history is retained; the source snapshot is pinned to the tested version.
+Main is aligned to upstream **0.1.36**, preserving our elastic expert cache,
+HC/GDN FP16, vector dequantization and the Turing prefill top-k active bound.
+The pending-copy ordering from PR463 is included. PR500's parallel intermediate
+quantization is opt-in; serial remains the measured daily default.
+Upstream history and the original0.1.31 provenance are retained.
 [Credits](CREDITS.md) explain which changes come from upstream and community forks.
 
-## Measured performance
+## Current comparison
+
+| Engine | Fresh 131k prefill t/s | Aggregate decode t/s | Initial elastic slots |
+|---|---:|---:|---:|
+| 0.1.31 reference | 974.05 | 41.255 | 6592 |
+| 0.1.36 serial (daily) | 972.68 | 40.123 | 6786 |
+| 0.1.36 parallel quant (opt-in) | 970.60 | 40.272 | 6034 |
+
+Single samples with real desktop activity, elastic cache and varying MTP; no causal
+speedup is claimed. See [current validation](docs/sm75/BENCHMARKS.md).
+
+## Historical 0.1.31 performance
 
 Windows, **modified RTX 2080 Ti 22 GB**, Ryzen 7 5800X, 96 GB RAM, PCIe 3.0,
 CUDA 12.6, IQ3_XXS, MTP, int8 KV capacity **262144**, 32768 resident KV cells,
@@ -79,8 +92,8 @@ CH16, score BPW and PR439 gather experiments are **not enabled** in this release
 model gains were not demonstrated or model validation is pending.
 See the [research record](https://github.com/imanu86/moe-aggressive-commit/tree/research/ds4-iq1-subbit-tier-planner/docs/porto/strata_adattivo).
 
-No new CUDA build/GPU benchmark was run for publication. The release engine is
-the previously tested binary; the manifest verifies its source snapshot.
+The0.1.36 engine was built and tested explicitly for the authorized kernel work.
+Its source manifest and validation are separate from the preserved0.1.31 record.
 Fresh builds may have different executable hashes because toolchains, dependencies
 and linking vary. General model quality and physical DRAM bandwidth were not measured.
 

@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     ck(cudaMemcpy(ds,scores.data(),scores.size()*4,cudaMemcpyHostToDevice));
     ck(cudaMemcpy(dt,steps.data(),steps.size()*4,cudaMemcpyHostToDevice));
     auto old=[&]{k::qsa_block_topk(ds,dt,nq,stride,cap,s,da,nullptr);};
-    auto bounded=[&]{k::qsa_block_topk_active(ds,dt,nq,stride,cap,s,db,nullptr,active);};
+    auto bounded=[&]{k::qsa_block_topk(ds,dt,nq,stride,cap,s,db,nullptr,active);};
     old(); bounded(); ck(cudaDeviceSynchronize());
     std::vector<int32_t> a(nq*cap),b(a.size());
     ck(cudaMemcpy(a.data(),da,a.size()*4,cudaMemcpyDeviceToHost));

@@ -1,488 +1,206 @@
 {
   "date": "2026-10-02",
-  "hardware": {
-    "gpu": "modified RTX 2080 Ti 22 GB",
-    "cpu": "Ryzen 7 5800X",
-    "ram_gb": 96,
-    "os": "Windows",
-    "cuda": "12.6",
-    "pcie": "3.0"
-  },
-  "publication_new_gpu_tests": false,
-  "model_aba": {
-    "scope": "model ABA, real 131k, KV262144, elastic",
-    "runs": {
-      "A1": {
-        "exe_sha256": "f469e096e868e4579daaec71ceef63693790e300e7a4cc5b49a8853d075a1d34",
-        "qsa_ch": null,
-        "topk_mode": "capacity",
-        "initial_cache": {
-          "expert_slots": 6537,
-          "expert_cache_mib": 10834,
-          "vram_free_mib": 973
-        },
-        "prefill_tps": 831.2,
-        "ttft_s": 158.509,
-        "decode_tps": 38.251,
-        "cost_per_verified_row_ms": 21.96963479688141,
-        "native": [
-          {
-            "generated": 1024,
-            "decode_ms": 25861.0,
-            "accepted": 498,
-            "offered": 698
-          },
-          {
-            "generated": 1024,
-            "decode_ms": 27679.0,
-            "accepted": 388,
-            "offered": 577
-          }
-        ],
-        "cpu_other_mean_cores": 0.9564,
-        "cpu_jump_mean_cores": 0.0,
-        "real_prompt_tokens": [
-          131248,
-          131239
-        ],
-        "reused_prompt_tokens": [
-          0,
-          131072
-        ],
-        "logits": {
-          "131247": {
-            "values": 248320,
-            "finite": true,
-            "argmax": 1596
-          },
-          "131238": {
-            "values": 248320,
-            "finite": true,
-            "argmax": 1596
-          }
-        }
-      },
-      "B": {
-        "exe_sha256": "f469e096e868e4579daaec71ceef63693790e300e7a4cc5b49a8853d075a1d34",
-        "qsa_ch": null,
-        "topk_mode": "active",
-        "initial_cache": {
-          "expert_slots": 6524,
-          "expert_cache_mib": 10812,
-          "vram_free_mib": 1049
-        },
-        "prefill_tps": 886.38,
-        "ttft_s": 148.664,
-        "decode_tps": 39.272,
-        "cost_per_verified_row_ms": 21.720116618075803,
-        "native": [
-          {
-            "generated": 1024,
-            "decode_ms": 24596.0,
-            "accepted": 520,
-            "offered": 702
-          },
-          {
-            "generated": 1024,
-            "decode_ms": 27554.0,
-            "accepted": 383,
-            "offered": 554
-          }
-        ],
-        "cpu_other_mean_cores": 0.8645833333333334,
-        "cpu_jump_mean_cores": 0.0,
-        "real_prompt_tokens": [
-          131248,
-          131239
-        ],
-        "reused_prompt_tokens": [
-          0,
-          131072
-        ],
-        "logits": {
-          "131247": {
-            "values": 248320,
-            "finite": true,
-            "argmax": 1596
-          },
-          "131238": {
-            "values": 248320,
-            "finite": true,
-            "argmax": 1596
-          }
-        }
-      },
-      "A2": {
-        "exe_sha256": "f469e096e868e4579daaec71ceef63693790e300e7a4cc5b49a8853d075a1d34",
-        "qsa_ch": null,
-        "topk_mode": "capacity",
-        "initial_cache": {
-          "expert_slots": 6872,
-          "expert_cache_mib": 11365,
-          "vram_free_mib": 936
-        },
-        "prefill_tps": 828.26,
-        "ttft_s": 159.092,
-        "decode_tps": 39.293,
-        "cost_per_verified_row_ms": 21.352314625153625,
-        "native": [
-          {
-            "generated": 1024,
-            "decode_ms": 24612.0,
-            "accepted": 524,
-            "offered": 710
-          },
-          {
-            "generated": 1024,
-            "decode_ms": 27509.0,
-            "accepted": 380,
-            "offered": 587
-          }
-        ],
-        "cpu_other_mean_cores": 0.8872,
-        "cpu_jump_mean_cores": 0.0,
-        "real_prompt_tokens": [
-          131248,
-          131239
-        ],
-        "reused_prompt_tokens": [
-          0,
-          131072
-        ],
-        "logits": {
-          "131247": {
-            "values": 248320,
-            "finite": true,
-            "argmax": 1596
-          },
-          "131238": {
-            "values": 248320,
-            "finite": true,
-            "argmax": 1596
-          }
-        }
-      }
-    },
-    "prefill": {
-      "baseline_mean_tps": 829.73,
-      "candidate_tps": 886.38,
-      "gain_percent": 6.827522206018832,
-      "baseline_variation_percent": 0.3543321321393772,
-      "candidate_beats_both_references": true,
-      "benefit_demonstrated": true
-    },
-    "logits_comparisons": {
-      "A1-B": {
-        "131247": {
-          "max_abs": 1.5576119422912598,
-          "mean_abs": 0.20659075677394867,
-          "equal_values": 0,
-          "same_argmax": true
-        },
-        "131238": {
-          "max_abs": 1.8939893245697021,
-          "mean_abs": 0.28477221727371216,
-          "equal_values": 0,
-          "same_argmax": true
-        }
-      },
-      "A2-B": {
-        "131247": {
-          "max_abs": 2.1202378273010254,
-          "mean_abs": 0.2013617306947708,
-          "equal_values": 0,
-          "same_argmax": true
-        },
-        "131238": {
-          "max_abs": 1.3813899755477905,
-          "mean_abs": 0.2343328297138214,
-          "equal_values": 1,
-          "same_argmax": true
-        }
-      },
-      "A1-A2": {
-        "131247": {
-          "max_abs": 1.3011624813079834,
-          "mean_abs": 0.19965960085391998,
-          "equal_values": 0,
-          "same_argmax": true
-        },
-        "131238": {
-          "max_abs": 1.7133874893188477,
-          "mean_abs": 0.2599373459815979,
-          "equal_values": 0,
-          "same_argmax": true
-        }
-      }
-    }
-  },
-  "native_topk": {
-    "scope": "capacity65538 vs host active bound; all selected IDs bitwise; A/B/A",
-    "steps": [
-      {
-        "name": "compile",
-        "exit": 0,
-        "seconds": 0.81
-      },
-      {
-        "name": "ctx1111-q256-mode0",
-        "exit": 0,
-        "seconds": 0.19
-      },
-      {
-        "name": "ctx8192-q256-mode0",
-        "exit": 0,
-        "seconds": 0.16
-      },
-      {
-        "name": "ctx32768-q256-mode0",
-        "exit": 0,
-        "seconds": 0.17
-      },
-      {
-        "name": "ctx131072-q256-mode0",
-        "exit": 0,
-        "seconds": 0.3
-      },
-      {
-        "name": "ctx131075-q255-mode0",
-        "exit": 0,
-        "seconds": 0.27
-      },
-      {
-        "name": "ctx135164-q256-mode0",
-        "exit": 0,
-        "seconds": 0.28
-      },
-      {
-        "name": "ctx135168-q256-mode0",
-        "exit": 0,
-        "seconds": 0.31
-      },
-      {
-        "name": "ctx250022-q256-mode0",
-        "exit": 0,
-        "seconds": 0.55
-      },
-      {
-        "name": "ctx262144-q256-mode0",
-        "exit": 0,
-        "seconds": 0.66
-      },
-      {
-        "name": "ctx131072-q1-mode0",
-        "exit": 0,
-        "seconds": 0.14
-      },
-      {
-        "name": "ctx131072-q8-mode0",
-        "exit": 0,
-        "seconds": 0.14
-      },
-      {
-        "name": "ctx131072-q257-mode0",
-        "exit": 0,
-        "seconds": 0.27
-      },
-      {
-        "name": "ctx131072-q256-mode1",
-        "exit": 0,
-        "seconds": 0.22
-      },
-      {
-        "name": "ctx131072-q256-mode2",
-        "exit": 0,
-        "seconds": 0.23
-      },
-      {
-        "name": "ctx131072-q256-mode3",
-        "exit": 0,
-        "seconds": 0.31
-      },
-      {
-        "name": "ctx131072-q256-mode4",
-        "exit": 0,
-        "seconds": 0.28
-      }
-    ]
-  },
-  "retrieval_deep_decode": {
-    "name": "topk_quality_250k",
-    "kv_capacity": 262144,
-    "prompt_profile": null,
-    "duration_limit_s": 1500,
-    "exe_sha256": "f469e096e868e4579daaec71ceef63693790e300e7a4cc5b49a8853d075a1d34",
-    "server_sha256": "3e556df4e13f783f9d961113dd0bbed7481f677e265b45c3a7f238b18530484a",
-    "requested_fixed_cache_slots": null,
-    "gather_mode": null,
-    "kernel_profiling": false,
-    "qsa_ch": null,
-    "topk_mode": "active",
-    "artificial_load": false,
-    "status": "completed",
-    "startup_s": 41.33,
-    "health": {
-      "status": "ok",
-      "max_context": 262144,
-      "model": "qwen3.8-flash-next-iq3_xxs",
-      "images": false,
-      "api_key": false,
-      "loaded": true
-    },
-    "initial_cache": {
-      "expert_slots": 6523,
-      "expert_cache_mib": 10811,
-      "vram_free_mib": 1162
-    },
-    "needles": [
-      {
-        "length": "32k",
-        "depth": 10,
-        "prompt_tokens": 30742,
-        "seconds": 31.4,
-        "found": true,
-        "word": "meadow-copper-504",
-        "answer": "meadow-copper-504"
-      },
-      {
-        "length": "32k",
-        "depth": 50,
-        "prompt_tokens": 30742,
-        "seconds": 29.1,
-        "found": true,
-        "word": "falcon-quartz-940",
-        "answer": "falcon-quartz-940"
-      },
-      {
-        "length": "32k",
-        "depth": 90,
-        "prompt_tokens": 30743,
-        "seconds": 29.5,
-        "found": true,
-        "word": "willow-cobalt-696",
-        "answer": "willow-cobalt-696"
-      }
-    ],
-    "test_type": "retrieval_250k_only",
-    "retrieval_250k": {
-      "target_tokens": 250000,
-      "local_tokens": 250022,
-      "needle_depth": 50,
-      "word": "ARCO-AMBRA-742913",
-      "prompt_sha256": "4c092a32936dcab286398d6567a098b2138a57fa72daf9e4bbd79b3e0030b652",
-      "filler_sha256": "ab76a0e01266e972631f9bb0f893077eccc4cd43eb62f048ff0ebc4597b64088",
-      "filler_characters": 987575,
-      "max_tokens": 40,
+  "upstream_commit": "36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca",
+  "version": "0.1.36",
+  "executable_sha256": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+  "model_comparison": {
+    "daily0131": {
+      "name": "daily0131",
+      "kv_capacity": 262144,
+      "prompt_profile": "lungo_131k",
+      "out": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\model-tests\\daily0131",
+      "duration_limit_s": 1000,
+      "exe": "D:\\ds4_work\\strata\\Strata\\build-0131-daily\\strata.exe",
+      "exe_sha256": "f469e096e868e4579daaec71ceef63693790e300e7a4cc5b49a8853d075a1d34",
+      "server_source": "D:\\ds4_work\\strata\\Strata\\build-0131-daily\\source",
+      "server_sha256": "3e556df4e13f783f9d961113dd0bbed7481f677e265b45c3a7f238b18530484a",
+      "requested_fixed_cache_slots": null,
+      "gather_mode": null,
+      "kernel_profiling": false,
+      "qsa_ch": null,
+      "topk_mode": "active",
       "artificial_load": false,
-      "seconds": 392.86,
-      "usage": {
-        "prompt_tokens": 250022,
-        "completion_tokens": 13,
-        "total_tokens": 250035,
-        "prompt_tokens_details": {
-          "cached_tokens": 0
-        }
+      "status": "completed",
+      "startup_s": 52.33,
+      "health": {
+        "status": "ok",
+        "max_context": 262144,
+        "model": "qwen3.8-flash-next-iq3_xxs",
+        "images": false,
+        "api_key": false,
+        "loaded": true
       },
-      "answer": "ARCO-AMBRA-742913",
-      "found": true,
-      "capacity_validated": true,
-      "decode_after": {
-        "seconds": 28.48,
-        "local_prompt_tokens": 250091,
-        "requested_output_tokens": 1024,
-        "usage": {
-          "prompt_tokens": 250091,
-          "completion_tokens": 1024,
-          "total_tokens": 251115,
-          "prompt_tokens_details": {
-            "cached_tokens": 250015
+      "initial_cache": {
+        "expert_slots": 6592,
+        "expert_cache_mib": 10913,
+        "vram_free_mib": 594
+      },
+      "summary": {
+        "corsa": "20261002_185244_daily0131_lungo_131k",
+        "nota": "KV 262144; prompt 131k; carico reale",
+        "decode_aggregato_tps": 41.255,
+        "blocchi": {
+          "131k": {
+            "casi": 2,
+            "decode_tps": 41.255
           }
         },
-        "finish": "length",
-        "engine_request": {
-          "projection": null,
-          "duration_s": 27.5,
-          "finish": "length",
-          "prompt_tokens": 250091,
-          "reused": 250015,
-          "output_tokens": 1024,
-          "engine_generated": 1024,
-          "prompt_ms": 1317.0,
-          "decode_ms": 26110.5,
-          "decode_tok_s": 39.2,
-          "hit_rate": 0.883,
-          "ram_blobs": 0,
-          "file_blobs": 0,
-          "file_mb": 0.0
-        },
-        "robust": true,
-        "engine": {
-          "model": "qwen3.8-flash-next-iq3_xxs",
-          "max_context": 262144,
-          "images": false,
-          "version": "0.1.31",
-          "context": 262144,
-          "kv": "int8",
-          "kv_resident": 32768,
-          "expert_slots": 6523,
-          "expert_cache_mib": 10811,
-          "expert_slots_primary": 6523,
-          "expert_cache_primary_mib": 10811,
-          "spec": 6,
-          "mtp_max": 4,
-          "lookup": 3,
-          "vram_free_mib": 1162,
-          "cvec": 0,
-          "arena_mib": 40925,
-          "pool_workers": 7,
-          "pcie_frac": "0.28",
-          "spec_min_p": "0.50",
-          "conversation_cache_mib": 0,
-          "conversation_cache_slots": 4,
-          "conversation_cache_min_free_mib": 2560,
-          "engine": "0.1.31"
-        },
-        "exact_decode_tps": 39.217939143256544
-      },
-      "prefill_request": {
-        "projection": null,
-        "duration_s": 391.9,
-        "finish": "stop",
-        "prompt_tokens": 250022,
-        "reused": 0,
-        "output_tokens": 13,
-        "engine_generated": 13,
-        "prompt_ms": 391472.7,
-        "decode_ms": 373.1,
-        "decode_tok_s": 34.8,
-        "hit_rate": 0.739,
-        "ram_blobs": 0,
-        "file_blobs": 0,
-        "file_mb": 0.0
-      },
-      "prefill_tps": 638.6703338444801
+        "per_caso": [
+          {
+            "etichetta": "L01@ctx131k",
+            "prefill_tps_motore": 974.05,
+            "decode_tps_motore": 44.264,
+            "ttft_s": 135.494,
+            "vram_prima_mib": 19731,
+            "fine": "length"
+          },
+          {
+            "etichetta": "L02@ctx131k",
+            "prefill_tps_motore": 83.61,
+            "decode_tps_motore": 38.628,
+            "ttft_s": 2.633,
+            "vram_prima_mib": 20912,
+            "fine": "length"
+          }
+        ]
+      }
     },
-    "first_logits": {
-      "first-logits.pos250021.f32": {
-        "values": 248320,
-        "finite": true,
-        "argmax": 905
+    "candidate0136_serial": {
+      "name": "candidate0136_serial",
+      "kv_capacity": 262144,
+      "prompt_profile": "lungo_131k",
+      "out": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\model-tests\\candidate0136_serial",
+      "duration_limit_s": 1000,
+      "exe": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\build0136\\strata.exe",
+      "exe_sha256": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+      "server_source": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\candidate0136",
+      "server_sha256": "73f90f417e9207811fdc47e5e6240f69bbde0f61ff027b9e0d8cb7b7bb2f4d81",
+      "requested_fixed_cache_slots": null,
+      "gather_mode": null,
+      "kernel_profiling": false,
+      "qsa_ch": null,
+      "topk_mode": "active",
+      "artificial_load": false,
+      "status": "completed",
+      "startup_s": 41.33,
+      "health": {
+        "status": "ok",
+        "max_context": 262144,
+        "model": "qwen3.8-flash-next-iq3_xxs",
+        "images": false,
+        "api_key": false,
+        "loaded": true,
+        "service": "strata"
       },
-      "first-logits.pos250090.f32": {
-        "values": 248320,
-        "finite": true,
-        "argmax": 760
+      "initial_cache": {
+        "expert_slots": 6786,
+        "expert_cache_mib": 11231,
+        "vram_free_mib": 976
       },
-      "first-logits.pos30741.f32": {
-        "values": 248320,
-        "finite": true,
-        "argmax": 69
+      "summary": {
+        "corsa": "20261002_190254_candidate0136_serial_lungo_131k",
+        "nota": "KV 262144; prompt 131k; carico reale",
+        "decode_aggregato_tps": 40.123,
+        "blocchi": {
+          "131k": {
+            "casi": 2,
+            "decode_tps": 40.123
+          }
+        },
+        "per_caso": [
+          {
+            "etichetta": "L01@ctx131k",
+            "prefill_tps_motore": 972.68,
+            "decode_tps_motore": 42.667,
+            "ttft_s": 135.655,
+            "vram_prima_mib": 20316,
+            "fine": "length"
+          },
+          {
+            "etichetta": "L02@ctx131k",
+            "prefill_tps_motore": 88.87,
+            "decode_tps_motore": 37.866,
+            "ttft_s": 2.498,
+            "vram_prima_mib": 20802,
+            "fine": "length"
+          }
+        ]
+      }
+    },
+    "candidate0136_parallel": {
+      "name": "candidate0136_parallel",
+      "kv_capacity": 262144,
+      "prompt_profile": "lungo_131k",
+      "out": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\model-tests\\candidate0136_parallel",
+      "duration_limit_s": 1000,
+      "exe": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\build0136\\strata.exe",
+      "exe_sha256": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+      "server_source": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\candidate0136",
+      "server_sha256": "73f90f417e9207811fdc47e5e6240f69bbde0f61ff027b9e0d8cb7b7bb2f4d81",
+      "requested_fixed_cache_slots": null,
+      "gather_mode": null,
+      "kernel_profiling": false,
+      "qsa_ch": null,
+      "topk_mode": "active",
+      "artificial_load": false,
+      "status": "completed",
+      "startup_s": 41.8,
+      "health": {
+        "status": "ok",
+        "max_context": 262144,
+        "model": "qwen3.8-flash-next-iq3_xxs",
+        "images": false,
+        "api_key": false,
+        "loaded": true,
+        "service": "strata"
       },
-      "first-logits.pos30742.f32": {
-        "values": 248320,
-        "finite": true,
-        "argmax": 13974
+      "initial_cache": {
+        "expert_slots": 6034,
+        "expert_cache_mib": 10007,
+        "vram_free_mib": 1303
+      },
+      "summary": {
+        "corsa": "20261002_190659_candidate0136_parallel_lungo_131k",
+        "nota": "KV 262144; prompt 131k; carico reale",
+        "decode_aggregato_tps": 40.272,
+        "blocchi": {
+          "131k": {
+            "casi": 2,
+            "decode_tps": 40.272
+          }
+        },
+        "per_caso": [
+          {
+            "etichetta": "L01@ctx131k",
+            "prefill_tps_motore": 970.6,
+            "decode_tps_motore": 41.224,
+            "ttft_s": 135.981,
+            "vram_prima_mib": 19316,
+            "fine": "length"
+          },
+          {
+            "etichetta": "L02@ctx131k",
+            "prefill_tps_motore": 89.1,
+            "decode_tps_motore": 39.363,
+            "ttft_s": 2.618,
+            "vram_prima_mib": 20473,
+            "fine": "length"
+          }
+        ]
       }
     }
-  }
+  },
+  "parallel_quant_default": "off; opt-in STRATA_PARALLEL_INTERMEDIATE_QUANT=1",
+  "numerical": {
+    "topk_bitwise_cases": 16,
+    "native_pool_bitwise_cases": 64,
+    "gr_failures": 0,
+    "server_mock_tests": 100
+  },
+  "limitations": [
+    "One sequential baseline/serial/parallel comparison; elastic cache, MTP, outputs and other apps vary.",
+    "No causal speed improvement or general model quality claim.",
+    "250k retrieval belongs to the historical 0.1.31 binary; the new engine was exercised at 131k with KV262144.",
+    "Only the modified 22 GB Turing card and AVX2 machine were exercised."
+  ]
 }

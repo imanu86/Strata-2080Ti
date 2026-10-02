@@ -1,3 +1,13 @@
+# Current SM75 build
+
+Current main is upstream0.1.36 plus the documented port. The complete fresh
+CMake/Ninja Release build passed with CUDA12.6, MSVC14.44, native CPU experts,
+shared CUDA runtime and architecture75. The builder now defaults to75.
+100 server mock tests and the CMake-built top-k/HC checks pass. Historical
+publication notes below refer to the original0.1.31 release. The original
+manifest is preserved as `source-manifest-0131.json`; `check_source.py` verifies
+the current source manifest. No automated workflow is installed.
+
 # Build the SM75 snapshot
 
 The measured daily used Windows, CUDA **12.6**, MSVC **14.44.35207** (VS2022

@@ -15,11 +15,11 @@
 - **ggml/llama.cpp contributors**: quantization formats, codebooks and MMQ,
   with vendored license notices preserved under `third_party/`.
 
-Source baseline: Strata **0.1.31**, commit
+Original published snapshot baseline: Strata **0.1.31**, commit
 `9259cad4cfa3543cd3b8decab5962672b968c649`, plus the documented
 [patches](docs/sm75/PATCHES.md). Upstream history is retained and the tested
 snapshot is imported as a new commit; published history is not rewritten.
-The snapshot's older version is an explicit validation choice.
+That historical snapshot and its evidence remain available separately from current main.
 
 The top-k radix/register kernel itself is upstream work. Our fix changes the
 prefill dispatch to use the true active block bound while preserving the score
@@ -27,3 +27,11 @@ stride. We do not claim authorship of the whole kernel or attribute all model
 performance gains to our changes.
 
 [Full research history and evidence](https://github.com/imanu86/moe-aggressive-commit/tree/research/ds4-iq1-subbit-tier-planner/docs/porto/strata_adattivo).
+
+Current main source baseline: Strata0.1.36, `36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca`. The0.1.31 manifest remains
+as historical provenance. Community [PR463](https://github.com/Niko1221/Strata/pull/463)
+provides the pending-copy ordering correction and [PR500](https://github.com/Niko1221/Strata/pull/500)
+the parallel intermediate quantization design; local integration adds opt-in
+dispatch and the real-GGUF parity harness. Their published author history and
+upstream licenses are preserved. No reported speedup from another machine is
+claimed for this fork.

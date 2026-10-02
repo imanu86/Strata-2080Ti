@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--jobs', type=int, default=2)
-    ap.add_argument('--arch', default='75;86')
+    ap.add_argument('--arch', default='75')
     ap.add_argument('--ggml-dir', type=Path)
     ap.add_argument('--build-dir', type=Path, default=ROOT/'build-sm75')
     a = ap.parse_args()
