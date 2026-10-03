@@ -1,0 +1,457 @@
+{
+  "date": "2026-10-04",
+  "hardware": "Modified RTX2080Ti 22GB, SM75, Ryzen5800X, 96GB RAM, CUDA12.6, PCIe3.0",
+  "source_base": "ac142dcce598ab76e447c35a0b0a5484edbd3771",
+  "source_files": {
+    "CMakeLists.txt": "0ed93c95b03f418ce0feaec145f772744902357c68eb94ce2766b739fad6909d",
+    "include/strata/prefill/gemm.hpp": "e89cbb994adec4e2f6bd522e453aa1778523d90ed73047f5a2d6878c5e0c0570",
+    "include/strata/prefill/prefill.hpp": "b05521d36cec46f6301f2320fd2527df5bf7987e22a120e2f18dc42a4bf6df97",
+    "src/kernels/cuda/qsa_select.cu": "2eec9b7a527b13123109fad8db340589ce061652279fa0bb0cbff41e1e019769",
+    "src/prefill/gemm.cu": "95ac612e47d0c6ea27dc4d3fb045e08c7d82d031befcb20277535b9b7f75fa7a",
+    "src/prefill/prefill.cpp": "15134f058dde482bdb090de896a5984a107fadec0b553f41ae761ef58806bde5",
+    "src/program/generate.cpp": "6c6f0036529a3922c1f4bc78dfe79d2a7f89c18483de3f931fae593a76645ef9",
+    "tests/cuda/qsa_prefill_multi_parity.cpp": "7c0db6ad9d5be17440317b96f6123a65f82d4581acff2270ec128f4637beed30"
+  },
+  "candidate_exe_sha256": "a17d0dd5362bc35420ca9ef3d1a8cf8c014dafbb3aea189c6c664fe7930e8674",
+  "settings": {
+    "kv": 262144,
+    "kv_type": "int8",
+    "kv_resident": 32768,
+    "expert_slots": 6167,
+    "expert_cache_mib": 10218,
+    "elastic": false,
+    "spec": 4,
+    "suffix_draft": 0,
+    "iq_mt_min": "unset; default2",
+    "qsa_multi": 1,
+    "exact_small": 1,
+    "prefixes": [
+      20001,
+      21015
+    ],
+    "output_tokens_per_request": 1,
+    "timing_events": true,
+    "logits_dump": "first position only"
+  },
+  "protocols": {
+    "prefill-stats-gate": "A1 original/stats unset, B counters/stats0, C same counters/stats1, A2 original/stats unset",
+    "prefill-io-gate": "A1 counters/stats1, B counters+I/O snapshots/stats1, C same plus ple-sync-submit, A2 same with default reader worker. All use direct PLE."
+  },
+  "gates": {
+    "prefill-stats-gate": {
+      "raw_result_sha256": "30050249462390a60f816b03a0a6eef2fa4d4cdf2e53cb0f0f0b5997b9b5128d",
+      "elapsed_seconds": 457.5320000000065,
+      "parity": "8 finite first-position rows; 248320 F32 values per row; all 4 arms byte-identical per prefix; output IDs equal",
+      "exe_sha256_after": {
+        "reference": "aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177",
+        "candidate": "bc4700807ebc3b033f9db35fec904b760dfeadc8d73c4802f0009e0fd5b1c39a"
+      },
+      "arms": {
+        "A1": {
+          "prompt_ms": [
+            19086.8,
+            3795.8
+          ],
+          "prefill_stats": [],
+          "ple_io_reports": []
+        },
+        "B": {
+          "prompt_ms": [
+            211984.4,
+            13737.9
+          ],
+          "prefill_stats": [],
+          "ple_io_reports": []
+        },
+        "C": {
+          "prompt_ms": [
+            19208.4,
+            3792.0
+          ],
+          "prefill_stats": [],
+          "ple_io_reports": []
+        },
+        "A2": {
+          "prompt_ms": [
+            19258.9,
+            3784.1
+          ],
+          "prefill_stats": [],
+          "ple_io_reports": []
+        }
+      }
+    },
+    "prefill-io-gate": {
+      "raw_result_sha256": "cb1d661439ee967bdda17fc636dd5e2fc478ed4e4f6371d346270c5e66e257d1",
+      "elapsed_seconds": 248.90700000000652,
+      "parity": "8 finite first-position rows; 248320 F32 values per row; all 4 arms byte-identical per prefix; output IDs equal",
+      "exe_sha256_after": {
+        "reference": "bc4700807ebc3b033f9db35fec904b760dfeadc8d73c4802f0009e0fd5b1c39a",
+        "candidate": "a17d0dd5362bc35420ca9ef3d1a8cf8c014dafbb3aea189c6c664fe7930e8674"
+      },
+      "arms": {
+        "A1": {
+          "prompt_ms": [
+            19231.0,
+            3784.0
+          ],
+          "prefill_stats": [
+            {
+              "prompt": 20001,
+              "reused": 0,
+              "tokens": 19994,
+              "chunks": 3,
+              "h2d_bytes": 110833920000,
+              "direct_pinned_bytes": 110833920000,
+              "via_stager_bytes": 0,
+              "streamed": 63516,
+              "direct": 63516,
+              "resident_count": 10068,
+              "run_ms": 18662.3,
+              "host_stage_ms": 502.7,
+              "ple_ms": 707.7
+            },
+            {
+              "prompt": 21015,
+              "reused": 20001,
+              "tokens": 1013,
+              "chunks": 2,
+              "h2d_bytes": 33418368000,
+              "direct_pinned_bytes": 33418368000,
+              "via_stager_bytes": 0,
+              "streamed": 19141,
+              "direct": 19141,
+              "resident_count": 10388,
+              "run_ms": 3669.5,
+              "host_stage_ms": 447.0,
+              "ple_ms": 74.9
+            }
+          ],
+          "ple_io_reports": []
+        },
+        "B": {
+          "prompt_ms": [
+            19208.5,
+            3744.4
+          ],
+          "prefill_stats": [
+            {
+              "prompt": 20001,
+              "reused": 0,
+              "tokens": 19994,
+              "chunks": 3,
+              "h2d_bytes": 110833920000,
+              "direct_pinned_bytes": 110833920000,
+              "via_stager_bytes": 0,
+              "streamed": 63516,
+              "direct": 63516,
+              "resident_count": 10068,
+              "run_ms": 18640.5,
+              "host_stage_ms": 483.6,
+              "ple_ms": 672.3
+            },
+            {
+              "prompt": 21015,
+              "reused": 20001,
+              "tokens": 1013,
+              "chunks": 2,
+              "h2d_bytes": 33418368000,
+              "direct_pinned_bytes": 33418368000,
+              "via_stager_bytes": 0,
+              "streamed": 19141,
+              "direct": 19141,
+              "resident_count": 10388,
+              "run_ms": 3629.1,
+              "host_stage_ms": 419.2,
+              "ple_ms": 5.2
+            }
+          ],
+          "ple_io_reports": [
+            {
+              "phase": "before",
+              "prompt": 20001,
+              "rows": 0,
+              "row_cache_hit_pct": 0.0,
+              "ssd_reads": 0,
+              "read_mb_cumulative": 0.0,
+              "read_p50_us_recent_window": 0.0,
+              "read_p99_us_recent_window": 0.0,
+              "blocked_ms_cumulative": 0.0,
+              "submit_ms_cumulative": 0.0,
+              "cache_rows": 0,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": null,
+              "keepalive_slowest_ms": null
+            },
+            {
+              "phase": "after",
+              "prompt": 20001,
+              "rows": 320000,
+              "row_cache_hit_pct": 14.2,
+              "ssd_reads": 205888,
+              "read_mb_cumulative": 861.6,
+              "read_p50_us_recent_window": 1548.0,
+              "read_p99_us_recent_window": 5734.0,
+              "blocked_ms_cumulative": 1573.027,
+              "submit_ms_cumulative": 221.208,
+              "cache_rows": 206975,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": 161,
+              "keepalive_slowest_ms": 4.9
+            },
+            {
+              "phase": "before",
+              "prompt": 21015,
+              "rows": 320016,
+              "row_cache_hit_pct": 14.2,
+              "ssd_reads": 205904,
+              "read_mb_cumulative": 861.7,
+              "read_p50_us_recent_window": 1548.0,
+              "read_p99_us_recent_window": 5734.0,
+              "blocked_ms_cumulative": 1573.571,
+              "submit_ms_cumulative": 221.238,
+              "cache_rows": 206991,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": 161,
+              "keepalive_slowest_ms": 4.9
+            },
+            {
+              "phase": "after",
+              "prompt": 21015,
+              "rows": 336224,
+              "row_cache_hit_pct": 15.4,
+              "ssd_reads": 215685,
+              "read_mb_cumulative": 902.6,
+              "read_p50_us_recent_window": 1510.0,
+              "read_p99_us_recent_window": 4379.0,
+              "blocked_ms_cumulative": 1635.222,
+              "submit_ms_cumulative": 230.349,
+              "cache_rows": 216774,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": 194,
+              "keepalive_slowest_ms": 4.9
+            }
+          ]
+        },
+        "C": {
+          "prompt_ms": [
+            19277.5,
+            3917.0
+          ],
+          "prefill_stats": [
+            {
+              "prompt": 20001,
+              "reused": 0,
+              "tokens": 19994,
+              "chunks": 3,
+              "h2d_bytes": 110833920000,
+              "direct_pinned_bytes": 110833920000,
+              "via_stager_bytes": 0,
+              "streamed": 63516,
+              "direct": 63516,
+              "resident_count": 10068,
+              "run_ms": 18715.2,
+              "host_stage_ms": 491.7,
+              "ple_ms": 691.8
+            },
+            {
+              "prompt": 21015,
+              "reused": 20001,
+              "tokens": 1013,
+              "chunks": 2,
+              "h2d_bytes": 33418368000,
+              "direct_pinned_bytes": 33418368000,
+              "via_stager_bytes": 0,
+              "streamed": 19141,
+              "direct": 19141,
+              "resident_count": 10388,
+              "run_ms": 3801.9,
+              "host_stage_ms": 409.5,
+              "ple_ms": 227.9
+            }
+          ],
+          "ple_io_reports": [
+            {
+              "phase": "before",
+              "prompt": 20001,
+              "rows": 0,
+              "row_cache_hit_pct": 0.0,
+              "ssd_reads": 0,
+              "read_mb_cumulative": 0.0,
+              "read_p50_us_recent_window": 0.0,
+              "read_p99_us_recent_window": 0.0,
+              "blocked_ms_cumulative": 0.0,
+              "submit_ms_cumulative": 0.0,
+              "cache_rows": 0,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": null,
+              "keepalive_slowest_ms": null
+            },
+            {
+              "phase": "after",
+              "prompt": 20001,
+              "rows": 320000,
+              "row_cache_hit_pct": 14.2,
+              "ssd_reads": 205888,
+              "read_mb_cumulative": 861.6,
+              "read_p50_us_recent_window": 2062.0,
+              "read_p99_us_recent_window": 5632.0,
+              "blocked_ms_cumulative": 1764.604,
+              "submit_ms_cumulative": 242.76,
+              "cache_rows": 206975,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": null,
+              "keepalive_slowest_ms": null
+            },
+            {
+              "phase": "before",
+              "prompt": 21015,
+              "rows": 320016,
+              "row_cache_hit_pct": 14.2,
+              "ssd_reads": 205904,
+              "read_mb_cumulative": 861.7,
+              "read_p50_us_recent_window": 2062.0,
+              "read_p99_us_recent_window": 5632.0,
+              "blocked_ms_cumulative": 1765.144,
+              "submit_ms_cumulative": 242.776,
+              "cache_rows": 206991,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": null,
+              "keepalive_slowest_ms": null
+            },
+            {
+              "phase": "after",
+              "prompt": 21015,
+              "rows": 336224,
+              "row_cache_hit_pct": 15.4,
+              "ssd_reads": 215685,
+              "read_mb_cumulative": 902.6,
+              "read_p50_us_recent_window": 2366.0,
+              "read_p99_us_recent_window": 25925.0,
+              "blocked_ms_cumulative": 2053.957,
+              "submit_ms_cumulative": 254.671,
+              "cache_rows": 216774,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": null,
+              "keepalive_slowest_ms": null
+            }
+          ]
+        },
+        "A2": {
+          "prompt_ms": [
+            19790.1,
+            3901.0
+          ],
+          "prefill_stats": [
+            {
+              "prompt": 20001,
+              "reused": 0,
+              "tokens": 19994,
+              "chunks": 3,
+              "h2d_bytes": 110833920000,
+              "direct_pinned_bytes": 110833920000,
+              "via_stager_bytes": 0,
+              "streamed": 63516,
+              "direct": 63516,
+              "resident_count": 10068,
+              "run_ms": 19224.8,
+              "host_stage_ms": 477.8,
+              "ple_ms": 1247.2
+            },
+            {
+              "prompt": 21015,
+              "reused": 20001,
+              "tokens": 1013,
+              "chunks": 2,
+              "h2d_bytes": 33418368000,
+              "direct_pinned_bytes": 33418368000,
+              "via_stager_bytes": 0,
+              "streamed": 19141,
+              "direct": 19141,
+              "resident_count": 10388,
+              "run_ms": 3785.9,
+              "host_stage_ms": 406.8,
+              "ple_ms": 198.0
+            }
+          ],
+          "ple_io_reports": [
+            {
+              "phase": "before",
+              "prompt": 20001,
+              "rows": 0,
+              "row_cache_hit_pct": 0.0,
+              "ssd_reads": 0,
+              "read_mb_cumulative": 0.0,
+              "read_p50_us_recent_window": 0.0,
+              "read_p99_us_recent_window": 0.0,
+              "blocked_ms_cumulative": 0.0,
+              "submit_ms_cumulative": 0.0,
+              "cache_rows": 0,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": null,
+              "keepalive_slowest_ms": null
+            },
+            {
+              "phase": "after",
+              "prompt": 20001,
+              "rows": 320000,
+              "row_cache_hit_pct": 14.2,
+              "ssd_reads": 205888,
+              "read_mb_cumulative": 861.6,
+              "read_p50_us_recent_window": 2391.0,
+              "read_p99_us_recent_window": 9056.0,
+              "blocked_ms_cumulative": 2589.516,
+              "submit_ms_cumulative": 229.506,
+              "cache_rows": 206975,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": 156,
+              "keepalive_slowest_ms": 5.0
+            },
+            {
+              "phase": "before",
+              "prompt": 21015,
+              "rows": 320016,
+              "row_cache_hit_pct": 14.2,
+              "ssd_reads": 205904,
+              "read_mb_cumulative": 861.7,
+              "read_p50_us_recent_window": 2392.0,
+              "read_p99_us_recent_window": 9056.0,
+              "blocked_ms_cumulative": 2594.623,
+              "submit_ms_cumulative": 229.523,
+              "cache_rows": 206991,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": 156,
+              "keepalive_slowest_ms": 5.0
+            },
+            {
+              "phase": "after",
+              "prompt": 21015,
+              "rows": 336224,
+              "row_cache_hit_pct": 15.4,
+              "ssd_reads": 215685,
+              "read_mb_cumulative": 902.6,
+              "read_p50_us_recent_window": 2579.0,
+              "read_p99_us_recent_window": 28685.0,
+              "blocked_ms_cumulative": 2858.65,
+              "submit_ms_cumulative": 241.088,
+              "cache_rows": 216774,
+              "cache_capacity_rows": 1048576,
+              "keepalive_reads": 189,
+              "keepalive_slowest_ms": 5.0
+            }
+          ]
+        }
+      }
+    }
+  },
+  "limitations": [
+    "Default-off diagnostics; no throughput improvement claimed. Daily keeps STRATA_PREFILL_STATS unset.",
+    "Byte counters sum issued non-peer primary-ring expert HtoD calls, including repeated transfers. They exclude peer staging, refill, P2P and resident reads; no physical bus/VRAM bandwidth counter.",
+    "The warm fixed fixture crosses a checkpoint/turn boundary and uses two batched chunks; not a one-chunk elastic HTTP request.",
+    "PLE rows/read/blocked/submit totals are cumulative snapshots; p50/p99 cover the last up to65536 completed read latencies, not request-local deltas.",
+    "ple-sync-submit also disables the existing SSD keepalive; its single sample cannot isolate only worker scheduling.",
+    "Host PLE time includes asynchronous gather wait, submission and synchronization; CUDA phase intervals can include host gaps.",
+    "The retained 211.984s cold anomaly is not a diagnostic overhead result: the same binary then ran in19.208s. No cause or fix established.",
+    "Bounded numerical regression check; not a broad semantic quality evaluation or new SOTA."
+  ]
+}

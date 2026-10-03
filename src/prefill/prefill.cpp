@@ -1379,6 +1379,10 @@ struct PeTimer {
 
 bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
     err.clear();
+    static const bool collect_h2d_bytes = [] {
+        const char* v = std::getenv("STRATA_PREFILL_STATS");
+        return v != nullptr && std::atoi(v) == 1;
+    }();
     Impl& m = *impl_;
     const core::OnDevice on_device(m.device);
     const core::ModelGeometry& g = *m.g;
@@ -1647,6 +1651,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     cudaMemcpyAsync(m.stage_dev[sl], hb, bytes, cudaMemcpyHostToDevice, m.copy);
                     m.stager->issued_one(en.job, m.copy);
                 }
+                if (collect_h2d_bytes) {
+                    stats_.h2d_expert_bytes += (uint64_t) bytes;
+                    if (en.job < 0) stats_.h2d_expert_direct_pinned_bytes += (uint64_t) bytes;
+                }
                 cudaEventRecord(m.copied[sl], m.copy);
                 m.stage_live[sl] = true;
                 stats_.ms_experts_host += ms_since(th);
@@ -1666,6 +1674,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         std::atomic<bool> a_stop{false};
         double iss_ms = 0;
         int64_t iss_streamed = 0, iss_dma = 0;
+        uint64_t iss_h2d_bytes = 0, iss_h2d_direct_pinned_bytes = 0;
         std::thread issuer;
         struct IssuerJoin {
             std::atomic<bool>* stop;
@@ -1697,6 +1706,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     cudaEventRecord(m.copied[sl], m.copy);
                     m.stage_live[sl] = true;
                     iss_ms += ms_since(th);
+                    if (collect_h2d_bytes) {
+                        iss_h2d_bytes += (uint64_t) bytes;
+                        if (en.job < 0) iss_h2d_direct_pinned_bytes += (uint64_t) bytes;
+                    }
                     ++iss_streamed;
                     a_issued.store(idx + 1, std::memory_order_release);
                 }
@@ -2464,6 +2477,11 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             cudaEventRecord(m.copied[sl], m.copy);
                             m.stage_live[sl] = true;
                             stage_of[j] = sl;
+                            if (collect_h2d_bytes) {
+                                const uint64_t bytes = lay.blob_bytes(l);
+                                stats_.h2d_expert_bytes += bytes;
+                                if (pinned) stats_.h2d_expert_direct_pinned_bytes += bytes;
+                            }
                             stats_.ms_experts_host += ms_since(th);
                             ++stats_.experts_streamed;
                             return true;
@@ -2692,6 +2710,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             stats_.ms_experts_host += iss_ms;
             stats_.experts_streamed += iss_streamed;
             stats_.experts_dma += iss_dma;
+            if (collect_h2d_bytes) {
+                stats_.h2d_expert_bytes += iss_h2d_bytes;
+                stats_.h2d_expert_direct_pinned_bytes += iss_h2d_direct_pinned_bytes;
+            }
         }
         stats_.tokens += T;
         core::progress_at("reading the prompt (batched): finishing the chunk from token", p0);

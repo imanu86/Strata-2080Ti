@@ -107,3 +107,13 @@ active bounds and more than eight queries; decode and other architectures keep
 the prior path. Score/selection buffers and four captured model rows/outputs
 match bitwise in bounded tests. Experimental group/grid tuning is not shipped.
 See [paired measurements, the complete chat curve and limits](BENCHMARKS.md#grouped-query-qsa-prefill-4-october-2026).
+
+
+## Optional prefill diagnostics, 4 October 2026
+
+`STRATA_PREFILL_STATS=1` reports per-request primary/stage statistics and PLE I/O
+snapshots on stderr. The default is off. Expert byte counters cover issued
+non-peer primary-ring HtoD copies and distinguish direct pinned-arena copies.
+They do not measure physical VRAM or PCIe bandwidth. Numerical comparisons and
+the intermittent PLE stall are documented in
+[the diagnostic evidence](prefill-diagnostics-20261004.json).

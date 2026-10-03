@@ -32,6 +32,8 @@ struct PrefillStats {
     double ms_experts_host = 0;     ///< host time staging non-resident experts
     int64_t experts_streamed = 0;   ///< expert blobs copied host -> device
     int64_t experts_dma = 0;        ///< ...of which straight from the pinned arena (no CPU copy)
+    uint64_t h2d_expert_bytes = 0;  ///< non-peer primary-ring expert HtoD bytes; excludes peer staging/refill/P2P
+    uint64_t h2d_expert_direct_pinned_bytes = 0; ///< subset copied directly from the pinned arena
     int64_t experts_resident = 0;   ///< expert-layer groups served from the VRAM tier
     double ms_ple = 0;
 };

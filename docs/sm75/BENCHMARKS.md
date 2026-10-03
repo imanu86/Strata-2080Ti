@@ -441,3 +441,31 @@ automatic CTest execution. The portable runner itself was executed successfully:
 12 cases, 26 processes, full-buffer equality, unchanged executable hash. Its later
 timings are only reproducibility evidence. Selected model executable SHA256:
 `aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177`.
+
+
+## Optional HtoD and PLE diagnostics (4 October 2026)
+
+Two four-arm checks at 20001 and 21015 input tokens pass full first-row F32
+bitwise parity and generated-ID equality. The first compares the original
+binary with counters disabled/enabled; the second adds PLE snapshots and one
+`--ple-sync-submit` arm. Both use fixed6167 slots, KV262144/int8/resident32768,
+spec4, QSA/exact-small enabled, default IQ_MT_MIN2 and timing events. These are
+diagnostic runs, not pure throughput or broad quality tests.
+
+The counted primary-ring expert copies are 110833920000 bytes for the cold
+20001 request and 33418368000 bytes for the 1014-fresh-token follow-up, all direct
+from pinned memory in this fixture. The latter uses two batched chunks across a
+checkpoint/turn boundary; it is not a one-chunk elastic HTTP turn. Dividing by
+prompt wall time is not an instantaneous PCIe or VRAM bandwidth measurement.
+
+The first gate retained a 211.984-second cold outlier: host PLE time was193044ms,
+against693ms in its19.087-second control. The same candidate binary subsequently
+ran the cold request in19.208 seconds. This localizes waiting to the PLE path but
+does not identify a disk, worker, GPU-clock or synchronization cause. CUDA phase
+intervals spanning host gaps must not be described as kernel execution time.
+
+PLE read counts and wait/submit totals are cumulative. Read p50/p99 reflect the
+most recent up to65536 completed reads; subtracting percentiles is invalid.
+`--ple-sync-submit` also disables the existing keepalive, so that arm changes
+more than worker scheduling alone. The operational I/O policy is unchanged.
+The diagnostic flag remains off by default. [All measured arms and hashes](prefill-diagnostics-20261004.json).

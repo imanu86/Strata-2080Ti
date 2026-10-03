@@ -4207,6 +4207,10 @@ int main(int argc, char** argv) {
                                  "--expert-cache; the graphed hit path additionally needs --expert-profile P)\n");
             return 2;
         }
+        const bool prefill_stats_on = [] {
+            const char* v = std::getenv("STRATA_PREFILL_STATS");
+            return v != nullptr && std::atoi(v) == 1;
+        }();
         strata::prefill::Prefill sp;
         void* borrow = nullptr;
         uint64_t borrow_bytes = 0;
@@ -5979,6 +5983,14 @@ int main(int argc, char** argv) {
                         if (i >= o.prompt_cache_root) root_at = i;
                         break;
                     }
+            // Reader snapshots are process-cumulative; p50/p99 are not request-local deltas.
+            const std::string prefill_io_before = prefill_stats_on ? ple_table.io_report() : std::string{};
+            std::vector<strata::prefill::PrefillStats> prefill_stats_before;
+            if (prefill_stats_on) {
+                prefill_stats_before.reserve(stages.size() + 1);
+                prefill_stats_before.push_back(sp.stats());
+                for (const auto& stp : stages) prefill_stats_before.push_back(stp->sp.stats());
+            }
             int64_t at = read_from;
             for (const int64_t to : {reread_to, root_at, turn_at, n - 1}) {
                 if (to <= at) continue;
@@ -6028,6 +6040,38 @@ int main(int argc, char** argv) {
             }
             tr("prompt done (slots refilled)");
             const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();
+            if (prefill_stats_on) {
+                auto report_prefill_delta = [&](const char* owner, const strata::prefill::PrefillStats& before,
+                                                const strata::prefill::PrefillStats& after) {
+                    const uint64_t h2d = after.h2d_expert_bytes - before.h2d_expert_bytes;
+                    const uint64_t direct = after.h2d_expert_direct_pinned_bytes - before.h2d_expert_direct_pinned_bytes;
+                    std::fprintf(stderr, "strata serve: prefill stats %s prompt=%lld reused=%lld tokens=%lld chunks=%lld "
+                                         "run_ms=%.1f host_stage_ms=%.1f ple_ms=%.1f streamed=%lld direct=%lld "
+                                         "resident_count=%lld h2d_bytes=%llu direct_pinned_bytes=%llu via_stager_bytes=%llu\n",
+                                 owner, (long long) n, (long long) resume,
+                                 (long long) (after.tokens - before.tokens), (long long) (after.chunks - before.chunks),
+                                 after.ms_total - before.ms_total, after.ms_experts_host - before.ms_experts_host,
+                                 after.ms_ple - before.ms_ple,
+                                 (long long) (after.experts_streamed - before.experts_streamed),
+                                 (long long) (after.experts_dma - before.experts_dma),
+                                 (long long) (after.experts_resident - before.experts_resident),
+                                 (unsigned long long) h2d, (unsigned long long) direct,
+                                 (unsigned long long) (h2d - direct));
+                };
+                report_prefill_delta("primary", prefill_stats_before[0], sp.stats());
+                if (!prefill_io_before.empty()) {
+                    std::fprintf(stderr, "strata serve: prefill io before prompt=%lld cumulative %s\n",
+                                 (long long) n, prefill_io_before.c_str());
+                    const std::string after = ple_table.io_report();
+                    std::fprintf(stderr, "strata serve: prefill io after prompt=%lld cumulative %s\n",
+                                 (long long) n, after.c_str());
+                }
+                for (size_t i = 0; i < stages.size(); ++i) {
+                    char owner[48];
+                    std::snprintf(owner, sizeof owner, "stage%zu_cuda%d", i + 1, stages[i]->dev);
+                    report_prefill_delta(owner, prefill_stats_before[i + 1], stages[i]->sp.stats());
+                }
+            }
             std::printf("REUSED %lld\n", (long long) resume);   // the prompt is read; the first window comes next
             std::fflush(stdout);
             // the verify windows: the first holds the last prompt token alone
