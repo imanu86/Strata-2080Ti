@@ -43,10 +43,11 @@ def main():
         '--ple-gguf', str(paths['ple_gguf']), '--expert-profile', str(paths['expert_profile']),
         '--expert-cache', 'auto', '--prefill', 'auto', '--spec', '4', '--spec-min-p', '0.5',
         '--mtp', str(paths['mtp']), '--max-context', str(a.context), '--kv', 'int8',
-        '--kv-resident', str(a.kv_resident), '--vram-reserve-mib', str(a.reserve_mib), '--elastic'],
+        '--kv-resident', str(a.kv_resident), '--vram-reserve-mib', str(a.reserve_mib), '--elastic',
+        '--prompt-cache-tail', '--prompt-cache-every', '16384'],
         'cwd': str(ROOT), 'tokenizer': str(tokenizer), 'model_name': 'qwen3.8-flash-next-iq3_xxs',
         'log': str(ROOT/'logs/strata-sm75.log'), 'port': a.port, 'host': '127.0.0.1',
-        'env': {'STRATA_WATCHDOG_S': '240'}}
+        'env': {'STRATA_WATCHDOG_S': '240', 'STRATA_PARALLEL_INTERMEDIATE_QUANT': '0'}}
     (ROOT/'logs').mkdir(exist_ok=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(cfg, indent=2)+'\n', encoding='utf-8')

@@ -35,3 +35,10 @@ the parallel intermediate quantization design; local integration adds opt-in
 dispatch and the real-GGUF parity harness. Their published author history and
 upstream licenses are preserved. No reported speedup from another machine is
 claimed for this fork.
+
+Current0.1.38 integration: upstream `99f3dbd0b21d1401b3769e0c0d963913607f380b`. Original elastic expert-cache design
+by Claude Opus; Codex port/guards and validation. Tail checkpoint: Codex,
+[PR614](https://github.com/Niko1221/Strata/pull/614). Wide top-k: Chanyeong Lim
+(asp345), co-authored by Claude Opus5.5, [PR603](https://github.com/Niko1221/Strata/pull/603),
+head6ba96984ac8a5f019edd84d7a83c278e6a1d363d. Their work is credited explicitly;
+the old grid is now historical and is absent from the operative source.

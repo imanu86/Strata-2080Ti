@@ -3,14 +3,29 @@
 A validated Windows snapshot of [Strata](https://github.com/Niko1221/Strata)
 for **RTX 2080 Ti / Turing SM75**, running Qwen3.8-Flash-Next IQ3_XXS.
 
-Main is aligned to upstream **0.1.36**, preserving our elastic expert cache,
-HC/GDN FP16, vector dequantization and the Turing prefill top-k active bound.
-The pending-copy ordering from PR463 is included. PR500's parallel intermediate
-quantization is opt-in; serial remains the measured daily default.
-Upstream history and the original0.1.31 provenance are retained.
+Main is aligned to upstream **0.1.38**, preserving the automatic elastic expert
+cache and validated Turing ports. The original checkpoint grid has been removed;
+the conservative tail checkpoint is optional in the engine and enabled by this
+fork's profile generator. The pinned wide top-k from PR603 is included after
+SM75 parity and model validation. Serial intermediate quantization remains the
+profile default. Historical0.1.31 and0.1.36 evidence is preserved separately.
 [Credits](CREDITS.md) explain which changes come from upstream and community forks.
 
-## Current comparison
+## Current0.1.38 validation
+
+Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server
+tests pass. Paired model regression and real conversations at131k/250k pass;
+see [current evidence and limits](docs/sm75/BENCHMARKS.md). KV capacity is262144.
+
+| Actual fresh input | Fresh prefill t/s | Long decode t/s | Output tokens |
+|---|---:|---:|---:|
+| 131072 | 1027.01 | 36.913 | 1024 |
+| 250000 | 833.50 | 39.065 | 1024 |
+
+Single automatic-profile samples; cache/MTP vary. The separately controlled
+PR603250k A/B/A and numerical parity are documented in the evidence above.
+
+## Historical0.1.36 comparison
 
 | Engine | Fresh 131k prefill t/s | Aggregate decode t/s | Initial elastic slots |
 |---|---:|---:|---:|
@@ -85,15 +100,16 @@ The fork-specific steps above explicitly select this fork's validated engine.
   [2080Ti community fork](https://github.com/jklnvlink/Strata-2080ti).
 - PR315 HC read with its existing numerical gate.
 - Top-k prefill selection using the actual active block bound while preserving
-  the KV-sized score stride. The original decode API/captured graphs are unchanged.
+  the KV-sized score stride. The wide fallback from PR603 also accelerates long selections and decode;
+  selected IDs pass parity against the upstream reference.
 - Opt-in first-logit diagnostics and numerical/benchmark evidence.
 
 CH16, score BPW and PR439 gather experiments are **not enabled** in this release:
 model gains were not demonstrated or model validation is pending.
 See the [research record](https://github.com/imanu86/moe-aggressive-commit/tree/research/ds4-iq1-subbit-tier-planner/docs/porto/strata_adattivo).
 
-The0.1.36 engine was built and tested explicitly for the authorized kernel work.
-Its source manifest and validation are separate from the preserved0.1.31 record.
+The current0.1.38 engine was built and validated for this integration.
+Current and historical source manifests/validation remain separate.
 Fresh builds may have different executable hashes because toolchains, dependencies
 and linking vary. General model quality and physical DRAM bandwidth were not measured.
 

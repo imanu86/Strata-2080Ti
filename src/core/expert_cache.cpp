@@ -1,12 +1,15 @@
 // src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the header first.
 #include "strata/core/expert_cache.hpp"
 
+#if !defined(STRATA_USE_HIP)
 #include <cuda.h>
+#endif
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <utility>
 #include <cstring>
 
@@ -267,6 +270,7 @@ bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_l
     return true;
 }
 
+#if !defined(STRATA_USE_HIP)
 namespace {
 bool drv_ok(CUresult r, const char* what, std::string& err) {
     if (r == CUDA_SUCCESS) return true;
@@ -321,7 +325,13 @@ void ExpertCache::unmap_above(uint64_t keep) {
 bool ExpertCache::open_sized_elastic(const std::vector<int64_t>& slot_bytes, int64_t n_layers, int64_t n_expert,
                                      uint64_t va_bytes, uint64_t chunk_bytes, std::string& err) {
     close();
-    if (slot_bytes.empty() || n_layers <= 0 || n_expert <= 0) { err = "ExpertCache (elastic): no slots"; return false; }
+    if (slot_bytes.empty() || n_layers <= 0 || n_expert <= 0 ||
+        n_layers > std::numeric_limits<int64_t>::max() / n_expert ||
+        (uint64_t) slot_bytes.size() > (uint64_t) (n_layers * n_expert)) {
+        err = "ExpertCache (elastic): invalid slot count or geometry"; return false;
+    }
+    for (const int64_t b : slot_bytes)
+        if (b <= 0) { err = "ExpertCache (elastic): slot sizes must be positive"; return false; }
     // the runtime has made the device's primary context current; the driver API works in the same one
     if (cudaFree(nullptr) != cudaSuccess) { err = "ExpertCache (elastic): no CUDA context"; return false; }
     int dev = 0;
@@ -341,7 +351,9 @@ bool ExpertCache::open_sized_elastic(const std::vector<int64_t>& slot_bytes, int
     std::vector<uint64_t> off(slot_bytes.size() + 1, 0);
     int64_t mx = 0;
     for (size_t i = 0; i < slot_bytes.size(); ++i) {
-        off[i + 1] = off[i] + ((uint64_t) slot_bytes[i] + 255) / 256 * 256;
+        const uint64_t aligned = ((uint64_t) slot_bytes[i] + 255) / 256 * 256;
+        if (aligned > va_bytes_ - off[i]) { err = "ExpertCache (elastic): the first slots exceed the reserved range"; return false; }
+        off[i + 1] = off[i] + aligned;
         mx = std::max(mx, slot_bytes[i]);
     }
     if (off.back() > va_bytes_) { err = "ExpertCache (elastic): the first slots exceed the reserved range"; return false; }
@@ -375,10 +387,18 @@ bool ExpertCache::open_sized_elastic(const std::vector<int64_t>& slot_bytes, int
     return true;
 }
 
+#else
+bool ExpertCache::map_to(uint64_t, std::string& err) { err = "elastic cache requires CUDA VMM"; return false; }
+void ExpertCache::unmap_above(uint64_t) {}
+bool ExpertCache::open_sized_elastic(const std::vector<int64_t>&, int64_t, int64_t, uint64_t, uint64_t, std::string& err) {
+    close(); err = "elastic cache requires CUDA VMM; using fixed cache"; return false;
+}
+#endif
+
 bool ExpertCache::grow(const std::vector<int64_t>& slot_bytes, std::string& err) {
     if (!vmm_) { err = "ExpertCache: grow needs the elastic arena"; return false; }
     if (slot_bytes.empty()) return true;
-    if (off_.size() + slot_bytes.size() > off_.capacity()) {
+    if ((uint64_t) slot_bytes.size() > (uint64_t) (n_layers_ * n_expert_ - slots_)) {
         err = "ExpertCache (elastic): more slots than (layer, expert) pairs";
         return false;
     }
@@ -387,7 +407,10 @@ bool ExpertCache::grow(const std::vector<int64_t>& slot_bytes, std::string& err)
     std::vector<uint64_t> add;
     add.reserve(slot_bytes.size());
     for (const int64_t b : slot_bytes) {
-        end += ((uint64_t) b + 255) / 256 * 256;
+        if (b <= 0) { err = "ExpertCache (elastic): slot sizes must be positive"; return false; }
+        const uint64_t aligned = ((uint64_t) b + 255) / 256 * 256;
+        if (aligned > va_bytes_ - end) { err = "ExpertCache (elastic): the reserved address range is full"; return false; }
+        end += aligned;
         add.push_back(end);
     }
     if (!map_to(end, err)) { unmap_above(old_end); return false; }
@@ -421,7 +444,9 @@ void ExpertCache::close() {
     off_.clear();
     if (vmm_) {
         unmap_above(0);
+#if !defined(STRATA_USE_HIP)
         if (va_ != 0) cuMemAddressFree((CUdeviceptr) va_, va_bytes_);
+#endif
         va_ = 0;
         va_bytes_ = 0;
         chunk_ = 0;

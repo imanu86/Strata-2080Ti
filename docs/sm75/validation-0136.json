@@ -1,0 +1,206 @@
+{
+  "date": "2026-10-02",
+  "upstream_commit": "36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca",
+  "version": "0.1.36",
+  "executable_sha256": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+  "model_comparison": {
+    "daily0131": {
+      "name": "daily0131",
+      "kv_capacity": 262144,
+      "prompt_profile": "lungo_131k",
+      "out": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\model-tests\\daily0131",
+      "duration_limit_s": 1000,
+      "exe": "D:\\ds4_work\\strata\\Strata\\build-0131-daily\\strata.exe",
+      "exe_sha256": "f469e096e868e4579daaec71ceef63693790e300e7a4cc5b49a8853d075a1d34",
+      "server_source": "D:\\ds4_work\\strata\\Strata\\build-0131-daily\\source",
+      "server_sha256": "3e556df4e13f783f9d961113dd0bbed7481f677e265b45c3a7f238b18530484a",
+      "requested_fixed_cache_slots": null,
+      "gather_mode": null,
+      "kernel_profiling": false,
+      "qsa_ch": null,
+      "topk_mode": "active",
+      "artificial_load": false,
+      "status": "completed",
+      "startup_s": 52.33,
+      "health": {
+        "status": "ok",
+        "max_context": 262144,
+        "model": "qwen3.8-flash-next-iq3_xxs",
+        "images": false,
+        "api_key": false,
+        "loaded": true
+      },
+      "initial_cache": {
+        "expert_slots": 6592,
+        "expert_cache_mib": 10913,
+        "vram_free_mib": 594
+      },
+      "summary": {
+        "corsa": "20261002_185244_daily0131_lungo_131k",
+        "nota": "KV 262144; prompt 131k; carico reale",
+        "decode_aggregato_tps": 41.255,
+        "blocchi": {
+          "131k": {
+            "casi": 2,
+            "decode_tps": 41.255
+          }
+        },
+        "per_caso": [
+          {
+            "etichetta": "L01@ctx131k",
+            "prefill_tps_motore": 974.05,
+            "decode_tps_motore": 44.264,
+            "ttft_s": 135.494,
+            "vram_prima_mib": 19731,
+            "fine": "length"
+          },
+          {
+            "etichetta": "L02@ctx131k",
+            "prefill_tps_motore": 83.61,
+            "decode_tps_motore": 38.628,
+            "ttft_s": 2.633,
+            "vram_prima_mib": 20912,
+            "fine": "length"
+          }
+        ]
+      }
+    },
+    "candidate0136_serial": {
+      "name": "candidate0136_serial",
+      "kv_capacity": 262144,
+      "prompt_profile": "lungo_131k",
+      "out": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\model-tests\\candidate0136_serial",
+      "duration_limit_s": 1000,
+      "exe": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\build0136\\strata.exe",
+      "exe_sha256": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+      "server_source": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\candidate0136",
+      "server_sha256": "73f90f417e9207811fdc47e5e6240f69bbde0f61ff027b9e0d8cb7b7bb2f4d81",
+      "requested_fixed_cache_slots": null,
+      "gather_mode": null,
+      "kernel_profiling": false,
+      "qsa_ch": null,
+      "topk_mode": "active",
+      "artificial_load": false,
+      "status": "completed",
+      "startup_s": 41.33,
+      "health": {
+        "status": "ok",
+        "max_context": 262144,
+        "model": "qwen3.8-flash-next-iq3_xxs",
+        "images": false,
+        "api_key": false,
+        "loaded": true,
+        "service": "strata"
+      },
+      "initial_cache": {
+        "expert_slots": 6786,
+        "expert_cache_mib": 11231,
+        "vram_free_mib": 976
+      },
+      "summary": {
+        "corsa": "20261002_190254_candidate0136_serial_lungo_131k",
+        "nota": "KV 262144; prompt 131k; carico reale",
+        "decode_aggregato_tps": 40.123,
+        "blocchi": {
+          "131k": {
+            "casi": 2,
+            "decode_tps": 40.123
+          }
+        },
+        "per_caso": [
+          {
+            "etichetta": "L01@ctx131k",
+            "prefill_tps_motore": 972.68,
+            "decode_tps_motore": 42.667,
+            "ttft_s": 135.655,
+            "vram_prima_mib": 20316,
+            "fine": "length"
+          },
+          {
+            "etichetta": "L02@ctx131k",
+            "prefill_tps_motore": 88.87,
+            "decode_tps_motore": 37.866,
+            "ttft_s": 2.498,
+            "vram_prima_mib": 20802,
+            "fine": "length"
+          }
+        ]
+      }
+    },
+    "candidate0136_parallel": {
+      "name": "candidate0136_parallel",
+      "kv_capacity": 262144,
+      "prompt_profile": "lungo_131k",
+      "out": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\model-tests\\candidate0136_parallel",
+      "duration_limit_s": 1000,
+      "exe": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\build0136\\strata.exe",
+      "exe_sha256": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+      "server_source": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-01\\https-github-com-imanu86-moe-aggressive\\strata-main-alignment\\candidate0136",
+      "server_sha256": "73f90f417e9207811fdc47e5e6240f69bbde0f61ff027b9e0d8cb7b7bb2f4d81",
+      "requested_fixed_cache_slots": null,
+      "gather_mode": null,
+      "kernel_profiling": false,
+      "qsa_ch": null,
+      "topk_mode": "active",
+      "artificial_load": false,
+      "status": "completed",
+      "startup_s": 41.8,
+      "health": {
+        "status": "ok",
+        "max_context": 262144,
+        "model": "qwen3.8-flash-next-iq3_xxs",
+        "images": false,
+        "api_key": false,
+        "loaded": true,
+        "service": "strata"
+      },
+      "initial_cache": {
+        "expert_slots": 6034,
+        "expert_cache_mib": 10007,
+        "vram_free_mib": 1303
+      },
+      "summary": {
+        "corsa": "20261002_190659_candidate0136_parallel_lungo_131k",
+        "nota": "KV 262144; prompt 131k; carico reale",
+        "decode_aggregato_tps": 40.272,
+        "blocchi": {
+          "131k": {
+            "casi": 2,
+            "decode_tps": 40.272
+          }
+        },
+        "per_caso": [
+          {
+            "etichetta": "L01@ctx131k",
+            "prefill_tps_motore": 970.6,
+            "decode_tps_motore": 41.224,
+            "ttft_s": 135.981,
+            "vram_prima_mib": 19316,
+            "fine": "length"
+          },
+          {
+            "etichetta": "L02@ctx131k",
+            "prefill_tps_motore": 89.1,
+            "decode_tps_motore": 39.363,
+            "ttft_s": 2.618,
+            "vram_prima_mib": 20473,
+            "fine": "length"
+          }
+        ]
+      }
+    }
+  },
+  "parallel_quant_default": "off; opt-in STRATA_PARALLEL_INTERMEDIATE_QUANT=1",
+  "numerical": {
+    "topk_bitwise_cases": 16,
+    "native_pool_bitwise_cases": 64,
+    "gr_failures": 0,
+    "server_mock_tests": 100
+  },
+  "limitations": [
+    "One sequential baseline/serial/parallel comparison; elastic cache, MTP, outputs and other apps vary.",
+    "No causal speed improvement or general model quality claim.",
+    "250k retrieval belongs to the historical 0.1.31 binary; the new engine was exercised at 131k with KV262144.",
+    "Only the modified 22 GB Turing card and AVX2 machine were exercised."
+  ]
+}

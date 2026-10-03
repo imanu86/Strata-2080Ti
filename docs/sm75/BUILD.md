@@ -1,3 +1,47 @@
+# Validated0.1.38 SM75 source, 3 October2026
+
+Upstream main `99f3dbd0b21d1401b3769e0c0d963913607f380b`, automatic elastic expert cache, SM75 HC/GDN FP16 and vector
+dequantization ports, serial intermediate quantization, conservative optional
+`--prompt-cache-tail` ([PR614](https://github.com/Niko1221/Strata/pull/614)), and wide
+top-k ([PR603](https://github.com/Niko1221/Strata/pull/603), exact pinned source).
+The old checkpoint grid is removed, including its chunk-boundary overrides.
+The old failed grid comparisons remain in the research record; this replacement
+does not turn those failures into passes.
+
+Full fresh CMake/Ninja Release build, CUDA12.6/MSVC14.44, architecture75.
+Six CTest checks pass; native CPU quantization64 cases bitwise; wide top-k18 cases,
+continuous scores, ties and equal scores, prompt/decode through524288 cells;
+118 upstream server mock tests pass. A fixed-placement old036/new038/old036
+model comparison has2560 teacher rows (2557 scored positions) per arm, finite
+logits, six complete recall oracles, and all local numerical gates pass.
+Separate Daily auto/elastic conversations at131072 and250000 input tokens pass
+six oracles, with1024 generated tokens at each depth and a new marker afterwards.
+
+Controlled PR603 comparison at250000 actual tokens: same038 source,5357 expert
+slots,8192 prefill chunk, spec4, KV262144/int8/resident32768, resize disabled by
+real long policy intervals. A/B/A repeated baseline; first logits are bitwise
+identical and every complete recall/marker oracle passes. Detailed timings and
+the distinction from the automatic Daily profile are in `validation.json`.
+
+Only the modified22GB RTX2080Ti, Ryzen5800X/AVX2 and96GB RAM were exercised.
+No artificial system saturation, general quality score, physical DRAM-bandwidth
+measurement, stock11GB or multiGPU performance claim.
+Executable SHA256: `014d7773886a45b10072cf362cf01082ec048a9063b318e3cd1ff024b3beaf71`. Previous manifests and validation remain intact.
+
+| Actual fresh input | Fresh prefill t/s | Long decode t/s | Output tokens |
+|---|---:|---:|---:|
+| 131072 | 1027.01 | 36.913 | 1024 |
+| 250000 | 833.50 | 39.065 | 1024 |
+
+Single automatic-profile samples: initial6339 expert slots, runtime spec6,
+MTPmax4/lookup3/PCIe0.36. They do not establish a causal gain against old036.
+Controlled PR603250k prefill A/B/A: 701.49/832.03/699.49t/s,
++18.78% relative to the baseline mean, reference spread0.29%.
+This fixed5357slot/8192chunk/spec4 profile has MTPmax0/lookup0/PCIe0.28;
+keep it distinct from the automatic Daily profile above. Only one A/B/A.
+
+## Historical records (their original versions and limits apply)
+
 # Current SM75 build
 
 Current main is upstream0.1.36 plus the documented port. The complete fresh

@@ -21,6 +21,8 @@
 #include <memory>
 #include <string>
 
+namespace strata::core { class PeerExperts; }
+
 namespace strata::prefill {
 
 struct PrefillStats {
@@ -89,6 +91,11 @@ public:
 
     const PrefillStats& stats() const { return stats_; }
 
+    /// multi-GPU: the experts the peer GPU holds are computed THERE for every prompt chunk (up to `cap_rows` routed
+    /// rows per layer; the rest of the peer's experts are read by this GPU over P2P).  Allocates the peer's buffers for
+    /// chunks of up to init's `chunk` tokens.  Needs P2P between the two cards.
+    bool set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& err);
+
     /// Plan v0.3 P6: called after every chunk with the chunk's final multi-stream residual rows (device,
     /// T x hc*n_embd, valid until the next chunk) and the chunk's first position; the MTP draft layer builds its
     /// K/V from them.  The prefill stream is synchronized before the call.
@@ -102,13 +109,6 @@ public:
 
     /// Checked before every chunk: true stops the prompt early (`run` returns false with err "cancelled").
     std::function<bool()> should_stop;
-
-    /// Chunk edges on a grid: a chunk that would cross the next point `align_origin + k * align_every` (absolute
-    /// positions) is cut there.  The conversation cache saves its checkpoints at chunk ends every
-    /// `--prompt-cache-every` tokens; with a chunk that does not divide it (6144 against 16384) they drifted to
-    /// 18432, 36864, ... and a follow-up on a 32K prompt re-read ~14.5K tokens.  0 (default) = the plain chunking.
-    int64_t align_every = 0;
-    int64_t align_origin = 0;
 
     /// The vision path: HOST rows (n_embd floats) indexed by absolute position, read in place of the token
     /// embedding where non-null (an image's <|image_pad|> cells).  Null (default): every position embeds its token.
