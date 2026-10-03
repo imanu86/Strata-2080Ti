@@ -1,5 +1,6 @@
 // src/prefill/prefill.cpp - see include/strata/prefill/prefill.hpp.
 #include "strata/prefill/prefill.hpp"
+#include "strata/prefill/request_chunk.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/progress.hpp"
 #include "strata/core/on_device.hpp"
@@ -1172,6 +1173,14 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
 
 void Prefill::set_pinned_share(double share) { g_pinned_share = share; }
 void Prefill::set_ring_override(int slots) { g_ring_override = slots > 0 ? slots : 0; }
+
+int64_t Prefill::request_chunk(int64_t tokens, int64_t max_chunk) {
+    static const bool exact_small = [] {
+        const char* v = std::getenv("STRATA_PREFILL_EXACT_SMALL");
+        return v != nullptr && v[0] == '1';
+    }();
+    return detail::request_chunk(tokens, max_chunk, stream_all_min(), exact_small);
+}
 double Prefill::pinned_share() { return g_pinned_share; }
 
 uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk, bool src) {

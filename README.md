@@ -17,6 +17,12 @@ all 25,306,163 input token IDs match full encoding. Around 250k context the CPU
 encoding component falls from 932 to 10.6 ms; GPU prefill/decode numbers below
 are unchanged. [Evidence and limits](docs/sm75/BENCHMARKS.md#incremental-prompt-tokenization-3-october-2026).
 
+An experimental `STRATA_PREFILL_EXACT_SMALL=1` option reduces the cache space
+borrowed for small routed prefill batches. It is **off by default and not
+promoted to the Daily**: numerical checks passed, but long-run performance
+controls and the operational smoke were unstable.
+[Measurements and limits](docs/sm75/BENCHMARKS.md#request-sized-routed-buffers-3-october-2026-experimental).
+
 ## Current0.1.38 validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server

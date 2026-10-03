@@ -82,6 +82,10 @@ public:
     /// (0 = that rule). Set before any `bytes_needed`/`init` (both count the ring); STRATA_PREFILL_RING still wins.
     static void set_ring_override(int slots);
 
+    /// Request-sized buffers, normally rounded up to 256. STRATA_PREFILL_EXACT_SMALL=1
+    /// keeps a routed-only segment below the streamed-ring allocation boundary.
+    static int64_t request_chunk(int64_t tokens, int64_t max_chunk);
+
     /// Device bytes `init` needs for a chunk of `chunk` tokens (what a borrowed region must hold).
     static uint64_t bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
                                  bool src = true);

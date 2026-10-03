@@ -94,7 +94,7 @@ tokens. Only the dispatch override changed.
 |A2|capacity|828.26|159.092|39.293|6872|
 
 Mean reference829.73, candidate886.38: **+6.83%**, reference spread0.35%.
-Mean TTFT158.801→148.664s:10.137s saved. Previous exact daily independently
+Mean TTFT158.801â†’148.664s:10.137s saved. Previous exact daily independently
 measured827.53prefill/39.048decode. This is one retained A/B/A; elastic slots
 and MTP output vary. B/A2 decode is virtually identical. See `validation.json`.
 
@@ -196,3 +196,83 @@ Daily executable remains SHA-256
 `13ee1a89be497ad83c67f62553b1133fec2a8d9309230d43a9dae639d89008a5`.
 The historical source manifest stays intact; the installed frontend has a
 separate overlay manifest and a backup of the replaced files.
+
+
+## Request-sized routed buffers, 3 October 2026 (experimental)
+
+`STRATA_PREFILL_EXACT_SMALL=1` keeps the buffer layout below the streaming
+threshold when the actual prompt segment is below it. The default is **off**.
+A 1007-token batch previously borrowed buffers for 1024 tokens, including the
+large streaming ring, but still executed the routed path (threshold1024).
+The opt-in uses a1007-token layout: **517 cache slots lent instead of1033**,
+leaving516 more experts resident during that batch. KV capacity is unchanged.
+The rounding of other requests remains unchanged; the helper is shared by the
+native serve and CLI paths and observes `STRATA_PREFILL_STREAM_MIN`.
+
+Windows, modified22GB2080Ti, Ryzen5800X,96GB RAM, CUDA12.6/SM75, IQ3_XXS,
+OktoCGControl open, no artificial load. Same executable, profiling off, native
+pipe with trace and first-logits dumps. Fixed6167 resident experts (10218MiB),
+KV int8 capacity262144/resident32768, spec4,7 workers, adaptive swaps and PCIe
+fraction off for the paired laboratory checks. This fixed cache is not a Daily
+configuration change.
+
+The standalone C++ boundary/property test passed519268 checks. Eight real-token
+slices exercise actual batched sizes256,768,769,1007,1023,1024,1025,1536.
+The short comparison completed in order off/on/off (A1/E/A2):
+
+| Batched tokens | Base A1 / A2 prefill ms | Exact buffers ms | t/s change vs mean base ms |
+|---|---:|---:|---:|
+| 256 | 1279.2 / 1295.9 | 1281.7 | +0.46% |
+| 768 | 2006.4 / 1989.4 | 2026.0 | -1.39% |
+| 769 | 2186.7 / 2201.7 | 2043.5 | +7.37% |
+| 1007 | 2336.1 / 2324.9 | 2196.2 | +6.12% |
+| 1023 | 2455.4 / 2448.5 | 2341.9 | +4.70% |
+| 1024 | 2813.8 / 2821.5 | 2816.2 | +0.05% |
+| 1025 | 2833.9 / 2848.5 | 2830.6 | +0.37% |
+| 1536 | 2868.4 / 2924.6 | 2876.4 | +0.70% |
+
+Times include the final input token (for example1008 input tokens for a1007
+batch) and cache refill. These are short-context samples, not130k/250k chat
+throughput or a new cold-prefill SOTA.
+
+The completed long-context A1/E pair used real continuation fixtures:
+
+| Total input | Fresh input | Base A1 ms | Exact ms | Interpretation |
+|---|---:|---:|---:|---|
+|130380|1014|3873.1|3713.9|Single pair, performance not confirmed|
+|249322|1014|4357.9|4363.1|No observed gain|
+
+Both final long control attempts became unusually slow during cold prefill and
+were stopped before completing a request. The original result files remain
+failed; their timings are excluded. A later smoke using the actual elastic
+Daily configuration also slowed in its first cold chunk and was stopped.
+Startup had6426 slots and1001MiB free; loading39.97GiB took about146s overall
+(arena0.37GiB/s), compared with about32s overall in faster starts. One snapshot
+of the first slow control found620MiB VRAM free and normal GPU clocks. Cause
+is **unresolved**; this is not evidence that OktoCGControl or the patch caused it.
+The operational smoke did not pass. **Native Daily and its configuration remain
+unchanged; this feature is not promoted.**
+
+Numerical evidence is separate from those inconclusive long timings. All248320
+first-target logits match bit for bit for each of the8 short cases and4 completed
+long requests (two seeds and two continuations). The generated greedy token IDs
+also match:64 short and66 long,130 total per A1/E comparison. Maximum absolute
+logit difference and KL are both zero. This checks allocation/copy equivalence
+on these fixtures; it is not a broad model quality/PPL evaluation. Other GPUs,
+stock11GB cards, and multi-GPU operation have not been validated.
+
+An exploratory8-slot grouped-gather variant also matched numerically but showed
+no gain in the usable short pairs; its final baseline was anomalously slow.
+That variant was removed before the final build. It is not shipped here.
+
+Reproduction: build `prefill_request_chunk_test` with `STRATA_BUILD_TESTS=ON`
+and run `ctest -R prefill_request_chunk_test`, or compile the standalone test
+with the repository include directory. For model comparisons, restart the same
+binary with `STRATA_PREFILL_EXACT_SMALL=0` and1, keep inputs/residency/settings
+fixed, and repeat the reference. `STRATA_DUMP_FIRST_LOGITS=<absolute-prefix>`
+now works for native `--serve`: each request writes the first target row to
+`<prefix>.pos<last-input-position>.f32` (float32). The existing CLI dump format
+is unchanged. Dumps are opt-in and no raw transcript or weights are published.
+[Hashes, per-case timings, parity and excluded runs](request-chunk-20261003.json)
+retain the measured evidence. Resolve the long-run instability and repeat the
+actual-config smoke before enabling the flag in the operational profile.

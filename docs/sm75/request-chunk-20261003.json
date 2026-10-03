@@ -1,0 +1,478 @@
+{
+  "date": "2026-10-03",
+  "hardware": "Windows, RTX 2080 Ti modified 22 GB, Ryzen 7 5800X, 96 GB RAM, CUDA 12.6, SM75",
+  "source_base": "1838b00d95f167b6ee16cf1da145b4b748124689",
+  "candidate_sha256": "d46a0752fd7b92726b34dd0332bf772cba22bba589aa22aed6e730becfb4b8fa",
+  "unit_checks": 519268,
+  "no_artificial_load": true,
+  "OktoCGControl": "open",
+  "method": "Same executable and fixed cache: valid short A1/E/A2 comparison; completed long A1/E numerical pair, both final performance controls interrupted.",
+  "configuration": {
+    "kv_capacity": 262144,
+    "kv_type": "int8",
+    "kv_resident": 32768,
+    "expert_slots": 6167,
+    "expert_cache_mib": 10218,
+    "expert_cache_requested": 4600,
+    "spec": 4,
+    "pool_workers": 7,
+    "adaptive_swaps": 0,
+    "pcie_frac": 0,
+    "elastic": false
+  },
+  "tests": {
+    "short_exact_final": {
+      "accepted_completed_arms": [
+        "A1",
+        "E",
+        "A2"
+      ],
+      "original_run_status": "completed",
+      "raw_result_sha256": "510c8b647e249079c3e872ca15a99c71a54da6fe5a9d296a7c6b3c8ca61819b5",
+      "fixture_sha256": {
+        "t256": "cc705afbae66bd31335e750a51e61a5fb773d63b683fea2e03628fc1d6e6b744",
+        "t768": "953496779447b7bb61aadd34f85dc21b79b904a1686fc6ea45bb536814077daf",
+        "t769": "6fc58f8d544e141679eb8b655c8d04cdc936a8ea773d7564418bbd1a910b6b7f",
+        "t1007": "ec3e5eadc1e8a07aa34701d24c4aaf90548170906097407f2af8a9d4f3c12505",
+        "t1023": "bd43daac6aba7aba83208d3d3890d4f8233f9864edbbbc22da233fe562426834",
+        "t1024": "9f06edf5a07fe24fd5b930e491539f2556ba8e48aa0b35f5bb7e851446d0177d",
+        "t1025": "d2e471685bccae08a3da12b0b12201439e0eef1510d9376a96ebb3d0fe960741",
+        "t1536": "7118243313315ebc1a3574d6967ac4310a3a3aee3d08c202a701521ce7ec86d8"
+      },
+      "first_logits_bitwise_equal": true,
+      "max_absolute_difference": 0.0,
+      "KL": 0.0,
+      "initial_info": {
+        "A1": {
+          "version": "0.1.38",
+          "context": 262144,
+          "kv": "int8",
+          "kv_resident": 32768,
+          "expert_slots": 6167,
+          "expert_cache_mib": 10218,
+          "expert_slots_primary": 6167,
+          "expert_cache_primary_mib": 10218,
+          "spec": 4,
+          "mtp_max": 0,
+          "lookup": 0,
+          "vram_free_mib": 1387,
+          "cvec": 0,
+          "arena_mib": 40925,
+          "pool_workers": 7,
+          "pcie_frac": "0.00",
+          "spec_min_p": "0.50",
+          "conversation_cache_mib": 0,
+          "conversation_cache_slots": 4,
+          "conversation_cache_min_free_mib": 2560,
+          "engine": "0.1.38"
+        },
+        "E": {
+          "version": "0.1.38",
+          "context": 262144,
+          "kv": "int8",
+          "kv_resident": 32768,
+          "expert_slots": 6167,
+          "expert_cache_mib": 10218,
+          "expert_slots_primary": 6167,
+          "expert_cache_primary_mib": 10218,
+          "spec": 4,
+          "mtp_max": 0,
+          "lookup": 0,
+          "vram_free_mib": 1330,
+          "cvec": 0,
+          "arena_mib": 40925,
+          "pool_workers": 7,
+          "pcie_frac": "0.00",
+          "spec_min_p": "0.50",
+          "conversation_cache_mib": 0,
+          "conversation_cache_slots": 4,
+          "conversation_cache_min_free_mib": 2560,
+          "engine": "0.1.38"
+        },
+        "A2": {
+          "version": "0.1.38",
+          "context": 262144,
+          "kv": "int8",
+          "kv_resident": 32768,
+          "expert_slots": 6167,
+          "expert_cache_mib": 10218,
+          "expert_slots_primary": 6167,
+          "expert_cache_primary_mib": 10218,
+          "spec": 4,
+          "mtp_max": 0,
+          "lookup": 0,
+          "vram_free_mib": 1291,
+          "cvec": 0,
+          "arena_mib": 40925,
+          "pool_workers": 7,
+          "pcie_frac": "0.00",
+          "spec_min_p": "0.50",
+          "conversation_cache_mib": 0,
+          "conversation_cache_slots": 4,
+          "conversation_cache_min_free_mib": 2560,
+          "engine": "0.1.38"
+        }
+      },
+      "rows": [
+        {
+          "name": "t256",
+          "kind": "boundary",
+          "input_tokens": 257,
+          "fresh_tokens": 257,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 1279.2,
+          "E_ms": 1281.7,
+          "A1_tps": 200.9068167604753,
+          "E_tps": 200.5149410938597,
+          "first_logits_sha256": {
+            "A1": "29c5c9a1a4b83ae618a43b15f03078570c37bd65927b8de970f88647090524fa",
+            "E": "29c5c9a1a4b83ae618a43b15f03078570c37bd65927b8de970f88647090524fa",
+            "A2": "29c5c9a1a4b83ae618a43b15f03078570c37bd65927b8de970f88647090524fa"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 1295.9,
+          "base_mean_ms": 1287.55,
+          "speedup_percent": 0.4564
+        },
+        {
+          "name": "t768",
+          "kind": "boundary",
+          "input_tokens": 769,
+          "fresh_tokens": 769,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 2006.4,
+          "E_ms": 2026.0,
+          "A1_tps": 383.27352472089314,
+          "E_tps": 379.5656465942744,
+          "first_logits_sha256": {
+            "A1": "1cb3e8935111f29b6703fa1168a8f01b5b8ae9d3dfbd42c862769c76380a7416",
+            "E": "1cb3e8935111f29b6703fa1168a8f01b5b8ae9d3dfbd42c862769c76380a7416",
+            "A2": "1cb3e8935111f29b6703fa1168a8f01b5b8ae9d3dfbd42c862769c76380a7416"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 1989.4,
+          "base_mean_ms": 1997.9,
+          "speedup_percent": -1.387
+        },
+        {
+          "name": "t769",
+          "kind": "boundary",
+          "input_tokens": 770,
+          "fresh_tokens": 770,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 2186.7,
+          "E_ms": 2043.5,
+          "A1_tps": 352.12877852471763,
+          "E_tps": 376.8045020797651,
+          "first_logits_sha256": {
+            "A1": "29c44f838971c9ae7d3d425e2491f2257c9af572ec121af062cf4686c95e503b",
+            "E": "29c44f838971c9ae7d3d425e2491f2257c9af572ec121af062cf4686c95e503b",
+            "A2": "29c44f838971c9ae7d3d425e2491f2257c9af572ec121af062cf4686c95e503b"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 2201.7,
+          "base_mean_ms": 2194.2,
+          "speedup_percent": 7.3746
+        },
+        {
+          "name": "t1007",
+          "kind": "boundary",
+          "input_tokens": 1008,
+          "fresh_tokens": 1008,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 2336.1,
+          "E_ms": 2196.2,
+          "A1_tps": 431.48837806600744,
+          "E_tps": 458.9745924779164,
+          "first_logits_sha256": {
+            "A1": "d8132adbf396aeb34ec6dab24c0aebd0c6dc1de079ef2452c0379b1dfd953df2",
+            "E": "d8132adbf396aeb34ec6dab24c0aebd0c6dc1de079ef2452c0379b1dfd953df2",
+            "A2": "d8132adbf396aeb34ec6dab24c0aebd0c6dc1de079ef2452c0379b1dfd953df2"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 2324.9,
+          "base_mean_ms": 2330.5,
+          "speedup_percent": 6.1151
+        },
+        {
+          "name": "t1023",
+          "kind": "boundary",
+          "input_tokens": 1024,
+          "fresh_tokens": 1024,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 2455.4,
+          "E_ms": 2341.9,
+          "A1_tps": 417.0399934837501,
+          "E_tps": 437.2518040906956,
+          "first_logits_sha256": {
+            "A1": "73d78c20b72a33e1b5e8dcd6fa0f5fb22ea40255bcd05c3efb3efc16d38d6406",
+            "E": "73d78c20b72a33e1b5e8dcd6fa0f5fb22ea40255bcd05c3efb3efc16d38d6406",
+            "A2": "73d78c20b72a33e1b5e8dcd6fa0f5fb22ea40255bcd05c3efb3efc16d38d6406"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 2448.5,
+          "base_mean_ms": 2451.95,
+          "speedup_percent": 4.6992
+        },
+        {
+          "name": "t1024",
+          "kind": "boundary",
+          "input_tokens": 1025,
+          "fresh_tokens": 1025,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 2813.8,
+          "E_ms": 2816.2,
+          "A1_tps": 364.2760679508138,
+          "E_tps": 363.96562744123287,
+          "first_logits_sha256": {
+            "A1": "8f826b1fe79a536ef62e60b7911d901794c66ab5a6dad4d3547a3590b8dd76cc",
+            "E": "8f826b1fe79a536ef62e60b7911d901794c66ab5a6dad4d3547a3590b8dd76cc",
+            "A2": "8f826b1fe79a536ef62e60b7911d901794c66ab5a6dad4d3547a3590b8dd76cc"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 2821.5,
+          "base_mean_ms": 2817.65,
+          "speedup_percent": 0.0515
+        },
+        {
+          "name": "t1025",
+          "kind": "boundary",
+          "input_tokens": 1026,
+          "fresh_tokens": 1026,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 2833.9,
+          "E_ms": 2830.6,
+          "A1_tps": 362.0452380112213,
+          "E_tps": 362.46732141595425,
+          "first_logits_sha256": {
+            "A1": "d27cca479df1d86d05f79bfd6f73928073e15cd68edf0e2d169f9ee7a0887cc5",
+            "E": "d27cca479df1d86d05f79bfd6f73928073e15cd68edf0e2d169f9ee7a0887cc5",
+            "A2": "d27cca479df1d86d05f79bfd6f73928073e15cd68edf0e2d169f9ee7a0887cc5"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 2848.5,
+          "base_mean_ms": 2841.2,
+          "speedup_percent": 0.3745
+        },
+        {
+          "name": "t1536",
+          "kind": "boundary",
+          "input_tokens": 1537,
+          "fresh_tokens": 1537,
+          "reused": 0,
+          "output_tokens": 8,
+          "A1_ms": 2868.4,
+          "E_ms": 2876.4,
+          "A1_tps": 535.8387951471203,
+          "E_tps": 534.3484911695174,
+          "first_logits_sha256": {
+            "A1": "71b403657f315f89a7e6a6ebc3a34702f3f1ef13d99545906ee2b74994b7bd37",
+            "E": "71b403657f315f89a7e6a6ebc3a34702f3f1ef13d99545906ee2b74994b7bd37",
+            "A2": "71b403657f315f89a7e6a6ebc3a34702f3f1ef13d99545906ee2b74994b7bd37"
+          },
+          "all_output_ids_equal": true,
+          "A2_ms": 2924.6,
+          "base_mean_ms": 2896.5,
+          "speedup_percent": 0.6988
+        }
+      ]
+    },
+    "long_exact_final": {
+      "accepted_completed_arms": [
+        "A1",
+        "E"
+      ],
+      "original_run_status": "failed",
+      "raw_result_sha256": "f870441e7e3bd55788cfa04982166184bb5b8cd02a5b0300046d7ed2c70c4803",
+      "fixture_sha256": {
+        "90-seed": "aa1ccb5f702c4afb6000a9c3ef79e0f9b14089386b20baaca799a626e147b4fb",
+        "90-warm": "873ba641df6c02341ceee87d4142dbc120c1ee2f2425d63652cdf214391046cb",
+        "186-seed": "88e34669afe751057777ac0ab3c62fd88e5dbe326269b4922ef8c943d62acdbc",
+        "186-warm": "eb667f6c3a491e909317f24d9cd65a251d166897dea52c52e7b54065e7c97ed6"
+      },
+      "first_logits_bitwise_equal": true,
+      "max_absolute_difference": 0.0,
+      "KL": 0.0,
+      "initial_info": {
+        "A1": {
+          "version": "0.1.38",
+          "context": 262144,
+          "kv": "int8",
+          "kv_resident": 32768,
+          "expert_slots": 6167,
+          "expert_cache_mib": 10218,
+          "expert_slots_primary": 6167,
+          "expert_cache_primary_mib": 10218,
+          "spec": 4,
+          "mtp_max": 0,
+          "lookup": 0,
+          "vram_free_mib": 1393,
+          "cvec": 0,
+          "arena_mib": 40925,
+          "pool_workers": 7,
+          "pcie_frac": "0.00",
+          "spec_min_p": "0.50",
+          "conversation_cache_mib": 0,
+          "conversation_cache_slots": 4,
+          "conversation_cache_min_free_mib": 2560,
+          "engine": "0.1.38"
+        },
+        "E": {
+          "version": "0.1.38",
+          "context": 262144,
+          "kv": "int8",
+          "kv_resident": 32768,
+          "expert_slots": 6167,
+          "expert_cache_mib": 10218,
+          "expert_slots_primary": 6167,
+          "expert_cache_primary_mib": 10218,
+          "spec": 4,
+          "mtp_max": 0,
+          "lookup": 0,
+          "vram_free_mib": 1379,
+          "cvec": 0,
+          "arena_mib": 40925,
+          "pool_workers": 7,
+          "pcie_frac": "0.00",
+          "spec_min_p": "0.50",
+          "conversation_cache_mib": 0,
+          "conversation_cache_slots": 4,
+          "conversation_cache_min_free_mib": 2560,
+          "engine": "0.1.38"
+        }
+      },
+      "rows": [
+        {
+          "name": "90-seed",
+          "kind": "seed",
+          "input_tokens": 129366,
+          "fresh_tokens": 129366,
+          "reused": 0,
+          "output_tokens": 1,
+          "A1_ms": 137761.3,
+          "E_ms": 138080.4,
+          "A1_tps": 939.0590826306083,
+          "E_tps": 936.8889429636647,
+          "first_logits_sha256": {
+            "A1": "b6bf6237737a877b6aba61d4f59345885424ccb3446974b45a30524fcc5a9667",
+            "E": "b6bf6237737a877b6aba61d4f59345885424ccb3446974b45a30524fcc5a9667"
+          },
+          "all_output_ids_equal": true,
+          "performance_status": "Exploratory A1/E pair only; both control attempts interrupted, no causal speedup established."
+        },
+        {
+          "name": "90-warm",
+          "kind": "warm",
+          "input_tokens": 130380,
+          "fresh_tokens": 1014,
+          "reused": 129366,
+          "output_tokens": 32,
+          "A1_ms": 3873.1,
+          "E_ms": 3713.9,
+          "A1_tps": 261.80578864475484,
+          "E_tps": 273.0283529443442,
+          "first_logits_sha256": {
+            "A1": "06b191549e714fd5a1993a17d961c0dad1d869788db8c6663a17b1d2e624a692",
+            "E": "06b191549e714fd5a1993a17d961c0dad1d869788db8c6663a17b1d2e624a692"
+          },
+          "all_output_ids_equal": true,
+          "performance_status": "Exploratory A1/E pair only; both control attempts interrupted, no causal speedup established."
+        },
+        {
+          "name": "186-seed",
+          "kind": "seed",
+          "input_tokens": 248308,
+          "fresh_tokens": 117935,
+          "reused": 130373,
+          "output_tokens": 1,
+          "A1_ms": 184405.8,
+          "E_ms": 184005.3,
+          "A1_tps": 639.5406218242593,
+          "E_tps": 640.9326253102493,
+          "first_logits_sha256": {
+            "A1": "46db28699384363675040e76901a90fc2ef2bee2b60d938cdbe22a360a56c9b7",
+            "E": "46db28699384363675040e76901a90fc2ef2bee2b60d938cdbe22a360a56c9b7"
+          },
+          "all_output_ids_equal": true,
+          "performance_status": "Exploratory A1/E pair only; both control attempts interrupted, no causal speedup established."
+        },
+        {
+          "name": "186-warm",
+          "kind": "warm",
+          "input_tokens": 249322,
+          "fresh_tokens": 1014,
+          "reused": 248308,
+          "output_tokens": 32,
+          "A1_ms": 4357.9,
+          "E_ms": 4363.1,
+          "A1_tps": 232.68087840473623,
+          "E_tps": 232.40356627168754,
+          "first_logits_sha256": {
+            "A1": "de6a780be73559620f7b99252608d8c293acfed55d1cf9be9a066ff15e0d5dfd",
+            "E": "de6a780be73559620f7b99252608d8c293acfed55d1cf9be9a066ff15e0d5dfd"
+          },
+          "all_output_ids_equal": true,
+          "performance_status": "Exploratory A1/E pair only; both control attempts interrupted, no causal speedup established."
+        }
+      ]
+    }
+  },
+  "excluded": [
+    {
+      "run": "short_aba",
+      "reason": "original candidate also contained opt-in grouped gather; last baseline suddenly slowed about 5x, so performance excluded. All checked first-logits rows were bit-identical."
+    },
+    {
+      "run": "short_repeat",
+      "reason": "relative dump path in harness; first result could not be captured. Harness corrected to absolute output directory; excluded."
+    },
+    {
+      "run": "long_exact_final/A2",
+      "reason": "Cold prefill slowed heavily; interrupted at65536-token progress, no completed request."
+    },
+    {
+      "run": "long_control_repeat/A2",
+      "reason": "Restarted with identical settings but cold prefill slow again; interrupted near32768, no completed request. Cause unconfirmed. Long-context causal performance comparison is inconclusive."
+    },
+    {
+      "run": "operational_exact/E",
+      "reason": "Actual Daily config, elastic6426 slots, initial1001MiB free; startup39.97GiB at0.37GiB/s. First cold chunk remained unusually slow. Stopped own process before a completed request; not a passed operational test."
+    }
+  ],
+  "limits": "First target logit row (248320 logits) per request and generated greedy token IDs; no broad quality/PPL claim. Local timings, not a new full-conversation curve or cold-prefill SOTA. Multi-GPU and stock 11 GB untested.",
+  "routed_gather8": {
+    "promoted": false,
+    "reason": "No gain in exploratory short cases; removed from final source and executable. Raw experiment saved separately."
+  },
+  "buffer_loan": {
+    "actual_batch": 1007,
+    "baseline_layout_tokens": 1024,
+    "exact_layout_tokens": 1007,
+    "baseline_lent_slots": 1033,
+    "exact_lent_slots": 517,
+    "extra_resident_slots_during_prefill": 516
+  },
+  "harness_sha256": "30555095ec0f81adb2f3c172baf2c27f9ceded860d2d8ab8105a97d801aeb531",
+  "deployment": {
+    "daily_changed": false,
+    "candidate_default": "off; STRATA_PREFILL_EXACT_SMALL=1 opts in",
+    "reason": "Operational elastic-config validation also slowed; stopped before any completed request. Deployment withheld.",
+    "operational_attempt_result_sha256": "66207216fbc4909cbccfff58a442861dcace7575411f0e628cfa6f2455c6eeae"
+  },
+  "running_engines": [],
+  "changed_source_sha256": {
+    "CMakeLists.txt": "175286d7df48856f100b1165a244e13d75e1e99f368dea937f00543e3c375796",
+    "include/strata/prefill/prefill.hpp": "08d024e29944f3507514771c78c4385c9ec34f4ab3752c4cea949b4d44ae82de",
+    "include/strata/prefill/request_chunk.hpp": "c25440af108243f2e573cfb86ca246bfb02bc93cb2d1f2d3e87748ec1876fe1c",
+    "src/prefill/prefill.cpp": "8556430c038234e4791b720d63ba92e3158977406c5d5aef0ceaf7f52164d489",
+    "src/program/generate.cpp": "647dd05a87f9547cdaacffcbc7a78b6917f854c781f26bb7f58dd3625195945a",
+    "tests/core/prefill_request_chunk_test.cpp": "5071b2610d300a9791bcb69a5960605af308f5f39d0356108d6e7128df266b13"
+  }
+}
