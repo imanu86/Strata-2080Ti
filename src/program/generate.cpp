@@ -6137,13 +6137,18 @@ int main(int argc, char** argv) {
                 bool adapt_ok = true;
                 if (!drive.d.usage.empty() && ((rounds + 1) % o.adapt_every) == 0)
                     adapt_thr = std::thread([&] { adapt_ok = adapt(); });
-                if (!ver.commit(a + 1, err)) {
+                // Upstream PR #652 (anon761): only retain the prefix whose predictions are emitted.
+                // An accepted speculative window can extend past this request's length cap or EOS.
+                int emit = 0;
+                for (bool end = false; emit <= a && produced_n + emit < max_new && !end; ++emit)
+                    end = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) emit]) != o.eos_ids.end();
+                if (!ver.commit(emit, err)) {
                     if (adapt_thr.joinable()) adapt_thr.join();
                     std::printf("ERR %s\n", err.c_str());
                     return 1;
                 }
-                // the window's first a + 1 tokens are in the session now (the last output is not: it is next x)
-                for (int i = 0; i <= a; ++i) consumed.push_back(window[(size_t) i]);
+                // The emitted prefix's input rows are in the session (the last output is the next x).
+                for (int i = 0; i < emit; ++i) consumed.push_back(window[(size_t) i]);
                 draft_offered += T - 1;
                 draft_accepted += a;
                 first_window = false;
