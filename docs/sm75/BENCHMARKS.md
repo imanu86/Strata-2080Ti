@@ -276,3 +276,35 @@ is unchanged. Dumps are opt-in and no raw transcript or weights are published.
 [Hashes, per-case timings, parity and excluded runs](request-chunk-20261003.json)
 retain the measured evidence. Resolve the long-run instability and repeat the
 actual-config smoke before enabling the flag in the operational profile.
+
+
+### Single B repeat after the anomalous runs
+
+At the user's request, only the candidate was repeated, once. It completed all
+four requests in **372.2 s including startup**, without the earlier slowdown.
+Executable, CLI arguments, input fixtures and expert-profile hashes match the
+interrupted operational candidate. Automatic elastic cache started at6342
+experts /10512MiB, with1137MiB free. KV remains262144/int8/resident32768.
+
+| Actual context | Fresh input | Prefill | First token, native pipe |
+|---|---:|---:|---:|
+|130380|1014|279.6 tokens/s|3.702 s|
+|249322|1014|248.5 tokens/s|4.193 s|
+
+The initial129366-token cold prompt ran at937.1 tokens/s. The later preparation
+of248308 total input reused130373 tokens, so its639.4 tokens/s over117935 new
+tokens must not be called a cold248k result. Each continuation generated32 tokens
+(25.4 and33.6 tokens/s); these short samples are not long-decode SOTA measures.
+All four captured logit rows contained248320 finite values. This single B does
+not add a paired numerical comparison or establish a causal long-context gain.
+
+As in the previous candidate test, the harness uses `STRATA_IQ_MT_MIN=1` for
+consistent CPU rounding across draft widths (the engine default is2), alongside
+trace/first-logits diagnostics. Thus these are the Daily CLI/cache settings with
+the stated benchmark overrides, not a claim of unmodified Daily decode speed.
+In64 lightweight process/CPU/I/O samples there were no detected compiler
+processes; median CPU use was22%, minimum available RAM22.9GiB. This documents
+the repeat's conditions, not the cause of the earlier anomalies. Those records
+are preserved. No additional A or B was run; the engine was closed afterward.
+The installed Daily and default-off flag were left unchanged in this test-only
+step. [Repeat evidence and hashes](request-chunk-B-repeat-20261003.json).

@@ -19,8 +19,9 @@ are unchanged. [Evidence and limits](docs/sm75/BENCHMARKS.md#incremental-prompt-
 
 An experimental `STRATA_PREFILL_EXACT_SMALL=1` option reduces the cache space
 borrowed for small routed prefill batches. It is **off by default and not
-promoted to the Daily**: numerical checks passed, but long-run performance
-controls and the operational smoke were unstable.
+promoted to the Daily**: numerical checks passed; a single elastic B repeat
+completed normally after anomalous runs, while a matched long performance
+comparison remains incomplete.
 [Measurements and limits](docs/sm75/BENCHMARKS.md#request-sized-routed-buffers-3-october-2026-experimental).
 
 ## Current0.1.38 validation
