@@ -17,12 +17,12 @@ all 25,306,163 input token IDs match full encoding. Around 250k context the CPU
 encoding component falls from 932 to 10.6 ms; GPU prefill/decode numbers below
 are unchanged. [Evidence and limits](docs/sm75/BENCHMARKS.md#incremental-prompt-tokenization-3-october-2026).
 
-An experimental `STRATA_PREFILL_EXACT_SMALL=1` option reduces the cache space
-borrowed for small routed prefill batches. It is **off by default and not
-promoted to the Daily**: numerical checks passed; a single elastic B repeat
-completed normally after anomalous runs, while a matched long performance
-comparison remains incomplete.
-[Measurements and limits](docs/sm75/BENCHMARKS.md#request-sized-routed-buffers-3-october-2026-experimental).
+`STRATA_PREFILL_EXACT_SMALL=1` reduces the cache space borrowed for small routed
+prefill batches. It remains off by default in the engine and is enabled in the
+local Daily after short paired tests and a completed delayed long control.
+Fixed-cache warm 130k improves about 3.9%; warm 249k is unchanged. HTTP checks also
+exposed short-response and variable-startup behavior, documented without a broad
+quality or new SOTA claim in the [follow-up evidence](docs/sm75/BENCHMARKS.md#completed-controls-and-http-follow-up).
 
 ## Current0.1.38 validation
 

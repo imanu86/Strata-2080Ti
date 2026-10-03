@@ -18,7 +18,7 @@ Separate Daily auto/elastic conversations at131072 and250000 input tokens pass
 six oracles, with1024 generated tokens at each depth and a new marker afterwards.
 
 Controlled PR603 comparison at250000 actual tokens: same038 source,5357 expert
-slots,8192 prefill chunk, spec4, KV262144/int8/resident32768, resize disabled by
+slots,8192 prefill chunk, spec4, KV 262144/int8/resident 32768, resize disabled by
 real long policy intervals. A/B/A repeated baseline; first logits are bitwise
 identical and every complete recall/marker oracle passes. Detailed timings and
 the distinction from the automatic Daily profile are in `validation.json`.
@@ -54,7 +54,7 @@ verdict is retained. These are controlled quality runs, not a new SOTA.
 
 Current source base: `36fa455e579b23a9c909c2c6fe1bddd9e51cb8ca`. The tested SM75 executable SHA256 is
 `c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a`. Windows, modified RTX2080Ti22GB, Ryzen5800X/AVX2, 96GB RAM,
-CUDA12.6, IQ3_XXS, KV262144/int8/resident32768, reserve1393MiB, automatic elastic
+CUDA12.6, IQ3_XXS, KV 262144/int8/resident 32768, reserve1393MiB, automatic elastic
 cache, MTP. Two requests per arm: fresh131248 tokens, then131239 with131072
 reused; 1024 output tokens each. No artificial saturation.
 
@@ -78,7 +78,7 @@ new executable.
 # Measured daily:2 October2026
 
 Modified RTX2080Ti22GB, Ryzen7 5800X,96GB RAM, Windows/CUDA12.6, PCIe3.0,
-IQ3_XXS, KV262144/int8/resident32768, reserve1393MiB, automatic elastic cache,
+IQ3_XXS, KV 262144/int8/resident 32768, reserve1393MiB, automatic elastic cache,
 automatic prefill, spec4/min-p0.5, MTP. Normal desktop activity remained;
 no artificial saturation. JumpConnect sampled CPU was zero in retained runs.
 
@@ -308,3 +308,40 @@ the repeat's conditions, not the cause of the earlier anomalies. Those records
 are preserved. No additional A or B was run; the engine was closed afterward.
 The installed Daily and default-off flag were left unchanged in this test-only
 step. [Repeat evidence and hashes](request-chunk-B-repeat-20261003.json).
+
+
+### Completed controls and HTTP follow-up
+
+The delayed fixed-cache A2 completed in 372.8 s with 6167 slots (10218 MiB).
+All four first-logit rows (248320 floats each) and 66 generated IDs match A1/B
+bit for bit. A2 followed intervening runs; this is not an uninterrupted A/B/A.
+Original stalled attempts remain recorded, with their cause unresolved.
+The numerical bench forces IQ_MT_MIN=1, unlike the normal Daily environment.
+
+| Actual input | Fresh tokens | A1 ms | B ms | Delayed A2 ms | B vs control mean |
+|---|---:|---:|---:|---:|---:|
+|130380|1014|3873.1|3713.9|3840.9|+3.85%|
+|249322|1014|4357.9|4363.1|4359.2|-0.10%|
+
+An elastic A also completed after B: observed warm gains 4.10%/3.00%, with
+6342/6347 startup slots. These are not fixed-placement causal gains. At 249k,
+first logits differ (same argmax), and generated IDs first diverge at token 28.
+Do not describe this as elastic bitwise parity.
+
+The local Daily enables exact-small; the engine default stays off. The original
+manifest is preserved, with separate binary/config/source backups and overlay.
+Actual-environment HTTP checks used no IQ_MT_MIN, trace, profiler or logits dump:
+
+- With cap 128, both exact-small on and off complete 11 requests to about 30k.
+  After the first two length-capped responses, later outputs increasingly end
+  mid-sentence despite native `stop`. This behavior is not specific to the patch;
+  its cause is not established by these different sampled conversation histories.
+- With cap 512, nine responses of 184–259 tokens finish with complete sentences.
+  The harness then fails to size the next prompt (target 30008, minimum 30176).
+  This is a partial run to 29854 input tokens, not a completed 30k test or a broad
+  answer-quality pass. The original failed result is retained.
+- First prefill varied from 18.24 s to 214.68 s and 196.03 s across these HTTP runs.
+  The slow runs are excluded from speed claims, and their cause is under review.
+
+No new cold-prefill or sustained-decode SOTA is claimed.
+[Hashes, measured rows and limitations](request-chunk-final-20261003.json).
