@@ -94,7 +94,7 @@ tokens. Only the dispatch override changed.
 |A2|capacity|828.26|159.092|39.293|6872|
 
 Mean reference829.73, candidate886.38: **+6.83%**, reference spread0.35%.
-Mean TTFT158.801â†’148.664s:10.137s saved. Previous exact daily independently
+Mean TTFT158.801→148.664s:10.137s saved. Previous exact daily independently
 measured827.53prefill/39.048decode. This is one retained A/B/A; elastic slots
 and MTP output vary. B/A2 decode is virtually identical. See `validation.json`.
 
