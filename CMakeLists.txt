@@ -436,6 +436,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(strata PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
 
+  if(NOT STRATA_ENABLE_HIP)
+    # Explicit two-process CUDA parity/benchmark driver; no automatic GPU invocation by CTest.
+    add_executable(qsa_prefill_multi_parity tests/cuda/qsa_prefill_multi_parity.cpp)
+    target_link_libraries(qsa_prefill_multi_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  endif()
+
   if(STRATA_ENABLE_HIP)
     enable_testing()
     set(_strata_hip_tests)

@@ -97,3 +97,13 @@ it for the active path (setting it to0 still forces the capacity path).
 Only prefill supplies the active bound. Captured decode graphs omit it:
 their context can grow after capture, invalidating a fixed host bound. No decode
 gain is attributed to this prefill change.
+
+
+## Grouped-query QSA prefill, 4 October 2026
+
+`STRATA_QSA_PREFILL_MULTI=1` enables a default-off SM75 scorer that shares each
+pooled key across up to eight prompt queries. It applies only to valid positive
+active bounds and more than eight queries; decode and other architectures keep
+the prior path. Score/selection buffers and four captured model rows/outputs
+match bitwise in bounded tests. Experimental group/grid tuning is not shipped.
+See [paired measurements, the complete chat curve and limits](BENCHMARKS.md#grouped-query-qsa-prefill-4-october-2026).

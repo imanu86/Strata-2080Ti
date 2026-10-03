@@ -24,6 +24,14 @@ Fixed-cache warm 130k improves about 3.9%; warm 249k is unchanged. HTTP checks a
 exposed short-response and variable-startup behavior, documented without a broad
 quality or new SOTA claim in the [follow-up evidence](docs/sm75/BENCHMARKS.md#completed-controls-and-http-follow-up).
 
+A default-off grouped-query QSA prefill path, `STRATA_QSA_PREFILL_MULTI=1`,
+now targets SM75. With exact-small already enabled, controlled warm requests gain
+5.38% at 130380 and6.26% at 249322 input tokens; captured logits and output IDs match
+bitwise. A separate 190-turn elastic conversation reaches 250130 tokens. Its complete
+[curve, startup anomalies and quality limits](docs/sm75/BENCHMARKS.md#grouped-query-qsa-prefill-4-october-2026)
+are documented. The earlier snapshot throughput table below is retained as history;
+these changes do not establish a new cold-prefill or sustained-decode SOTA.
+
 ## Current0.1.38 validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server

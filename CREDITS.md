@@ -48,3 +48,9 @@ Incremental prompt encoding: Guillaume PUTIER (gputier),
 `f29e527856b85e37bda90626ccc28e002b4989dd`. The upstream patch and tests are
 ported without algorithm changes; Codex adds local real-pack validation and
 Daily integration. This is community work, not a new local tokenizer algorithm.
+
+
+Grouped-query QSA prefill reuse extends q8atnight (Andy)'s earlier block-score
+work, [PR187](https://github.com/Niko1221/Strata/pull/187). Codex adapts this reuse
+to active-bound prompt batches on SM75, retaining FP32 operation order and the
+existing decode path, and adds the bounded parity driver and validation evidence.

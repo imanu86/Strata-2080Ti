@@ -361,3 +361,83 @@ The experimental source was removed before the next build and was never enabled
 in the Daily. No end-to-end speed claim is made. This is a result for our local
 adaptation, not a verdict on the unmodified upstream PR. Configuration, thresholds,
 raw hashes and per-depth metrics are in [the rejection report](bf16-main-rejected-20261003.json).
+
+
+## Grouped-query QSA prefill (4 October 2026)
+
+This default-off `STRATA_QSA_PREFILL_MULTI=1` path reuses each FP32 key block for
+up to eight prompt queries on SM75. It extends q8atnight's
+[PR187](https://github.com/Niko1221/Strata/pull/187) to bounded prompt batches;
+per-query arithmetic and the decode path are unchanged. The measured card is a
+modified 22 GB RTX 2080 Ti, with Ryzen 7 5800X, 96 GB RAM, CUDA 12.6 and PCIe 3.0.
+Stock 11 GB cards and multi-GPU operation are unvalidated.
+
+The 12-case synthetic suite checks complete score/selection buffers: query counts
+7/8/9/256/1007/8192, small/large/tail/cap shapes, ties, non-finite inputs, and the
+unspecified active-bound fallback(-1). All comparisons are byte-identical.
+A same-binary off/on/off model gate also passes: all four 248320-value first-logit
+rows are finite and bitwise identical, and all 258 output IDs per arm match.
+These are bounded regression checks, not a broad semantic-quality evaluation.
+
+The model gate uses KV 262144/int8/resident32768, fixed 6167 expert slots/10218 MiB,
+spec 4, suffix drafts off, exact-small on, and default IQ_MT_MIN 2 (no override).
+First-logit dumping occurs after native prompt_ms; it affects decode/wall time.
+
+| Actual context | Fresh / reused | A1 prompt ms | B prompt ms | A2 prompt ms | Throughput gain vs control mean |
+|---|---:|---:|---:|---:|---:|
+|130380|1014 /129366|3722.0|3520.2|3697.0|5.38%|
+|249322|1014 /248308|4233.5|4000.3|4268.0|6.26%|
+
+The full-fresh 129366 request took 325.298/130.794/417.148 s in A1/B/A2.
+The large control spread remains unexplained and cannot establish a causal cold
+speedup. The 248308 request reuses 130373 tokens, so it is not a cold 248k measure.
+Additional group/grid tuning passed parity but showed no consistent winner;
+one anomalous 8x64 case was repeated once and remained slower. It is not shipped.
+
+A separate real HTTP conversation completed 190 turns, from 20002 to 250130 input
+tokens, in 2017.73 s including startup/cleanup. It uses the Daily automatic/elastic
+configuration, KV 262144/int8/resident32768, CLI spec 4 with adaptive policy,
+exact-small and QSA enabled, and no IQ override, trace, logits dump or profiler.
+Each user follow-up targets 1000 tokens, with a shorter final turn. Temperature 0.6,
+top_p 0.95/top_k20, thinking off, output cap 512. All requests report stop.
+The first cold 20k prefill took 214.342 s (93.3 t/s). Turns 2-5 were also slow, then the
+same process recovered without changing flags. All warm observations are retained.
+
+| Warm context band | Requests | Aggregate fresh prefill t/s | Aggregate decode t/s | Median first-token s |
+|---|---:|---:|---:|---:|
+|20-50k|24|230.6|31.5|2.99|
+|50-100k|40|328.2|36.1|3.16|
+|100-150k|41|307.5|39.8|3.42|
+|150-200k|41|290.3|40.6|3.64|
+|200k-end|43|269.6|41.0|3.86|
+
+Across all 189 warm turns: 286.5 prefill/38.0 decode t/s. Initial slow turns remain
+included. The final 151-fresh-token request has 73.7 prefill t/s and 2.218 s first
+latency; its smaller batch is not comparable to a 1k turn. The nearest full-sized
+turn and final turn are recorded separately. No causal comparison to the earlier
+187-turn trace or new cold/decode SOTA is claimed.
+
+The API cache count 6420 is a startup snapshot. Native-log counts at request end
+range 6618-6878; they document resize decisions, not physical residency. The CSV
+labels these fields separately. Manual reading of sampled outputs found complete
+sentences but repeated stock reasoning and unsupported technical claims. This
+conversation is continuity/performance evidence, not a semantic-quality pass.
+
+![One completed chat curve; the final shorter turn is labeled](qsa-chat-20261004.png)
+
+[SVG](qsa-chat-20261004.svg), [per-turn CSV](qsa-chat-20261004.csv), and
+[hashes, controls, settings and limitations](qsa-prefill-multi-20261004.json).
+No private conversation text or raw token IDs are published.
+
+Reproduce the synthetic gate with a CUDA SM75 build and runtime libraries on PATH:
+
+```text
+cmake --build build --target qsa_prefill_multi_parity
+python tests/cuda/qsa_prefill_multi_check.py --exe build/qsa_prefill_multi_parity.exe --out qsa-check --run
+```
+
+Omit `--run` for the CPU-only dry-run. The explicit GPU target is not added to
+automatic CTest execution. The portable runner itself was executed successfully:
+12 cases, 26 processes, full-buffer equality, unchanged executable hash. Its later
+timings are only reproducibility evidence. Selected model executable SHA256:
+`aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177`.

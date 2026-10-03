@@ -1,0 +1,535 @@
+{
+  "document_status": "Verified bounded numerical gates and completed descriptive HTTP curve; not a broad quality or SOTA claim.",
+  "real_http_curve": {
+    "status": "analyzed_completed_curve",
+    "scope": "One completed, untruncated conversation; descriptive single-run curve only.",
+    "hardware": "Modified RTX 2080 Ti, 22 GB; Ryzen 7 5800X; 96 GB RAM.",
+    "runtime": {
+      "elastic": true,
+      "kv_capacity": 262144,
+      "kv": "int8",
+      "kv_resident": 32768,
+      "qsa_prefill_multi": "1",
+      "prefill_exact_small": "1",
+      "api_startup_expert_slots": 6420,
+      "expert_slot_note": "API metrics expert_slots is a startup snapshot; native-log observations below are the last logged count at request end, not proof of physical residency."
+    },
+    "claims": {
+      "general_quality": false,
+      "sota": false,
+      "causal_comparison_to_old_curve": false,
+      "timing_interpretation": "Single-conversation measurements; no causal comparison to any older curve."
+    },
+    "input_hashes": {
+      "result_sha256": "f3025a65fb2838989dd58a262292d0b2a159c27664bd76d97fb2bbee1ec60e5b",
+      "curve_csv_sha256": "89cba2f79aed6c8608f75e557aa79a008483ef88c968797ea3e9f89038d7732e",
+      "run_config_sha256": "d22e89fa063074dbf49fc8b2f281b5bb7af57b3cffb00fc062f7acb884d3c43e",
+      "native_log_sha256": "06e4437c3cd01da3d1e94f719059ed524e14e65f430f5e4598dd5435d69ebbb6"
+    },
+    "exe": {
+      "sha256": "aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177",
+      "sha256_after": "aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177"
+    },
+    "config": {
+      "source_config_sha256": "0d432a753f88bce661b9a15d60d3ee0be27236a5a36201695eb126269a1b3029",
+      "source_config_sha256_after": "0d432a753f88bce661b9a15d60d3ee0be27236a5a36201695eb126269a1b3029",
+      "saved_run_config_name": "config.json",
+      "saved_run_config_sha256": "d22e89fa063074dbf49fc8b2f281b5bb7af57b3cffb00fc062f7acb884d3c43e"
+    },
+    "curve": {
+      "turns": 190,
+      "first_context": 20002,
+      "last_context": 250130,
+      "warm_turns": 189
+    },
+    "cold_first_request_excluded_from_warm": {
+      "turn": 1,
+      "context_tokens": 20002,
+      "fresh_tokens": 20002,
+      "prefill_ms": 214342.2,
+      "prefill_tokens_per_second": 93.31806802393555,
+      "decode_ms": 12767.8,
+      "ttft_s": 214.46799999999348,
+      "output_tokens": 272,
+      "finish": "stop",
+      "api_startup_expert_slots": 6420,
+      "last_logged_expert_slots_at_request_end": 6618
+    },
+    "warm_all": {
+      "band": "all warm requests, including early slow turns",
+      "count": 189,
+      "context_min": 21288,
+      "context_max": 250130,
+      "prefill_aggregate_tokens_per_second": 286.4657965352296,
+      "prefill_fresh_tokens": 191519,
+      "fresh_tokens_min": 151,
+      "fresh_tokens_max": 1266,
+      "requests_with_fresh_at_least_1024": 3,
+      "prefill_ms_sum": 668558.0,
+      "decode_aggregate_tokens_per_second": 37.95069883802273,
+      "decode_engine_generated_tokens": 39429,
+      "decode_ms_sum": 1038953.2,
+      "ttft_median_s": 3.4839999999967404,
+      "ttft_p90_s": 3.9219999999913853,
+      "output_tokens_sum": 39429,
+      "finish_counts": {
+        "stop": 189
+      },
+      "api_startup_expert_slots": 6420,
+      "last_logged_expert_slots_at_request_end_min": 6618,
+      "last_logged_expert_slots_at_request_end_max": 6878
+    },
+    "nearest_context_rows": [
+      {
+        "turn": 25,
+        "prompt_tokens": 49927,
+        "fresh_tokens": 1018,
+        "reused_tokens": 48909,
+        "output_tokens": 244,
+        "engine_generated": 244,
+        "prefill_ms": 2940.5,
+        "decode_ms": 6453.3,
+        "ttft_s": 3.0320000000065193,
+        "finish": "stop",
+        "last_logged_expert_slots_at_request_end": 6662
+      },
+      {
+        "turn": 90,
+        "prompt_tokens": 129587,
+        "fresh_tokens": 1013,
+        "reused_tokens": 128574,
+        "output_tokens": 220,
+        "engine_generated": 220,
+        "prefill_ms": 3379.1,
+        "decode_ms": 5798.3,
+        "ttft_s": 3.5,
+        "finish": "stop",
+        "last_logged_expert_slots_at_request_end": 6676
+      },
+      {
+        "turn": 148,
+        "prompt_tokens": 200031,
+        "fresh_tokens": 1012,
+        "reused_tokens": 199019,
+        "output_tokens": 195,
+        "engine_generated": 195,
+        "prefill_ms": 3602.0,
+        "decode_ms": 5500.4,
+        "ttft_s": 3.75,
+        "finish": "stop",
+        "last_logged_expert_slots_at_request_end": 6717
+      },
+      {
+        "turn": 189,
+        "prompt_tokens": 249770,
+        "fresh_tokens": 1010,
+        "reused_tokens": 248760,
+        "output_tokens": 210,
+        "engine_generated": 210,
+        "prefill_ms": 3755.3,
+        "decode_ms": 4807.4,
+        "ttft_s": 3.9219999999913853,
+        "finish": "stop",
+        "last_logged_expert_slots_at_request_end": 6862
+      }
+    ],
+    "nearest_context_rows_note": "Nearest requests with 900-1100 fresh tokens; the shorter final turn stays in all warm aggregates and plots.",
+    "terminal_turn": {
+      "turn": 190,
+      "prompt_tokens": 250130,
+      "fresh_tokens": 151,
+      "prefill_ms": 2050.0,
+      "decode_ms": 5359.7,
+      "output_tokens": 217,
+      "ttft_s": 2.2179999999934807
+    },
+    "warm_bands": [
+      {
+        "band": "20\u201350k",
+        "count": 24,
+        "context_min": 21288,
+        "context_max": 49927,
+        "prefill_aggregate_tokens_per_second": 230.62706170632592,
+        "prefill_fresh_tokens": 24358,
+        "fresh_tokens_min": 1011,
+        "fresh_tokens_max": 1018,
+        "requests_with_fresh_at_least_1024": 0,
+        "prefill_ms_sum": 105616.4,
+        "decode_aggregate_tokens_per_second": 31.54280789392363,
+        "decode_engine_generated_tokens": 5563,
+        "decode_ms_sum": 176363.5,
+        "ttft_median_s": 2.992500000007567,
+        "ttft_p90_s": 12.047000000020489,
+        "output_tokens_sum": 5563,
+        "finish_counts": {
+          "stop": 24
+        },
+        "api_startup_expert_slots": 6420,
+        "last_logged_expert_slots_at_request_end_min": 6618,
+        "last_logged_expert_slots_at_request_end_max": 6878
+      },
+      {
+        "band": "50\u2013100k",
+        "count": 40,
+        "context_min": 51184,
+        "context_max": 99113,
+        "prefill_aggregate_tokens_per_second": 328.2009365906716,
+        "prefill_fresh_tokens": 40796,
+        "fresh_tokens_min": 1010,
+        "fresh_tokens_max": 1235,
+        "requests_with_fresh_at_least_1024": 1,
+        "prefill_ms_sum": 124301.9,
+        "decode_aggregate_tokens_per_second": 36.1214560445647,
+        "decode_engine_generated_tokens": 8641,
+        "decode_ms_sum": 239220.7,
+        "ttft_median_s": 3.164500000013504,
+        "ttft_p90_s": 3.3429999999934807,
+        "output_tokens_sum": 8641,
+        "finish_counts": {
+          "stop": 40
+        },
+        "api_startup_expert_slots": 6420,
+        "last_logged_expert_slots_at_request_end_min": 6662,
+        "last_logged_expert_slots_at_request_end_max": 6775
+      },
+      {
+        "band": "100\u2013150k",
+        "count": 41,
+        "context_min": 100356,
+        "context_max": 148967,
+        "prefill_aggregate_tokens_per_second": 307.4515358530821,
+        "prefill_fresh_tokens": 41589,
+        "fresh_tokens_min": 1010,
+        "fresh_tokens_max": 1018,
+        "requests_with_fresh_at_least_1024": 0,
+        "prefill_ms_sum": 135270.1,
+        "decode_aggregate_tokens_per_second": 39.82865581178358,
+        "decode_engine_generated_tokens": 8264,
+        "decode_ms_sum": 207488.8,
+        "ttft_median_s": 3.4219999999913853,
+        "ttft_p90_s": 3.5160000000032596,
+        "output_tokens_sum": 8264,
+        "finish_counts": {
+          "stop": 41
+        },
+        "api_startup_expert_slots": 6420,
+        "last_logged_expert_slots_at_request_end_min": 6676,
+        "last_logged_expert_slots_at_request_end_max": 6775
+      },
+      {
+        "band": "150\u2013200k",
+        "count": 41,
+        "context_min": 150173,
+        "context_max": 198794,
+        "prefill_aggregate_tokens_per_second": 290.2711808450168,
+        "prefill_fresh_tokens": 42027,
+        "fresh_tokens_min": 1010,
+        "fresh_tokens_max": 1266,
+        "requests_with_fresh_at_least_1024": 2,
+        "prefill_ms_sum": 144785.3,
+        "decode_aggregate_tokens_per_second": 40.601090874393655,
+        "decode_engine_generated_tokens": 8340,
+        "decode_ms_sum": 205413.2,
+        "ttft_median_s": 3.639999999984866,
+        "ttft_p90_s": 3.7820000000065193,
+        "output_tokens_sum": 8340,
+        "finish_counts": {
+          "stop": 41
+        },
+        "api_startup_expert_slots": 6420,
+        "last_logged_expert_slots_at_request_end_min": 6717,
+        "last_logged_expert_slots_at_request_end_max": 6717
+      },
+      {
+        "band": "200k\u2013end",
+        "count": 43,
+        "context_min": 200031,
+        "context_max": 250130,
+        "prefill_aggregate_tokens_per_second": 269.566407267302,
+        "prefill_fresh_tokens": 42749,
+        "fresh_tokens_min": 151,
+        "fresh_tokens_max": 1018,
+        "requests_with_fresh_at_least_1024": 0,
+        "prefill_ms_sum": 158584.3,
+        "decode_aggregate_tokens_per_second": 40.96129084369521,
+        "decode_engine_generated_tokens": 8621,
+        "decode_ms_sum": 210467.0,
+        "ttft_median_s": 3.859000000025844,
+        "ttft_p90_s": 4.046999999991385,
+        "output_tokens_sum": 8621,
+        "finish_counts": {
+          "stop": 43
+        },
+        "api_startup_expert_slots": 6420,
+        "last_logged_expert_slots_at_request_end_min": 6660,
+        "last_logged_expert_slots_at_request_end_max": 6862
+      }
+    ],
+    "elapsed_seconds_including_startup_cleanup": 2017.73,
+    "sampling": {
+      "temperature": 0.6,
+      "top_p": 0.95,
+      "top_k": 20,
+      "min_p": 0.0
+    },
+    "thinking": false,
+    "max_output_tokens": 512,
+    "user_step_target": 1000,
+    "all_finish_stop": true,
+    "output_tokens_min": 141,
+    "output_tokens_max": 272,
+    "response_review": {
+      "reviewed_turns": [
+        1,
+        6,
+        18,
+        20,
+        21,
+        40,
+        41,
+        60,
+        61,
+        80,
+        81,
+        89,
+        101,
+        141,
+        181,
+        189,
+        190
+      ],
+      "findings": [
+        "Sampled responses end in complete sentences; all190 requests report stop, which does not itself prove semantic quality.",
+        "Manual review found repeated stock reasoning, imprecise terminology and unsupported technical causal claims.",
+        "Several sampled reminders retain approximate22GB/262K/32K values, but this was not an exact structured recall oracle."
+      ],
+      "general_quality_pass": false,
+      "regression_attributable_to_patch": null,
+      "transcript_sha256": "63d1a2f86df91c3f1ac38601930fff3ce227a1b17efd4d07befa38069fbdcb6c"
+    },
+    "curve_note": "All189 warm requests retained, including slow initial turns2-5 and final151-fresh-token turn. The latter is explicitly labeled on the plot; representative near-context rows require900-1100 fresh tokens."
+  },
+  "change_under_review": {
+    "name": "Grouped-query QSA block-score prefill kernel",
+    "candidate": "Original candidate executable strata-session-qsa.exe, SHA-256 aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177",
+    "selected": true,
+    "opt_in": "STRATA_QSA_PREFILL_MULTI=1",
+    "default": "off",
+    "scope": "SM75 only; captured decode and other architectures remain unchanged",
+    "tuning_status": "Experimental group/grid tuning was not promoted; retain the original candidate.",
+    "source_base_commit": "a3aa4f2ad272252f53a6611a83f2bdf03cc9095d",
+    "source_change": "Build from base commit plus the QSA kernel, CMake target and CUDA driver changes published with this report; compiled file hashes below pin that source.",
+    "source_files_sha256": {
+      "CMakeLists.txt": "0ed93c95b03f418ce0feaec145f772744902357c68eb94ce2766b739fad6909d",
+      "include/strata/prefill/gemm.hpp": "e89cbb994adec4e2f6bd522e453aa1778523d90ed73047f5a2d6878c5e0c0570",
+      "src/prefill/gemm.cu": "95ac612e47d0c6ea27dc4d3fb045e08c7d82d031befcb20277535b9b7f75fa7a",
+      "src/prefill/prefill.cpp": "8556430c038234e4791b720d63ba92e3158977406c5d5aef0ceaf7f52164d489",
+      "src/program/generate.cpp": "51efd94afc6e7862326433212b8a8cb066accadb76b29756e44e0411700418f8",
+      "src/kernels/cuda/qsa_select.cu": "2eec9b7a527b13123109fad8db340589ce061652279fa0bb0cbff41e1e019769",
+      "tests/cuda/qsa_prefill_multi_parity.cpp": "7c0db6ad9d5be17440317b96f6123a65f82d4581acff2270ec128f4637beed30"
+    },
+    "restored_qsa_source_sha256": "2eec9b7a527b13123109fad8db340589ce061652279fa0bb0cbff41e1e019769"
+  },
+  "prior_art_credit": {
+    "pull_request": "https://github.com/Niko1221/Strata/pull/187",
+    "credit": "The grouped query/block-score reuse builds on q8atnight's earlier multi-query QSA block-score work."
+  },
+  "test_environment": {
+    "gpu": "NVIDIA GeForce RTX 2080 Ti, 22 GB, compute capability 7.5 (SM75)",
+    "cpu": "AMD Ryzen 7 5800X",
+    "system_ram_gb": 96,
+    "model_family": "Native IQ3_XXS pack",
+    "context": 262144,
+    "kv": "int8",
+    "kv_resident_cells": 32768,
+    "expert_cache_slots": 6167,
+    "expert_cache_mib": 10218,
+    "speculative_window": 4,
+    "suffix_drafts": 0,
+    "exact_small_prefill": true,
+    "iq_mt_min": "2 (runtime default; environment override absent)",
+    "first_logits_dump": "Active after native prompt_ms timestamp, during first verify window; affects decode/wall timing, not directly included in native prompt_ms."
+  },
+  "correctness_evidence": {
+    "micro_suite": {
+      "status": "PASS",
+      "cases": 12,
+      "coverage": [
+        "query counts 7, 8, 9, 256, 1007, and 8192",
+        "small and large contexts, including tail/cap cases",
+        "Random key/query inputs, ties, non-finite inputs, and unspecified active bound (-1) fallback"
+      ],
+      "candidate_vs_reference_dumps": "byte-identical in every case; A/B/A performance fixtures also repeat bitwise"
+    },
+    "model_gate": {
+      "status": "PASS",
+      "protocol": "same candidate executable in A1/B/A2 order; multi-query prefill disabled/enabled/disabled",
+      "requests": 4,
+      "first_logit_row": {
+        "values_per_request": 248320,
+        "dtype": "FP32",
+        "finite": true,
+        "comparison": "all 4 rows byte-identical among A1, B, and A2"
+      },
+      "generated_outputs": {
+        "tokens_per_arm": 258,
+        "comparison": "all 4 request outputs byte-identical between A1, B, and A2"
+      },
+      "control_repeatability": "A1 and A2 matched on every request",
+      "scope_limit": "Four fixed prefixes from two turns of one conversation establish this parity gate only; they are not broad quality evidence."
+    }
+  },
+  "paired_warm_prompt_measurements": [
+    {
+      "prompt_context_tokens": 130380,
+      "fresh_tokens": 1014,
+      "reused_prefix_tokens": 129366,
+      "control_A1_ms": 3722.0,
+      "control_A2_ms": 3697.0,
+      "control_mean_ms": 3709.5,
+      "candidate_B_ms": 3520.2,
+      "time_derived_throughput_change_vs_control_mean_pct": 5.38
+    },
+    {
+      "prompt_context_tokens": 249322,
+      "fresh_tokens": 1014,
+      "reused_prefix_tokens": 248308,
+      "control_A1_ms": 4233.5,
+      "control_A2_ms": 4268.0,
+      "control_mean_ms": 4250.75,
+      "candidate_B_ms": 4000.3,
+      "time_derived_throughput_change_vs_control_mean_pct": 6.26
+    }
+  ],
+  "timing_caveat": "Native prompt_ms is measured after prefill/cache refill and before first verify/logit dump (generate.cpp6030 versus6123). Dumping is active in this diagnostic run and can affect decode/whole-request time. Fixed cache and limited fixtures do not establish production HTTP throughput.",
+  "cold_start_observations": {
+    "status": "UNRESOLVED",
+    "same_binary_and_environment_full_fresh_129366_token_request_seconds": {
+      "A1": 325.5,
+      "B": 131.01600000000326,
+      "A2": 417.35899999999674
+    },
+    "interpretation": "The control repeats vary substantially. Startup-dependent cold timing has no verified cause and cannot support attributing the candidate's apparent cold-time difference to the kernel.",
+    "classification_note": "The 248308-token request reused a 130373-token prefix and processed 117935 fresh tokens; it is not a cold-start observation.",
+    "native_prefill_seconds": {
+      "A1": 325.2984,
+      "B": 130.7936,
+      "A2": 417.148
+    },
+    "wall_time_note": "Whole-request seconds include first decode/dump/pipe overhead; native_prefill_seconds isolates the reported prompt_ms interval."
+  },
+  "optional_tuning_appendix": {
+    "matrix_status": "PASS for bitwise parity",
+    "scope": "Exploratory group 7/8 and grid 32/64/128/256 matrix on two 256-query contexts, 10 repetitions",
+    "interpretation": "Measured times did not show a consistent group/grid winner; tuning remains archived and was not promoted.",
+    "repeat": "The single group-8/grid-64 repeat measured 8.319 ms for the score stage and remained byte-identical to the off reference. This isolated repeat does not establish a preferred setting."
+  },
+  "claims_not_supported": [
+    "No new cold-prefill or sustained-decode SOTA.",
+    "No broad semantic-quality pass.",
+    "No causal HTTP speed comparison to the older187-turn trace.",
+    "No physical VRAM or PCIe bandwidth measurement; last logged cache slots are not proof of residency."
+  ],
+  "provenance": {
+    "build_record": "build-qsa.json",
+    "micro_record": "qsa-micro/results.json",
+    "model_gate_record": "qsa-model-gate/results.json",
+    "artifact_paths_or_private_prompt_text_included": false,
+    "raw_token_ids_included": false,
+    "local_evidence_sha256": {
+      "build-qsa.json": "c77c7a967d80b0d3684ddea2a127b1e8d8536fca26235c23b753be483acf6e0b",
+      "qsa-micro/results.json": "8e98263371350b29cabb2d28e52aee10d7b28d5c17a7d3cde9785552d9d87ae6",
+      "qsa-model-gate/results.json": "1fb5fe92f491f4df89077e984c9a8e1deabc2be1edf4402eb4fb4c0eeea072d9",
+      "qsa-tuning-micro/results.json": "7bb5ce952bf78274052e4e07dce1b3129952238710b861838cd0d86c4104bd28",
+      "qsa-tuning-single-repeat/results.json": "f4641eec6a0289c41f182623ce9a31693feb1ddaca109f7e2cb9a673b215958f",
+      "qsa-http-curve/result.json": "f3025a65fb2838989dd58a262292d0b2a159c27664bd76d97fb2bbee1ec60e5b",
+      "qsa-http-curve/curve.csv": "89cba2f79aed6c8608f75e557aa79a008483ef88c968797ea3e9f89038d7732e",
+      "qsa-public-micro-proof/results.json": "db53bb950b8077c71bf13f3f49746f573c22a2db0bbf60eb45c93714263b912d",
+      "analyze_qsa_curve.py": "7a654c81fe4ebf77cfba05d6f5084787eafbcaed26030646e1c0c9e852a22b5c"
+    }
+  },
+  "model_request_records": [
+    {
+      "context": 129366,
+      "fresh": 129366,
+      "reused": 0,
+      "output_tokens": 1,
+      "all_arms_logit_sha256": "a7feacb98dc0ed7809542c7d1e124ae805742888955ae2e81cee4de3321b116a",
+      "all_arms_output_ids_sha256": "f66a8a966619a7aae703ba69f26c7d0b93f5a86b91d51608f9e8b51bb4acc4c5",
+      "prompt_ms": {
+        "A1": 325298.4,
+        "B": 130793.6,
+        "A2": 417148.0
+      },
+      "decode_ms": {
+        "A1": 54.7,
+        "B": 55.6,
+        "A2": 59.5
+      }
+    },
+    {
+      "context": 130380,
+      "fresh": 1014,
+      "reused": 129366,
+      "output_tokens": 128,
+      "all_arms_logit_sha256": "98c6cf6393d6a9ee72b87a6bf09244d068bb25bbc44c22c69ef8f809e2716579",
+      "all_arms_output_ids_sha256": "605f4a9b02abb8e3745f728cd29e041d478d72b103682e949bbd0908d637fc6e",
+      "prompt_ms": {
+        "A1": 3722.0,
+        "B": 3520.2,
+        "A2": 3697.0
+      },
+      "decode_ms": {
+        "A1": 4467.9,
+        "B": 4465.6,
+        "A2": 4467.4
+      }
+    },
+    {
+      "context": 248308,
+      "fresh": 117935,
+      "reused": 130373,
+      "output_tokens": 1,
+      "all_arms_logit_sha256": "f585b735fe8cbf5b034cde5f2c56d6d2d6593414b1b4e6dab668e2dcc719aa18",
+      "all_arms_output_ids_sha256": "592124ef2e3946c3a68f7e04be06fbededf35d0b1e64ddae1894201de6f38423",
+      "prompt_ms": {
+        "A1": 184284.5,
+        "B": 161656.4,
+        "A2": 184437.4
+      },
+      "decode_ms": {
+        "A1": 56.0,
+        "B": 59.5,
+        "A2": 50.4
+      }
+    },
+    {
+      "context": 249322,
+      "fresh": 1014,
+      "reused": 248308,
+      "output_tokens": 128,
+      "all_arms_logit_sha256": "7bb1f03e1e16142a90e19bfbddd7bf64ebfad232d1b7773c691addfc75a5f0af",
+      "all_arms_output_ids_sha256": "416c3e0a896772f5062c78d4620c485d42062fb737fb09dbd24eeafde8e76405",
+      "prompt_ms": {
+        "A1": 4233.5,
+        "B": 4000.3,
+        "A2": 4268.0
+      },
+      "decode_ms": {
+        "A1": 5174.9,
+        "B": 5835.6,
+        "A2": 4893.7
+      }
+    }
+  ],
+  "public_reproducer_validation": {
+    "status": "passed",
+    "cases": 12,
+    "processes": 26,
+    "executable_sha256": "775c7a44b5b983b9a427ca8437c810ca722853255ef7ac1669ef4ca682e43aa9",
+    "executable_unchanged": true,
+    "runner_sha256": "2257873ab29b9f8adae82b34c8cc30556ccd6f16e124abdbefcf996df90c3204",
+    "result_sha256": "db53bb950b8077c71bf13f3f49746f573c22a2db0bbf60eb45c93714263b912d",
+    "purpose": "Reproducibility/parity confirmation; these later kernel timings are not used for speed claims."
+  }
+}

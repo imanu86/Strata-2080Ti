@@ -765,6 +765,83 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(co
 }
 
 #if !defined(__HIPCC__)
+// Extend the FP32 key reuse from upstream PR #187 to bounded prompt batches.
+// Keep the per-query arithmetic and the existing decode path unchanged.
+// One CTA processes one key-block stripe and up to eight consecutive prompt queries.
+// Grid: (min(256, ceil(active_blocks / SCORE_WARPS)), ceil(nq / MQ)); active_blocks bounds the batch.
+// pooled/dead float4 values are fetched once per (CTA, block, lane) and reused across this query group.
+__global__ void __launch_bounds__(SCORE_WARPS * 32)
+block_scores_prefill_multi_kernel(const float* __restrict__ pooled, const float* __restrict__ dead,
+                                  const float* __restrict__ q_idx, const int32_t* __restrict__ steps,
+                                  int nq, int64_t max_blocks, int64_t active_blocks,
+                                  float* __restrict__ out) {
+    __shared__ __align__(16) float qs[MQ * IDX_HEADS * IDX_DIM];
+    __shared__ int64_t s_nkv[MQ], s_nbid[MQ];
+
+    const int q0 = (int) blockIdx.y * MQ;
+    const int q_count = (nq - q0 < MQ) ? (nq - q0) : MQ;
+    const float* q_base = q_idx + (int64_t) q0 * IDX_HEADS * IDX_DIM;
+    const int32_t* step_base = steps + (int64_t) q0 * kStepCount;
+    for (int i = threadIdx.x; i < q_count * IDX_HEADS * IDX_DIM; i += blockDim.x) qs[i] = q_base[i];
+    if (threadIdx.x < q_count) {
+        s_nkv[threadIdx.x] = step_base[threadIdx.x * kStepCount + kStepNKv];
+        s_nbid[threadIdx.x] = step_base[threadIdx.x * kStepCount + kStepNBid];
+    }
+    __syncthreads();
+
+    int64_t top = 0;
+    for (int qi = 0; qi < q_count; ++qi) top = s_nbid[qi] > top ? s_nbid[qi] : top;
+    const int lane = threadIdx.x & 31;
+    const int64_t wstride = (int64_t) gridDim.x * SCORE_WARPS;
+    for (int64_t b = (int64_t) blockIdx.x * SCORE_WARPS + (threadIdx.x >> 5);
+         b <= top && b < active_blocks && b < max_blocks; b += wstride) {
+        const float4 kd = *reinterpret_cast<const float4*>(dead + lane * 4);
+        // The largest tail is needed only as dead; do not read an uninitialized pooled tail.
+        const float4 kp = b < top ? *reinterpret_cast<const float4*>(pooled + b * IDX_DIM + lane * 4) : kd;
+        for (int qi = 0; qi < q_count; ++qi) {
+            const int64_t n_bid = s_nbid[qi];
+            if (b > n_bid) continue;
+            const float4 k4 = (b == n_bid) ? kd : kp;
+            const float* q = qs + qi * IDX_HEADS * IDX_DIM + lane * 4;
+            float score = 0.0f;
+#pragma unroll
+            for (int h = 0; h < IDX_HEADS; ++h) {
+                const float4 q4 = *reinterpret_cast<const float4*>(q + h * IDX_DIM);
+                float d = k4.x * q4.x + k4.y * q4.y + k4.z * q4.z + k4.w * q4.w;
+#pragma unroll
+                for (int o = 16; o > 0; o >>= 1) d += __shfl_xor_sync(0xffffffffu, d, o);
+                score += d > 0.0f ? d : 0.0f;
+            }
+            if (lane == 0) {
+                if (b == n_bid && s_nkv[qi] % R != 0) score += 1e9f;
+                out[(int64_t) (q0 + qi) * max_blocks + b] = score;
+            }
+        }
+    }
+}
+
+// This FP32 reuse is independent of tensor-core settings. Default off and SM75 only.
+bool prefill_multi_enabled() {
+    static const bool requested = [] {
+        const char* value = std::getenv("STRATA_QSA_PREFILL_MULTI");
+        return value && value[0] == '1' && value[1] == '\0';
+    }();
+    if (!requested) return false;
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) return false;
+    static thread_local int cached_device = -1;
+    static thread_local bool turing = false;
+    if (device != cached_device) {
+        cudaDeviceProp properties{};
+        if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) return false;
+        turing = properties.major == 7 && properties.minor == 5;
+        cached_device = device;
+    }
+    return turing;
+}
+#endif
+
+#if !defined(__HIPCC__)
 // ---- the decode top-k on a thread-block cluster (sm_90+; S19).  One CTA per query (block_topk_reg_kernel, or
 // block_topk_kernel above 33,792 blocks: a --max-context over ~135K) makes four radix passes and two scans over up to
 // 65,538 blocks on ONE SM while the rest of the GPU idles - a decode window has 1-5 queries.  Here a cluster of CL_N
@@ -995,6 +1072,20 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
         std::fprintf(stderr, "qsa_block_scores: unsupported indexer geometry\n");
         std::exit(1);
     }
+#if !defined(__HIPCC__)
+    if (nq > MQ && active_blocks > 0 && active_blocks <= max_blocks && prefill_multi_enabled()) {
+        const int64_t key_tiles = (active_blocks + SCORE_WARPS - 1) / SCORE_WARPS;
+        const dim3 grid((unsigned) (key_tiles < 256 ? key_tiles : 256), (unsigned) ((nq + MQ - 1) / MQ));
+        block_scores_prefill_multi_kernel<<<grid, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(
+            pooled, dead, q_idx, steps, (int) nq, max_blocks, active_blocks, scores);
+        const cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) {
+            std::fprintf(stderr, "qsa_block_scores prefill multi: %s\n", cudaGetErrorString(e));
+            std::exit(1);
+        }
+        return;
+    }
+#endif
     // a block past a query's n_bid returns at once: the grid need only reach the batch's largest n_bid (C-1)
     static const bool multi = [] { const char* v = std::getenv("STRATA_SCORES_MULTI"); return v == nullptr || std::atoi(v) != 0; }();
     if (multi && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
