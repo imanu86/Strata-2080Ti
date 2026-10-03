@@ -11,6 +11,12 @@ SM75 parity and model validation. Serial intermediate quantization remains the
 profile default. Historical0.1.31 and0.1.36 evidence is preserved separately.
 [Credits](CREDITS.md) explain which changes come from upstream and community forks.
 
+Chat prompt tokenization now reuses exact shared prefixes from community
+[PR567](https://github.com/Niko1221/Strata/pull/567). On the local 187-turn trace,
+all 25,306,163 input token IDs match full encoding. Around 250k context the CPU
+encoding component falls from 932 to 10.6 ms; GPU prefill/decode numbers below
+are unchanged. [Evidence and limits](docs/sm75/BENCHMARKS.md#incremental-prompt-tokenization-3-october-2026).
+
 ## Current0.1.38 validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server

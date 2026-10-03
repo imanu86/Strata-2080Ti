@@ -42,3 +42,9 @@ by Claude Opus; Codex port/guards and validation. Tail checkpoint: Codex,
 (asp345), co-authored by Claude Opus5.5, [PR603](https://github.com/Niko1221/Strata/pull/603),
 head6ba96984ac8a5f019edd84d7a83c278e6a1d363d. Their work is credited explicitly;
 the old grid is now historical and is absent from the operative source.
+
+Incremental prompt encoding: Guillaume PUTIER (gputier),
+[PR567](https://github.com/Niko1221/Strata/pull/567), pinned commit
+`f29e527856b85e37bda90626ccc28e002b4989dd`. The upstream patch and tests are
+ported without algorithm changes; Codex adds local real-pack validation and
+Daily integration. This is community work, not a new local tokenizer algorithm.

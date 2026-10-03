@@ -158,3 +158,41 @@ consume GPU time and are explicit actions. No new GPU test was run for
 publication. The previously installed exact daily passed startup in42.84s at
 KV262144, then stopped. Local publication checks cover source/config only;
 this fork has no automated workflow.
+
+
+## Incremental prompt tokenization, 3 October 2026
+
+Community [PR567](https://github.com/Niko1221/Strata/pull/567), pinned at
+`f29e527856b85e37bda90626ccc28e002b4989dd`, reuses tokens up to a safe special-token
+boundary in a shared rendered prompt. Only the remaining text runs through BPE.
+The two production Python files and the upstream tests are ported unchanged.
+
+Validated on Windows, Ryzen 7 5800X, 96 GiB RAM, with OktoCGControl open. CPU only,
+no artificial load. The real IQ3_XXS pack vocabulary, merges and chat template
+were used on all 187 prompts of the 20,001 -> 250,012-token conversation.
+Full encoding from the installed pre-patch server was compared with the new
+incremental encoder on every prompt: **25,306,163 input token IDs, all equal**.
+
+| Actual context window | Turns | Full encode, median | Incremental, median |
+|---|---:|---:|---:|
+| 125k-135k | 8 | 434.1 ms | 7.77 ms |
+| 240k-250,012 | 9 | 931.9 ms | 10.57 ms |
+
+This measures the tokenization component before the native engine. It does not
+measure end-to-end chat TTFT, change GPU prefill/decode, or establish a new SOTA.
+There is one chronological replay; each turn runs full encoding then incremental
+encoding in the same process. First prompts and unrelated prefixes still need
+full encoding. Rendering and HTTP transfer costs are outside this table.
+
+`python -B -m unittest tools.test_strata_tokenizer serve.test_server -v`:
+132 tests run, 131 passed, one skipped (llama.cpp reference vectors unavailable).
+`STRATA_TOKENIZER` points to the actual pack, so real-vocabulary prompt tests ran.
+Coverage includes shared/edited/shortened prompts, tools, images, overlapping
+special tokens, mock-engine HTTP requests, and tokenizers without resume points.
+
+[Per-turn counts, hashes, timings and validation metadata](incremental-prompts-20261003.json)
+retain the evidence without publishing the full local transcript. The native
+Daily executable remains SHA-256
+`13ee1a89be497ad83c67f62553b1133fec2a8d9309230d43a9dae639d89008a5`.
+The historical source manifest stays intact; the installed frontend has a
+separate overlay manifest and a backup of the replaced files.
