@@ -1,0 +1,60 @@
+{
+  "status": "completed",
+  "date": "2026-10-04",
+  "exe_sha256": "a17d0dd5362bc35420ca9ef3d1a8cf8c014dafbb3aea189c6c664fe7930e8674",
+  "config_sha256": "f0237b6abdacd73944fb9232bcdaf016c733bc2dd1fdae6723284ae3659f2e8d",
+  "raw_result_sha256": "fc8aeac88da6323143f4637bd677cf4aaff72e7cf109811b418d8f70fbcb4e6d",
+  "elapsed_seconds": 989.66,
+  "startup_seconds": 274.74,
+  "initial_engine": {
+    "expert_slots": 7082,
+    "context": 262144,
+    "kv": "int8",
+    "kv_resident": 32768,
+    "spec": 6
+  },
+  "history": "All 190 user/assistant pairs plus system and final question; 382 messages, unchanged between modes, no truncation",
+  "requests": [
+    {
+      "thinking": false,
+      "prompt_tokens": 250487,
+      "completion_tokens": 52,
+      "reused_tokens": 0,
+      "fresh_tokens": 250487,
+      "native_prompt_ms": 293331.6,
+      "native_decode_ms": 1629.1,
+      "http_ttft_seconds": 294.4059999999881,
+      "finish": "stop",
+      "oracle_json_pass": false,
+      "oracle_error": "RuntimeError('Oracle gpu must be RTX 2080 Ti (optionally NVIDIA GeForce prefix)')",
+      "answer_sha256": "537ba977e40f40fa250a7c2fe9d23cd8b98f82a3587462da4eacfa915a12aaf3",
+      "independent_oracle_check": false,
+      "manual_fact_review": "all five requested facts correct",
+      "manual_review_note": "Literal GPU-name validator rejects the suffix modificata (modified); the identified GPU and all four numeric fields are correct. Original automatic FAIL retained."
+    },
+    {
+      "thinking": true,
+      "prompt_tokens": 250523,
+      "completion_tokens": 306,
+      "reused_tokens": 0,
+      "fresh_tokens": 250523,
+      "native_prompt_ms": 407485.0,
+      "native_decode_ms": 7664.4,
+      "http_ttft_seconds": 414.9679999999935,
+      "finish": "stop",
+      "oracle_json_pass": true,
+      "oracle_error": null,
+      "answer_sha256": "2d73cc140ef2031dd3ac556c690f3079adf93d0c4c0e0289ba6e615b3c6e4e26",
+      "independent_oracle_check": true,
+      "manual_fact_review": "all five requested facts correct"
+    }
+  ],
+  "both_bounded_oracles_pass": false,
+  "both_manual_fact_reviews_pass": true,
+  "limits": [
+    "Only five facts/arithmetic fields on one supplied history; not general quality or retrieval accuracy.",
+    "First response is not appended before the second request. Both read the complete rendered prompts. Single samples with variable elastic cache and intermittent stalls are not a thinking-mode causal timing comparison.",
+    "Facts also occur in earlier assistant replies; this is not a hidden-needle retrieval benchmark.",
+    "Full-history cold replay differs from the original incremental chat curve; no SOTA claim."
+  ]
+}

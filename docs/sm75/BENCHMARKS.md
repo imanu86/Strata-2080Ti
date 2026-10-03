@@ -388,6 +388,8 @@ First-logit dumping occurs after native prompt_ms; it affects decode/wall time.
 |130380|1014 /129366|3722.0|3520.2|3697.0|5.38%|
 |249322|1014 /248308|4233.5|4000.3|4268.0|6.26%|
 
+The gain is `(mean(A1 prompt_ms, A2 prompt_ms) / B prompt_ms - 1) * 100`.
+
 The full-fresh 129366 request took 325.298/130.794/417.148 s in A1/B/A2.
 The large control spread remains unexplained and cannot establish a causal cold
 speedup. The 248308 request reuses 130373 tokens, so it is not a cold 248k measure.
@@ -442,6 +444,17 @@ automatic CTest execution. The portable runner itself was executed successfully:
 timings are only reproducibility evidence. Selected model executable SHA256:
 `aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177`.
 
+### Extended teacher check: partial, not a full pass
+
+A later off/on/off check planned 256 teacher-forced positions at each of 130380
+and 249000 tokens per arm, using the same QSA binary and fixed 6167-slot profile.
+The work deadline interrupted A2; elapsed time was 1712.984 s. It captured 1456
+of 1536 planned full rows: A1 and B have 512 each; A2 has 256 at 130380 and 176
+at 249000. Independent byte, finiteness and per-row hash checks find A1/B equal
+at all 512 positions, with A2 equal at all 432 common positions. The missing 80
+A2 rows prevent a complete extended-gate PASS. These observations do not support
+a semantic-quality or performance claim. [Coverage and hashes](qsa-teacher-partial-20261004.json).
+
 
 ## Optional HtoD and PLE diagnostics (4 October 2026)
 
@@ -457,6 +470,8 @@ The counted primary-ring expert copies are 110833920000 bytes for the cold
 from pinned memory in this fixture. The latter uses two batched chunks across a
 checkpoint/turn boundary; it is not a one-chunk elastic HTTP turn. Dividing by
 prompt wall time is not an instantaneous PCIe or VRAM bandwidth measurement.
+The counters cover 19994 and 1013 batched tokens respectively; native fresh-token
+counts are 20001 and 1014. Final-token verification is outside these counters.
 
 The first gate retained a 211.984-second cold outlier: host PLE time was193044ms,
 against693ms in its19.087-second control. The same candidate binary subsequently
@@ -469,3 +484,33 @@ most recent up to65536 completed reads; subtracting percentiles is invalid.
 `--ple-sync-submit` also disables the existing keepalive, so that arm changes
 more than worker scheduling alone. The operational I/O policy is unchanged.
 The diagnostic flag remains off by default. [All measured arms and hashes](prefill-diagnostics-20261004.json).
+
+### Actual Daily: full-history recall and arithmetic
+
+The installed diagnostics binary (SHA256 below), with statistics disabled and
+the unchanged automatic/elastic Daily configuration, completed two HTTP requests
+over the full 190-pair history. Both use temperature 0 and cap 1536. The first
+answer is not appended to the second request; no history is truncated.
+
+| Thinking | Rendered prompt tokens | Reused | Completion tokens | Native prompt s | Automatic JSON oracle |
+|---|---:|---:|---:|---:|---|
+| off | 250487 | 0 | 52 | 293.332 | FAIL: GPU-name suffix |
+| on | 250523 | 0 | 306 | 407.485 | PASS |
+
+Independent reading confirms all five requested facts in both final answers:
+GPU, 22 GB VRAM, KV capacity 262144, resident KV 32768, and the margin calculation
+`262144 - 250130 - 512 = 11502`. The first names the GPU `RTX 2080 Ti modificata`;
+the predeclared literal validator rejects that suffix. Its original FAIL is
+preserved separately from the manual factual assessment.
+
+Elapsed time including startup and cleanup was 989.66 s; HTTP readiness took
+274.74 s. Initial automatic cache: 7082 slots, runtime spec 6 (CLI spec 4 with
+adaptive policy). Both requests read their full rendered prompts. These single
+observations, with intermittent stalls and variable elastic cache, are not a
+causal timing comparison between thinking modes or a new SOTA. Facts also occur
+in earlier assistant responses: this is a five-field check, not a hidden-needle
+or general semantic-quality evaluation. All pinned inputs stayed unchanged and
+the owned processes closed. [Sanitized result and hashes](qsa-daily-recall-20261004.json).
+
+Installed Daily executable SHA256:
+`a17d0dd5362bc35420ca9ef3d1a8cf8c014dafbb3aea189c6c664fe7930e8674`.

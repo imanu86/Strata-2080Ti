@@ -1,0 +1,80 @@
+{
+  "status": "incomplete_due_to_work_deadline",
+  "full_predeclared_gate_pass": false,
+  "elapsed_seconds": 1712.9839999999967,
+  "cleanup_verified": true,
+  "protocol": "Same QSA binary0/1/0; intended256teacherpositions at130380 and249000 perarm",
+  "configuration": "Fixed6167slots,KV262144/int8/resident32768,spec4,exact-small1,defaultIQ_MT_MIN2;noelastic",
+  "exe_sha256": "aefbde27309d3a16ca02ba1ab67ff62ea71c80275af993a2026db67ae66a0177",
+  "harness_sha256": "9e264a4b790db6618de49b883f5f49680a4d10c17bb35bfb6765d3d4f5cc0a02",
+  "raw_plan_sha256": "31ca57335caf25d6d4b1f834913128efe47a061ffc4899c1ffb9b589bf8a8f4a",
+  "points": {
+    "130380": {
+      "rows_by_arm": {
+        "A1": 256,
+        "B": 256,
+        "A2": 256
+      },
+      "matrix_sha256": {
+        "A1": "be99a979eb6fa3d705403cbe56a4009b3d0d07678f15ec9f0370631d7d7fd354",
+        "B": "be99a979eb6fa3d705403cbe56a4009b3d0d07678f15ec9f0370631d7d7fd354",
+        "A2": "be99a979eb6fa3d705403cbe56a4009b3d0d07678f15ec9f0370631d7d7fd354"
+      },
+      "comparisons": {
+        "A1_vs_B": {
+          "common_positions": 256,
+          "finite_logits_bitwise": true,
+          "input_hashes_equal": true,
+          "output_hashes_equal": true
+        },
+        "A1_vs_A2": {
+          "common_positions": 256,
+          "finite_logits_bitwise": true,
+          "input_hashes_equal": true,
+          "output_hashes_equal": true
+        },
+        "B_vs_A2": {
+          "common_positions": 256,
+          "finite_logits_bitwise": true,
+          "input_hashes_equal": true,
+          "output_hashes_equal": true
+        }
+      }
+    },
+    "249000": {
+      "rows_by_arm": {
+        "A1": 256,
+        "B": 256,
+        "A2": 176
+      },
+      "matrix_sha256": {
+        "A1": "f998931f5ba61eca20e40a458dc90b6730f2698c2caa64804009c6d3789d980b",
+        "B": "f998931f5ba61eca20e40a458dc90b6730f2698c2caa64804009c6d3789d980b",
+        "A2": "48469e37222f8523d89bac995da1312d6b6eed3bfe16ce47810b357b836e99ba"
+      },
+      "comparisons": {
+        "A1_vs_B": {
+          "common_positions": 256,
+          "finite_logits_bitwise": true,
+          "input_hashes_equal": true,
+          "output_hashes_equal": true
+        },
+        "A1_vs_A2": {
+          "common_positions": 176,
+          "finite_logits_bitwise": true,
+          "input_hashes_equal": true,
+          "output_hashes_equal": true
+        },
+        "B_vs_A2": {
+          "common_positions": 176,
+          "finite_logits_bitwise": true,
+          "input_hashes_equal": true,
+          "output_hashes_equal": true
+        }
+      }
+    }
+  },
+  "total_rows_collected": 1456,
+  "independent_review": "Every collected row finite, full bytes and logged row hashes verified; comparisons cover only common captured positions",
+  "limitation": "80A2 rows missing at249k. No full extended-gate PASS, performance claim or general semantic-quality claim. Earlier completed QSA gates remain separate."
+}

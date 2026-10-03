@@ -32,11 +32,21 @@ bitwise. A separate 190-turn elastic conversation reaches 250130 tokens. Its com
 are documented. The earlier snapshot throughput table below is retained as history;
 these changes do not establish a new cold-prefill or sustained-decode SOTA.
 
-## Current0.1.38 validation
+The local Daily now uses executable SHA256 `a17d0dd5…` with these source changes.
+The latest published download,
+[`v0.1.38-sm75-20261003-r1`](https://github.com/imanu86/Strata-2080Ti/releases/tag/v0.1.38-sm75-20261003-r1),
+is the earlier `fc9a767` snapshot; it does not contain the later QSA and diagnostic
+changes. [Build main](docs/sm75/BUILD.md) for those changes. Full binary hashes,
+the partial extended teacher check and bounded 250k recall results are in
+[the benchmark record](docs/sm75/BENCHMARKS.md#actual-daily-full-history-recall-and-arithmetic).
+
+## 0.1.38 baseline validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server
 tests pass. Paired model regression and real conversations at131k/250k pass;
 see [current evidence and limits](docs/sm75/BENCHMARKS.md). KV capacity is262144.
+These checks and the throughput samples below belong to the base snapshot;
+later patches have their separately documented gates above.
 
 | Actual fresh input | Fresh prefill t/s | Long decode t/s | Output tokens |
 |---|---:|---:|---:|
