@@ -1,0 +1,204 @@
+{
+  "date": "2026-10-03",
+  "status": "rejected_for_daily",
+  "candidate": "Local main-model-only BF16 to FP16 product variant inspired by rafatxf PR655; MTP BF16 unchanged; reuses existing Gemm scratch.",
+  "upstream_reference": "https://github.com/Niko1221/Strata/pull/655",
+  "scope_note": "This tests a local adaptation, not the unmodified upstream PR or every BF16 tensor-core implementation.",
+  "hardware": "Windows, modified RTX 2080 Ti 22 GB, CUDA12.6, SM75",
+  "executable_sha256": "372f5f7a1d7a15cc6c99c0670661c273e45b588fccaaa13bb25e36e079af9d2a",
+  "expert_profile_sha256": "8f59b4aa8873209dff11c11e37bcda9529a1335b724a1afeea37bf6388975baf",
+  "fixture_sha256": "10cdf192c27bd8c2e07a02dbfd7343833974eca751dbc3045ad9ca1ddc0df4f9",
+  "elapsed_seconds": 1324.625,
+  "context_capacity": 262144,
+  "kv": "int8",
+  "kv_resident": 32768,
+  "expert_slots": 6167,
+  "expert_cache_mib": 10218,
+  "elastic": false,
+  "adapt_swaps": 0,
+  "pcie_frac": 0,
+  "suffix_draft": 0,
+  "spec": 4,
+  "prompt_cache": 6,
+  "prompt_cache_tail": true,
+  "conversation_cache_mib": 0,
+  "environment": {
+    "STRATA_PREFILL_BF16_TC": [
+      "0",
+      "1",
+      "0"
+    ],
+    "STRATA_PREFILL_EXACT_SMALL": "1 for all arms",
+    "STRATA_IQ_MT_MIN": "1",
+    "STRATA_PARALLEL_INTERMEDIATE_QUANT": "0",
+    "timing_and_profile": "disabled"
+  },
+  "policy_declared_before_run": {
+    "description": "Local paired numerical gate from tools/sm75/validate_model.py; not a general quality score",
+    "block_tokens": 32,
+    "nll_allowance_nats": 0.01,
+    "median_kl_floor": 0.001,
+    "p99_kl_floor": 0.01,
+    "baseline_kl_multiplier": 3.0,
+    "top1_allowance_percentage_points": 1.0
+  },
+  "procedure": "Same executable A1/B/A2, flag off/on/off. At each depth, 256 growing teacher-forced prefixes from one saved real conversation; each generated prediction discarded.",
+  "results": [
+    {
+      "prefix_tokens": 20001,
+      "rows": 256,
+      "comparison": {
+        "A1_vs_B": {
+          "positions": 256,
+          "top1_agreement_pct": 97.265625,
+          "kl_mean": 0.005052665919199369,
+          "kl_median": 0.001021515104977039,
+          "kl_p99": 0.060820930419423526,
+          "kl_max": 0.12884681468574666,
+          "nll_delta_mean": -0.000269844575961381
+        },
+        "A1_vs_A2": {
+          "positions": 256,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "nll_delta_mean": 0.0
+        },
+        "gate": {
+          "pass": false,
+          "checks": {
+            "nll": true,
+            "median_kl": false,
+            "p99_kl": false,
+            "top1": false
+          },
+          "limits": {
+            "nll_upper_nats": 0.01,
+            "median_kl": 0.001,
+            "p99_kl": 0.01,
+            "top1_min_pct": 99.0
+          },
+          "candidate_delta_nats": -0.000269844575961381,
+          "candidate_block_half_interval": 0.008948290221378389,
+          "reference_repeat_noise_bound": 0.0,
+          "uncertainty_note": "Approximate paired 32-token block interval over this restricted corpus."
+        }
+      },
+      "raw_logits_sha256": {
+        "A1": "9414536c14a65541befb09e22d57d34585a4e0a89dd1f49ace53083cf0360792",
+        "B": "f856ed819aa84aaad477e7df43129fc18e3853f9bc11382d8f734dd9bf94b128",
+        "A2": "9414536c14a65541befb09e22d57d34585a4e0a89dd1f49ace53083cf0360792"
+      },
+      "point_report_sha256": "fcd80301e392c3f0d3452139996125991a95646e41c1ccb18ad6516e05262a1e"
+    },
+    {
+      "prefix_tokens": 130380,
+      "rows": 256,
+      "comparison": {
+        "A1_vs_B": {
+          "positions": 256,
+          "top1_agreement_pct": 98.4375,
+          "kl_mean": 0.04112561237805254,
+          "kl_median": 7.6284295731226064e-06,
+          "kl_p99": 0.4696547714932681,
+          "kl_max": 4.396690060394178,
+          "nll_delta_mean": 0.029603222336041658
+        },
+        "A1_vs_A2": {
+          "positions": 256,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "nll_delta_mean": 0.0
+        },
+        "gate": {
+          "pass": false,
+          "checks": {
+            "nll": false,
+            "median_kl": true,
+            "p99_kl": false,
+            "top1": false
+          },
+          "limits": {
+            "nll_upper_nats": 0.01,
+            "median_kl": 0.001,
+            "p99_kl": 0.01,
+            "top1_min_pct": 99.0
+          },
+          "candidate_delta_nats": 0.029603222336041658,
+          "candidate_block_half_interval": 0.05581253050577326,
+          "reference_repeat_noise_bound": 0.0,
+          "uncertainty_note": "Approximate paired 32-token block interval over this restricted corpus."
+        }
+      },
+      "raw_logits_sha256": {
+        "A1": "3c02989107e060d85fc6672fcbfdfdb04397de83cf810eb3cbc3f2ebc0256bd2",
+        "B": "12ed5471a37a849f2be0cf3427a8d09989a635ec3c480d5e6764d8a7f581ad6b",
+        "A2": "3c02989107e060d85fc6672fcbfdfdb04397de83cf810eb3cbc3f2ebc0256bd2"
+      },
+      "point_report_sha256": "7882441935c7cbd865288827b63828766de5bdc37acc0b7d7e5d623c394d04fa"
+    },
+    {
+      "prefix_tokens": 249000,
+      "rows": 256,
+      "comparison": {
+        "A1_vs_B": {
+          "positions": 256,
+          "top1_agreement_pct": 94.921875,
+          "kl_mean": 0.027820895848535997,
+          "kl_median": 0.0016694158062425066,
+          "kl_p99": 0.38426271377010185,
+          "kl_max": 1.9080641932062075,
+          "nll_delta_mean": -0.016607426779751876
+        },
+        "A1_vs_A2": {
+          "positions": 256,
+          "top1_agreement_pct": 100.0,
+          "kl_mean": 0.0,
+          "kl_median": 0.0,
+          "kl_p99": 0.0,
+          "kl_max": 0.0,
+          "nll_delta_mean": 0.0
+        },
+        "gate": {
+          "pass": false,
+          "checks": {
+            "nll": false,
+            "median_kl": false,
+            "p99_kl": false,
+            "top1": false
+          },
+          "limits": {
+            "nll_upper_nats": 0.01,
+            "median_kl": 0.001,
+            "p99_kl": 0.01,
+            "top1_min_pct": 99.0
+          },
+          "candidate_delta_nats": -0.016607426779751876,
+          "candidate_block_half_interval": 0.047731527854741336,
+          "reference_repeat_noise_bound": 0.0,
+          "uncertainty_note": "Approximate paired 32-token block interval over this restricted corpus."
+        }
+      },
+      "raw_logits_sha256": {
+        "A1": "599eb189294b75e343401c9751c90cc9baad3b0979fc5799085cd379b012d35c",
+        "B": "a2d984a71f3fb5b1a1a0b67b31819c46de8f59467a11c2a858d185dd51fd77fa",
+        "A2": "599eb189294b75e343401c9751c90cc9baad3b0979fc5799085cd379b012d35c"
+      },
+      "point_report_sha256": "eeba4c8e80a5daa2b0a52fdc33a5279c2c7b08103e43f9dee5baa1d5e2708de3"
+    }
+  ],
+  "baseline_repeat_bitwise_all_points": true,
+  "pass_all_points": false,
+  "action": "Removed this candidate from working source before the next build; never enabled it in the Daily. Source, binary and raw logits remain in local laboratory evidence.",
+  "limits": [
+    "The corpus is restricted; changed argmax tokens are not a semantic error rate.",
+    "The local predeclared numerical tolerance failed. This does not prove every changed prediction is worse.",
+    "Microbenchmarks passed on bounded inputs, but they did not establish model-level numerical equivalence.",
+    "No end-to-end performance claim or SOTA promotion is made for the rejected candidate."
+  ]
+}

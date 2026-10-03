@@ -345,3 +345,19 @@ Actual-environment HTTP checks used no IQ_MT_MIN, trace, profiler or logits dump
 
 No new cold-prefill or sustained-decode SOTA is claimed.
 [Hashes, measured rows and limitations](request-chunk-final-20261003.json).
+
+
+## 2026-10-03: main-model BF16 tensor-core experiment rejected
+
+A local adaptation of [rafatxf's PR655](https://github.com/Niko1221/Strata/pull/655)
+converted the remaining main-model BF16 products through FP16 on SM75, preserving
+the MTP draft path and reusing existing scratch. It passed the bounded kernel tests
+but failed the predeclared paired model gate at 20,001, 130,380 and 249,000 tokens
+(256 teacher-forced positions each). The off/on/off baseline repeat was bitwise
+identical at all three depths. Top-1 agreement with the candidate was respectively
+97.27%, 98.44% and 94.92%; these are agreement rates, not semantic accuracy scores.
+
+The experimental source was removed before the next build and was never enabled
+in the Daily. No end-to-end speed claim is made. This is a result for our local
+adaptation, not a verdict on the unmodified upstream PR. Configuration, thresholds,
+raw hashes and per-depth metrics are in [the rejection report](bf16-main-rejected-20261003.json).
