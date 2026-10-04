@@ -1,4 +1,32 @@
-# Validated0.1.38 SM75 source, 3 October2026
+# Current Daily package, 4 October 2026
+
+Release `v0.1.38-sm75-20261004-r1` packages the exact operational Daily engine:
+SHA256 `f2e371bf631d13b40890b8efc8b35395844b1dfd592f8c5baab0cef60729621a`.
+Its engine-source commit is `f01c0843daa32238e6194b5e54a294f5956ab555`, built with
+CUDA 12.6, MSVC 14.44, Release, SM75, native CPU experts and shared CUDA runtime.
+The executable was built and model-tested during development; publication only
+copies it and checks bytes. No publication-time CUDA build or model run occurs.
+
+The package adds the later exact-small and grouped-query prefill paths,
+incremental frontend tokenization through the matching source checkout, and
+opt-in persistent initial-prefix caching. It includes the disabled PLE diagnostic.
+Use this release's source tag or current main for the Python server and profile
+generator; the ZIP supplies the engine, notices, provenance and measured evidence,
+not model weights or CUDA/VC++ runtime installers.
+
+`release-20261004.json` records the tested engine/frontend source hashes plus
+the current publication helpers. `check_source.py` verifies this overlay and
+the hashes of all three historical manifests; those manifests are unchanged.
+Historical validation below belongs to its stated engine, not automatically to
+the new binary. See [the separate feature gates and limits](BENCHMARKS.md).
+
+Publication CPU checks verify the archive contents, engine hash, profile generation
+and preserved configurations; the two prefix-codec suites each pass 84 checks.
+The tested hardware is a modified 22 GB RTX 2080 Ti, Ryzen 7 5800X/AVX2 and 96 GiB
+RAM. Other memory sizes need their own settings and validation. Source builds
+remain available with `python tools/sm75/build.py --jobs 2` as described below.
+
+## Historical 0.1.38 SM75 source, 3 October 2026
 
 Upstream main `99f3dbd0b21d1401b3769e0c0d963913607f380b`, automatic elastic expert cache, SM75 HC/GDN FP16 and vector
 dequantization ports, serial intermediate quantization, conservative optional

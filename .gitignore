@@ -48,6 +48,7 @@ build-vision.bat
 /dist/
 /profiles/local-*.json
 /profiles/*.log
+/cache/
 /.publication/
 *.done
 /third_party/*.zip

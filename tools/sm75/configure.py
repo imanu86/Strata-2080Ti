@@ -17,6 +17,12 @@ def main():
     ap.add_argument('--context', type=int, default=262144)
     ap.add_argument('--kv-resident', type=int, default=32768)
     ap.add_argument('--reserve-mib', type=int, default=1393)
+    ap.add_argument('--prefill-exact-small', action=argparse.BooleanOptionalAction, default=True,
+                    help='Use the validated smaller expert allocation for short prefill batches (default on)')
+    ap.add_argument('--qsa-prefill-multi', action=argparse.BooleanOptionalAction, default=True,
+                    help='Use the validated grouped-query SM75 prefill path (default on)')
+    ap.add_argument('--prompt-cache-file', type=Path,
+                    help='Optional local file for the fixed initial text prefix; omit to keep persistence off')
     ap.add_argument('--port', type=int, default=8100)
     ap.add_argument('--out', type=Path, default=ROOT/'profiles/local-sm75.json')
     a = ap.parse_args()
@@ -47,7 +53,16 @@ def main():
         '--prompt-cache-tail', '--prompt-cache-every', '16384'],
         'cwd': str(ROOT), 'tokenizer': str(tokenizer), 'model_name': 'qwen3.8-flash-next-iq3_xxs',
         'log': str(ROOT/'logs/strata-sm75.log'), 'port': a.port, 'host': '127.0.0.1',
-        'env': {'STRATA_WATCHDOG_S': '240', 'STRATA_PARALLEL_INTERMEDIATE_QUANT': '0'}}
+        'env': {'STRATA_WATCHDOG_S': '240', 'STRATA_PARALLEL_INTERMEDIATE_QUANT': '0',
+                'STRATA_PREFILL_EXACT_SMALL': '1' if a.prefill_exact_small else '0',
+                'STRATA_QSA_PREFILL_MULTI': '1' if a.qsa_prefill_multi else '0'}}
+    if a.prompt_cache_file is not None:
+        cache = a.prompt_cache_file.resolve()
+        if cache.exists() and not cache.is_file():
+            ap.error('Prompt cache destination must be a file path')
+        if cache == out:
+            ap.error('Prompt cache destination must differ from the config file')
+        cfg['args'].extend(['--prompt-cache-file', str(cache)])
     (ROOT/'logs').mkdir(exist_ok=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(cfg, indent=2)+'\n', encoding='utf-8')

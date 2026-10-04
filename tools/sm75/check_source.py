@@ -7,12 +7,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main():
-    manifest = json.loads((ROOT/'docs/sm75/source-manifest.json').read_text(encoding='utf-8'))
+    current = ROOT/'docs/sm75/release-20261004.json'
+    if not current.is_file():
+        current = ROOT/'docs/sm75/source-manifest.json'
+    manifest = json.loads(current.read_text(encoding='utf-8'))
+    for name, expected in manifest.get('historical_manifests', {}).items():
+        if hashlib.sha256((ROOT/'docs/sm75'/name).read_bytes()).hexdigest() != expected:
+            raise SystemExit('Historical source manifest changed: '+name)
     if 'previous_manifest_sha256' in manifest:
         previous = ROOT/'docs/sm75'/manifest['previous_manifest']
         if hashlib.sha256(previous.read_bytes()).hexdigest() != manifest['previous_manifest_sha256']:
             raise SystemExit('Historical source manifest changed')
-    overrides = set(manifest['publication_overrides'])
+    overrides = set(manifest.get('publication_overrides', []))
     bad, checked = [], 0
     for name, expected in manifest['files'].items():
         if name in overrides:

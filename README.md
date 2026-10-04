@@ -45,10 +45,11 @@ Its earlier automatic-profile answer failure is preserved; the completed repeat
 with matched placement now agrees bitwise with the old Daily and answers correctly.
 See [prefix validation and deployment](docs/sm75/BENCHMARKS.md#persistent-system-prefix-4-october-2026)
 and the [earlier diagnostic results](docs/sm75/BENCHMARKS.md#decode-ple-timing-and-pcie-screening-4-october-2026).
-The latest published download,
-[`v0.1.38-sm75-20261003-r1`](https://github.com/imanu86/Strata-2080Ti/releases/tag/v0.1.38-sm75-20261003-r1),
-is the earlier `fc9a767` snapshot; it does not contain the later QSA, diagnostic
-or persistent-prefix changes. [Build main](docs/sm75/BUILD.md) for those changes. Full binary hashes,
+The current download,
+[`v0.1.38-sm75-20261004-r1`](https://github.com/imanu86/Strata-2080Ti/releases/tag/v0.1.38-sm75-20261004-r1),
+contains that exact tested Daily executable, including QSA prefill, the optional
+diagnostic and persistent-prefix support. The previous October 3 release remains
+available for rollback. [Build instructions and provenance](docs/sm75/BUILD.md). Full binary hashes,
 the partial extended teacher check and bounded 250k recall results are in
 [the benchmark record](docs/sm75/BENCHMARKS.md#actual-daily-full-history-recall-and-arithmetic).
 
@@ -119,11 +120,17 @@ numerical checks, cache variation and model quality coverage.
      --pack D:/models/iq3_xxs `
      --native D:/models/model-00001-of-00002.gguf `
      --ple-gguf D:/models/model-00002-of-00002.gguf `
-     --mtp D:/models/mtp/rt
+     --mtp D:/models/mtp/rt `
+     --prompt-cache-file ./cache/system-prefix.bin
    ```
 
    The examples are placeholders. This writes ignored `profiles/local-sm75.json`.
-   Use `--help` to adjust capacity, resident KV, reserve and port.
+   Use `--help` to adjust capacity, resident KV, reserve and port. The current
+   profile enables exact-small and grouped-query prefill; use
+   `--no-prefill-exact-small` or `--no-qsa-prefill-multi` to disable either.
+   Omit `--prompt-cache-file` to disable disk persistence. These settings target
+   the new October 4 executable. The default 262k context / 32k resident KV and
+   1393 MiB reserve reproduce the tested 22 GB profile; tune them for your PC.
    Model packs are supplied separately; [upstream](https://github.com/Niko1221/Strata)
    explains model/pack selection.
 
