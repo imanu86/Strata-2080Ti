@@ -650,3 +650,59 @@ config while the engine is stopped. To restore the previous binary deployment,
 restore the executable, config and sources from that backup according to
 `recovery.json`. Post-install checks confirm the server remains off and port
 8100 is free. This is a local Daily update, not a new published binary release.
+
+### Larger persistent prefixes and the byte limit (4 October 2026)
+
+The same installed engine and Daily configuration were tested with synthetic
+ledgers containing three verified facts near the start, middle and end. The
+prefix lengths below are exact; each request adds 48 fresh tokens. Every arm
+starts a separate engine process. Hardware, native first-token metric, startup
+exclusion and Windows filesystem-cache caveats are the same as above.
+
+| Prefix tokens | Run | Recompute: first token (s) | Create file: first token (s) | Restore: first token (s) | File (MiB) |
+|---:|---|---:|---:|---:|---:|
+| 10000 | matrix | 10.656 | 14.656 | 1.375 | 258.25 |
+| 20000 | earlier standalone | 18.765 | 18.375 | 1.907 | 403.89 |
+| 20000 | matrix | 16.781 | 18.046 | 1.547 | 403.89 |
+| 27000 | repeat 1 | 22.688 | 23.672 | 2.281 | 505.84 |
+| 27000 | repeat 2 | 25.218 | 23.812 | 1.704 | 505.84 |
+
+All completed arms return the correct three facts. These auto/elastic runs
+are factual checks, not bitwise parity or broad model-quality evaluations.
+At 27000 tokens, both fresh-process restores actually reuse all 27000 tokens;
+the paired first-token reductions are 89.95% and 93.24%. Files are 530,414,864
+bytes. Read/validation is 716.8 / 599.0 ms and upload is 73.6 / 63.1 ms.
+This is not a cold-SSD test or a change in decode speed.
+
+Both limits apply: **32768 tokens and 512 MiB of serialized payload**. For this
+model and INT8 KV geometry the byte cap is tighter. **27000 is the largest
+measured successful prefix**, not a universal limit for all models or KV modes.
+A 28000-token image is estimated at about 520.4 MiB and was not run.
+
+The original ten-trial plan (two each at 10/20/30/40/50k) was stopped at the
+user's request to focus on supported sizes. It did not complete ten trials:
+
+- At 30000, no file was saved (size/geometry/RAM admission log; the estimated
+  image is about 549.5 MiB). The third arm recomputed the prompt in 23.906 s,
+  versus 23.984 s cold. Both have zero prefix reuse; this is a fallback,
+  not a cache speedup.
+- At 40000, the engine reported an incomplete windowed MTP prefix and saved
+  no file; this also exceeds the token cap. The fallback took 32.797 s,
+  versus 33.422 s cold, with zero prefix reuse.
+- At 50000, cold and create arms finished (40.375 / 40.797 s, correct facts,
+  no file). The restore attempt was interrupted when the scope changed;
+  it has no completed timing or correctness result.
+
+Excluded attempts remain recorded: the initial runner's 1024 MiB READY floor
+rejected 10k restore and 20k cold before generation (720 / 600 MiB free).
+The floor was changed to 512 MiB, matching the engine's existing elastic
+target of about 500 MiB; engine settings were unchanged. One subsequent 20k
+startup timed out after 180 s with slow expert loading, before generation;
+its cause is unresolved. Only the completed repeats appear in the table.
+No competing application was stopped and no artificial saturation was added.
+
+[Measured arms, exclusions and evidence hashes](prefix-cache-long-20261004.json)
+and [synthetic messages and token fixtures](prefix-cache-long-fixtures-20261004.json)
+are provided separately from the earlier controlled parity gate. All test
+engines have exited. The production prefix file was not populated by these
+tests; the Daily executable and configuration hashes are unchanged.
