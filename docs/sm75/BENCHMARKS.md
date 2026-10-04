@@ -836,3 +836,16 @@ online pruned model was not tested. This is a short-context measurement, not a
 Sources and validation are pinned in `neuron-probe100-20261004.json`; complete
 synthetic candidates, curves, costs, exclusions and limits are in the research
 repository's `20261004_neuron_cache/probe100-measurements.json`.
+
+
+## Physical GPU/CPU expert blocks, 4 October 2026
+
+A separate physical block probe preserves every weight and neuron contribution.
+On 120 short-context, single-token cases, partition parity on each backend has
+maximum L2 2.11e-7 (CPU) / 9.19e-8 (GPU). Mixed-backend output is not bitwise
+identical to the all-GPU reference. Nine interleaved rounds per case compare
+30% of ten experts on GPU with three complete GPU experts: mean case-median
+latency is 859.35 versus 844.55 microseconds, with substantial variation and
+no reproducible speedup. Packing and weight upload are excluded; no online
+cache policy or end-to-end throughput was measured. Daily and release unchanged.
+[Method, all controls, raw evidence and reproduction](HYBRID_BLOCKS.md).

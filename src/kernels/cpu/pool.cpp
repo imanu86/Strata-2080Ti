@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <stdexcept>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -537,7 +538,7 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
             const int e = q.e, t = q.t;
             if (nfmt_ != nullptr) {
                 if (nfmt_->d_type == 42)
-                    act_quant_any(split_multi_[(size_t) e].ff[t], FF, split_multi_[(size_t) e].a2[t]);
+                    act_quant_any(split_multi_[(size_t) e].ff[t], (int) nfmt_->n_ff, split_multi_[(size_t) e].a2[t]);
                 else
                     native_quant_h(*nfmt_, split_multi_[(size_t) e].ff[t], split_multi_[(size_t) e].hq[t]);
             } else {
@@ -545,7 +546,7 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
             }
         } else if (mode_ >= 5) {
             // plan v0.3 P6: native layers, 5 = gate/up rows, 6 = down rows
-            const int per = mode_ == 5 ? FF : H;
+            const int per = mode_ == 5 ? (int) nfmt_->n_ff : H;
             const int64_t g0 = mrows_ * (int64_t) i / mtasks_, g1 = mrows_ * (int64_t) (i + 1) / mtasks_;
             for (int64_t r = g0; r < g1;) {
                 const int e = (int) (r / per), r0 = (int) (r % per);
@@ -667,7 +668,7 @@ void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {
     else for (const QuantTask& q : quant_tasks_) {
         auto& b = split_multi_[(size_t) q.e];
         if (!nfmt_) act_quant_q8_1(b.ff[q.t], FF, b.a2[q.t]);
-        else if (nfmt_->d_type == 42) act_quant_any(b.ff[q.t], FF, b.a2[q.t]);
+        else if (nfmt_->d_type == 42) act_quant_any(b.ff[q.t], (int) nfmt_->n_ff, b.a2[q.t]);
         else native_quant_h(*nfmt_, b.ff[q.t], b.hq[q.t]);
     }
     const auto t2 = std::chrono::steady_clock::now();
@@ -684,6 +685,9 @@ void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {
 
 void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n) {
     if (n <= 0) return;
+    // Partial native experts keep complete quantization blocks and fit the existing scratch.
+    if (f.n_embd != H || f.n_ff <= 0 || f.n_ff > FF || f.n_ff % 64 != 0)
+        throw std::invalid_argument("native pool: expected H=2560 and 1..640 FF in blocks of 64");
     const auto t0 = std::chrono::steady_clock::now();
     // more distinct experts than buffers: run them in batches
     for (int b0 = 0; b0 < n; b0 += kMaxSplitMulti) {
@@ -694,7 +698,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         nfmt_ = &f;
         const int threads = n_ + (host_works_ ? 1 : 0);
         mtasks_ = 3 * threads;
-        mrows_ = (int64_t) nb * FF;
+        mrows_ = (int64_t) nb * f.n_ff;
         const auto a = std::chrono::steady_clock::now();
         run_phase(5, mtasks_);
         const auto b = std::chrono::steady_clock::now();
@@ -706,7 +710,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
     else for (const QuantTask& q : quant_tasks_) {
         auto& b = split_multi_[(size_t) q.e];
         if (!nfmt_) act_quant_q8_1(b.ff[q.t], FF, b.a2[q.t]);
-        else if (nfmt_->d_type == 42) act_quant_any(b.ff[q.t], FF, b.a2[q.t]);
+        else if (nfmt_->d_type == 42) act_quant_any(b.ff[q.t], (int) nfmt_->n_ff, b.a2[q.t]);
         else native_quant_h(*nfmt_, b.ff[q.t], b.hq[q.t]);
     }
         const auto c = std::chrono::steady_clock::now();

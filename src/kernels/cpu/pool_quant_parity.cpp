@@ -13,7 +13,9 @@
 namespace c = strata::kernels::cpu;
 struct Act { alignas(64) uint8_t data[c::kNativeActBytes]; };
 int main(int argc, char** argv) {
-    if (argc != 2) { std::fprintf(stderr, "usage: pool_quant_parity shard1.gguf\n"); return 2; }
+    if (argc != 2 && argc != 3) { std::fprintf(stderr, "usage: pool_quant_parity shard1.gguf [ff=640]\n"); return 2; }
+    const int ff = argc == 3 ? std::atoi(argv[2]) : c::FF;
+    if (ff <= 0 || ff > c::FF || ff % 64) return 2;
     try {
         strata::GgufFile gguf(argv[1]);
         int cases = 0;
@@ -25,15 +27,19 @@ int main(int argc, char** argv) {
                     if (t.name == "blk." + std::to_string(layer) + ".ffn_" + role[r] + "_exps.weight") tensor[r] = &t;
             if (!tensor[0] || !tensor[1] || !tensor[2]) return 2;
             c::NativeFmt f; std::string err;
-            if (!c::native_fmt(tensor[0]->type, tensor[2]->type, c::H, c::FF, f, err)) {
+            if (!c::native_fmt(tensor[0]->type, tensor[2]->type, c::H, ff, f, err)) {
                 std::fprintf(stderr, "%s\n", err.c_str()); return 2;
             }
+            c::NativeFmt original;
+            if (!c::native_fmt(tensor[0]->type, tensor[2]->type, c::H, c::FF, original, err)) return 2;
             std::vector<uint8_t> blobs(8 * f.bytes);
             for (int e = 0; e < 8; ++e) {
                 auto* p = blobs.data() + e * f.bytes;
-                std::memcpy(p, gguf.tensor_data(*tensor[0]) + e*f.up_off, f.up_off);
-                std::memcpy(p+f.up_off, gguf.tensor_data(*tensor[1]) + e*f.up_off, f.up_off);
-                std::memcpy(p+f.down_off, gguf.tensor_data(*tensor[2]) + e*(f.bytes-f.down_off), f.bytes-f.down_off);
+                std::memcpy(p, gguf.tensor_data(*tensor[0]) + e*original.up_off, f.up_off);
+                std::memcpy(p+f.up_off, gguf.tensor_data(*tensor[1]) + e*original.up_off, f.up_off);
+                for (int row = 0; row < c::H; ++row)
+                    std::memcpy(p+f.down_off+row*f.d_row,
+                                gguf.tensor_data(*tensor[2]) + e*(original.bytes-original.down_off)+row*original.d_row, f.d_row);
             }
             std::printf("layer %d native gu=%d down=%d, %zu bytes/expert\n", layer, f.gu_type, f.d_type, f.bytes);
             for (bool host : {false, true}) {

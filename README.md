@@ -65,6 +65,12 @@ constructs temporary neuron masks from ten real MTP continuations of ten tokens
 and measures their lifetime with adaptive rebuilding in offline GPU replay.
 It remains a disabled research tool; the released engine and Daily are unchanged.
 
+The [physical GPU/CPU block probe](docs/sm75/HYBRID_BLOCKS.md) preserves all
+neurons while placing 30% of each expert on GPU. Same-backend partition checks
+pass, but matched microbenchmarks show no reproducible gain over three full GPU
+experts at equal active weight bytes. It remains research; Daily and release
+ZIP are unchanged.
+
 ## 0.1.38 baseline validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server

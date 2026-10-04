@@ -13,6 +13,7 @@ def main():
     args = parser.parse_args()
     current = (ROOT / args.manifest) if args.manifest else next(
         ROOT / 'docs/sm75' / name for name in (
+            'hybrid-blocks-20261004.json',
             'neuron-probe100-20261004.json', 'neuron-trace-20261004.json',
             'release-20261004.json', 'source-manifest.json')
         if (ROOT / 'docs/sm75' / name).is_file())

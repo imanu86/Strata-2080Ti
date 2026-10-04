@@ -198,3 +198,13 @@ The public research analyzer builds unions from the 100 candidate positions and
 evaluates target replay errors. Adaptive refresh decisions use only errors at
 already-processed target positions. Reference inputs remain from the full model:
 the local replay does not simulate accumulated state error of a pruned model.
+
+
+## Optional physical GPU/CPU block experiment
+
+The `hybrid_expert_probe` target is included only with
+`STRATA_BUILD_NEURON_REPLAY=ON`. The accompanying pool test is enabled with
+`STRATA_PARITY_POOL_QUANT=ON`. See [HYBRID_BLOCKS.md](HYBRID_BLOCKS.md) for the
+input converter, explicit commands, measured outcomes and limitations. This
+probe performs real complementary CPU/GPU computation; it does not enable an
+online partial-expert cache or replace the Daily.
