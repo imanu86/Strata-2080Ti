@@ -706,3 +706,63 @@ and [synthetic messages and token fixtures](prefix-cache-long-fixtures-20261004.
 are provided separately from the earlier controlled parity gate. All test
 engines have exited. The production prefix file was not populated by these
 tests; the Daily executable and configuration hashes are unchanged.
+
+## Neuron cache pilot, 4 October 2026
+
+A default-off diagnostic now records actual expert inputs, IDs, routing weights,
+outputs and CPU/VRAM/PCIe placement. Its offline GPU replay tests neuron masks;
+it does not prune the running model. Three synthetic prompts (86,85,102 input
+tokens), each capped at 64 generated tokens, supply 192 accepted positions on
+layers 0,1,35,36: 768 routed sums and 7680 expert invocations. This is short
+context despite the configured 262144-cell capacity and 32768 resident cells.
+
+Hardware: modified RTX2080Ti 22GB, Ryzen5800X/AVX2,96GiB RAM, Windows,
+CUDA12.6/MSVC14.44, SM75 Release. Controls: spec4/MTPmax4, workers7,
+PCIe0.25, IQ_MT_MIN1, suffix/adaptation/elasticity off. The requested cache3800
+sets a max-blob budget, yielding exactly5080 variable-size slots/8442MiB with
+the pinned profile. These are controlled diagnostic settings, not Daily auto.
+
+Daily executable vs diagnostic-off, then diagnostic-off vs diagnostic-on:
+all64 output IDs and all248320 finite first-logit float32 values are bitwise
+equal on the code prompt. GPU replay reproduces every captured VRAM/PCIe
+expert output with zero L2 difference. CPU replay-to-GPU differences are
+reported separately. The alternate down projection's routed-sum numerical
+floor is below4.9e-8 relative L2. Grouped v1/v2 output and Q8_1 checks pass for
+four real native-format pairs in each of the three replays. Six executable
+I/O cases pass, including overlapping rejected draft tails and overwrite refusal;
+the Python parser/analyzer also rejects invalid and truncated records.
+
+For each current activation, retain its largest-|h| neurons at their original
+positions, and retain whole touched down-quantization blocks:
+
+| Neurons retained | Hypothetical weight-byte saving | Mean routed-sum relative L2 | Per-prompt p99 relative L2 |
+|---|---:|---:|---:|
+|75% (480/640)|15.22%|2.06–2.20%|3.98–4.92%|
+|50% (320/640)|30.43%|7.69–8.38%|14.63–16.07%|
+|25% (160/640)|45.65%|19.51–21.44%|33.68–35.91%|
+
+Errors compare against full GPU replay on the same input, using the FP64 sum
+of the ten routing-weighted experts. Shared expert and residual are excluded.
+They are not percentages of incorrect answers. Savings count selected gate/up
+rows and original down blocks, normalized by total full bytes across these
+invocations; selection, packing, alignment and metadata costs are excluded.
+The replay still reads full blobs, so no bandwidth or speed gain is measured.
+
+Reusing the previous invocation's top480 mask gives21.76–22.78% mean local
+error, with p9954.94–61.11%, even though27–28% of calls fall back to full width
+because no history exists. This history uses the *complete* previous h:
+refreshing it is not free in a genuinely reduced execution. Its Q8_1 block
+scales may also change. Top-|h| optimizes retained hidden energy, not necessarily
+the error after the down matrix; neither experiment tests final answer quality.
+
+As an optimistic packing calculation, unions of top480 masks over eight accepted
+positions retain88.98–89.56% of the distinct experts' bytes per layer/window on
+average; sixteen positions retain90.27–90.48%. These are observed accepted-path
+unions, not predicted branches or a tested100-candidate speculation tree.
+
+The simple previous-mask policy is not suitable for promotion. Draft-conditioned
+prediction, output-aware selection and an exact fallback remain research tasks.
+Daily, launcher and public ZIP are unchanged; no server or test engine remains.
+[Diagnostic source manifest](neuron-trace-20261004.json) and
+[measurements, analyzer and fixtures](https://github.com/imanu86/moe-aggressive-commit/tree/research/ds4-iq1-subbit-tier-planner/docs/porto/strata_adattivo/corse_2080ti/20261004_neuron_cache)
+preserve the evidence independently of earlier release validation.

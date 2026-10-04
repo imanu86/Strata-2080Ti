@@ -26,6 +26,42 @@ The tested hardware is a modified 22 GB RTX 2080 Ti, Ryzen 7 5800X/AVX2 and 96 G
 RAM. Other memory sizes need their own settings and validation. Source builds
 remain available with `python tools/sm75/build.py --jobs 2` as described below.
 
+## Optional neuron trace research overlay
+
+Later main adds `STRATA_NEURON_TRACE_FILE`, disabled unless explicitly set, and
+the separate `neuron_trace_replay` executable. The published ZIP and operational
+Daily remain the earlier executable above. `neuron-trace-20261004.json` records
+the diagnostic build's exact sources and its narrow validation; it preserves
+the release manifest and all three earlier manifests by hash. The default
+`python tools/sm75/check_source.py` verifies this current research overlay.
+`--manifest docs/sm75/release-20261004.json` explicitly checks the release source
+instead and correctly reports mismatches on the later research sources.
+
+In an already configured CUDA/native-expert build directory:
+
+```powershell
+cmake -S . -B build-sm75 -DSTRATA_BUILD_NEURON_REPLAY=ON
+cmake --build build-sm75 --parallel 2 --target strata neuron_trace_replay
+```
+
+Set `STRATA_NEURON_TRACE_FILE` to a new file before starting the diagnostic
+engine. It records at most 64 committed decode windows on layers 0,1,35,36,
+with input vectors, expert IDs, true routing weights, expert outputs and tiers.
+Only one visible GPU and the 2560/640/512/top-10 geometry are supported.
+The extra graph copies and file writes invalidate timing comparisons.
+After the engine exits, replay with:
+
+```powershell
+build-sm75/neuron_trace_replay trace.bin model-shard.gguf replay.bin
+```
+
+The replay selects accepted positions, reconstructs GPU hidden activations,
+and compares full, current-top-|h| and previous-full-h masks. It always reads
+full blobs; it does not implement a compact online expert. The public research
+[analyzer and synthetic fixtures](https://github.com/imanu86/moe-aggressive-commit/tree/research/ds4-iq1-subbit-tier-planner/docs/porto/strata_adattivo/corse_2080ti/20261004_neuron_cache)
+provide the matched offline calculations. Source and model checks are described
+in [the pilot record](BENCHMARKS.md#neuron-cache-pilot-4-october-2026).
+
 ## Historical 0.1.38 SM75 source, 3 October 2026
 
 Upstream main `99f3dbd0b21d1401b3769e0c0d963913607f380b`, automatic elastic expert cache, SM75 HC/GDN FP16 and vector

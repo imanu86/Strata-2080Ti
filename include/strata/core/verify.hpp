@@ -38,6 +38,7 @@
 namespace strata::core {
 
 class NativeHead;
+class NeuronTrace;
 
 /// The CPU pool for a window: x_f (n_tok, n_embd), ids (n_tok, k) -> out (n_tok * k, n_embd), hit rows zeroed.
 using PoolMultiFn = void (*)(void* user, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k, float* out,
@@ -173,6 +174,7 @@ private:
     const int32_t* hist_d_ = nullptr;   ///< penalty-history row (set_history); null = no penalties apply
     int hist_len_ = 0;
     bool head_sampling_ = true;          ///< set_head_sampling
+    NeuronTrace* neuron_trace_ = nullptr; ///< optional pinned snapshots, owned until all graphs are destroyed
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
     std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
     bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)

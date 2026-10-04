@@ -53,6 +53,13 @@ available for rollback. [Build instructions and provenance](docs/sm75/BUILD.md).
 the partial extended teacher check and bounded 250k recall results are in
 [the benchmark record](docs/sm75/BENCHMARKS.md#actual-daily-full-history-recall-and-arithmetic).
 
+Main also includes a **disabled neuron-trace diagnostic and offline replay tool**.
+The October 4 pilot covers 192 accepted positions on four layers; naive reuse of
+the previous neuron mask introduces substantial local error. It is research,
+not an installed pruning optimization or a speed improvement. The Daily and
+download above remain unchanged. [Measured results and limits](docs/sm75/BENCHMARKS.md#neuron-cache-pilot-4-october-2026)
+and [diagnostic build instructions](docs/sm75/BUILD.md#optional-neuron-trace-research-overlay).
+
 ## 0.1.38 baseline validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server

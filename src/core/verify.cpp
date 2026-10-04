@@ -5,6 +5,7 @@
 #endif
 
 #include "strata/core/native_head.hpp"
+#include "strata/core/neuron_trace.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/peer_experts.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -185,6 +186,7 @@ Verifier::~Verifier() {
                      h_flagA_, h_plan_, h_flagB_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
+    delete neuron_trace_;   // no graph or stream can still write its pinned snapshots
 }
 
 bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
@@ -370,6 +372,22 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                              cudaMemcpyHostToDevice) == cudaSuccess;
         }
         if (!ok2) { cudaGetLastError(); device_plan_ = false; }
+    }
+    if (const char* path = std::getenv("STRATA_NEURON_TRACE_FILE"); path && path[0]) {
+        int devices = 0;
+        if (cudaGetDeviceCount(&devices) != cudaSuccess || devices != 1 || peer_portable() ||
+            lb_ != 0 || le_ != g.n_layers || next_ != nullptr || g.n_layers != 48 ||
+            g.n_embd != NeuronTrace::H || g.n_ff != NeuronTrace::FF || ss.k != NeuronTrace::K || g.n_expert != 512) {
+            err = "neuron trace: requires one visible CUDA GPU, no peer/layer split, and the 2560/640/512/top-10 geometry";
+            return false;
+        }
+        try {
+            neuron_trace_ = new NeuronTrace;
+            if (!neuron_trace_->init(path, max_t, err)) return false;
+        } catch (const std::exception& e) {
+            err = "neuron trace: initialization failed: " + std::string(e.what());
+            return false;
+        }
     }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers\n", max_t,
                  (double) count.used / 1048576.0);
@@ -792,6 +810,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 copy_from_mapped(parts_ + (size_t) tb * K * N, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K * N, cs);
         }
         moe_hit_add(parts_ + (size_t) tb * K * N, hit_out, p_dst, p_counts + 1, cap, N, cs);
+        if (neuron_trace_ && !neuron_trace_->capture(l, grp, tb, n, mixed_, ids_, w_, parts_, pl, cs, err)) return false;
         if (dec_batch && n > 1 && native_moe_combine_enabled()) {   // one launch for the window's rows
             try {
                 native_moe_combine_multi(parts_ + (size_t) tb * K * N, w_ + tb * K, shared_ + tb * N, bo_ + tb * N, N, K, n, cs);
@@ -1029,6 +1048,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
     if (pos0 + T > ss.qsa_states[ss.qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
+    if (neuron_trace_) neuron_trace_->begin_run();
     if (!capture(T, err) || !capture_commit(err)) return false;
     VDBG("captured; staging\n");
     const Clock::time_point t0 = Clock::now();
@@ -1206,6 +1226,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         }
     }
     VDBG("window done\n");
+    if (neuron_trace_) neuron_trace_->complete_run(T, tokens, pos0, (uint64_t) windows + 1, G, head_sampling_);
     ++windows;
     progress_at("decode");
     progress_beat();
@@ -1353,6 +1374,10 @@ bool Verifier::commit(int n_keep, std::string& err) {
             ss_->ple_prev[1] = last_tokens_[t];
         }
     ms_commit += ms_since(t0);
+    if (neuron_trace_ && neuron_trace_->pending()) {
+        // Diagnostics only: a record names successfully committed inputs, including an async commit's completion.
+        if (!wait_commit(err) || !neuron_trace_->committed(n_keep, err)) return false;
+    }
     return next_ == nullptr || next_->commit(n_keep, err);
 }
 

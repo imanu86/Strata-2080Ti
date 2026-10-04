@@ -1,4 +1,5 @@
 """Check tested source bytes without CUDA, downloads or model loading."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -7,9 +8,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def main():
-    current = ROOT/'docs/sm75/release-20261004.json'
-    if not current.is_file():
-        current = ROOT/'docs/sm75/source-manifest.json'
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--manifest', type=Path, help='Explicit manifest, relative to the repository root')
+    args = parser.parse_args()
+    current = (ROOT / args.manifest) if args.manifest else next(
+        ROOT / 'docs/sm75' / name for name in (
+            'neuron-trace-20261004.json', 'release-20261004.json', 'source-manifest.json')
+        if (ROOT / 'docs/sm75' / name).is_file())
     manifest = json.loads(current.read_text(encoding='utf-8'))
     for name, expected in manifest.get('historical_manifests', {}).items():
         if hashlib.sha256((ROOT/'docs/sm75'/name).read_bytes()).hexdigest() != expected:
