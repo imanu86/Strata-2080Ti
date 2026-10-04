@@ -1913,7 +1913,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         for (int q = 0; q < nd; ++q) {
             const int64_t i0 = distinct[q];
             const int32_t e = ids[i0];
-            int kd = -1;
+            int kd = e < 0 ? 3 : -1;               // 3: dropped by the routed-keep probe, never computed
             unsigned long long ptr = 0;
             if (e >= 0 && e < d.n_expert) {
                 const int32_t slot = d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e];
@@ -1976,7 +1976,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     } else {
         for (int64_t i = 0; i < n; ++i) {
             const int32_t e = ids[i];
-            kind[i] = (e >= 0 && e < d.n_expert && d.host_res != nullptr &&
+            kind[i] = e < 0 ? 3 : (e >= 0 && e < d.n_expert && d.host_res != nullptr &&
                        d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] >= 0) ? 0
                     : (e >= 0 && e < d.n_expert && d.peer != nullptr && d.peer->has(d.layers, e)) ? 2 : -1;
         }
@@ -2024,6 +2024,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             const int64_t i = t * k + j;
             const int64_t e = ids[i];
             float* row = out + (size_t) i * H;
+            if (kind[i] == 3) {             // dropped: weight 0 in the combine, the row only has to be finite
+                std::memset(row, 0, (size_t) H * sizeof(float));
+                continue;
+            }
             if (e < 0 || e >= d.n_expert) {
                 d.failed = true;
                 d.fail = "a routed expert id is out of range";

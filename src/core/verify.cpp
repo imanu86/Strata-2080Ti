@@ -292,13 +292,28 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sink_.ctx = this;
     }
 
-    if (const char* v = std::getenv("STRATA_ROUTED_KEEP")) {
-        routed_keep_ = std::atoi(v);
-        if (routed_keep_ < 1 || routed_keep_ > 9 || K != 10) { err = "STRATA_ROUTED_KEEP needs 1..9 and top-10 routing"; return false; }
-        const char* r = std::getenv("STRATA_ROUTED_KEEP_RENORM");
-        routed_keep_renorm_ = r && r[0] == '1';
-        std::fprintf(stderr, "ROUTED_KEEP keep=%d renorm=%d (lab quality probe: experts still computed)\n",
-                     routed_keep_, routed_keep_renorm_ ? 1 : 0);
+    {
+        const char* kv = std::getenv("STRATA_ROUTED_KEEP");
+        const char* wv = std::getenv("STRATA_ROUTED_MIN_W");
+        if (kv != nullptr || wv != nullptr) {
+            routed_keep_ = kv != nullptr ? std::atoi(kv) : 10;
+            routed_min_w_ = wv != nullptr ? (float) std::atof(wv) : 0.0f;
+            const char* mk = std::getenv("STRATA_ROUTED_MIN_KEEP");
+            routed_min_keep_ = mk != nullptr ? std::atoi(mk) : (wv != nullptr ? 4 : 10);
+            if (routed_keep_ < 1 || routed_keep_ > 10 || routed_min_keep_ < 1 || routed_min_keep_ > 10 ||
+                !(routed_min_w_ >= 0.0f && routed_min_w_ < 1.0f) || K != 10 ||
+                (routed_keep_ == 10 && routed_min_w_ == 0.0f)) {
+                err = "STRATA_ROUTED_KEEP 1..10, STRATA_ROUTED_MIN_W [0,1), STRATA_ROUTED_MIN_KEEP 1..10, top-10";
+                return false;
+            }
+            const char* r = std::getenv("STRATA_ROUTED_KEEP_RENORM");
+            routed_keep_renorm_ = r && r[0] == '1';
+            const char* s = std::getenv("STRATA_ROUTED_KEEP_SKIP");
+            routed_keep_skip_ = s && s[0] == '1';
+            std::fprintf(stderr, "ROUTED_KEEP keep=%d min_w=%.4f min_keep=%d renorm=%d skip=%d (lab probe)\n",
+                         routed_keep_, routed_min_w_, routed_min_keep_, routed_keep_renorm_ ? 1 : 0,
+                         routed_keep_skip_ ? 1 : 0);
+        }
     }
     closed_available_ = std::getenv("STRATA_CLOSED_ROUTING") != nullptr;
     if (closed_available_ && (g.n_expert != 512 || g.n_layers != 48 || lb_ != 0 || le_ != 48 ||
@@ -732,7 +747,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             } catch (const std::exception& e) { err = e.what(); return false; }
         }
         if (routed_keep_ > 0) {
-            try { routed_rank_keep(w_ + tb * K, n, routed_keep_, routed_keep_renorm_, cs); }
+            try { routed_rank_keep(w_ + tb * K, n, routed_keep_, routed_keep_renorm_, routed_min_w_, routed_min_keep_, cs); }
             catch (const std::exception& e) { err = e.what(); return false; }
         }
         if (device_plan_)  // E-6: every routed expert resident: this group's plan without the host
@@ -1162,6 +1177,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         progress_at("verify window: the CPU experts of layer", l);
         if (pool != nullptr) {
             ++closed_pool_calls;
+            if (routed_keep_skip_) {   // lab: zero-weight entries leave the plan (no CPU job, no fetch, no group)
+                int32_t* id = h_ids_ + (size_t) tb * ss.k;
+                const volatile float* wr = h_w_ + (size_t) tb * ss.k;
+                for (int64_t i = 0; i < (int64_t) n * ss.k; ++i)
+                    if (wr[i] == 0.0f) id[i] = -1;
+            }
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
         }

@@ -111,7 +111,7 @@ __global__ void closed_drop(int32_t* ids, float* weights, const int32_t* res,
     int fallback = 0; while (fallback < 512 && res[fallback] < 0) ++fallback;
     if (fallback < 512) { ids[i] = fallback; weights[i] = 0.0f; }
 }
-__global__ void rank_keep(float* weights, int n, int keep, int renorm) {
+__global__ void rank_keep(float* weights, int n, int keep, int renorm, float min_w, int min_keep) {
     const int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t >= n) return;
     float* row = weights + (size_t) t * 10;
@@ -120,7 +120,7 @@ __global__ void rank_keep(float* weights, int n, int keep, int renorm) {
     for (int k = 0; k < 10; ++k) {
         int rank = 0;
         for (int j = 0; j < 10; ++j) rank += in[j] > in[k] || (in[j] == in[k] && j < k);
-        row[k] = rank < keep ? in[k] : 0.0f;
+        row[k] = rank < keep && (rank < min_keep || in[k] >= min_w) ? in[k] : 0.0f;
         kept += row[k];
     }
     if (renorm && kept > 0.0f)
@@ -154,11 +154,12 @@ void closed_router_apply(float* logits, int32_t* ids, float* weights, int32_t* o
     closed_drop<<<1,128,0,cs>>>(ids,weights,resident,mode,n_tok*10);
     e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
 }
-void routed_rank_keep(float* weights, int n_tok, int keep, bool renorm, void* stream) {
-    if (!weights || !stream || n_tok < 1 || keep < 1 || keep > 9)
-        throw std::invalid_argument("routed rank keep: invalid window or keep");
+void routed_rank_keep(float* weights, int n_tok, int keep, bool renorm, float min_w, int min_keep, void* stream) {
+    if (!weights || !stream || n_tok < 1 || keep < 1 || keep > 10 || min_keep < 1 || min_keep > 10 ||
+        !(min_w >= 0.0f && min_w < 1.0f))
+        throw std::invalid_argument("routed rank keep: invalid window, keep or threshold");
     rank_keep<<<(unsigned) ((n_tok + 63) / 64), 64, 0, static_cast<cudaStream_t>(stream)>>>(
-        weights, n_tok, keep, renorm ? 1 : 0);
+        weights, n_tok, keep, renorm ? 1 : 0, min_w, min_keep);
     const auto e = cudaGetLastError();
     if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
 }
