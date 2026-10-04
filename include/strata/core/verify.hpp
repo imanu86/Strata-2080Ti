@@ -194,6 +194,11 @@ private:
     int routed_min_keep_ = 10;            ///< STRATA_ROUTED_MIN_KEEP (default 4 with MIN_W): never dropped by MIN_W
     bool routed_keep_skip_ = false;       ///< STRATA_ROUTED_KEEP_SKIP=1: the host plan skips zeroed experts
     float routed_miss_w_ = 0.0f;          ///< STRATA_ROUTED_MISS_W: below it (beyond min_keep) drop only non-resident experts
+    bool la_probe_ = false;               ///< lab STRATA_LOOKAHEAD_PROBE=1: router(l+1) on layer l's input vs real routing
+    int32_t* la_pred_ = nullptr;          ///< [max_t, 20] predicted ids for the next layer
+    float* la_logits_ = nullptr;          ///< [max_t, n_expert]
+    unsigned long long* la_cnt_ = nullptr;   ///< [n_layers, 5] cumulative counters (see routed_lookahead_compare)
+    int64_t la_windows_ = 0;
     bool device_plan_ = false;           ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device

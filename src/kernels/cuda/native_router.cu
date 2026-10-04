@@ -126,6 +126,44 @@ __global__ void rank_keep(float* weights, int n, int keep, int renorm, float min
     if (renorm && kept > 0.0f)
         for (int k = 0; k < 10; ++k) row[k] /= kept;
 }
+__global__ void la_top20_kernel(const float* logits, int32_t* pred) {
+    const int t = blockIdx.x, lane = threadIdx.x;   // one warp per token
+    __shared__ float v[512];
+    for (int i = lane; i < 512; i += 32) v[i] = logits[(size_t) t * 512 + i];
+    __syncwarp();
+    for (int r = 0; r < 20; ++r) {
+        float best = -INFINITY;
+        int id = 512;
+        for (int i = lane; i < 512; i += 32)
+            if (v[i] > best || (v[i] == best && i < id)) { best = v[i]; id = i; }
+        for (int m = 16; m; m >>= 1) {
+            const float ob = __shfl_xor_sync(0xffffffffu, best, m);
+            const int oi = __shfl_xor_sync(0xffffffffu, id, m);
+            if (ob > best || (ob == best && oi < id)) { best = ob; id = oi; }
+        }
+        if (id >= 512) id = 0;
+        if (lane == 0) { pred[t * 20 + r] = id; v[id] = -INFINITY; }
+        __syncwarp();
+    }
+}
+__global__ void la_compare_kernel(const int32_t* ids, const int32_t* pred, const int32_t* res,
+                                  unsigned long long* cnt, int n) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    unsigned long long h10 = 0, h20 = 0, nr = 0, nrh = 0;
+    for (int k = 0; k < 10; ++k) {
+        const int e = ids[t * 10 + k];
+        if (e < 0 || e >= 512) continue;
+        bool i10 = false, i20 = false;
+        for (int j = 0; j < 20; ++j)
+            if (pred[t * 20 + j] == e) { i20 = true; if (j < 10) i10 = true; }
+        h10 += i10; h20 += i20;
+        const bool nres = res != nullptr && res[e] < 0;
+        nr += nres; nrh += nres && i20;
+    }
+    atomicAdd(cnt + 0, 1ull); atomicAdd(cnt + 1, h10); atomicAdd(cnt + 2, h20);
+    atomicAdd(cnt + 3, nr); atomicAdd(cnt + 4, nrh);
+}
 __global__ void count_closed(const int32_t* ids, float* counts, int stride,
                              const int32_t* keep_d, int keep_h) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, l = blockIdx.y;
@@ -160,6 +198,19 @@ void routed_rank_keep(float* weights, int n_tok, int keep, bool renorm, float mi
         throw std::invalid_argument("routed rank keep: invalid window, keep or threshold");
     rank_keep<<<(unsigned) ((n_tok + 63) / 64), 64, 0, static_cast<cudaStream_t>(stream)>>>(
         weights, n_tok, keep, renorm ? 1 : 0, min_w, min_keep);
+    const auto e = cudaGetLastError();
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
+}
+void routed_lookahead_top20(const float* logits, int32_t* pred, int n_tok, void* stream) {
+    if (!logits || !pred || !stream || n_tok < 1) throw std::invalid_argument("lookahead top20: invalid window");
+    la_top20_kernel<<<(unsigned) n_tok, 32, 0, static_cast<cudaStream_t>(stream)>>>(logits, pred);
+    const auto e = cudaGetLastError();
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
+}
+void routed_lookahead_compare(const int32_t* ids, const int32_t* pred, const int32_t* res, unsigned long long* cnt,
+                              int n_tok, void* stream) {
+    if (!ids || !pred || !cnt || !stream || n_tok < 1) throw std::invalid_argument("lookahead compare: invalid window");
+    la_compare_kernel<<<1, 64, 0, static_cast<cudaStream_t>(stream)>>>(ids, pred, res, cnt, n_tok);
     const auto e = cudaGetLastError();
     if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
 }

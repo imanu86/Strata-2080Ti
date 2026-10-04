@@ -182,6 +182,9 @@ Verifier::~Verifier() {
     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
     if (commit_done_) cudaEventDestroy(commit_done_);
     if (arena_) cudaFree(arena_);
+    if (la_pred_) cudaFree(la_pred_);
+    if (la_logits_) cudaFree(la_logits_);
+    if (la_cnt_) cudaFree(la_cnt_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
                      h_flagA_, h_plan_, h_flagB_};
     for (void* h : hosts)
@@ -295,6 +298,18 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     {
         const char* kv = std::getenv("STRATA_ROUTED_KEEP");
         const char* wv = std::getenv("STRATA_ROUTED_MIN_W");
+        la_probe_ = std::getenv("STRATA_LOOKAHEAD_PROBE") != nullptr;
+        if (la_probe_) {
+            if (g.n_expert != 512 || K != 10 ||
+                cudaMalloc((void**) &la_pred_, (size_t) max_t * 20 * sizeof(int32_t)) != cudaSuccess ||
+                cudaMalloc((void**) &la_logits_, (size_t) max_t * 512 * sizeof(float)) != cudaSuccess ||
+                cudaMalloc((void**) &la_cnt_, (size_t) g.n_layers * 5 * sizeof(unsigned long long)) != cudaSuccess ||
+                cudaMemset(la_cnt_, 0, (size_t) g.n_layers * 5 * sizeof(unsigned long long)) != cudaSuccess) {
+                err = "STRATA_LOOKAHEAD_PROBE: 512 experts, top-10 and its buffers required";
+                return false;
+            }
+            std::fprintf(stderr, "LOOKAHEAD probe on (lab: router of layer l+1 on layer l's MoE input)\n");
+        }
         if (const char* mv = std::getenv("STRATA_ROUTED_MISS_W")) {
             routed_miss_w_ = (float) std::atof(mv);
             const char* mk = std::getenv("STRATA_ROUTED_MIN_KEEP");
@@ -761,6 +776,23 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         if (routed_keep_ > 0) {
             try { routed_rank_keep(w_ + tb * K, n, routed_keep_, routed_keep_renorm_, routed_min_w_, routed_min_keep_, cs); }
             catch (const std::exception& e) { err = e.what(); return false; }
+        }
+        if (la_probe_) {   // lab: score the previous layer's prediction, then predict the next layer
+            try {
+                if (l > lb_)
+                    routed_lookahead_compare(ids_ + tb * K, la_pred_ + tb * 20,
+                                             hits_.d_res != nullptr ? hits_.d_res + l * NE : nullptr, la_cnt_ + l * 5,
+                                             n, cs);
+                if (l + 1 < (int64_t) g.n_layers) {
+                    const LayerView vn(wt, l + 1);
+                    const WeightRef* wr = vn.get("ffn_gate_inp.weight");
+                    if (wr != nullptr) {
+                        bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) wr->data, la_logits_ + tb * NE, NE,
+                                                  N, NE, n, cs);
+                        routed_lookahead_top20(la_logits_ + tb * NE, la_pred_ + tb * 20, n, cs);
+                    }
+                }
+            } catch (const std::exception& e) { err = std::string("lookahead probe: ") + e.what(); return false; }
         }
         if (device_plan_)  // E-6: every routed expert resident: this group's plan without the host
             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
@@ -1240,6 +1272,17 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     // beside the expert workers).
     const cudaError_t se = cudaStreamSynchronize(cs_);
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
+    if (la_probe_ && (++la_windows_ % 16) == 0) {   // lab: cumulative lookahead counters per layer
+        std::vector<unsigned long long> c((size_t) g.n_layers * 5);
+        if (cudaMemcpy(c.data(), la_cnt_, c.size() * sizeof(unsigned long long), cudaMemcpyDeviceToHost) == cudaSuccess) {
+            std::string s = "LOOKAHEAD windows=" + std::to_string(la_windows_);
+            for (int64_t l = 0; l < g.n_layers; ++l) {
+                s += " " + std::to_string(l) + ":";
+                for (int i = 0; i < 5; ++i) s += (i ? "," : "") + std::to_string(c[(size_t) (l * 5 + i)]);
+            }
+            std::fprintf(stderr, "%s\n", s.c_str());
+        }
+    }
     progress_at("verify window: waiting for the expert copies", (int64_t) T);
     cudaStreamSynchronize(copy_);   // no host function of this window may raise flag B in the next one
     if (prof_on_ && G == 1) {       // the window's GPU stage stamps
