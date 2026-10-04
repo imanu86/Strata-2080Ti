@@ -295,6 +295,18 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     {
         const char* kv = std::getenv("STRATA_ROUTED_KEEP");
         const char* wv = std::getenv("STRATA_ROUTED_MIN_W");
+        if (const char* mv = std::getenv("STRATA_ROUTED_MISS_W")) {
+            routed_miss_w_ = (float) std::atof(mv);
+            const char* mk = std::getenv("STRATA_ROUTED_MIN_KEEP");
+            routed_min_keep_ = mk != nullptr ? std::atoi(mk) : 4;
+            if (!(routed_miss_w_ > 0.0f && routed_miss_w_ < 1.0f) || routed_min_keep_ < 1 || routed_min_keep_ > 10 ||
+                K != 10) {
+                err = "STRATA_ROUTED_MISS_W (0,1), STRATA_ROUTED_MIN_KEEP 1..10, top-10 routing";
+                return false;
+            }
+            std::fprintf(stderr, "ROUTED_MISS miss_w=%.4f min_keep=%d (lab probe: low-weight CPU/PCIe experts dropped)\n",
+                         routed_miss_w_, routed_min_keep_);
+        }
         if (kv != nullptr || wv != nullptr) {
             routed_keep_ = kv != nullptr ? std::atoi(kv) : 10;
             routed_min_w_ = wv != nullptr ? (float) std::atof(wv) : 0.0f;
@@ -1182,6 +1194,22 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                 const volatile float* wr = h_w_ + (size_t) tb * ss.k;
                 for (int64_t i = 0; i < (int64_t) n * ss.k; ++i)
                     if (wr[i] == 0.0f) id[i] = -1;
+            }
+            if (routed_miss_w_ > 0.0f) {   // lab: mark low-weight entries; the pool drops them only if not resident
+                int32_t* id = h_ids_ + (size_t) tb * ss.k;
+                const volatile float* wr = h_w_ + (size_t) tb * ss.k;
+                for (int64_t t = 0; t < (int64_t) n; ++t)
+                    for (int64_t j = 0; j < (int64_t) ss.k; ++j) {
+                        const int64_t i = t * (int64_t) ss.k + j;
+                        const float wi = wr[i];
+                        if (id[i] < 0 || !(wi < routed_miss_w_)) continue;
+                        int rank = 0;
+                        for (int64_t q = 0; q < (int64_t) ss.k; ++q) {
+                            const float wq = wr[t * (int64_t) ss.k + q];
+                            rank += wq > wi || (wq == wi && q < j);
+                        }
+                        if (rank >= routed_min_keep_) id[i] = -(id[i] + 2);
+                    }
             }
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);

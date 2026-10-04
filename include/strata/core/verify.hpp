@@ -193,6 +193,7 @@ private:
     float routed_min_w_ = 0.0f;           ///< STRATA_ROUTED_MIN_W: also drop weights below it (beyond min_keep)
     int routed_min_keep_ = 10;            ///< STRATA_ROUTED_MIN_KEEP (default 4 with MIN_W): never dropped by MIN_W
     bool routed_keep_skip_ = false;       ///< STRATA_ROUTED_KEEP_SKIP=1: the host plan skips zeroed experts
+    float routed_miss_w_ = 0.0f;          ///< STRATA_ROUTED_MISS_W: below it (beyond min_keep) drop only non-resident experts
     bool device_plan_ = false;           ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device

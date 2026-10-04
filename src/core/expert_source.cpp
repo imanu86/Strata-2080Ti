@@ -1880,6 +1880,27 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         if (ptrace) { std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a); std::fflush(stderr); }
     };
     const auto c0 = std::chrono::steady_clock::now();
+    // Lab routed-miss probe (STRATA_ROUTED_MISS_W): -(id+2) marks a low-weight entry that is computed only where
+    // it costs no CPU or PCIe work (resident on this GPU or a peer); elsewhere it is dropped (-1, row zeroed).
+    int32_t ids_miss[kMaxWindowEntries];
+    {
+        bool marked = false;
+        for (int64_t i = 0; i < n_tok * k && !marked; ++i) marked = ids[i] <= -2;
+        if (marked && n_tok * k <= kMaxWindowEntries) {
+            for (int64_t i = 0; i < n_tok * k; ++i) {
+                int32_t e = ids[i];
+                if (e <= -2) {
+                    e = -e - 2;
+                    const bool resident = e < d.n_expert && d.host_res != nullptr &&
+                        d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] >= 0;
+                    const bool peer = e < d.n_expert && d.peer != nullptr && d.peer->has(d.layers, e);
+                    if (!resident && !peer) e = -1;
+                }
+                ids_miss[i] = e;
+            }
+            ids = ids_miss;
+        }
+    }
     pt("begin");
     d.src->begin_layer(d.layers, ids, n_tok * k);
     pt("begun");
