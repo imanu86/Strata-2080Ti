@@ -1,5 +1,12 @@
 # Strata-2080Ti
 
+An optional `--prompt-cache-file PATH` now persists a fixed text system prefix
+across engine restarts. On the tested 4003-token prefix, three Daily-profile
+pairs reduce median native first-token latency from 5.000 to 1.344 seconds after
+model loading. Fixed-placement full-logit/output parity and changed-prompt
+invalidation pass. Automatic elastic placement remains numerically variable;
+all seven factual answers pass. [Configuration, evidence and limits](docs/sm75/BENCHMARKS.md#persistent-system-prefix-4-october-2026).
+
 A validated Windows snapshot of [Strata](https://github.com/Niko1221/Strata)
 for **RTX 2080 Ti / Turing SM75**, running Qwen3.8-Flash-Next IQ3_XXS.
 

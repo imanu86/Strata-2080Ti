@@ -575,6 +575,38 @@ prompt when that is 2,048 tokens or more (engine 0.1.20; PR #62 + #65), so that 
 system prompts and tool lists. Engine options: `--prompt-cache N` (0 = off), `--prompt-cache-every N`,
 `--prompt-cache-root N` (0 = no system-prompt checkpoint), `--turn-token ID`.
 
+**Persistent system prefix (opt-in, this fork).** Add `--prompt-cache-file PATH`
+to the server config's `args`, choosing a file outside the model/pack directories.
+For example, append `"--prompt-cache-file", "D:\\strata-cache\\system-prefix.bin"`.
+The first eligible request computes and atomically saves the root; after an engine
+restart, the same token prefix and next-token frontier restore its running state,
+main K/V and MTP K/V. The restored root then joins the ordinary RAM checkpoints.
+A changed system prompt is recomputed and replaces the file automatically.
+The one file holds one prefix, not a collection of chats or the model weights.
+
+The option defaults off. It requires `--serve`, enabled prompt caching/root
+checkpoints, and one session GPU without layer split, peer or remote expert tiers.
+Only text roots qualify, with the ordinary 2048-token minimum by default, a
+32768-token cap and a 512 MiB file-payload cap. A long first request whose MTP
+window skipped old draft cells is not saved. Model initialization still runs.
+Only the repeated prefix prefill is avoided; this does not accelerate token decode.
+
+The key includes executable/model assets, engine options, STRATA/CUDA overrides,
+device/runtime identity, steering mode and exact tokens. Files up to 1 MiB are
+hashed fully; larger assets use canonical path, size/mtime and three 64 KiB
+samples. This is not a full weights hash: delete the cache if changing unsampled
+weight bytes while preserving size and timestamps. The snapshot payload has a
+SHA-256 checksum, bounded decoding and full shape validation before GPU restore.
+Missing, incompatible or corrupt files fall back to normal prefill. A destination
+with a foreign/invalid magic header is never overwritten; remove that file to
+allow rebuilding. A GPU transfer failure after restore starts remains fatal.
+
+CPU codec tests: configure with `-DSTRATA_BUILD_CONVERSATION_TESTS=ON`, build
+`prefix_cache_file_test` and `prefix_cache_portable_test`, then run
+`ctest --test-dir BUILD -R "^prefix_cache_(file|portable)_test$" --output-on-failure`.
+[Measured latency, numerical parity and limits](sm75/BENCHMARKS.md#persistent-system-prefix-4-october-2026)
+cover the modified 22 GB RTX 2080 Ti, not stock 11 GB or multi-GPU use.
+
 **Multiple conversations (opt-in).** Add `--conversation-cache-mib 8192
 --conversation-cache-slots 4` to the engine arguments to park up to four conversations
 in a bounded 8 GiB host-RAM cache. This preserves controller/worker histories when
@@ -612,8 +644,8 @@ rather than permission to continue with partial state. Indexer spare keys and th
 moving spare row are preserved, including checkpoint rewinds.
 The engine log reports parking, restoration, bytes, evictions, individual snapshot
 sizes and K/V bytes reused during capture. `STRATA_SNAPSHOT_FULL_CAPTURE=1` disables
-retention for diagnostic comparisons. Snapshots are not
-persisted across restarts.
+retention for diagnostic comparisons. Parked conversations remain in RAM;
+the separate optional prefix file above persists only the first text root.
 
 **Current limits (v1):** one request at a time, and one conversation cached at a time (switching between two chats
 re-reads the other one unless the opt-in cache above is enabled); images only when set up with them (below); no video. **Temperature / top_p / top_k / min_p /

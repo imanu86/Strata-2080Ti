@@ -18,6 +18,7 @@
 #include "strata/core/device.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/conversation_snapshot.hpp"
+#include "strata/core/prefix_cache_file.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/expert_source.hpp"
@@ -94,6 +95,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -444,6 +446,7 @@ struct Options {
     /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and
     /// the PLE history (~118 MB of host RAM); the KV cache itself is positional and stays where it is.
     int prompt_cache = 6;
+    std::string prompt_cache_file; // opt-in single text-root snapshot, persisted across engine restarts
     int64_t conversation_cache_mib = 0; // opt-in host RAM for independent conversations
     int conversation_cache_slots = 4;
     int64_t conversation_cache_min_free_mib = 2560;
@@ -555,6 +558,8 @@ void usage() {
                  "  --vision             --serve takes images too (GENI requests; embeddings from strata-vision)\n"
                  "  --prompt-cache N     --serve: keep N conversation checkpoints between requests (default 6, ~118 MB\n"
                  "                       of RAM each; 0 = read every prompt from the start)\n"
+                 "  --prompt-cache-file PATH  persist one text system-prefix across restarts (default off; single GPU,\n"
+                 "                       up to 32768 tokens/512 MiB; replaces its prior prefix when instructions change)\n"
                  "  --conversation-cache-mib N  --serve: RAM budget for parked conversations (default 0 = off)\n"
                  "  --conversation-cache-slots N  --serve: at most N parked conversations (default 4)\n"
                  "  --conversation-cache-min-free-mib N  --serve: physical RAM floor when parking (default 2560)\n"
@@ -1314,6 +1319,7 @@ int main(int argc, char** argv) {
         else if (a == "--serve") o.serve = true;
         else if (a == "--vision") o.vision = true;
         else if (a == "--prompt-cache") o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
+        else if (a == "--prompt-cache-file") o.prompt_cache_file = next("--prompt-cache-file");
         else if (a == "--conversation-cache-mib" || a == "--conversation-cache-slots" ||
                  a == "--conversation-cache-min-free-mib") {
             const std::string value = next(a.c_str());
@@ -1441,6 +1447,12 @@ int main(int argc, char** argv) {
                      o.prompt_cache == 0 ? "--prompt-cache 0" : "--conversation-cache-slots 0");
     if (o.conversation_cache_mib > 0 && o.conversation_cache_slots > 0 && o.prompt_cache > 0 && !o.layer_split.empty()) {
         std::fprintf(stderr, "strata serve: conversation parking does not yet support --layer-split; disable parking with --conversation-cache-mib 0\n");
+        return 2;
+    }
+    if (!o.prompt_cache_file.empty() && (!o.serve || o.prompt_cache <= 0 || o.prompt_cache_root <= 0 ||
+            o.turn_token < 0 || !o.layer_split.empty() || o.peer_device >= 1 ||
+            std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int slots) { return slots > 0; }))) {
+        std::fprintf(stderr, "strata: --prompt-cache-file requires --serve, enabled root checkpoints and one GPU\n");
         return 2;
     }
     // Layer split (multi-GPU): the later stages run layers [K_i, K_i+1) on their own GPUs (--split-device, default
@@ -4681,6 +4693,81 @@ int main(int argc, char** argv) {
         std::vector<ConvCheckpoint> checks;
         uint64_t check_clock = 0;   // the checkpoints' LRU clock; creation and every use advance it
         bool cvec_cached = true;   // the control vector's state the live session and the checkpoints were read with
+        strata::core::PrefixDigest prefix_identity{};
+        bool prefix_disk_enabled = !o.prompt_cache_file.empty();
+        if (prefix_disk_enabled) {
+            const auto identity_start = Clock::now();
+            std::vector<std::filesystem::path> assets{argv[0], o.pack, o.mtp, o.ple_gguf, o.embd_gguf,
+                o.native_preset, o.native_head_gguf, o.expert_profile};
+            for (const auto& p : o.native_shards) assets.emplace_back(p);
+            for (const auto& p : o.native_head_shards) assets.emplace_back(p);
+            for (const auto& p : o.native_dense_gguf) assets.emplace_back(p);
+            for (const auto& item : o.cvec_files) assets.emplace_back(item.first);
+            std::vector<std::string> settings;
+            // Activations are local to this device/runtime, not portable model files.
+            int device = 0, driver = 0, runtime = 0;
+            cudaDeviceProp device_properties{};
+            if (cudaGetDevice(&device) != cudaSuccess ||
+                    cudaGetDeviceProperties(&device_properties, device) != cudaSuccess ||
+                    cudaDriverGetVersion(&driver) != cudaSuccess || cudaRuntimeGetVersion(&runtime) != cudaSuccess) {
+                cudaGetLastError(); prefix_disk_enabled = false; err = "device/runtime identity unavailable";
+            } else {
+                settings.emplace_back(device_properties.name);
+                settings.push_back(std::to_string(device_properties.major) + ":" +
+                    std::to_string(device_properties.minor) + ":" + std::to_string(driver) + ":" + std::to_string(runtime));
+#if defined(STRATA_USE_HIP)
+                settings.emplace_back(device_properties.gcnArchName);
+                settings.push_back(std::to_string(device_properties.pciDomainID) + ":" +
+                    std::to_string(device_properties.pciBusID) + ":" + std::to_string(device_properties.pciDeviceID));
+#else
+                settings.emplace_back(device_properties.uuid.bytes, sizeof(device_properties.uuid.bytes));
+#endif
+            }
+            // Conservative compatibility: all engine options except the cache destination,
+            // and all STRATA_/CUDA_ environment overrides. Exact request tokens are checked separately.
+            for (int i = 1; i < argc; ++i) {
+                if (std::string(argv[i]) == "--prompt-cache-file") { ++i; continue; }
+                settings.emplace_back(argv[i]);
+            }
+            std::vector<std::string> environment;
+#ifdef _WIN32
+            if (wchar_t* block = GetEnvironmentStringsW()) {
+                for (const wchar_t* p = block; *p; p += std::wcslen(p) + 1) {
+                    if (_wcsnicmp(p, L"STRATA_", 7) && _wcsnicmp(p, L"CUDA_", 5)) continue;
+                    const int count = WideCharToMultiByte(CP_UTF8, 0, p, -1, nullptr, 0, nullptr, nullptr);
+                    std::string entry(size_t(count > 0 ? count : 1), '\0');
+                    if (count > 0 && WideCharToMultiByte(CP_UTF8, 0, p, -1, entry.data(), count, nullptr, nullptr)) {
+                        entry.pop_back(); environment.push_back(std::move(entry));
+                    }
+                }
+                FreeEnvironmentStringsW(block);
+            } else { prefix_disk_enabled = false; err = "environment identity unavailable"; }
+#else
+            for (char** p = environ; p && *p; ++p)
+                if (!std::strncmp(*p, "STRATA_", 7) || !std::strncmp(*p, "CUDA_", 5)) environment.emplace_back(*p);
+#endif
+            std::sort(environment.begin(), environment.end());
+            settings.insert(settings.end(), environment.begin(), environment.end());
+            try {
+                const auto destination = std::filesystem::weakly_canonical(o.prompt_cache_file);
+                for (const auto& p : assets) {
+                    if (p.empty()) continue;
+                    const auto asset = std::filesystem::canonical(p);
+                    const auto relative = destination.lexically_relative(asset);
+                    if (destination == asset || (std::filesystem::is_directory(asset) && !relative.empty() &&
+                            *relative.begin() != "..")) {
+                        prefix_disk_enabled = false; err = "cache destination overlaps model assets"; break;
+                    }
+                }
+            } catch (const std::exception& e) { prefix_disk_enabled = false; err = e.what(); }
+            if (prefix_disk_enabled)
+                prefix_disk_enabled = strata::core::prefix_cache_identity(assets, settings, prefix_identity, err);
+            std::fprintf(stderr, "strata serve: prefix disk cache: %s (identity %.1f ms)%s%s\n",
+                         prefix_disk_enabled ? "enabled" : "disabled",
+                         std::chrono::duration<double, std::milli>(Clock::now() - identity_start).count(),
+                         prefix_disk_enabled ? "" : ": ", prefix_disk_enabled ? "" : err.c_str());
+            err.clear();
+        }
         strata::core::ConversationCache conversations(
             o.prompt_cache > 0 ? (size_t) o.conversation_cache_mib * 1024 * 1024 : 0,
             (size_t) o.conversation_cache_slots);
@@ -5634,6 +5721,41 @@ int main(int argc, char** argv) {
                 incoming.reset();
                 err.clear();
             }
+            int64_t incoming_tokens = parked.tokens;
+            bool incoming_live = parked.live, incoming_disk = false;
+            double disk_read_ms = 0;
+            // Only the same first-turn boundary as the ordinary root checkpoint is eligible.
+            // Do not replace a longer in-RAM match or read a disk image for a vision request.
+            if (prefix_disk_enabled && req_imgs.empty() && std::getenv("STRATA_CKPT_REREAD") == nullptr) {
+                int64_t disk_root = -1, last_turn = -1;
+                for (int64_t i = n - 1; i > 0; --i) if (ids[size_t(i)] == o.turn_token) { last_turn = i; break; }
+                for (int64_t i = 1; i < last_turn; ++i) if (ids[size_t(i)] == o.turn_token) { disk_root = i; break; }
+                if (disk_root >= o.prompt_cache_root && disk_root <= int64_t(strata::core::prefix_cache_max_tokens) &&
+                        disk_root > std::max(resume, incoming ? incoming_tokens : int64_t(0))) {
+                    const auto t0 = Clock::now();
+                    std::error_code ec;
+                    const auto bytes = std::filesystem::file_size(o.prompt_cache_file, ec);
+                    const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
+                    const uint64_t held = incoming ? incoming->bytes() : 0;
+                    if (!ec && bytes <= strata::core::prefix_cache_max_bytes + 88 &&
+                            strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), bytes + held + 1024 * 1024, floor)) {
+                        std::vector<int32_t> prefix(ids.begin(), ids.begin() + disk_root);
+                        strata::core::SavedConversation image;
+                        if (strata::core::prefix_cache_read(o.prompt_cache_file, prefix_identity, prefix,
+                                int32_t(ids[size_t(disk_root)]), want_cvec, image, err) &&
+                                strata::core::conversation_snapshot_validate(image, ss, g, mtp.kv_state(), err)) {
+                            incoming.emplace(std::move(image)); incoming_tokens = disk_root;
+                            incoming_live = true; incoming_disk = true;
+                        } else {
+                            std::fprintf(stderr, "strata serve: prefix disk cache: miss (%s)\n", err.c_str()); err.clear();
+                        }
+                    } else {
+                        std::fprintf(stderr, "strata serve: prefix disk cache: miss (%s)\n",
+                                     ec ? "file unavailable" : "file size or physical RAM admission");
+                    }
+                    disk_read_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                }
+            }
             // Preserve the outgoing branch before any checkpoint rewind, reset,
             // or incoming restore overwrites the positional state it requires.
             if ((!from_live || incoming) && !park_current(incoming ? incoming->bytes() : 0)) {
@@ -5661,15 +5783,26 @@ int main(int argc, char** argv) {
                                  mtp.kv_state().kv_mode, "ram",
                                  (long long) (mtp.kv_state().n_slots * strata::kernels::qsa_real_shapes().page_size));
                 }
-                live = std::move(incoming->live.ids);
-                live_imgs = std::move(incoming->live.imgs);
-                checks = std::move(incoming->checkpoints);
+                if (incoming_disk) {
+                    live = incoming->live.ids;
+                    live_imgs.clear(); checks.clear();
+                    incoming->live.used = ++check_clock;
+                    checks.push_back(std::move(incoming->live)); // keep the restored root pinned in RAM
+                } else {
+                    live = std::move(incoming->live.ids);
+                    live_imgs = std::move(incoming->live.imgs);
+                    checks = std::move(incoming->checkpoints);
+                }
                 cvec_cached = incoming->cvec;
-                resume = parked.tokens;
-                from_live = parked.live;
+                resume = incoming_tokens;
+                from_live = incoming_live;
                 if (std::getenv("STRATA_SNAPSHOT_FULL_CAPTURE") == nullptr)
                     conversations.retain(std::move(incoming->kv), int64_t(live.size()));
                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
+                if (incoming_disk)
+                    std::fprintf(stderr, "strata serve: prefix disk cache: restored %lld tokens; read/validate %.1f ms, upload %.1f ms\n",
+                                 (long long) resume, disk_read_ms,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
                 std::fprintf(stderr, "strata serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu\n",
                              (long long) resume, from_live ? "live" : "checkpoint",
                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
@@ -6032,6 +6165,42 @@ int main(int argc, char** argv) {
                 if ((to == turn_at || to == root_at) && !checkpoint_at(to)) {
                     std::printf("ERR saving a conversation checkpoint failed\n");
                     return 1;
+                }
+                // A long first request may skip old draft cells outside MTP's window.
+                // Persist only complete draft prefixes, usable by later shorter requests too.
+                if (to == root_at && prefix_disk_enabled && req_imgs.empty() && mtp.first_needed() > 0)
+                    std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (incomplete windowed draft prefix)\n");
+                if (to == root_at && prefix_disk_enabled && req_imgs.empty() && mtp.first_needed() <= 0 &&
+                        to <= int64_t(strata::core::prefix_cache_max_tokens)) {
+                    const auto save_start = Clock::now();
+                    try {
+                        const std::vector<int32_t> prefix(ids.begin(), ids.begin() + to);
+                        const std::vector<ImgKey> no_images;
+                        const std::vector<ConvCheckpoint> no_checkpoints;
+                        const strata::core::ConversationView view{prefix, no_images, no_checkpoints, want_cvec};
+                        size_t estimate = 0;
+                        const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
+                        if (strata::core::conversation_snapshot_bytes(view, ss, g, mtp.kv_state(), estimate, err) &&
+                                estimate <= strata::core::prefix_cache_max_bytes &&
+                                strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), estimate, floor)) {
+                            strata::core::SavedConversation image;
+                            if (!strata::core::conversation_snapshot_save(image, view, ss, g, mtp.kv_state(), err)) {
+                                // A CUDA copy/synchronization error can poison the live session.
+                                std::printf("ERR capturing prefix disk cache: %s\n", err.c_str()); return 1;
+                            }
+                            const bool stored = strata::core::prefix_cache_write(o.prompt_cache_file, prefix_identity,
+                                                    int32_t(ids[size_t(to)]), image, err);
+                            std::fprintf(stderr, "strata serve: prefix disk cache: %s %lld tokens, %zu bytes in %.1f ms%s%s\n",
+                                         stored ? "saved" : "skip saving", (long long) to, image.bytes(),
+                                         std::chrono::duration<double, std::milli>(Clock::now() - save_start).count(),
+                                         stored ? "" : ": ", stored ? "" : err.c_str());
+                        } else {
+                            std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (size, geometry or physical RAM admission)\n");
+                        }
+                    } catch (const std::bad_alloc&) {
+                        std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (host allocation failed)\n");
+                    }
+                    err.clear(); // A disk miss/write failure never changes the normal prefill error channel.
                 }
             }
             if (!refill(err)) {

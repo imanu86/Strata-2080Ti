@@ -532,11 +532,11 @@ and 384 generated IDs per arm, bitwise. These are 128-token prefixes, not
 complete answers or a throughput comparison. PLE gather in the ON arm takes
 0.849/0.758/0.457 ms per window, with 0.002 ms residual staging. The earlier
 intermittent 30–33 ms staging cost was not reproduced here.
-These numerical arms use 5080 actual cache slots/8442 MiB, PCIe share 0,
+These numerical arms use 5080 actual cache slots / 8442 MiB, PCIe share 0,
 spec 4/MTP max 4, with elastic/adaptive swaps, suffix and prompt caching off.
 They do not establish full-answer parity under the operative elastic policy.
 
-**Not installed in Daily.** A separate smoke using the operative automatic,
+**Initial decision: not installed in Daily.** A separate smoke using the operative automatic,
 elastic and tail settings finishes its 9283-token LRU task but fails the exact
 answer oracle: hits 1 / misses 13 instead of hits 2 / misses 12. Valid JSON
 and throughput do not establish correct output. The old Daily reference passes
@@ -568,3 +568,68 @@ between CPU/GPU partitions, which change rounding and continuations.
 
 Failed preflights, count/parser failures and incomplete answers remain
 separate from completed gates. [Evidence, hashes and limitations](decode-ple-diagnostics-20261004.json).
+
+## Persistent system prefix (4 October 2026)
+
+`--prompt-cache-file PATH` persists one text root across engine restarts. It is
+off by default. [Configuration and file contract](../DETAILS.md) describe exact
+token/frontier matching, complete MTP state, integrity checks and invalidation.
+The measured model is Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS on the modified RTX
+2080 Ti 22 GB, Ryzen 7 5800X, 96 GiB RAM, Windows/CUDA 12.6/SM75.
+
+The synthetic system prefix contains **4003 tokens**, followed by 49 fresh tokens
+in a 4052-token request. The file is 179,213,800 bytes (170.91 MiB). Each restore
+runs in a fresh engine process. KV remains INT8 with capacity 262144 and 32768
+resident tokens. Seven complete factual answers pass exact JSON-content oracles.
+
+With the actual Daily auto/elastic profile (PCIe 0.36, workers 7, CLI spec 4/runtime 6,
+MTP 4, reserve 1393 MiB; exact-small and grouped QSA enabled), three pairs measure:
+
+| Pair | Recompute prefix: first token (s) | Restore prefix: first token (s) | Saved (s) |
+|---|---:|---:|---:|
+| 1 | 5.328 | 1.875 | 3.453 |
+| 2 | 5.000 | 1.344 | 3.656 |
+| 3 | 4.594 | 1.266 | 3.328 |
+
+The two medians are **5.000 and 1.344 seconds**, a 73.12% reduction in their ratio.
+Median paired saving is 3.453 seconds; these are distinct statistics. The shared
+first-logit diagnostic is enabled on both sides. This is native request-to-first
+`T` latency after READY, not full HTTP/client TTFT. Model startup takes about
+37–40 seconds and is excluded. File pages can be in the Windows filesystem cache;
+there was no reboot or OS-cache purge, so this is not a cold-SSD bandwidth test.
+Three pairs do not establish a population distribution, p99 or a new decode SOTA.
+
+Restore read/validation takes 212.3–252.6 ms, plus 24.2–29.8 ms upload. The first
+creation takes 9.625 seconds to the first token, with 477.9 ms recorded for capture
+and write. Its full excess over separate cold samples is not isolated as write
+overhead. A first use or changed prompt still requires prefill and file creation.
+
+Correctness is checked separately with fixed placement: actual 5080 slots / 8442
+MiB, PCIe 0, spec 4/MTP 4, workers 7, elastic/suffix/adaptive swaps disabled and
+`STRATA_IQ_MT_MIN=1`. Reference, candidate off, capture and fresh-process restore
+produce bitwise identical full first-logit rows (248320 finite F32 values) and
+all 31 generated IDs. Changing the ticket in the system prompt forces a miss and
+replacement; its following restore also matches bitwise and answers correctly.
+The old Daily and candidate off also complete the 9283-token LRU task with 740
+identical output IDs, identical first-logit rows and the correct 2 hits / 12 misses.
+This resolves that repeat under matched placement; it does not erase the earlier
+auto-profile failure or establish general model quality.
+
+The actual auto/elastic timing arms have 7284–7448 initial slots. Their logits are
+not bitwise equal, including cold-versus-cold samples. Two cold outputs use a
+multiline JSON layout instead of compact JSON; all values are correct. Full IDs
+differ with that formatting. These arms demonstrate bounded factual correctness
+and latency under variable placement, not numerical equivalence or causal
+attribution of every floating-point difference to a particular setting.
+
+Both CPU codec suites pass (OS SHA-256 and portable SHA-256). They cover known
+digests, segmented roundtrip, corrupt/truncated/oversized data, identity/prefix/
+frontier/steering mismatch and failed-write preservation. All 13 model processes
+from the two completed runs have exited; the public server was not started.
+
+Candidate executable SHA256:
+`f2e371bf631d13b40890b8efc8b35395844b1dfd592f8c5baab0cef60729621a`.
+[Sanitized evidence and hashes](prefix-cache-20261004.json) and
+[synthetic token fixture](prefix-cache-fixture-20261004.json) contain no user chats.
+The implementation and CPU tests are in main; the published release binary
+`v0.1.38-sm75-20261003-r1` predates this feature.
