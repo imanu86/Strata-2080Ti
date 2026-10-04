@@ -20,6 +20,10 @@ void native_router_top10(const float* logits, int32_t* ids, float* weights, void
 // Caller must guarantee >=10 resident experts; mode/residency remain device data.
 void closed_router_apply(float* logits, int32_t* ids, float* weights, int32_t* original_ids,
                          const int32_t* resident, const int32_t* mode, int n_tok, void* stream);
+// Lab-only quality probe (STRATA_ROUTED_KEEP): zero the routed weights ranked >= keep in
+// each [n_tok,10] row, ranked by weight (ties by slot), optionally renormalizing the kept ones.
+// The experts are still computed: this measures output fidelity, not speed.
+void routed_rank_keep(float* weights, int n_tok, int keep, bool renorm, void* stream);
 // Accumulate only committed rows of [layers,stride,10], into [layers,512].
 void closed_router_count(const int32_t* ids, float* counts, int layers, int stride,
                          const int32_t* keep_device, int keep_host, void* stream);

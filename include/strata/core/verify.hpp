@@ -188,7 +188,9 @@ private:
     int closed_mode_ = 0;
     int32_t *closed_mode_d_ = nullptr, *closed_ids_ = nullptr;
     float* closed_usage_ = nullptr;
-    bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
+    int routed_keep_ = 0;                 ///< lab-only STRATA_ROUTED_KEEP: decode weights ranked >= keep zeroed (0: off)
+    bool routed_keep_renorm_ = false;     ///< STRATA_ROUTED_KEEP_RENORM=1: renormalize the kept weights
+    bool device_plan_ = false;           ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device
     int64_t lb_ = 0, le_ = -1;           ///< set_stage: the layers this verifier runs (-1: to the last)

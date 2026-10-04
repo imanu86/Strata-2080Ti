@@ -111,6 +111,21 @@ __global__ void closed_drop(int32_t* ids, float* weights, const int32_t* res,
     int fallback = 0; while (fallback < 512 && res[fallback] < 0) ++fallback;
     if (fallback < 512) { ids[i] = fallback; weights[i] = 0.0f; }
 }
+__global__ void rank_keep(float* weights, int n, int keep, int renorm) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    float* row = weights + (size_t) t * 10;
+    float in[10], kept = 0.0f;
+    for (int k = 0; k < 10; ++k) in[k] = row[k];
+    for (int k = 0; k < 10; ++k) {
+        int rank = 0;
+        for (int j = 0; j < 10; ++j) rank += in[j] > in[k] || (in[j] == in[k] && j < k);
+        row[k] = rank < keep ? in[k] : 0.0f;
+        kept += row[k];
+    }
+    if (renorm && kept > 0.0f)
+        for (int k = 0; k < 10; ++k) row[k] /= kept;
+}
 __global__ void count_closed(const int32_t* ids, float* counts, int stride,
                              const int32_t* keep_d, int keep_h) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x, l = blockIdx.y;
@@ -138,6 +153,14 @@ void closed_router_apply(float* logits, int32_t* ids, float* weights, int32_t* o
     route<true><<<(unsigned) n_tok, dim3(32,8), 0, cs>>>(logits, ids, weights, resident, mode);
     closed_drop<<<1,128,0,cs>>>(ids,weights,resident,mode,n_tok*10);
     e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
+}
+void routed_rank_keep(float* weights, int n_tok, int keep, bool renorm, void* stream) {
+    if (!weights || !stream || n_tok < 1 || keep < 1 || keep > 9)
+        throw std::invalid_argument("routed rank keep: invalid window or keep");
+    rank_keep<<<(unsigned) ((n_tok + 63) / 64), 64, 0, static_cast<cudaStream_t>(stream)>>>(
+        weights, n_tok, keep, renorm ? 1 : 0);
+    const auto e = cudaGetLastError();
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
 }
 void closed_router_count(const int32_t* ids, float* counts, int layers, int stride,
                          const int32_t* keep_device, int keep_host, void* stream) {

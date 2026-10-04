@@ -292,6 +292,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sink_.ctx = this;
     }
 
+    if (const char* v = std::getenv("STRATA_ROUTED_KEEP")) {
+        routed_keep_ = std::atoi(v);
+        if (routed_keep_ < 1 || routed_keep_ > 9 || K != 10) { err = "STRATA_ROUTED_KEEP needs 1..9 and top-10 routing"; return false; }
+        const char* r = std::getenv("STRATA_ROUTED_KEEP_RENORM");
+        routed_keep_renorm_ = r && r[0] == '1';
+        std::fprintf(stderr, "ROUTED_KEEP keep=%d renorm=%d (lab quality probe: experts still computed)\n",
+                     routed_keep_, routed_keep_renorm_ ? 1 : 0);
+    }
     closed_available_ = std::getenv("STRATA_CLOSED_ROUTING") != nullptr;
     if (closed_available_ && (g.n_expert != 512 || g.n_layers != 48 || lb_ != 0 || le_ != 48 ||
                               hits.d_res == nullptr || hits.cache_base == nullptr)) {
@@ -723,7 +731,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                     hits_.d_res + l * NE, closed_mode_d_, n, cs);
             } catch (const std::exception& e) { err = e.what(); return false; }
         }
-        if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
+        if (routed_keep_ > 0) {
+            try { routed_rank_keep(w_ + tb * K, n, routed_keep_, routed_keep_renorm_, cs); }
+            catch (const std::exception& e) { err = e.what(); return false; }
+        }
+        if (device_plan_)  // E-6: every routed expert resident: this group's plan without the host
             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
                           plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
