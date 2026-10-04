@@ -292,8 +292,18 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sink_.ctx = this;
     }
 
+    closed_available_ = std::getenv("STRATA_CLOSED_ROUTING") != nullptr;
+    if (closed_available_ && (g.n_expert != 512 || g.n_layers != 48 || lb_ != 0 || le_ != 48 ||
+                              hits.d_res == nullptr || hits.cache_base == nullptr)) {
+        err = "closed routing requires the single-GPU 48-layer native expert cache"; return false;
+    }
     // ---- the device arena: the same sequence counted, then carved
     auto carve = [&](Bump& b) {
+        if (closed_available_) {
+            closed_mode_d_ = b.take<int32_t>(1);
+            closed_ids_ = b.take<int32_t>(g.n_layers * T * K);
+            closed_usage_ = b.take<float>(g.n_layers * g.n_expert);
+        }
         tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(T * strata::kernels::kStepCount);
         pos_ = b.take<int32_t>(T * (NH + NKV + IQ)); commit_ = b.take<int32_t>(2 + T);
         ple_ = b.take<float>(T * N); emb_ = b.take<float>(T * N); R_ = b.take<float>(T * HC * N);
@@ -362,7 +372,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // exact, but neutral on RIBPC 1-2 GPUs: off by default)
     {
         const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN");
-        device_plan_ = v != nullptr && std::atoi(v) != 0;
+        device_plan_ = closed_available_ || (v != nullptr && std::atoi(v) != 0);
     }
     if (device_plan_) {
         bool ok2 = cudaMalloc((void**) &skip_, 64) == cudaSuccess && cudaMemset(skip_, 0, 64) == cudaSuccess;
@@ -373,6 +383,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         }
         if (!ok2) { cudaGetLastError(); device_plan_ = false; }
     }
+    if (closed_available_ && !device_plan_) { err = "closed routing needs a working device planner"; return false; }
     if (const char* path = std::getenv("STRATA_NEURON_TRACE_FILE"); path && path[0]) {
         int devices = 0;
         if (cudaGetDeviceCount(&devices) != cudaSuccess || devices != 1 || peer_portable() ||
@@ -705,6 +716,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
             if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr)) return false;
         }
+        if (closed_available_) {
+            try {
+                closed_router_apply(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K,
+                                    closed_ids_ + (l * max_t_ + tb) * K,
+                                    hits_.d_res + l * NE, closed_mode_d_, n, cs);
+            } catch (const std::exception& e) { err = e.what(); return false; }
+        }
         if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
@@ -1019,6 +1037,8 @@ bool Verifier::capture_commit(std::string& err) {
                 ++qsa_index;
             }
         }
+        if (ok && closed_available_)
+            closed_router_count(closed_ids_, closed_usage_, (int) g.n_layers, max_t_, commit_, 0, cs_);
         if (ok && ss.ple.ready() && ple_stage()) copy_indexed(ss.ple.hist, hist_snap_, HS, commit_ + 1, HS, cs_);
     } catch (const std::exception& e) {
         err = std::string("verify commit: ") + e.what();
@@ -1094,7 +1114,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
     const int64_t steps = (le_ - lb_) * G;
     const bool test_stall = g_test_stall > 0 && windows + 1 == g_test_stall;   // #267 test hook (off: false)
-    for (int64_t k = 0; k < steps; ++k) {
+    if (closed_mode_ != 0) ++closed_windows;
+    for (int64_t k = 0; closed_mode_ == 0 && k < steps; ++k) {
         const int64_t l = lb_ + k / G;
         const int grp = (int) (k % G);
         const uint32_t want = (uint32_t) (k + 1);
@@ -1127,9 +1148,11 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         set_plan_slot(grp);
         const int tb = gtb[grp], n = gte[grp] - gtb[grp];
         progress_at("verify window: the CPU experts of layer", l);
-        if (pool != nullptr)
+        if (pool != nullptr) {
+            ++closed_pool_calls;
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
+        }
         VDBG("layer %lld served\n", (long long) l);
         progress_tick();
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -1391,6 +1414,27 @@ bool Verifier::wait_commit(std::string& err) {
     return next_ == nullptr || next_->wait_commit(err);
 }
 
+bool Verifier::set_closed_mode(int mode, std::string& err) {
+    if (!closed_available_ || mode < 0 || mode > 2) { err="closed routing unavailable/invalid mode"; return false; }
+    if (!wait_commit(err) || cudaStreamSynchronize(cs_) != cudaSuccess) { err="closed routing sync failed"; return false; }
+    if (mode) {
+        std::vector<int32_t> r((size_t)g_->n_layers*g_->n_expert);
+        if (cudaMemcpy(r.data(),hits_.d_res,r.size()*4,cudaMemcpyDeviceToHost)!=cudaSuccess) return false;
+        for (int l=0;l<48;++l) {
+            int count=0; for(int e=0;e<512;++e) count += r[l*512+e]>=0;
+            if(count<10) { err="closed routing needs at least ten residents in every layer"; return false; }
+        }
+    }
+    if(cudaMemcpyAsync(closed_mode_d_,&mode,4,cudaMemcpyHostToDevice,cs_)!=cudaSuccess || cudaStreamSynchronize(cs_)!=cudaSuccess) { err="closed mode upload failed"; return false; }
+    closed_mode_=mode; return true;
+}
+bool Verifier::take_closed_usage(std::vector<float>& out, std::string& err) {
+    if(!closed_available_ || !wait_commit(err) || cudaStreamSynchronize(cs_)!=cudaSuccess) return false;
+    out.resize((size_t)g_->n_layers*g_->n_expert);
+    if(cudaMemcpy(out.data(),closed_usage_,out.size()*4,cudaMemcpyDeviceToHost)!=cudaSuccess ||
+       cudaMemsetAsync(closed_usage_,0,out.size()*4,cs_)!=cudaSuccess || cudaStreamSynchronize(cs_)!=cudaSuccess) { err="closed usage transfer failed"; return false; }
+    return true;
+}
 bool Verifier::copy_logits(int t, float* host) const {
     if (next_ != nullptr) return next_->copy_logits(t, host);   // a layer split: the head is on the last stage
     if (head_logits_ == nullptr || host == nullptr || t < 0 || n_vocab_ <= 0) return false;

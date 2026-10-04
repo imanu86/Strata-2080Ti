@@ -77,6 +77,11 @@ mean-contribution nor peak-contribution score passes the local error screen;
 no pruning is enabled in the Daily. Its full-mask control also identified and
 removed a small activation-quantizer mismatch in the offline replay tool.
 
+The [closed expert cache experiment](docs/sm75/CLOSED_CACHE.md) runs decode
+without CPU expert jobs after selecting the prefill's hottest experts. It shows
+a raw prose-decode gain of 57%, but other answers degenerate while MTP acceptance
+stays high. It remains disabled research; neither Daily nor release ZIP changes.
+
 ## 0.1.38 baseline validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server

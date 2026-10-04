@@ -142,6 +142,13 @@ public:
     const float* final_R(int t) const;
     const float* final_R_all() const { return next_ ? next_->final_R_all() : R_; }
 
+    // Default-off approximation probe, enabled only by STRATA_CLOSED_ROUTING.
+    float* closed_usage_buffer() { return closed_usage_; }
+    bool set_closed_mode(int mode, std::string& err);
+    bool take_closed_usage(std::vector<float>& out, std::string& err);
+    int64_t closed_windows = 0;
+    int64_t closed_pool_calls = 0;
+
     /// The GPU plan the pool writes each layer (VRAM hits + the PCIe share of the misses); give it to the
     /// dispatch (`ExpertDispatch::plan`) before the first `run`.
     GpuPlanSink* plan_sink() { return &sink_; }
@@ -177,6 +184,10 @@ private:
     NeuronTrace* neuron_trace_ = nullptr; ///< optional pinned snapshots, owned until all graphs are destroyed
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
     std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
+    bool closed_available_ = false;
+    int closed_mode_ = 0;
+    int32_t *closed_mode_d_ = nullptr, *closed_ids_ = nullptr;
+    float* closed_usage_ = nullptr;
     bool device_plan_ = false;            ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device

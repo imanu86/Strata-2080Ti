@@ -96,6 +96,8 @@ public:
     /// first, -1 for none) and is advanced to the last two of these.
     bool run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err);
 
+    // Optional probe counter on the same GPU: [n_layers,512]. Null leaves prefill unchanged.
+    float* closed_usage = nullptr;
     const PrefillStats& stats() const { return stats_; }
 
     /// multi-GPU: the experts the peer GPU holds are computed THERE for every prompt chunk (up to `cap_rows` routed

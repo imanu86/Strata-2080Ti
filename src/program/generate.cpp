@@ -4669,6 +4669,18 @@ int main(int argc, char** argv) {
                 stage_ver(st).set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : 2);
             }
         }
+        const char* closed_env = std::getenv("STRATA_CLOSED_ROUTING");
+        const int closed_mode = closed_env == nullptr || std::string(closed_env) == "observe" ? 0 :
+                                std::string(closed_env) == "resident" ? 1 : std::string(closed_env) == "drop" ? 2 : -1;
+        if (closed_env && (closed_mode < 0 || multi_gpu || peer.valid() || o.elastic || o.adapt_swaps != 0 ||
+                           o.prompt_cache != 0 || o.prefill_chunk <= 0 || o.suffix_draft != 0)) {
+            std::fprintf(stderr,"closed routing: requires valid mode, one GPU, fixed cache, no ordinary swaps, no prompt cache/suffix\n");
+            return 1;
+        }
+        if (closed_env && src.complement_ready() && !src.reserve_exchanges(96,err)) {
+            std::fprintf(stderr,"closed routing: exchange reservation: %s\n",err.c_str()); return 1;
+        }
+        if (closed_env) sp.closed_usage = ver.closed_usage_buffer();
         // the pool the verify windows call: with a layer split, the wrapper that routes each layer to its stage
         const strata::core::PoolMultiFn win_pool_fn = n_stages > 1 ? &drive_pool_split : &drive_pool_multi;
         void* const win_pool_user = n_stages > 1 ? (void*) &split_drive : (void*) &drive;
@@ -4991,6 +5003,59 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(st->dev);
                 cudaMemcpy(st->d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
             }
+        };
+        // Lab refresh is synchronous and measured. It cannot race the verifier or drafter.
+        int64_t closed_refreshes = 0, closed_refill_bytes = 0;
+        double closed_refill_ms = 0.0;
+        auto closed_refill = [&](const char* reason) -> bool {
+            const auto began = Clock::now();
+            if (!ver.wait_commit(err) || cudaDeviceSynchronize() != cudaSuccess) return false;
+            std::vector<float> counts;
+            if (!ver.take_closed_usage(counts,err)) return false;
+            struct Swap { int32_t layer,in,out; };
+            std::vector<Swap> swaps;
+            double observations=0; for(float v:counts) observations+=v;
+            for(int l=0;l<(int)g.n_layers;++l) {
+                std::vector<int32_t> order(512), incoming,outgoing;
+                int capacity=0;
+                for(int e=0;e<512;++e) { order[e]=e; capacity += host_res[l*512+e]>=0; }
+                if(capacity<10) { err="closed cache has fewer than ten slots in a layer"; return false; }
+                std::sort(order.begin(),order.end(),[&](int a,int b) {
+                    if(counts[l*512+a]!=counts[l*512+b]) return counts[l*512+a]>counts[l*512+b];
+                    bool ra=host_res[l*512+a]>=0, rb=host_res[l*512+b]>=0;
+                    return ra!=rb ? ra : a<b;
+                });
+                std::vector<bool> wanted(512,false);
+                for(int i=0;i<capacity;++i) { wanted[order[i]]=true; if(host_res[l*512+order[i]]<0)incoming.push_back(order[i]); }
+                for(int e=0;e<512;++e)if(host_res[l*512+e]>=0 && !wanted[e])outgoing.push_back(e);
+                if(incoming.size()!=outgoing.size())return false;
+                for(size_t i=0;i<incoming.size();++i)swaps.push_back({l,incoming[i],outgoing[i]});
+            }
+            int64_t bytes=0;
+            for(size_t at=0;at<swaps.size();at+=96) {
+                std::vector<Swap> batch(swaps.begin()+at,swaps.begin()+std::min(swaps.size(),at+96));
+                const size_t expected=batch.size();
+                if(!resident_stage_swaps(src,xcache,host_res,g.n_expert,batch,adapt_stream) || batch.size()!=expected)return false;
+                for(const auto& s:batch) {
+                    int slot=host_res[s.layer*512+s.out];
+                    const uint8_t* b=srcp->blob(s.layer,s.in);
+                    const size_t nb=strata::kernels::cpu::expert_layout().blob_bytes(s.layer);
+                    if(!b || slot<0 || cudaMemcpyAsync(xcache.device_slot(slot),b,nb,cudaMemcpyHostToDevice,adapt_stream)!=cudaSuccess)return false;
+                    bytes += nb;
+                }
+                if(cudaStreamSynchronize(adapt_stream)!=cudaSuccess)return false;
+                src.commit_exchanges();
+                for(const auto& s:batch) {
+                    host_res[s.layer*512+s.in]=host_res[s.layer*512+s.out];
+                    host_res[s.layer*512+s.out]=strata::core::kNotResident;
+                }
+            }
+            if(cudaMemcpyAsync(d_res,host_res.data(),host_res.size()*4,cudaMemcpyHostToDevice,adapt_stream)!=cudaSuccess || cudaStreamSynchronize(adapt_stream)!=cudaSuccess)return false;
+            if(!ver.set_closed_mode(closed_mode,err))return false;
+            const double ms=std::chrono::duration<double,std::milli>(Clock::now()-began).count();
+            ++closed_refreshes; closed_refill_bytes+=bytes; closed_refill_ms+=ms;
+            std::fprintf(stderr,"CLOSED_REFILL reason=%s observations=%.0f swaps=%zu h2d_bytes=%lld ms=%.3f\n",reason,observations,swaps.size(),(long long)bytes,ms);
+            return true;
         };
         auto apply_pending = [&](bool wait) {
             if (peer.valid()) peer.apply_pending(wait);
@@ -5506,7 +5571,13 @@ int main(int argc, char** argv) {
                 BusyScope() { strata::core::progress().busy.store(true); strata::core::progress_at("request"); }
                 ~BusyScope() { strata::core::progress().busy.store(false); strata::core::progress_at("idle"); }
             } busy_scope;
-            stop_req.store(false);   // a STOP that arrived between requests is stale
+            stop_req.store(false);
+            if(closed_env) {
+                std::vector<float> discarded;
+                if(!ver.set_closed_mode(0,err) || !ver.take_closed_usage(discarded,err)) {
+                    std::printf("ERR closed request reset: %s\n",err.c_str()); return 1;
+                }
+            }   // a STOP that arrived between requests is stale
             err.clear();
             const bool geni = line.rfind("GENI ", 0) == 0;
             if (!geni && line.rfind("GEN ", 0) != 0) {
@@ -6207,6 +6278,9 @@ int main(int argc, char** argv) {
                 std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
                 return 1;
             }
+            if (closed_mode && !closed_refill("prefill")) {
+                std::printf("ERR closed prefill selection: %s\n",err.c_str()); return 1;
+            }
             tr("prompt done (slots refilled)");
             const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();
             if (prefill_stats_on) {
@@ -6288,6 +6362,10 @@ int main(int argc, char** argv) {
             bool first_window = true;
             int64_t produced_n = 0, sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
             int64_t draft_offered = 0, draft_accepted = 0;
+            int64_t closed_offered=0, closed_accepted=0, closed_tokens=0;
+            const int64_t closed_refresh0=closed_refreshes, closed_bytes0=closed_refill_bytes;
+            const int64_t closed_windows0=ver.closed_windows, closed_pool0=ver.closed_pool_calls;
+            const double closed_ms0=closed_refill_ms;
             // what the session holds once this request is done: the prompt read so far, then every committed token
             std::vector<int32_t> consumed;
             consumed.reserve((size_t) (n + max_new + S));
@@ -6475,10 +6553,25 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                 }
+                if(closed_mode) {
+                    closed_offered+=T-1; closed_accepted+=a; closed_tokens+=emit;
+                    if(closed_offered>=64 && closed_tokens>=32) {
+                        const double rate=(double)closed_accepted/closed_offered;
+                        std::fprintf(stderr,"CLOSED_ACCEPT pos=%lld accepted=%lld offered=%lld rate=%.6f\n",
+                                     (long long)p,(long long)closed_accepted,(long long)closed_offered,rate);
+                        if(rate<0.5 && produced_n<max_new && !closed_refill("mtp_low")) {
+                            std::printf("ERR closed refresh: %s\n",err.c_str()); return 1;
+                        }
+                        closed_offered=closed_accepted=closed_tokens=0;
+                    }
+                }
                 x = outv[(size_t) a];
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            if(closed_env) std::fprintf(stderr,"CLOSED_DONE mode=%d windows=%lld pool_calls=%lld refreshes=%lld refill_ms=%.3f h2d_bytes=%lld\n",
+                closed_mode,(long long)(ver.closed_windows-closed_windows0),(long long)(ver.closed_pool_calls-closed_pool0),
+                (long long)(closed_refreshes-closed_refresh0),closed_refill_ms-closed_ms0,(long long)(closed_refill_bytes-closed_bytes0));
             // the last commit (set_commit_async): the session is complete before anything reads or copies it
             if (!ver.wait_commit(err)) {
                 std::printf("ERR %s\n", err.c_str());

@@ -41,9 +41,11 @@ __device__ __forceinline__ float warp_max(float value) {
     for (int mask = 16; mask; mask >>= 1) value = fmaxf(value, __shfl_xor_sync(0xffffffffu, value, mask, 32));
     return value;
 }
+template<bool Restricted = false>
 __launch_bounds__(256, 1)
 __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ ids,
-                      float* __restrict__ weights) {
+                      float* __restrict__ weights, const int32_t* resident = nullptr, const int32_t* mode = nullptr) {
+    if constexpr (Restricted) { if (*mode != 1) return; }
     // Preserve the pinned 32x8 block geometry; only row zero is active here.
     // blockIdx.x = the token (a multi-token launch; 0 for the single one)
     logits += (size_t) blockIdx.x * 512; ids += (size_t) blockIdx.x * 10; weights += (size_t) blockIdx.x * 10;
@@ -51,7 +53,10 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
     const int lane = threadIdx.x;
     float values[16];
 #pragma unroll
-    for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
+    for (int i = 0; i < 16; ++i) {
+        values[i] = logits[lane + i * 32];
+        if constexpr (Restricted) if (resident[lane + i * 32] < 0) values[i] = -INFINITY;
+    }
     __syncthreads();
     float maximum = -INFINITY;
 #pragma unroll
@@ -68,6 +73,7 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
     for (int i = 0; i < 16; ++i) {
         values[i] *= reciprocal;
         if (__isnanf(values[i])) values[i] = -FLT_MAX;
+        if constexpr (Restricted) if (resident[lane + i * 32] < 0) values[i] = -FLT_MAX;
     }
     float selected = 0.0f, selected_sum = 0.0f;
     for (int rank = 0; rank < 10; ++rank) {
@@ -96,6 +102,23 @@ __global__ void route(const float* __restrict__ logits, int32_t* __restrict__ id
     const float inverse_selected_sum = 1.0f / selected_sum;
     if (lane < 10) weights[lane] = selected * inverse_selected_sum;
 }
+__global__ void closed_drop(int32_t* ids, float* weights, const int32_t* res,
+                             const int32_t* mode, int n) {
+    if (*mode != 2) return;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || res[ids[i]] >= 0) return;
+    // Zero-weight dummy resident IDs preserve the grouped planner contract.
+    int fallback = 0; while (fallback < 512 && res[fallback] < 0) ++fallback;
+    if (fallback < 512) { ids[i] = fallback; weights[i] = 0.0f; }
+}
+__global__ void count_closed(const int32_t* ids, float* counts, int stride,
+                             const int32_t* keep_d, int keep_h) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x, l = blockIdx.y;
+    const int keep = keep_d ? *keep_d : keep_h;
+    if (i >= keep * 10) return;
+    const int id = ids[(size_t) l * stride * 10 + i];
+    if (id >= 0 && id < 512) atomicAdd(counts + l * 512 + id, 1.0f);
+}
 bool valid(const void* p, size_t bytes) {
     const auto address = reinterpret_cast<uintptr_t>(p);
     return p && address % 4 == 0 && bytes <= UINTPTR_MAX - address;
@@ -105,6 +128,26 @@ bool overlap(const void* a, size_t an, const void* b, size_t bn) {
     return ap < bp + bn && bp < ap + an;
 }
 }
+void closed_router_apply(float* logits, int32_t* ids, float* weights, int32_t* original_ids,
+                         const int32_t* resident, const int32_t* mode, int n_tok, void* stream) {
+    if (!stream || !logits || !ids || !weights || !original_ids || !resident || !mode || n_tok < 1 || n_tok > 8)
+        throw std::invalid_argument("closed router: invalid spans/window");
+    const auto cs = static_cast<cudaStream_t>(stream);
+    auto e = cudaMemcpyAsync(original_ids, ids, (size_t) n_tok * 10 * 4, cudaMemcpyDeviceToDevice, cs);
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
+    route<true><<<(unsigned) n_tok, dim3(32,8), 0, cs>>>(logits, ids, weights, resident, mode);
+    closed_drop<<<1,128,0,cs>>>(ids,weights,resident,mode,n_tok*10);
+    e = cudaGetLastError(); if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
+}
+void closed_router_count(const int32_t* ids, float* counts, int layers, int stride,
+                         const int32_t* keep_device, int keep_host, void* stream) {
+    if (!ids || !counts || !stream || layers < 1 || layers > 48 || stride < 1 ||
+        (!keep_device && (keep_host < 1 || keep_host > stride)))
+        throw std::invalid_argument("closed router: invalid count geometry");
+    count_closed<<<dim3((unsigned)((stride*10+255)/256),(unsigned)layers),256,0,
+                   static_cast<cudaStream_t>(stream)>>>(ids,counts,stride,keep_device,keep_host);
+    auto e=cudaGetLastError(); if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));
+}
 void native_router_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_router_enabled() { return enabled.load(std::memory_order_relaxed); }
 void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream) {
@@ -112,7 +155,7 @@ void native_router_top10(const float* logits, int32_t* ids, float* weights, void
         || overlap(logits, 512 * 4, ids, 10 * 4) || overlap(logits, 512 * 4, weights, 10 * 4)
         || overlap(ids, 10 * 4, weights, 10 * 4))
         throw std::invalid_argument("native router requires a stream, aligned spans, and disjoint outputs");
-    route<<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
+    route<false><<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
@@ -120,7 +163,7 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     if (!stream || n_tok < 1 || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
         !valid(weights, (size_t) n_tok * 10 * 4))
         throw std::invalid_argument("native router (multi) requires a stream and aligned [n,512]/[n,10] buffers");
-    route<<<(unsigned) n_tok, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
+    route<false><<<(unsigned) n_tok, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

@@ -15,5 +15,13 @@ bool native_router_enabled();
 // Requires a nonnull ordered CUDA stream. No allocation or synchronization.
 void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream);
 /// n_tok rows at once (logits [n,512], ids/weights [n,10]); each row exactly as the single call.
+// Lab-only: keep original router IDs, then restrict to resident experts (mode 1)
+// or drop nonresident contributions without renormalizing (mode 2). Mode 0 is exact.
+// Caller must guarantee >=10 resident experts; mode/residency remain device data.
+void closed_router_apply(float* logits, int32_t* ids, float* weights, int32_t* original_ids,
+                         const int32_t* resident, const int32_t* mode, int n_tok, void* stream);
+// Accumulate only committed rows of [layers,stride,10], into [layers,512].
+void closed_router_count(const int32_t* ids, float* counts, int layers, int stride,
+                         const int32_t* keep_device, int keep_host, void* stream);
 void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream);
 }

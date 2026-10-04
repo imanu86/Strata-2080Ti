@@ -1,5 +1,6 @@
 // src/prefill/prefill.cpp - see include/strata/prefill/prefill.hpp.
 #include "strata/prefill/prefill.hpp"
+#include "strata/kernels/native_router.hpp"
 #include "strata/prefill/request_chunk.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/progress.hpp"
@@ -2066,6 +2067,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     pt.mark(kPfRouter, cs);
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
+                    if (closed_usage)
+                        strata::kernels::closed_router_count(m.ids, closed_usage + l * 512, 1, (int)T, nullptr, (int)T, m.cs);
                     // the shared expert and its scalar gate
                     if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
                     if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
