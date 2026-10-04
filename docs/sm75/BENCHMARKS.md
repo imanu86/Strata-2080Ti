@@ -633,3 +633,20 @@ Candidate executable SHA256:
 [synthetic token fixture](prefix-cache-fixture-20261004.json) contain no user chats.
 The implementation and CPU tests are in main; the published release binary
 `v0.1.38-sm75-20261003-r1` predates this feature.
+
+**Local Daily deployment completed.** Source commit `f01c0843daa32238e6194b5e54a294f5956ab555`
+and the candidate hash above are installed in `build-0138-daily`. The config adds
+only `--prompt-cache-file D:\ds4_work\strata\sota\prompt-prefix-v1.bin`;
+its SHA256 is `db77e8364bf9221cfc846b8133a3c40fc8936196aa9939fa583cee3d539fe172`.
+The first eligible user request will create that file; synthetic test snapshots
+were not installed as user prefixes. The existing launcher is unchanged.
+
+`build-0138-daily/backup-prefix-disk-20261004` preserves the old executable,
+config, changed operational sources and all 48 untracked checkout files.
+The historical `source-manifest.json` is unchanged; the separate
+`prefix-cache-validation.json` records this installation and all 289 verified
+source hashes. To disable persistence, remove the flag and its path from the
+config while the engine is stopped. To restore the previous binary deployment,
+restore the executable, config and sources from that backup according to
+`recovery.json`. Post-install checks confirm the server remains off and port
+8100 is free. This is a local Daily update, not a new published binary release.

@@ -39,14 +39,16 @@ bitwise. A separate 190-turn elastic conversation reaches 250130 tokens. Its com
 are documented. The earlier snapshot throughput table below is retained as history;
 these changes do not establish a new cold-prefill or sustained-decode SOTA.
 
-The local Daily now uses executable SHA256 `a17d0dd5…` with these source changes.
-The later optional decode PLE diagnostic is available in source but has not
-been promoted to the Daily: numerical parity passed, while the operative answer
-check failed. See [results and limits](docs/sm75/BENCHMARKS.md#decode-ple-timing-and-pcie-screening-4-october-2026).
+The local Daily now uses executable SHA256 `f2e371bf…`, with persistent prefix
+caching enabled. The optional decode PLE diagnostic is included and remains off.
+Its earlier automatic-profile answer failure is preserved; the completed repeat
+with matched placement now agrees bitwise with the old Daily and answers correctly.
+See [prefix validation and deployment](docs/sm75/BENCHMARKS.md#persistent-system-prefix-4-october-2026)
+and the [earlier diagnostic results](docs/sm75/BENCHMARKS.md#decode-ple-timing-and-pcie-screening-4-october-2026).
 The latest published download,
 [`v0.1.38-sm75-20261003-r1`](https://github.com/imanu86/Strata-2080Ti/releases/tag/v0.1.38-sm75-20261003-r1),
-is the earlier `fc9a767` snapshot; it does not contain the later QSA and diagnostic
-changes. [Build main](docs/sm75/BUILD.md) for those changes. Full binary hashes,
+is the earlier `fc9a767` snapshot; it does not contain the later QSA, diagnostic
+or persistent-prefix changes. [Build main](docs/sm75/BUILD.md) for those changes. Full binary hashes,
 the partial extended teacher check and bounded 250k recall results are in
 [the benchmark record](docs/sm75/BENCHMARKS.md#actual-daily-full-history-recall-and-arithmetic).
 
