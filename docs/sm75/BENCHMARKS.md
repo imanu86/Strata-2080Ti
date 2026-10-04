@@ -514,3 +514,57 @@ the owned processes closed. [Sanitized result and hashes](qsa-daily-recall-20261
 
 Installed Daily executable SHA256:
 `a17d0dd5362bc35420ca9ef3d1a8cf8c014dafbb3aea189c6c664fe7930e8674`.
+
+
+## Decode PLE timing and PCIe screening (4 October 2026)
+
+The default-off `STRATA_DECODE_TIMING` diagnostic now measures the primary
+verifier's PLE gather (submit, wait and dequantization, excluding n-gram keys).
+It is a subset of host staging. The residual is not separate source attribution,
+and the primary-verifier counter is not an aggregate across multiple GPUs.
+Cumulative reader counts/blocked time can be differenced; rolling p50/p99
+must not be subtracted as request-local percentiles. Leave the flag unset to
+disable it, including on Windows (setting it to 0 still enables it).
+
+Old executable / candidate off / candidate on pass three full first-logit
+rows at 4163, 9283 and 20480 input tokens (248320 finite F32 values per row)
+and 384 generated IDs per arm, bitwise. These are 128-token prefixes, not
+complete answers or a throughput comparison. PLE gather in the ON arm takes
+0.849/0.758/0.457 ms per window, with 0.002 ms residual staging. The earlier
+intermittent 30–33 ms staging cost was not reproduced here.
+These numerical arms use 5080 actual cache slots/8442 MiB, PCIe share 0,
+spec 4/MTP max 4, with elastic/adaptive swaps, suffix and prompt caching off.
+They do not establish full-answer parity under the operative elastic policy.
+
+**Not installed in Daily.** A separate smoke using the operative automatic,
+elastic and tail settings finishes its 9283-token LRU task but fails the exact
+answer oracle: hits 1 / misses 13 instead of hits 2 / misses 12. Valid JSON
+and throughput do not establish correct output. The old Daily reference passes
+the complete-answer oracle. Initial automatic cache allocations differ (5849
+candidate slots, 6014 reference slots), and full generated token sequences
+differ. This pair alone does not isolate a code regression.
+The operational executable remains `a17d0dd5…`; config, launcher, source
+snapshot and historical manifest are unchanged. No new SOTA or release.
+
+The separate PCIe-share study warms three tasks and runs A/B/A in one process:
+A=0.36, B=0.55; workers 7, spec 6/MTP max 4, suffix/adapt/elastic off.
+Auto sizing at startup gives 5732 slots/9503 MiB cache, 1639 MiB free with
+reserve 2048. Prefill still borrows slots: placement is not fully frozen,
+and this is not an operational elastic-profile comparison.
+
+| Rendered input | A1 decode t/s | B decode t/s | A2 decode t/s |
+|---:|---:|---:|---:|
+| 4163 | 38.422 | 28.656 | 36.875 |
+| 9283 | 38.082 | 28.363 | 38.851 |
+| 20480 | 38.362 | 31.905 | 36.821 |
+
+Higher share is rejected: all three tasks slow down. First/third control
+pairs also drift about 4.1%, beyond the predeclared 3% stability bound, so
+these are screening observations, not precise general regression estimates.
+All eight arithmetic/LRU requests pass exact final oracles. Four archive
+answers, including warmup, finish within 200–300 words and retain the bounded
+decision facts. This does not establish general quality or numerical parity
+between CPU/GPU partitions, which change rounding and continuations.
+
+Failed preflights, count/parser failures and incomplete answers remain
+separate from completed gates. [Evidence, hashes and limitations](decode-ple-diagnostics-20261004.json).

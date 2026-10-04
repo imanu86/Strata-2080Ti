@@ -33,6 +33,9 @@ are documented. The earlier snapshot throughput table below is retained as histo
 these changes do not establish a new cold-prefill or sustained-decode SOTA.
 
 The local Daily now uses executable SHA256 `a17d0dd5…` with these source changes.
+The later optional decode PLE diagnostic is available in source but has not
+been promoted to the Daily: numerical parity passed, while the operative answer
+check failed. See [results and limits](docs/sm75/BENCHMARKS.md#decode-ple-timing-and-pcie-screening-4-october-2026).
 The latest published download,
 [`v0.1.38-sm75-20261003-r1`](https://github.com/imanu86/Strata-2080Ti/releases/tag/v0.1.38-sm75-20261003-r1),
 is the earlier `fc9a767` snapshot; it does not contain the later QSA and diagnostic

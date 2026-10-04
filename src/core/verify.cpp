@@ -57,6 +57,7 @@ constexpr float EPS = 1e-6f;
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
+const bool g_ple_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -1049,7 +1050,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             prev[0] = prev[1];
             prev[1] = tokens[t];
         }
+        const Clock::time_point ple_start = g_ple_timing ? Clock::now() : Clock::time_point{};
         if (!ss.ple.table->gather_batch(rows, (size_t) T, h_ple_, err)) return false;
+        if (g_ple_timing) ms_ple_gather += ms_since(ple_start);
     }
     *(volatile uint32_t*) h_seq_ = 0;
     *(volatile uint32_t*) h_flag_ = 0;
