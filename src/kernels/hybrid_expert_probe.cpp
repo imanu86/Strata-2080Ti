@@ -248,6 +248,8 @@ int main(int argc,char** argv) {
     if (argc!=6 && argc!=7) { std::cerr<<"usage: hybrid_expert_probe input.shb model.gguf output.jsonl iterations rounds [paired]\n";return 2; }
     try {
         const bool paired=argc==7;
+        // lab gate-first probe: per-token neuron selection differs between a partition and the whole expert
+        const bool gate_probe=std::getenv("STRATA_GATE_KEEP")!=nullptr;
         require(!paired || std::string(argv[6])=="paired","unknown probe mode");
         require(!fs::exists(fs::u8path(argv[3])),"output already exists");
         const int iterations=std::stoi(argv[4]),rounds=std::stoi(argv[5]);
@@ -275,13 +277,13 @@ int main(int argc,char** argv) {
             cpu_full.run(pool,c.x.data());cpu_hot.run(pool,c.x.data());cpu_cold.run(pool,c.x.data());
             const Vec ref_cpu=cpu_full.values(), hot_cpu=cpu_hot.values(),cold_cpu=cpu_cold.values();
             const double cpu_split_error=l2(add(hot_cpu,cold_cpu),ref_cpu);
-            require(cpu_split_error<1e-5,"CPU partition parity failed");
+            require(gate_probe || cpu_split_error<1e-5,"CPU partition parity failed");
             Vec ref_gpu,hot_gpu,cold_gpu;
             { GpuBatch g(full,bs,c.x.data(),ws);g.launch();g.finish(false);ref_gpu=g.get_parts(); }
             { GpuBatch g(hf,hot,c.x.data(),ws);g.launch();g.finish(false);hot_gpu=g.get_parts(); }
             { GpuBatch g(cf,cold,c.x.data(),ws);g.launch();g.finish(false);cold_gpu=g.get_parts(); }
             const double gpu_split_error=l2(add(hot_gpu,cold_gpu),ref_gpu);
-            require(gpu_split_error<1e-5,"GPU partition parity failed");
+            require(gate_probe || gpu_split_error<1e-5,"GPU partition parity failed");
             const Vec hybrid_reference=weighted(add(hot_gpu,cold_cpu),ws);
             const Vec gpu_reference=weighted(ref_gpu,ws),cpu_reference=weighted(ref_cpu,ws);
             Blobs three(bs.begin(),bs.begin()+3),seven(bs.begin()+3,bs.end());
@@ -315,7 +317,7 @@ int main(int argc,char** argv) {
             for (size_t i=0;i<arms.size();++i) {
                 const auto& a=arms[i]; if(i)out<<',';
                 const Vec& reference=a.name=="gpu30_cpu70"?hybrid_reference:(a.name=="cpu10"?cpu_reference:gpu_reference);
-                if (a.name!="gpu3_cpu7") require(l2(a.output,reference)<1e-5,"timed path parity failed");
+                if (a.name!="gpu3_cpu7" && !(gate_probe && a.name=="gpu30_cpu70")) require(l2(a.output,reference)<1e-5,"timed path parity failed");
                 out<<"{\"name\":\""<<a.name<<"\",\"gpu_active_weight_bytes\":"<<a.gpu_bytes<<",\"cpu_active_weight_bytes\":"<<a.cpu_bytes
                    <<",\"routed_l2_vs_full_gpu\":"<<l2(a.output,gpu_reference)<<",\"round_us\":"; values(out,a.us);out<<'}';
             }

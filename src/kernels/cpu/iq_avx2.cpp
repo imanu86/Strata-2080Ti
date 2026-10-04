@@ -11,6 +11,7 @@
 //
 // Formats: IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21), IQ2_S (22), IQ4_XS (23).  IQ1_M stays on ggml-cpu.
 #include "strata/kernels/cpu/iq_avx2.hpp"
+#include "strata/kernels/cpu/native_expert.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -332,6 +333,8 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const voi
         row_dot_any<TY, NT>(blob + (size_t) r * gu_row, nb, y, g);
         row_dot_any<TY, NT>(blob + up_off + (size_t) r * gu_row, nb, y, u);
         for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
+        if (g_gate_side != nullptr)   // lab gate-first probe
+            for (int t = 0; t < NT; ++t) g_gate_side[t][r] = std::fabs(g[t] / (1.f + std::exp(-g[t])));
     }
 }
 

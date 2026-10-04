@@ -537,6 +537,8 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
             const QuantTask& q = quant_tasks_[i];
             const int e = q.e, t = q.t;
             if (nfmt_ != nullptr) {
+                gate_keep_mask(split_multi_[(size_t) e].ff[t], split_multi_[(size_t) e].gs[t], (int) nfmt_->n_ff,
+                               gate_keep_count((int) nfmt_->n_ff));
                 if (nfmt_->d_type == 42)
                     act_quant_any(split_multi_[(size_t) e].ff[t], (int) nfmt_->n_ff, split_multi_[(size_t) e].a2[t]);
                 else
@@ -562,12 +564,18 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
                     q2_rows_any(mjobs_[e].blob, nfmt_->gu_row, nbk, mjobs_[e].act, mjobs_[e].nt, gp, r0, r1);
                     q2_rows_any(mjobs_[e].blob + nfmt_->up_off, nfmt_->gu_row, nbk, mjobs_[e].act, mjobs_[e].nt, up, r0, r1);
                     for (int t = 0; t < mjobs_[e].nt; ++t)
-                        for (int r = r0; r < r1; ++r)
-                            sb.ff[t][r] = (gbuf[t][r] / (1.f + std::exp(-gbuf[t][r]))) * ubuf[t][r];
+                        for (int r = r0; r < r1; ++r) {
+                            const float sg = gbuf[t][r] / (1.f + std::exp(-gbuf[t][r]));
+                            sb.ff[t][r] = sg * ubuf[t][r];
+                            sb.gs[t][r] = std::fabs(sg);
+                        }
                 } else if (mode_ == 5) {
                     float* ff[MAXT];
-                    for (int t = 0; t < mjobs_[e].nt; ++t) ff[t] = sb.ff[t];
+                    float* gs[MAXT];
+                    for (int t = 0; t < mjobs_[e].nt; ++t) { ff[t] = sb.ff[t]; gs[t] = sb.gs[t]; }
+                    if (gate_keep_count((int) nfmt_->n_ff) > 0) g_gate_side = gs;
                     native_gu_rows(*nfmt_, mjobs_[e].blob, mjobs_[e].nact, mjobs_[e].nt, ff, r0, r1);
+                    g_gate_side = nullptr;
                 } else if (nfmt_->d_type == 42) {
                     // Q2_0 down (most IQ layers): the AVX-512 kernel, ggml-cpu has only a scalar one on x86
                     const ActQ* a2[MAXT];
@@ -709,6 +717,7 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
         if (parallel_quant_ && quant_tasks_.size() > 1) run_phase(7, (int) quant_tasks_.size());
     else for (const QuantTask& q : quant_tasks_) {
         auto& b = split_multi_[(size_t) q.e];
+        gate_keep_mask(b.ff[q.t], b.gs[q.t], (int) nfmt_->n_ff, gate_keep_count((int) nfmt_->n_ff));
         if (!nfmt_) act_quant_q8_1(b.ff[q.t], FF, b.a2[q.t]);
         else if (nfmt_->d_type == 42) act_quant_any(b.ff[q.t], (int) nfmt_->n_ff, b.a2[q.t]);
         else native_quant_h(*nfmt_, b.ff[q.t], b.hq[q.t]);

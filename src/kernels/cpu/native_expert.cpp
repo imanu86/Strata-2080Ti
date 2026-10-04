@@ -11,7 +11,9 @@
 #include "ggml.h"
 #include "ggml-cpu.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 
@@ -68,6 +70,28 @@ bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt
     return true;
 }
 
+thread_local float* const* g_gate_side = nullptr;
+
+int gate_keep_count(int n_ff) {
+    static const double frac = [] {
+        const char* v = std::getenv("STRATA_GATE_KEEP");
+        const double f = v != nullptr ? std::atof(v) : 0.0;
+        if (v != nullptr) std::fprintf(stderr, "GATE_KEEP fraction=%.4f (lab probe: gate-first neuron selection)\n", f);
+        return f > 0.0 && f < 1.0 ? f : 0.0;
+    }();
+    return frac > 0.0 ? std::max(1, (int) std::lround(frac * n_ff)) : 0;
+}
+
+void gate_keep_mask(float* h, const float* side, int n_ff, int keep) {
+    if (keep <= 0 || keep >= n_ff) return;
+    float tmp[1024];
+    for (int r = 0; r < n_ff; ++r) tmp[r] = side[r];
+    std::nth_element(tmp, tmp + (n_ff - keep), tmp + n_ff);
+    const float thr = tmp[n_ff - keep];
+    for (int r = 0; r < n_ff; ++r)
+        if (side[r] < thr) h[r] = 0.0f;
+}
+
 void native_quant_act(const NativeFmt& f, const float* x, void* dst) {
     traits(f.gu_act)->from_float(x, dst, f.n_embd);
 }
@@ -122,6 +146,7 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
             dot(n, &g, 0, gr, 0, act[t], 0, 1);
             dot(n, &u, 0, ur, 0, act[t], 0, 1);
             ff[t][r] = (g / (1.f + std::exp(-g))) * u;
+            if (g_gate_side != nullptr) g_gate_side[t][r] = std::fabs(g / (1.f + std::exp(-g)));
         }
     }
 }

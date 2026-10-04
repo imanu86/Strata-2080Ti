@@ -15,6 +15,8 @@
 #include "ggml-common.h"
 
 #include <cstdio>
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 
 namespace strata::kernels {
@@ -1039,6 +1041,41 @@ __global__ void quantize_q8_1_kernel(const float* __restrict__ x, block_q8_1* __
     q8_1_store(x[i], y, i);
 }
 
+// Lab-only gate-first probe (STRATA_GATE_KEEP): per entry keep the `keep` neurons with the largest |silu(gate)|
+// (ties kept) and zero `up` elsewhere, so SwiGLU gives h = 0 there.  One block per entry; quality probe only.
+__global__ void __launch_bounds__(256) gate_keep_kernel(const float* __restrict__ gate, float* __restrict__ up,
+                                                        const int32_t* __restrict__ grp_start,
+                                                        const int32_t* __restrict__ n_groups, int n_ff, int keep) {
+    const int e = grp_start[0] + (int) blockIdx.x;
+    if (e >= grp_start[*n_groups]) return;
+    __shared__ float s[1024];
+    const float* g = gate + (size_t) e * n_ff;
+    for (int i = threadIdx.x; i < 1024; i += blockDim.x) {
+        float v = -1.0f;
+        if (i < n_ff) { const float x = g[i]; v = fabsf(x / (1.0f + __expf(-x))); }
+        s[i] = v;
+    }
+    __syncthreads();
+    for (int k = 2; k <= 1024; k <<= 1)          // bitonic sort, descending
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            for (int i = threadIdx.x; i < 1024; i += blockDim.x) {
+                const int l = i ^ j;
+                if (l > i) {
+                    const bool desc = (i & k) == 0;
+                    const float a = s[i], b = s[l];
+                    if (desc ? a < b : a > b) { s[i] = b; s[l] = a; }
+                }
+            }
+            __syncthreads();
+        }
+    const float thr = s[keep - 1];
+    float* u = up + (size_t) e * n_ff;
+    for (int i = threadIdx.x; i < n_ff; i += blockDim.x) {
+        const float x = g[i];
+        if (fabsf(x / (1.0f + __expf(-x))) < thr) u[i] = 0.0f;
+    }
+}
+
 // swiglu_entries_kernel and quantize_q8_1_kernel in one pass, over the call's own entries only:
 // [grp_start[0], grp_start[*n_groups]) (a call's entries are contiguous; the verify window's PCIe call starts after
 // its VRAM call) instead of all cap_entries twice - nothing reads the others: the down kernel reads its groups'.
@@ -1561,6 +1598,17 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         default: std::fprintf(stderr, "native_expert_grouped: gate/up type %d\n", L.gu_type); std::exit(1);
     }
     check("native_expert_grouped/gu");
+    static const double gate_keep_frac = [] {
+        const char* v = std::getenv("STRATA_GATE_KEEP");
+        const double f = v != nullptr ? std::atof(v) : 0.0;
+        return f > 0.0 && f < 1.0 ? f : 0.0;
+    }();
+    if (gate_keep_frac > 0.0 && L.n_ff <= 1024) {
+        const int keep = std::max(1, (int) std::lround(gate_keep_frac * (double) L.n_ff));
+        if (keep < L.n_ff)
+            gate_keep_kernel<<<(unsigned) cap_entries, 256, 0, s>>>(gate, up, grp_start, n_groups, (int) L.n_ff, keep);
+        check("native_expert_grouped/gate_keep");
+    }
     const long long nh = (long long) cap_entries * L.n_ff;
     if (v1) {
         swiglu_entries_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(gate, up, h, nh);

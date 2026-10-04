@@ -263,6 +263,7 @@ private:
         alignas(64) float ff[MAXT][FF];
         ActQ a2[MAXT];
         alignas(64) uint8_t hq[MAXT][kNativeHBytes];   // plan v0.3 P6: native down activations
+        alignas(64) float gs[MAXT][FF];                 // lab gate-first probe: |silu(gate)| per row
     };
     const NativeFmt* nfmt_ = nullptr;
     std::vector<SplitBufMulti> split_multi_;
