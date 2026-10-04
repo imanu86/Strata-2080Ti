@@ -208,3 +208,18 @@ The `hybrid_expert_probe` target is included only with
 input converter, explicit commands, measured outcomes and limitations. This
 probe performs real complementary CPU/GPU computation; it does not enable an
 online partial-expert cache or replace the Daily.
+
+## Turn-local pruning replay correction
+
+The current `neuron_trace_replay` uses `quantize_q8_1_rows` for masked down
+projections, matching the grouped full-reference activation quantizer.
+The earlier standalone quantizer produced a small full-mask discrepancy in
+one of2560 calls. After correction, full/zero controls and the repeated10%
+pruning case pass bitwise. Output formats and command-line arguments are unchanged;
+the corrected executable SHA256 is
+`64b55b1bef1b4ef4528ab8be9d7cc7f4465ed878e40ddf3b60bd00667d7a970c`.
+
+`turn-pruning-20261004.json` records this diagnostic snapshot and preserves all
+historical manifests. See [TURN_PRUNING.md](TURN_PRUNING.md) for the experiment,
+public scripts/masks and the limits of the negative pruning result. Production
+CUDA kernels, the Daily executable and release ZIP are unchanged.

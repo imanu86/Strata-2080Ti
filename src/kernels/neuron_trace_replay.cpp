@@ -435,7 +435,10 @@ void down_project(const uint8_t* d_blob, const k::NativeExpertLayout& L, const f
     std::array<float, kFF> pruned{};
     for (int i = 0; i < kFF; ++i) pruned[i] = (!mask || (*mask)[i]) ? h[i] : 0.0f;
     copy_h2d(d_values.get(), pruned.data(), sizeof(pruned), stream);
-    k::native_quantize_q8_1(d_values.get(), d_q8.get(), kFF, 1, stream);
+    // Match native_expert_grouped's activation quantizer. The standalone native
+    // quantizer can round a Q8 value differently even for an all-one mask;
+    // that numerical floor must not be attributed to neuron removal.
+    k::quantize_q8_1_rows(d_values.get(), 1, kFF, d_q8.get(), stream);
     k::native_mmvq(L.d_type, d_blob + L.down_off, d_q8.get(), d_out.get(), kFF, kH, 1, stream);
     copy_d2h(out.data(), d_out.get(), out.size() * sizeof(float), stream);
     if (!all_finite(out)) fail("non-finite down-projection output during replay");

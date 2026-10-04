@@ -71,6 +71,12 @@ pass, but matched microbenchmarks show no reproducible gain over three full GPU
 experts at equal active weight bytes. It remains research; Daily and release
 ZIP are unchanged.
 
+The [turn-local pruning pilot](docs/sm75/TURN_PRUNING.md) calibrates masks on
+earlier tokens and tests 10/20/25% neuron removal on later inputs. Neither the
+mean-contribution nor peak-contribution score passes the local error screen;
+no pruning is enabled in the Daily. Its full-mask control also identified and
+removed a small activation-quantizer mismatch in the offline replay tool.
+
 ## 0.1.38 baseline validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server
