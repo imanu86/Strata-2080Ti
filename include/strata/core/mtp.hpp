@@ -74,6 +74,12 @@ public:
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                      float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
 
+    // Offline neuron-cache probe only: ten distinct roots, nine greedy MTP steps each.
+    // Writes speculative MTP cells at/after cell; caller must end the request immediately.
+    // Short prefixes ensure branches never overwrite resident prefix KV through ring wrap.
+    bool neuron_probe_100(const float* R_row, const int32_t* roots, int64_t cell,
+                          std::vector<int32_t>& candidates, double& prediction_ms, std::string& err);
+
     /// COUPLED DRAFT SAMPLING (core/coupled_draft.hpp; STRATA_SPEC_COUPLED=1, set up by bind()): the request's
     /// sampling.  A sampled request (temperature > 0, not greedy) then drafts by SAMPLING with the target's chain and
     /// the target's Philox draw for the verifying row, and `probs` is the draft's probability under that chain; a

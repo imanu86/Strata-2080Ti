@@ -60,6 +60,11 @@ not an installed pruning optimization or a speed improvement. The Daily and
 download above remain unchanged. [Measured results and limits](docs/sm75/BENCHMARKS.md#neuron-cache-pilot-4-october-2026)
 and [diagnostic build instructions](docs/sm75/BUILD.md#optional-neuron-trace-research-overlay).
 
+The follow-up [100-candidate probe](docs/sm75/BUILD.md#optional-100-candidate-experiment)
+constructs temporary neuron masks from ten real MTP continuations of ten tokens
+and measures their lifetime with adaptive rebuilding in offline GPU replay.
+It remains a disabled research tool; the released engine and Daily are unchanged.
+
 ## 0.1.38 baseline validation
 
 Six CTest checks,18 wide top-k cases,64 CPU quantization cases and118 server

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -44,6 +45,12 @@ public:
             return fail(err, "SNTv0001 requires little-endian IEEE-754 float32");
         if (max_t < 1 || max_t > MaxT) return fail(err, "invalid window capacity");
         max_t_ = max_t;
+        if (const char* limit = std::getenv("STRATA_NEURON_TRACE_WINDOWS")) {
+            char* end = nullptr;
+            const long value = std::strtol(limit, &end, 10);
+            if (!*limit || *end || value < 1 || value > 512) return fail(err, "trace windows must be 1..512");
+            max_windows_ = (int) value;
+        }
         cap_ = max_t * K;
         // Separate layer slots, with token-group slices at their original token offsets.
         size_t bytes = 0;
@@ -101,7 +108,7 @@ public:
         u32(H); u32(FF); u32(K); u32(L);
         append(Layers, sizeof Layers);
         if (!write_record(err)) return false;
-        std::fprintf(stderr, "strata neuron trace: %s; layers 0,1,35,36; at most 64 decode windows; diagnostic timing only\n", path);
+        std::fprintf(stderr, "strata neuron trace: %s; layers 0,1,35,36; at most %d decode windows; diagnostic timing only\n", path, max_windows_);
         return true;
     }
 
@@ -138,7 +145,7 @@ public:
         pending_ = false;
     }
     void complete_run(int t, const int32_t* tokens, int64_t pos0, uint64_t serial, int groups, bool decode) {
-        pending_ = decode && written_ < MaxWindows;
+        pending_ = decode && written_ < max_windows_;
         if (!pending_) return;
         t_ = t; pos0_ = pos0; serial_ = serial; groups_ = groups;
         std::memcpy(tokens_.data(), tokens, (size_t) t * 4);
@@ -191,11 +198,11 @@ public:
         if (!write_record(err)) return false;
         pending_ = false;
         ++written_;
-        if (written_ == MaxWindows) {
+        if (written_ == max_windows_) {
             const int status = std::fclose(file_);
             file_ = nullptr;
             if (status != 0) return fail(err, std::string("close failed: ") + std::strerror(errno));
-            std::fprintf(stderr, "strata neuron trace: completed 64 decode windows; capture buffers retained for graph lifetime\n");
+            std::fprintf(stderr, "strata neuron trace: completed %d decode windows; capture buffers retained for graph lifetime\n", max_windows_);
         }
         return true;
     }
@@ -213,6 +220,7 @@ private:
     std::vector<uint8_t> record_;
     std::array<int32_t, MaxT> tokens_{};
     int max_t_ = 0, cap_ = 0, written_ = 0, t_ = 0, groups_ = 1;
+    int max_windows_ = MaxWindows;
     int64_t pos0_ = 0;
     uint64_t serial_ = 0;
     bool pending_ = false;

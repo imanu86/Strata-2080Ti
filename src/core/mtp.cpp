@@ -877,6 +877,61 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     return true;
 }
 
+bool MtpDrafter::neuron_probe_100(const float* R_row, const int32_t* roots, int64_t cell,
+                                 std::vector<int32_t>& candidates, double& prediction_ms, std::string& err) {
+    const OnDevice on_device(device_);
+    if (!R_row || !roots || cell < 0 || cell > 2048 || max_t_ < 4 || coupled_active_ ||
+        (window_ > 0 && window_ < cell + 16)) {
+        err = "neuron probe: requires short prefix, greedy MTP, window >= prefix+16, max_t >= 4";
+        return false;
+    }
+    const size_t bytes = (size_t) g_->hc * g_->n_embd * sizeof(float);
+    auto check = [&](cudaError_t ce) {
+        if (ce == cudaSuccess) return true;
+        err = std::string("neuron probe: ") + cudaGetErrorString(ce); return false;
+    };
+    candidates.assign(100, 0);
+    const auto prediction_start = Clock::now();
+    // Recompute in reverse order too: any dependence on a preceding branch's stale KV is an error.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int b0 = 0; b0 < 10; ++b0) {
+            const int b = pass ? 9 - b0 : b0;
+            int32_t token = roots[b];
+            if (!check(cudaMemcpyAsync(Rin_, R_row, bytes, cudaMemcpyDeviceToDevice, cs_))) return false;
+            if (!pass) candidates[b * 10] = token;
+            for (int j = 0; j < 9; ++j) {
+                const int32_t c = (int32_t) (cell + j);
+                const int32_t rec[4] = {c, c + 1, (c + 1) / 4, c + 1};
+                std::vector<int32_t> positions((size_t) g_->n_head, c);
+                if (!check(cudaMemcpyAsync(tok_, &token, sizeof(token), cudaMemcpyHostToDevice, cs_)) ||
+                    !check(cudaMemcpyAsync(step_, rec, sizeof(rec), cudaMemcpyHostToDevice, cs_)) ||
+                    !check(cudaMemcpyAsync(pos_, positions.data(), positions.size() * sizeof(int32_t), cudaMemcpyHostToDevice, cs_)) ||
+                    !record_forward(1, 0, cs_, err) ||
+                    !check(cudaMemcpyAsync(&token, out_ids_, sizeof(token), cudaMemcpyDeviceToHost, cs_)) ||
+                    !check(cudaStreamSynchronize(cs_))) return false;
+                if (token < 0 || token >= n_vocab_) { err = "neuron probe: invalid draft token"; return false; }
+                if (!pass) candidates[b * 10 + j + 1] = token;
+                else if (candidates[b * 10 + j + 1] != token) {
+                    err = "neuron probe: branch-order parity failed"; return false;
+                }
+                if (!check(cudaMemcpyAsync(Rin_, R_, bytes, cudaMemcpyDeviceToDevice, cs_))) return false;
+            }
+        }
+        if (!pass) {
+            if (!check(cudaStreamSynchronize(cs_))) return false;
+            prediction_ms = ms_since(prediction_start);
+        }
+    }
+    if (!check(cudaStreamSynchronize(cs_))) return false;
+    std::vector<int32_t> baseline((size_t) max_t_);
+    if (!draft(1, roots, cell, 0, baseline.data(), err)) return false;
+    for (int j = 0; j < 3; ++j) if (baseline[j] != candidates[j + 1]) {
+        err = "neuron probe: ordinary MTP chain parity failed"; return false;
+    }
+    std::fprintf(stderr, "neuron probe: 100 candidates; reverse-branch and ordinary-chain parity PASS\n");
+    return true;
+}
+
 bool MtpDrafter::draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                              float* probs, float min_p, int* n_drafts) {
     const OnDevice on_device(device_);

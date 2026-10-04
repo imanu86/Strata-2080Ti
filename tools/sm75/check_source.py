@@ -13,7 +13,8 @@ def main():
     args = parser.parse_args()
     current = (ROOT / args.manifest) if args.manifest else next(
         ROOT / 'docs/sm75' / name for name in (
-            'neuron-trace-20261004.json', 'release-20261004.json', 'source-manifest.json')
+            'neuron-probe100-20261004.json', 'neuron-trace-20261004.json',
+            'release-20261004.json', 'source-manifest.json')
         if (ROOT / 'docs/sm75' / name).is_file())
     manifest = json.loads(current.read_text(encoding='utf-8'))
     for name, expected in manifest.get('historical_manifests', {}).items():

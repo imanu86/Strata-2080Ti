@@ -32,7 +32,9 @@ Later main adds `STRATA_NEURON_TRACE_FILE`, disabled unless explicitly set, and
 the separate `neuron_trace_replay` executable. The published ZIP and operational
 Daily remain the earlier executable above. `neuron-trace-20261004.json` records
 the diagnostic build's exact sources and its narrow validation; it preserves
-the release manifest and all three earlier manifests by hash. The default
+the release manifest and all three earlier manifests by hash. The newer
+`neuron-probe100-20261004.json` pins the 100-candidate research overlay and
+preserves this earlier trace manifest too. The default
 `python tools/sm75/check_source.py` verifies this current research overlay.
 `--manifest docs/sm75/release-20261004.json` explicitly checks the release source
 instead and correctly reports mismatches on the later research sources.
@@ -149,10 +151,50 @@ portability beyond the measured machine remains unvalidated.
 python tools/sm75/check_source.py
 ```
 
-It checks the source file hashes from `docs/sm75/source-manifest.json` and
+It checks the source file hashes from the newest available research/release manifest and
 the absence of CH16/BPW switches. Publication overrides cover README, launcher,
 ignore rules and byte-preserving Git attributes; original README is kept in
 `docs/UPSTREAM_README.md`. These checks never launch CUDA or the model.
 
 See [BENCHMARKS.md](BENCHMARKS.md) for numerical targets and model evidence.
 GPU checks are explicit. This fork has no automated build/test workflow.
+## Optional 100-candidate experiment
+
+The separate research engine supports `STRATA_NEURON_PROBE_CONTROL`, a path to
+an ASCII control file reread for each pipe-server request. It is disabled by
+default and is not present in the Daily profile or release ZIP. Only a single
+GPU and prefixes of at most 2,049 tokens are supported by this probe.
+
+- `draft C:\lab\candidates.txt`: request exactly one greedy output token.
+  The probe takes ten distinct, non-EOS top-logit target roots and extends each
+  with nine greedy MTP steps. It writes ten paths of ten tokens. The output path
+  must contain no spaces and must not already exist. The first output line is
+  `PROBE100 last_prefix_position total_probe_ms prediction_ms`; total time also
+  includes reverse-order token parity and comparison with the ordinary MTP chain.
+  The following ten lines contain token IDs; the final line has the ten root logits.
+- `force 10 id0 id1 ... id9`: request eleven output rows. These are **teacher-forced
+  diagnostic inputs**, not a generated answer or a quality test. They capture the
+  last prefix row plus all ten candidate input rows, using one-token verifier calls.
+  EOS inputs are rejected. Ignore the first trace row when collecting candidates.
+- `normal`: ordinary generation, used for the held-out reference continuation.
+
+Set `STRATA_NEURON_TRACE_FILE` as in the earlier trace instructions. For a probe
+session with multiple requests, `STRATA_NEURON_TRACE_WINDOWS=512` raises the bounded
+capture limit (default 64; accepted range 1..512; at most 1,847,488,552 bytes at T=8).
+The harness splits the append-only stream at completed request boundaries; each
+split retains the 40-byte header and must pass the existing per-trace validator.
+Positions restart between requests: never feed the combined multi-request stream
+to the ordinary replayer as though it were one continuation.
+
+`neuron_trace_replay trace.snt model.gguf output.snr masks.snm` accepts an optional
+frozen mask bank. `SNM10001` contains little-endian FF=640 and record count, followed
+by unique `(layer, expert)` int32 keys and three arrays of 640 boolean bytes.
+The output then uses magic `SNRv0002`: vectors 5..7 apply these three masks;
+`cold=1` means an absent expert was evaluated in full. All other layout fields
+match SNRv0001. Full expert blobs are still read; this tool does not implement
+compact weight kernels or measure a bandwidth saving.
+
+The public research analyzer builds unions from the 100 candidate positions and
+evaluates target replay errors. Adaptive refresh decisions use only errors at
+already-processed target positions. Reference inputs remain from the full model:
+the local replay does not simulate accumulated state error of a pruned model.

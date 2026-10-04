@@ -393,6 +393,30 @@ void copy_d2h(void* dst, const void* src, size_t bytes, cudaStream_t s) {
 }
 
 using KeepMask = std::array<uint8_t, kFF>;
+using ProbeMasks = std::map<std::pair<int, int>, std::array<KeepMask, 3>>;
+
+ProbeMasks read_probe_masks(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) fail("cannot open probe mask bank");
+    char magic[8]; read_exact(in, magic, 8, "probe mask magic");
+    if (std::memcmp(magic, "SNM10001", 8)) fail("invalid probe mask magic");
+    if (read_le<uint32_t>(in, "mask FF") != kFF) fail("invalid probe mask FF");
+    const auto n = read_le<uint32_t>(in, "mask count");
+    if (!n || n > 2048) fail("invalid probe mask count");
+    ProbeMasks masks;
+    for (uint32_t i = 0; i < n; ++i) {
+        const int layer = read_i32(in, "mask layer"), expert = read_i32(in, "mask expert");
+        if (std::find(std::begin(kLayers), std::end(kLayers), layer) == std::end(kLayers) || expert < 0 || expert >= 512)
+            fail("invalid probe mask expert key");
+        std::array<KeepMask, 3> row{};
+        read_exact(in, row.data(), sizeof(row), "probe masks");
+        for (const auto& m : row) for (auto value : m) if (value > 1) fail("nonboolean probe mask");
+        if (!masks.emplace(std::make_pair(layer, expert), row).second) fail("duplicate probe mask key");
+    }
+    if (in.peek() != std::char_traits<char>::eof() || !in.eof()) fail("trailing probe mask data or I/O error");
+    return masks;
+}
+
 KeepMask top_mask(const float* h, int keep) {
     std::array<int, kFF> order{};
     for (int i = 0; i < kFF; ++i) order[i] = i;
@@ -428,14 +452,15 @@ uint64_t pair_key(int layer, int expert) {
     return (uint64_t(static_cast<uint32_t>(layer)) << 32) | static_cast<uint32_t>(expert);
 }
 
-void write_header(OutputFile& out) {
-    out.bytes("SNRv0001", 8);
+void write_header(OutputFile& out, bool probe) {
+    out.bytes(probe ? "SNRv0002" : "SNRv0001", 8);
     out.u32(kH); out.u32(kFF); out.u32(kK); out.u32(4);
     for (int l : kLayers) out.i32(l);
 }
 
 void replay_trace(const fs::path& trace_path, const fs::path& output_path, const strata::GgufModel& model,
-                  const std::array<ExpertLayer, 4>& layers, uint64_t expected_entries, size_t max_blob) {
+                  const std::array<ExpertLayer, 4>& layers, uint64_t expected_entries, size_t max_blob,
+                  const ProbeMasks* masks) {
     int device = 0;
     CUDA_CHECK(cudaGetDevice(&device));
     cudaDeviceProp prop{};
@@ -463,7 +488,7 @@ void replay_trace(const fs::path& trace_path, const fs::path& output_path, const
     CUDA_CHECK(cudaStreamSynchronize(stream.get()));
 
     OutputFile out(output_path);
-    write_header(out);
+    write_header(out, masks != nullptr);
     TraceReader reader(trace_path);
     std::map<uint64_t, std::array<float, kFF>> last_h;
     std::set<std::pair<int, int>> v2_checked;
@@ -539,7 +564,19 @@ void replay_trace(const fs::path& trace_path, const fs::path& output_path, const
                                      oracle[m], stream.get());
                     }
                     std::array<std::vector<float>, 3> last;
-                    if (had_last) {
+                    bool mask_missing = false;
+                    if (masks) {
+                        const auto found = masks->find(std::make_pair(kLayers[li], expert));
+                        mask_missing = found == masks->end();
+                        for (size_t m = 0; m < 3; ++m) {
+                            if (mask_missing) last[m] = mmvqfull;
+                            else {
+                                last[m].resize(kH);
+                                down_project(d_blob.get(), el.layout, h.data(), &found->second[m], d_down_in,
+                                             d_down_q8, d_down_out, last[m], stream.get());
+                            }
+                        }
+                    } else if (had_last) {
                         for (size_t m = 0; m < 3; ++m) {
                             const KeepMask mask = top_mask(prev.data(), static_cast<int>(kKeeps[m]));
                             last[m].resize(kH);
@@ -552,7 +589,7 @@ void replay_trace(const fs::path& trace_path, const fs::path& output_path, const
 
                     out.u64(w.serial); out.i64(pos); out.i32(kLayers[li]); out.i32(expert);
                     out.i32(wl.tier[at]); out.i32(el.layout.gu_type); out.i32(el.layout.d_type);
-                    out.i32(had_last ? 0 : 1); out.f32(wl.weights[at]);
+                    out.i32(masks ? (mask_missing ? 1 : 0) : (had_last ? 0 : 1)); out.f32(wl.weights[at]);
                     for (float v : h) out.f32(v);
                     for (float v : grouped) out.f32(v);
                     for (float v : mmvqfull) out.f32(v);
@@ -573,8 +610,8 @@ void replay_trace(const fs::path& trace_path, const fs::path& output_path, const
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::fprintf(stderr, "usage: neuron_trace_replay <trace.snt> <model-shard.gguf> <output.snr>\n");
+    if (argc != 4 && argc != 5) {
+        std::fprintf(stderr, "usage: neuron_trace_replay <trace.snt> <model-shard.gguf> <output.snr> [probe-masks.snm]\n");
         return 2;
     }
     try {
@@ -582,11 +619,12 @@ int main(int argc, char** argv) {
         const fs::path shard_path = fs::u8path(argv[2]);
         const fs::path output_path = fs::u8path(argv[3]);
         if (fs::exists(output_path)) fail("output already exists; refusing to overwrite it");
+        const auto masks = argc == 5 ? read_probe_masks(fs::u8path(argv[4])) : ProbeMasks{};
         const strata::GgufModel model(strata::gguf_split_paths(shard_path.string()));
         size_t max_blob = 0;
         const auto layers = load_layers(model, max_blob);
         const uint64_t entries = validate_trace(trace_path, layers); // validate the complete input before any GPU work
-        replay_trace(trace_path, output_path, model, layers, entries, max_blob);
+        replay_trace(trace_path, output_path, model, layers, entries, max_blob, argc == 5 ? &masks : nullptr);
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "neuron_trace_replay: %s\n", e.what());

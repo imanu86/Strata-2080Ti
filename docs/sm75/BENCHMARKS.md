@@ -766,3 +766,73 @@ Daily, launcher and public ZIP are unchanged; no server or test engine remains.
 [Diagnostic source manifest](neuron-trace-20261004.json) and
 [measurements, analyzer and fixtures](https://github.com/imanu86/moe-aggressive-commit/tree/research/ds4-iq1-subbit-tier-planner/docs/porto/strata_adattivo/corse_2080ti/20261004_neuron_cache)
 preserve the evidence independently of earlier release validation.
+## Real 100-candidate adaptive probe, 4 October 2026
+
+Seven mask-bank epochs were measured on three synthetic prompts: **700 candidate
+positions and 28,000 candidate expert calls on layers 0, 1, 35 and 36**. Each epoch
+starts from an accepted prefix, takes ten distinct non-EOS top-logit target roots,
+and extends each root by nine greedy MTP steps. These are ten coherent paths of
+ten tokens, not a beam search or 100 distinct tree nodes: the epochs contain 38–88
+distinct `(depth, token)` pairs. Reverse branch order and the ordinary MTP chain
+pass token-level controls. Candidate masks are constructed before inspecting the
+held-out continuation's errors.
+
+For each `(layer, expert)`, union the top 320 absolute hidden activations from
+every candidate invocation. Keep that bank until mean relative L2 across the four
+routed-expert sums exceeds 5%, any layer exceeds 10%, or mean missing route weight
+exceeds 10%. Missing experts use full fallback. A trigger row also calls for full
+fallback; rebuild from the newly accepted prefix before the next position.
+These are laboratory thresholds, **not answer-accuracy guarantees**.
+
+| Synthetic task | Positions within threshold in successive epochs | Estimated bank weight saving | Ideal weight-read saving on those positions |
+|---|---|---|---|
+| Code | 5, 4, 11 | 14.60%, 14.72%, 16.36% | 3.46%, 3.72%, 8.81% |
+| Explanation | 4, 2 | 13.94%, 15.19% | 3.37%, 5.86% |
+| Reasoning | 6, 1 | 13.92%, 13.76% | 3.47%, 1.80% |
+
+Storage estimates compare the bank with the full weights of its own selected
+experts. The path estimate weights the bytes of actual expert calls before each
+trigger, including full fallback for unseen experts. Both retain original down
+quantization blocks. The bank includes many alternatives that the target never
+uses; frequently used experts tend to retain more neurons. Neither number is a
+measured bandwidth or t/s improvement: the replay still reads full blobs.
+
+Predicting the 100 candidates took **118–128 ms** per epoch, excluding the extra
+reverse-order and standard-chain checks. Sequential target scans took 15.64–17.95 s
+in this diagnostic harness, including repeated prefix prefill; their decode
+components totaled 3.90–5.47 s. Additional GPU activation replay cost 11.71–15.39 s,
+CPU mask construction 0.328–0.390 s and target replay/validation 5.33–6.80 s.
+These stages are recorded separately; they are not optimized online construction
+or verification costs, and startup is excluded. No end-to-end acceleration was
+implemented or demonstrated.
+
+The masks were also replayed with top160/top480 candidate selections. The raw
+curves retain all three variants; only top320 controlled the actual refresh
+prefixes. Other variants' frozen-bank lifetimes are counterfactual, not separate
+adaptive runs. Full-mask GPU results are bit-identical, zero masks produce exact
+zero, and absent-expert fallback is bit-identical; four malformed bank inputs are
+rejected. The portable analyzer reproduces all seven banks and curves exactly.
+
+The code continuation retains the previous 64 greedy IDs. Explanation/reasoning
+do not match the older run under different memory registration settings, so two
+fresh-process controls used the same new runtime variant without any candidate
+probe. Each matches all64 IDs and all256 accepted `(position,layer)` trace rows
+byte-for-byte, including inputs, IDs, routing weights, expert outputs and tiers.
+Free-VRAM telemetry differs; the numerical runtime settings match. No first-logit
+or model-wide quality claim is inferred from these controls.
+
+Hardware: modified 22 GB RTX 2080 Ti, Ryzen 7 5800X, 96 GiB RAM, Windows/CUDA12.6.
+Initial prompts were 85–102 tokens; refresh prefixes reached 109. KV capacity was
+262144/int8, resident32768; actual expert cache5080 slots/8442 MiB, spec4/MTP4,
+workers7, PCIe0.25, IQ_MT_MIN1, no elasticity/swaps/suffix/persistent prefix cache.
+Valid runs used `STRATA_NO_LARGEPAGES=1` and `STRATA_ARENA_PIN_GIB=8`. Three startup
+attempts were excluded: a180 s timeout and two stopped repeats, including one
+with the pin cap alone. This does not establish the cause of the startup stalls.
+
+Errors apply to local routed-expert sums, excluding shared experts and residuals.
+Target inputs/routing come from the full model: accumulated state error of an
+online pruned model was not tested. This is a short-context measurement, not a
+250k-depth validation. The Daily, launcher, config and public ZIP are unchanged.
+Sources and validation are pinned in `neuron-probe100-20261004.json`; complete
+synthetic candidates, curves, costs, exclusions and limits are in the research
+repository's `20261004_neuron_cache/probe100-measurements.json`.

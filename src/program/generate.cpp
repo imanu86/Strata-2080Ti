@@ -6243,6 +6243,38 @@ int main(int argc, char** argv) {
             }
             std::printf("REUSED %lld\n", (long long) resume);   // the prompt is read; the first window comes next
             std::fflush(stdout);
+            // Lab-only controls, reread once per request. Never enabled by the Daily profile.
+            std::string neuron_probe_mode, neuron_probe_output;
+            std::vector<int32_t> neuron_forced;
+            if (const char* ctl = std::getenv("STRATA_NEURON_PROBE_CONTROL")) {
+                std::ifstream in(ctl);
+                if (!(in >> neuron_probe_mode) || n > 2049 || peer.valid() || !stages.empty()) {
+                    std::printf("ERR neuron probe: invalid control or unsupported context/device layout\n"); return 1;
+                }
+                if (neuron_probe_mode == "draft") {
+                    in >> neuron_probe_output;
+                    if (max_new != 1 || neuron_probe_output.empty() || req_temperature != 0.0f) {
+                        std::printf("ERR neuron probe: draft requires one output token, greedy target and output path\n"); return 1;
+                    }
+                } else if (neuron_probe_mode == "force") {
+                    int count = 0;
+                    in >> count;
+                    if (count != 10 || max_new != 11) {
+                        std::printf("ERR neuron probe: force requires 10 inputs and 11 output rows\n"); return 1;
+                    }
+                    neuron_forced.resize(10);
+                    for (auto& id : neuron_forced) {
+                        if (!(in >> id) || id < 0 || id >= ver.vocab() ||
+                            std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) id) != o.eos_ids.end()) {
+                            std::printf("ERR neuron probe: invalid or EOS forced token\n"); return 1;
+                        }
+                    }
+                } else if (neuron_probe_mode != "normal") {
+                    std::printf("ERR neuron probe: unknown mode\n"); return 1;
+                }
+                std::string extra;
+                if (in >> extra) { std::printf("ERR neuron probe: trailing control data\n"); return 1; }
+            }
             // the verify windows: the first holds the last prompt token alone
             int64_t p = n - 1;
             int32_t x = (int32_t) ids[(size_t) (n - 1)];
@@ -6291,6 +6323,7 @@ int main(int argc, char** argv) {
                     while (T < S_mtp && dprob[(size_t) T - 1] >= (float) req_spec_min_p) ++T;
                 }
                 if (first_window) T = 1;
+                if (!neuron_forced.empty()) T = 1;
                 // a repeat of earlier context (prompt lookup) where the MTP's own first guess agrees: the policy takes it
                 // when its expected tokens per ms, from the measured acceptance and window costs, beat the MTP window's
                 bool from_sfx = false;
@@ -6345,6 +6378,36 @@ int main(int argc, char** argv) {
                     }
                 }
                 int a = 0;
+                if (first_window && neuron_probe_mode == "draft") {
+                    std::vector<float> logits((size_t) ver.vocab());
+                    if (!ver.copy_logits(0, logits.data())) { std::printf("ERR neuron probe: logits copy\n"); return 1; }
+                    std::vector<int32_t> order;
+                    for (int32_t id = 0; id < ver.vocab(); ++id) {
+                        if (!std::isfinite(logits[id])) { std::printf("ERR neuron probe: nonfinite logit\n"); return 1; }
+                        if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) id) == o.eos_ids.end()) order.push_back(id);
+                    }
+                    if (order.size() < 10) { std::printf("ERR neuron probe: too few root choices\n"); return 1; }
+                    std::partial_sort(order.begin(), order.begin() + 10, order.end(), [&](int32_t a, int32_t b) {
+                        return logits[a] == logits[b] ? a < b : logits[a] > logits[b];
+                    });
+                    std::vector<int32_t> candidates;
+                    double prediction_ms = 0;
+                    const auto probe_start = Clock::now();
+                    if (!mtp.neuron_probe_100(ver.final_R(0), order.data(), p, candidates, prediction_ms, err)) {
+                        std::printf("ERR %s\n", err.c_str()); return 1;
+                    }
+                    const double probe_ms = std::chrono::duration<double, std::milli>(Clock::now() - probe_start).count();
+                    std::FILE* probe_file = std::fopen(neuron_probe_output.c_str(), "wbx");
+                    if (!probe_file) { std::printf("ERR neuron probe: output exists or cannot be created\n"); return 1; }
+                    bool saved = std::fprintf(probe_file, "PROBE100 %lld %.6f %.6f\n", (long long) p, probe_ms, prediction_ms) > 0;
+                    for (int b = 0; b < 10; ++b) {
+                        for (int j = 0; j < 10; ++j) saved = (std::fprintf(probe_file, "%d%c", candidates[b * 10 + j], j == 9 ? '\n' : ' ') > 0) && saved;
+                    }
+                    for (int b = 0; b < 10; ++b) saved = (std::fprintf(probe_file, "%.9g%c", logits[order[b]], b == 9 ? '\n' : ' ') > 0) && saved;
+                    if (std::fclose(probe_file) != 0 || !saved) { std::printf("ERR neuron probe: output write failed\n"); return 1; }
+                }
+                if (!neuron_forced.empty() && produced_n < (int64_t) neuron_forced.size())
+                    outv[0] = neuron_forced[(size_t) produced_n];
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
                 if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
                 const Clock::time_point tw1 = Clock::now();
@@ -6382,7 +6445,7 @@ int main(int argc, char** argv) {
                 // commit, outv[a] is its row 0) - the drafts extend it on the device as the verify rows will
                 if (hist_n > 0 && mtp.coupled() && !eos && produced_n < max_new)
                     mtp.set_draft_history(consumed.data(), (int64_t) consumed.size(), outv[(size_t) a]);
-                const bool drafted = eos || produced_n >= max_new ||
+                const bool drafted = !neuron_forced.empty() || eos || produced_n >= max_new ||
                                      mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p);
                 {
                     const Clock::time_point tw3 = Clock::now();
