@@ -11,10 +11,12 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/cpu/iq_1tok.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 
 #include "ggml.h"
+#include "ggml-cpu.h"
 
 #include <algorithm>
 #include <atomic>
@@ -154,7 +156,8 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 2) { std::fprintf(stderr, "usage: cpu_format_bench shard1.gguf [experts=48] [iters=3] [threads=1,8]\n"); return 2; }
     const bool pool_mode = argc > 2 && std::string(argv[2]) == "pool";   // cpu_format_bench shard1.gguf pool [reps]
-    const int experts = pool_mode ? 48 : (argc > 2 ? std::atoi(argv[2]) : 48);
+    const bool onetok_mode = argc > 2 && std::string(argv[2]) == "onetok";   // cpu_format_bench shard1.gguf onetok
+    const int experts = (pool_mode || onetok_mode) ? 48 : (argc > 2 ? std::atoi(argv[2]) : 48);
     const int iters = argc > 3 ? std::atoi(argv[3]) : 3;
     std::vector<int> thread_list;
     for (const char* p = argc > 4 ? argv[4] : "1,8"; *p;) {
@@ -191,6 +194,66 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr, "  caso %s pronto (%zu byte/esperto)\n", cs.name.c_str(), cs.f.bytes);
         cases.push_back(std::move(cs));
+    }
+    if (argc > 2 && std::string(argv[2]) == "onetok") {
+        // lab: one-token IQ2_XXS rows (layer 1's gate/up) - ggml-cpu's vec_dot against iq_1tok_avx2.cpp's variants,
+        // every row bit for bit, then the time of all rows of the 48 experts on 1 and 8 threads (best of 5)
+        const Case& l1 = cases[1];
+        if (l1.f.gu_type != 16) { std::printf("layer 1 is not IQ2_XXS\n"); return 2; }
+        const auto* tr = ggml_get_type_traits_cpu((ggml_type) 16);
+        std::mt19937 rng(5);
+        std::normal_distribution<float> nd(0.0f, 1.0f);
+        std::vector<float> x(c::H);
+        for (auto& v : x) v = nd(rng);
+        std::vector<uint8_t> act(c::kNativeActBytes + 64);
+        c::native_quant_act(l1.f, x.data(), act.data());
+        const int rows = (int) c::FF;
+        auto row_ptr = [&](int e, int m, int r) {
+            return l1.blobs.data() + (size_t) e * l1.f.bytes + (m ? l1.f.up_off : 0) + (size_t) r * l1.f.gu_row;
+        };
+        long long same_s = 0, same_g = 0, total = 0;
+        for (int e = 0; e < experts; ++e)
+            for (int m = 0; m < 2; ++m)
+                for (int r = 0; r < rows; ++r) {
+                    float ref = 0.f;
+                    tr->vec_dot((int) c::H, &ref, 0, row_ptr(e, m, r), 0, act.data(), 0, 1);
+                    const float a = c::iq2xxs_dot_1tok(c::Iq1TokVariant::kScalar, (int) c::H, row_ptr(e, m, r), act.data());
+                    const float b = c::iq2xxs_dot_1tok(c::Iq1TokVariant::kGather, (int) c::H, row_ptr(e, m, r), act.data());
+                    same_s += std::memcmp(&ref, &a, 4) == 0;
+                    same_g += std::memcmp(&ref, &b, 4) == 0;
+                    ++total;
+                }
+        std::printf("bit-identical to ggml: scalar %lld/%lld, gather %lld/%lld\n", same_s, total, same_g, total);
+        auto timed = [&](int which, int threads) {
+            double best = 1e30;
+            for (int rep = 0; rep < 6; ++rep) {
+                const auto t0 = Clock::now();
+                std::vector<std::thread> th;
+                std::atomic<float> sink{0.f};
+                for (int w = 0; w < threads; ++w)
+                    th.emplace_back([&, w] {
+                        float acc = 0.f;
+                        for (int e = w; e < experts; e += threads)
+                            for (int m = 0; m < 2; ++m)
+                                for (int r = 0; r < rows; ++r) {
+                                    float v = 0.f;
+                                    if (which == 0) tr->vec_dot((int) c::H, &v, 0, row_ptr(e, m, r), 0, act.data(), 0, 1);
+                                    else v = c::iq2xxs_dot_1tok(which == 1 ? c::Iq1TokVariant::kScalar : c::Iq1TokVariant::kGather,
+                                                                (int) c::H, row_ptr(e, m, r), act.data());
+                                    acc += v;
+                                }
+                        sink.store(acc);
+                    });
+                for (auto& t : th) t.join();
+                if (rep > 0) best = std::min(best, ms_since(t0));
+            }
+            return best * 1e3 / experts;   // us per expert (gate + up)
+        };
+        const char* names[] = {"ggml vec_dot", "variante scalare", "variante gather"};
+        for (int threads : {1, 8})
+            for (int which = 0; which < 3; ++which)
+                std::printf("%-18s %d thread: %8.1f us/esperto gate+up\n", names[which], threads, timed(which, threads));
+        return 0;
     }
     if (pool_mode) {
         // gate/up and down of the real layers recombined (speed does not depend on which layer a row came from), and
