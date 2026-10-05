@@ -208,7 +208,20 @@ struct GpuPlanSink {
     /// kernel reads the mapped arena directly; 2 = a copy kernel stages it inside the graph.  For 1 and 2 `ptr2`
     /// holds the arena's device alias.
     int pcie_mode = 0;
+    /// Lab STRATA_PREFETCH_NEXT=P: the next layer's predicted experts copied one layer ahead (DMA mode, unsplit
+    /// windows).  `pf_staging` holds 2 * pf_cap blobs, one half per layer parity; `prefetch` queues the copies on the
+    /// copy engine behind the layer's own fetch.  `pf_enabled` is set per window by the Verifier; `pf_pending` tells
+    /// `fetch` that the layer's plan reads prefetched blobs, so flag B must rise behind the copy engine.
+    unsigned long long pf_staging = 0;
+    int64_t pf_cap = 0;
+    int pf_enabled = 0;
+    int pf_pending = 0;
+    void (*prefetch)(void* ctx, const uint8_t* const* src, const unsigned long long* dst, int n, size_t bytes) = nullptr;
 };
+
+/// Lab STRATA_PREFETCH_NEXT: the Verifier's host thread hands the next layer's predicted experts ([n_tok, k] ids, best
+/// first per token) to the dispatch it is about to call; nullptr when there is no prediction for this call.
+void expert_set_next_prediction(const int32_t* pred, int n_tok, int k);
 
 /// The adapter's own state.  One per session, reused every layer so the token path allocates nothing (P2.T10).
 struct ExpertDispatch {
@@ -331,6 +344,12 @@ struct ExpertDispatch {
     GpuPlanSink* plan = nullptr;
     int pcie_num = 0;
     int64_t pcie_experts = 0;      ///< distinct experts the GPU read over PCIe in verify windows
+    /// Lab STRATA_PREFETCH_NEXT: the blobs copied one layer ahead, per layer parity (which layer, which experts).
+    int64_t pf_layer[2] = {-1, -1};
+    int pf_n[2] = {0, 0};
+    int32_t pf_expert[2][64] = {};
+    int64_t pf_issued = 0;         ///< blobs prefetched
+    int64_t pf_used = 0;           ///< distinct missed experts the GPU computed from a prefetched blob
     double ms_plan = 0, ms_actq = 0, ms_jobs = 0, ms_run = 0;   ///< verify-window dispatch sections
     /// Plan v0.3 P6: decayed routing counts per (layer, expert) during decode (sized by the caller; empty = off),
     /// which the driver uses to swap the most-routed missing experts into the VRAM tier between rounds.

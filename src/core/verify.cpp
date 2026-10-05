@@ -185,8 +185,9 @@ Verifier::~Verifier() {
     if (la_pred_) cudaFree(la_pred_);
     if (la_logits_) cudaFree(la_logits_);
     if (la_cnt_) cudaFree(la_cnt_);
+    if (pf_staging_) cudaFree(pf_staging_);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_, h_ymiss_,
-                     h_flagA_, h_plan_, h_flagB_};
+                     h_flagA_, h_plan_, h_flagB_, h_pred_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
     delete neuron_trace_;   // no graph or stream can still write its pinned snapshots
@@ -299,16 +300,41 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         const char* kv = std::getenv("STRATA_ROUTED_KEEP");
         const char* wv = std::getenv("STRATA_ROUTED_MIN_W");
         la_probe_ = std::getenv("STRATA_LOOKAHEAD_PROBE") != nullptr;
-        if (la_probe_) {
+        if (const char* pv = std::getenv("STRATA_PREFETCH_NEXT"); pv != nullptr && std::atoi(pv) > 0)
+            pf_cap_ = std::min(32, std::atoi(pv));
+        if (la_probe_ || pf_cap_ > 0) {
             if (g.n_expert != 512 || K != 10 ||
                 cudaMalloc((void**) &la_pred_, (size_t) max_t * 20 * sizeof(int32_t)) != cudaSuccess ||
-                cudaMalloc((void**) &la_logits_, (size_t) max_t * 512 * sizeof(float)) != cudaSuccess ||
-                cudaMalloc((void**) &la_cnt_, (size_t) g.n_layers * 5 * sizeof(unsigned long long)) != cudaSuccess ||
+                cudaMalloc((void**) &la_logits_, (size_t) max_t * 512 * sizeof(float)) != cudaSuccess) {
+                err = "STRATA_LOOKAHEAD_PROBE / STRATA_PREFETCH_NEXT: 512 experts, top-10 and the buffers required";
+                return false;
+            }
+        }
+        if (la_probe_) {
+            if (cudaMalloc((void**) &la_cnt_, (size_t) g.n_layers * 5 * sizeof(unsigned long long)) != cudaSuccess ||
                 cudaMemset(la_cnt_, 0, (size_t) g.n_layers * 5 * sizeof(unsigned long long)) != cudaSuccess) {
-                err = "STRATA_LOOKAHEAD_PROBE: 512 experts, top-10 and its buffers required";
+                err = "STRATA_LOOKAHEAD_PROBE: counter allocation failed";
                 return false;
             }
             std::fprintf(stderr, "LOOKAHEAD probe on (lab: router of layer l+1 on layer l's MoE input)\n");
+        }
+        if (pf_cap_ > 0) {
+            const uint64_t mb = strata::kernels::cpu::expert_layout().max_blob;
+            if (!strata::kernels::cpu::expert_layout().native || sink_.publish == nullptr ||
+                !mapped((size_t) max_t * 20 * sizeof(int32_t), (void**) &h_pred_, (void**) &m_pred_) ||
+                cudaMalloc((void**) &pf_staging_, (size_t) 2 * (size_t) pf_cap_ * mb) != cudaSuccess) {
+                (void) cudaGetLastError();
+                std::fprintf(stderr, "PREFETCH_NEXT off: needs a native pack, the GPU plan and %llu MiB of VRAM\n",
+                             (unsigned long long) ((2 * (uint64_t) pf_cap_ * mb) >> 20));
+                pf_cap_ = 0;
+            } else {
+                sink_.pf_staging = (unsigned long long) pf_staging_;
+                sink_.pf_cap = pf_cap_;
+                sink_.prefetch = &Verifier::prefetch_dma;
+                std::fprintf(stderr, "PREFETCH_NEXT on (lab): up to %d of the next layer's predicted experts copied one "
+                                     "layer ahead, %llu MiB of staging\n",
+                             pf_cap_, (unsigned long long) ((2 * (uint64_t) pf_cap_ * mb) >> 20));
+            }
         }
         if (const char* mv = std::getenv("STRATA_ROUTED_MISS_W")) {
             routed_miss_w_ = (float) std::atof(mv);
@@ -777,9 +803,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             try { routed_rank_keep(w_ + tb * K, n, routed_keep_, routed_keep_renorm_, routed_min_w_, routed_min_keep_, cs); }
             catch (const std::exception& e) { err = e.what(); return false; }
         }
-        if (la_probe_) {   // lab: score the previous layer's prediction, then predict the next layer
+        if (la_probe_ || pf_cap_ > 0) {   // lab: score the previous layer's prediction, then predict the next layer
             try {
-                if (l > lb_)
+                if (la_probe_ && l > lb_)
                     routed_lookahead_compare(ids_ + tb * K, la_pred_ + tb * 20,
                                              hits_.d_res != nullptr ? hits_.d_res + l * NE : nullptr, la_cnt_ + l * 5,
                                              n, cs);
@@ -790,6 +816,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                         bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) wr->data, la_logits_ + tb * NE, NE,
                                                   N, NE, n, cs);
                         routed_lookahead_top20(la_logits_ + tb * NE, la_pred_ + tb * 20, n, cs);
+                        // STRATA_PREFETCH_NEXT: to mapped memory before the doorbell, so the pool reads it with the ids
+                        if (pf_cap_ > 0 &&
+                            cudaMemcpyAsync(m_pred_ + tb * 20, la_pred_ + tb * 20, (size_t) n * 20 * sizeof(int32_t),
+                                            cudaMemcpyDefault, cs) != cudaSuccess) {
+                            err = "prefetch: the prediction copy failed";
+                            return false;
+                        }
                     }
                 }
             } catch (const std::exception& e) { err = std::string("lookahead probe: ") + e.what(); return false; }
@@ -1243,8 +1276,11 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                         if (rank >= routed_min_keep_) id[i] = -(id[i] + 2);
                     }
             }
+            const bool pf_pred = pf_cap_ > 0 && sink_.pf_enabled && l + 1 < (int64_t) g.n_layers;
+            if (pf_pred) expert_set_next_prediction(h_pred_ + (size_t) tb * 20, n, 20);
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
+            if (pf_pred) expert_set_next_prediction(nullptr, 0, 0);
         }
         VDBG("layer %lld served\n", (long long) l);
         progress_tick();
@@ -1376,6 +1412,7 @@ void Verifier::set_plan_slot(int grp) {
     const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
     sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * strata::kernels::cpu::expert_layout().max_blob);
     sink_.staging_cap = per;
+    sink_.pf_enabled = pf_cap_ > 0 && G == 1 && sink_.pcie_mode == 0;   // lab prefetch: unsplit DMA windows only
 }
 
 // Flag B only rises: a host function of an earlier layer may run after a later layer already raised it directly.
@@ -1400,13 +1437,21 @@ void Verifier::raise_flag(uint32_t* flag, uint32_t value) {
 void Verifier::fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes) {
     Verifier* v = (Verifier*) ctx;
     const uint32_t want = v->cur_layer_ + 1;
-    if (n <= 0) { raise_flag(v->h_flagB_, want); return; }
+    // a plan that reads prefetched blobs: flag B rises behind the copy engine, after the earlier layer's prefetch
+    if (n <= 0 && !v->sink_.pf_pending) { raise_flag(v->h_flagB_, want); return; }
     uint8_t* stage = (uint8_t*) v->sink_.staging;                  // this group's half in a split window
     for (int i = 0; i < n; ++i) cudaMemcpyAsync(stage + (size_t) i * bytes, src[i], bytes, cudaMemcpyHostToDevice, v->copy_);
     FlagSet& fs = v->flag_sets_[v->cur_layer_ % (sizeof v->flag_sets_ / sizeof v->flag_sets_[0])];
     fs.flag = v->h_flagB_;
     fs.value = want;
     cudaLaunchHostFunc(v->copy_, [](void* p) { FlagSet* s = (FlagSet*) p; raise_flag(s->flag, s->value); }, &fs);
+}
+
+// Lab STRATA_PREFETCH_NEXT: the next layer's predicted blobs into its parity half of pf_staging_.  Queued on the copy
+// engine behind this layer's fetch, so this layer's flag B is not held up; the next layer's flag B rises behind them.
+void Verifier::prefetch_dma(void* ctx, const uint8_t* const* src, const unsigned long long* dst, int n, size_t bytes) {
+    Verifier* v = (Verifier*) ctx;
+    for (int i = 0; i < n; ++i) cudaMemcpyAsync((void*) dst[i], src[i], bytes, cudaMemcpyHostToDevice, v->copy_);
 }
 
 void Verifier::publish_plan(void* ctx) {

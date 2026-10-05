@@ -6385,13 +6385,13 @@ int main(int argc, char** argv) {
             const std::string decode_io_before = dec_timing ? ple_table.io_report() : std::string{};
             struct DecSnap {
                 double wait, pool, host, ple, plan, actq, jobs, run;
-                int64_t misses, entries, hits, pcie;
+                int64_t misses, entries, hits, pcie, pf_issued, pf_used;
             };
             auto dec_snap = [&]() {
                 return DecSnap{ver.ms_wait, ver.ms_pool, ver.ms_host, ver.ms_ple_gather,
                                drive.d.ms_plan, drive.d.ms_actq, drive.d.ms_jobs,
                                drive.d.ms_run, drive.d.multi_misses, drive.d.multi_entries, drive.d.cache_hits,
-                               drive.d.pcie_experts};
+                               drive.d.pcie_experts, drive.d.pf_issued, drive.d.pf_used};
             };
             const DecSnap ds0 = dec_snap();
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
@@ -6597,6 +6597,10 @@ int main(int argc, char** argv) {
                              (d1.actq - ds0.actq) / w, (d1.jobs - ds0.jobs) / w, (d1.run - ds0.run) / w,
                              (d1.host - ds0.host) / w, dt_commit / w, dt_draft / w, (d1.misses - ds0.misses) / (w * L),
                              (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L));
+                if (d1.pf_issued > ds0.pf_issued)   // lab STRATA_PREFETCH_NEXT
+                    std::fprintf(stderr, "strata decode prefetch: per layer-window %.2f copied one layer ahead, %.2f used (%.0f%%)\n",
+                                 (d1.pf_issued - ds0.pf_issued) / (w * L), (d1.pf_used - ds0.pf_used) / (w * L),
+                                 100.0 * (double) (d1.pf_used - ds0.pf_used) / (double) (d1.pf_issued - ds0.pf_issued));
                 const std::string pr = ver.profile_report();
                 if (!pr.empty()) std::fprintf(stderr, "strata decode GPU stages (ms/window):%s\n", pr.c_str());
                 const double ple_ms = d1.ple - ds0.ple;

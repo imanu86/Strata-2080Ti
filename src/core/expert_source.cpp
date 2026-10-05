@@ -1722,6 +1722,18 @@ bool FileExpertSource::pcie_layer(int64_t layer) const {
 
 // ================================ THE ADAPTER ================================
 
+namespace {
+// lab STRATA_PREFETCH_NEXT: the next layer's predicted experts for the dispatch the Verifier's host thread is calling
+thread_local const int32_t* g_next_pred = nullptr;
+thread_local int g_next_pred_tok = 0, g_next_pred_k = 0;
+}  // namespace
+
+void expert_set_next_prediction(const int32_t* pred, int n_tok, int k) {
+    g_next_pred = pred;
+    g_next_pred_tok = n_tok;
+    g_next_pred_k = k;
+}
+
 void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, const float* weights, int64_t n_embd,
                           int64_t k, float* out) {
     (void) weights;   // clause 2: `moe_combine` applies it on the device.  Not an oversight.
@@ -1912,6 +1924,15 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     const int64_t n = n_tok * k;
     int32_t kind[kMaxWindowEntries];       // per entry: -1 CPU, 0 VRAM, 1 PCIe
     if (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap) {
+        // lab STRATA_PREFETCH_NEXT: this layer's blobs the previous layer already copied to VRAM (its parity half)
+        const int par = (int) (d.layers & 1);
+        const bool pf_here = d.plan->pf_enabled && d.plan->pcie_mode == 0 && d.pf_layer[par] == d.layers;
+        auto pf_slot = [&](int32_t e) -> int {
+            if (pf_here)
+                for (int s = 0; s < d.pf_n[par]; ++s)
+                    if (d.pf_expert[par][s] == e) return s;
+            return -1;
+        };
         int64_t distinct[kMaxWindowEntries], first_of[kMaxWindowEntries];
         int nd = 0, nmiss = 0;
         for (int64_t i = 0; i < n; ++i) {
@@ -1922,15 +1943,17 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 distinct[nd++] = i;
                 const int32_t e = ids[i];
                 if (e >= 0 && e < d.n_expert && d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] < 0 &&
-                    !(d.peer != nullptr && d.peer->has(d.layers, e))) ++nmiss;
+                    !(d.peer != nullptr && d.peer->has(d.layers, e)) && pf_slot(e) < 0) ++nmiss;
             }
         }
         const bool pcie_ok = d.pcie_num > 0 && d.src->pcie_layer(d.layers);
         const int m = pcie_ok ? (nmiss * d.pcie_num) >> 8 : 0;
-        int miss_rank = 0, groups = 0, entries = 0, fetches = 0;
+        int miss_rank = 0, groups = 0, entries = 0, fetches = 0, groups2 = 0, pf_hits = 0;
         GpuPlanSink& P = *d.plan;
         const uint8_t* dma_src[64];
-        int64_t pcie_i0[64];
+        int64_t pcie_i0[64];                   // per PCIe group: its first entry
+        unsigned long long pcie_ptr[64];       // per PCIe group: a prefetched blob, or ~0 for a DMA staging slot
+        int dma_slot[64];                      // per PCIe group fetched now: its staging slot
         for (int q = 0; q < nd; ++q) {
             const int64_t i0 = distinct[q];
             const int32_t e = ids[i0];
@@ -1944,13 +1967,21 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                                                                                  : (size_t) slot * (size_t) d.cache_blob));
                 } else if (d.peer != nullptr && d.peer->has(d.layers, e)) {
                     kd = 2;                        // multi-GPU: the second GPU computes it
+                } else if (const int ps = pf_slot(e); ps >= 0 && groups2 < 64) {
+                    kd = 1;                        // lab: copied one layer ahead, already in VRAM
+                    pcie_ptr[groups2] = P.pf_staging + (unsigned long long) (par * P.pf_cap + ps) *
+                                                           (unsigned long long) lay.max_blob;
+                    pcie_i0[groups2++] = i0;
+                    ++pf_hits;
                 } else {
-                    if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < 64) {
+                    if (miss_rank >= nmiss - m && fetches < P.staging_cap && fetches < 64 && groups2 < 64) {
                         const uint8_t* src = d.src->pinned(d.layers, e) ? d.src->blob(d.layers, e) : nullptr;
                         if (src != nullptr) {
                             kd = 1;
+                            pcie_ptr[groups2] = ~0ull;
+                            dma_slot[groups2] = fetches;
                             dma_src[fetches] = src;
-                            pcie_i0[fetches] = i0;
+                            pcie_i0[groups2++] = i0;
                             ++fetches;
                         }
                     }
@@ -1972,10 +2003,11 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         }
         P.start[groups] = entries;
         const uint64_t bb = lay.blob_bytes(d.layers);
-        for (int q = 0; q < fetches; ++q) {       // the PCIe groups: staging slot q, entries after the VRAM ones
+        for (int q = 0; q < groups2; ++q) {       // the PCIe groups: entries after the VRAM ones
             const int64_t i0 = pcie_i0[q];
-            P.ptr2[q] = P.pcie_mode != 0 ? (unsigned long long) d.src->device_alias(d.layers, ids[i0])
-                                 : P.staging + (unsigned long long) q * (unsigned long long) bb;
+            P.ptr2[q] = pcie_ptr[q] != ~0ull ? pcie_ptr[q]
+                      : P.pcie_mode != 0 ? (unsigned long long) d.src->device_alias(d.layers, ids[i0])
+                                         : P.staging + (unsigned long long) dma_slot[q] * (unsigned long long) bb;
             P.start2[q] = entries;
             for (int64_t i = i0; i < n; ++i)
                 if (first_of[i] == i0) {
@@ -1983,17 +2015,50 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                     P.tok[entries] = (int32_t) (i / k);
                     ++entries;
                 }
-            ++d.pcie_experts;
+            if (pcie_ptr[q] == ~0ull) ++d.pcie_experts;
         }
-        P.start2[fetches] = entries;
+        P.start2[groups2] = entries;
         P.counts[0] = groups;
         P.counts[1] = entries;
-        P.counts[2] = fetches;
+        P.counts[2] = groups2;
+        P.pf_pending = pf_hits > 0;               // flag B must then rise behind the copy engine (fetch_dma)
+        d.pf_used += pf_hits;
         std::atomic_thread_fence(std::memory_order_seq_cst);
         pt("publish", fetches);
         if (P.publish) P.publish(P.ctx);
         pt("fetch", fetches);
         if (P.fetch) P.fetch(P.ctx, dma_src, P.pcie_mode != 0 ? 0 : fetches, (size_t) bb);   // the copy engine, beside the CPU's work
+        // lab STRATA_PREFETCH_NEXT: the next layer's predicted, non-resident experts, copied behind this layer's
+        // fetch into the other parity half.  Only a copy: the next layer's real routing still decides what runs.
+        if (P.pf_enabled && P.pcie_mode == 0 && P.prefetch != nullptr && g_next_pred != nullptr && lay.native &&
+            d.layers + 1 < (int64_t) lay.fmt.size()) {
+            const int64_t L1 = d.layers + 1;
+            const int par1 = (int) (L1 & 1);
+            const int cap1 = (int) std::min<int64_t>(P.pf_cap, 64);
+            const uint8_t* psrc[64];
+            unsigned long long pdst[64];
+            int np = 0;
+            for (int r = 0; r < g_next_pred_k && np < cap1; ++r)          // best-ranked first, every token
+                for (int t = 0; t < g_next_pred_tok && np < cap1; ++t) {
+                    const int32_t e = g_next_pred[(size_t) t * (size_t) g_next_pred_k + (size_t) r];
+                    if (e < 0 || e >= d.n_expert) continue;
+                    if (d.host_res[(size_t) L1 * (size_t) d.n_expert + (size_t) e] >= 0) continue;   // resident
+                    if (d.peer != nullptr && d.peer->has(L1, e)) continue;
+                    bool dup = false;
+                    for (int s = 0; s < np && !dup; ++s) dup = d.pf_expert[par1][s] == e;
+                    if (dup) continue;
+                    const uint8_t* src = d.src->pinned(L1, e) ? d.src->blob(L1, e) : nullptr;
+                    if (src == nullptr) continue;
+                    d.pf_expert[par1][np] = e;
+                    psrc[np] = src;
+                    pdst[np] = P.pf_staging + (unsigned long long) (par1 * P.pf_cap + np) * (unsigned long long) lay.max_blob;
+                    ++np;
+                }
+            d.pf_layer[par1] = np > 0 ? L1 : -1;
+            d.pf_n[par1] = np;
+            if (np > 0) P.prefetch(P.ctx, psrc, pdst, np, (size_t) lay.blob_bytes(L1));
+            d.pf_issued += np;
+        }
     } else {
         for (int64_t i = 0; i < n; ++i) {
             const int32_t e = ids[i];

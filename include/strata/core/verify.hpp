@@ -199,6 +199,11 @@ private:
     float* la_logits_ = nullptr;          ///< [max_t, n_expert]
     unsigned long long* la_cnt_ = nullptr;   ///< [n_layers, 5] cumulative counters (see routed_lookahead_compare)
     int64_t la_windows_ = 0;
+    /// Lab STRATA_PREFETCH_NEXT=P: the lookahead prediction (la_pred_) also copied to mapped host memory before the
+    /// doorbell, so the pool copies up to P of the next layer's predicted non-resident experts one layer ahead.
+    int pf_cap_ = 0;
+    uint8_t* pf_staging_ = nullptr;       ///< [2 parities, pf_cap_] blobs of the largest layer
+    int32_t* h_pred_ = nullptr; int32_t* m_pred_ = nullptr;   ///< mapped [max_t, 20]
     bool device_plan_ = false;           ///< E-6: resident-only layers planned on the device (STRATA_VERIFY_DEVICE_PLAN)
     uint32_t* skip_ = nullptr;            ///< E-6: per group, the ring whose plan the device built (0: the host's)
     unsigned long long* slot_off_d_ = nullptr;   ///< E-6: the slot offsets on the device
@@ -252,6 +257,8 @@ private:
     struct FlagSet { uint32_t* flag; uint32_t value; };
     FlagSet flag_sets_[2 * 64 * 2] = {};                          // host-function arguments, one per (layer, group)
     static void fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes);
+    /// Lab STRATA_PREFETCH_NEXT: the next layer's predicted blobs, copied by the copy engine behind this layer's fetch.
+    static void prefetch_dma(void* ctx, const uint8_t* const* src, const unsigned long long* dst, int n, size_t bytes);
     static void raise_flag(uint32_t* flag, uint32_t value);
     int32_t* h_plan_ = nullptr;  int32_t* m_plan_ = nullptr;     // counts | start | dst | tok | ptr (as int32 pairs)
     int64_t plan_i32_ = 0;                                        // int32 words in the plan block
