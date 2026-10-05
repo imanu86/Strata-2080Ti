@@ -86,3 +86,7 @@ relax a gate, label a partial run PASS, or promote unrelated performance claims.
 ## Daily 0.1.39 - 5 ottobre 2026
 
 Upstream v0.1.39 (`6f32ec0`) unito nel fork (`73cb2d4`) con port SM75, cache elastica a due zone, top-k #603, tail #614 e le opzioni di laboratorio di questa sessione spente. Eseguibile shipping validato sulla configurazione del Daily: a 131k L01 51,4 / L02 44,2 t/s contro 38,7 / 38,0 del Daily 0.1.38; fedelta' in teacher forcing KL 0,0004 / 0,0020 / 0,0001 (A/A 0,0004 / 0,0005 / 0,0001), perplessita' -0,16% / -2,10% / +1,07% senza spostamento sistematico. CTest 8/8, pool CPU 64 casi bitwise, test server 262/271 (7 saltati, 2 errori non del fork). Dettagli: `validation.json`.
+
+## Daily 0.1.39-r2 - 6 ottobre 2026
+
+Sorgente del fork `14433b0` (upstream v0.1.39 `6f32ec0` + port SM75): PR #904, Encapsulate, merge v2 (#910), kernel Q2_0 esatto, #930, #949, #965 e diagnostica PLE, tutti identici bit per bit a posizionamento fisso (teacher forcing dell'eseguibile shipping uguale a `TFX-enc`). Configurazione: nucleo elastico adattivo, DMA, `--pool-tasks 96`, tabella PLE su D:, cache di righe PLE 16M. A 131k L01 53,1 / L02 45,8 t/s (0.1.39 r1: 51,4 / 44,2). Benchmark a turni fino a ~130k: costo per finestra -10% (45,4 contro 50,5 ms), +3,4% di t/s sui turni a testo normale, nessun blocco del DMA. CTest 11/11, pool CPU bitwise sul GGUF reale, test server 276/278 (2 errori non del fork). Dettagli: `validation.json`.

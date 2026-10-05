@@ -1,71 +1,126 @@
 {
-  "date": "2026-10-05",
+  "date": "2026-10-06",
   "upstream_commit": "6f32ec070f23ced9f50e704d854d775da52591ab",
-  "version": "0.1.39",
-  "fork_commit": "73cb2d46df1fd76a7bdb9bde396c90594899e648",
-  "executable_sha256": "dd82377ab682108bb6a8e2480727a27e211400df8dd01a4801144a0843270791",
+  "version": "0.1.39-r2",
+  "fork_commit": "14433b09dc57775abf112f131aeb501d88de020a",
+  "executable_sha256": "b0edf8455031832e08e8e419792d49f6ba1dc1d610c56f360d316690c6089261",
   "build": {
-    "configure": "rc 0",
-    "build": "rc 0",
-    "ctest": "rc 0 (7 tests)",
-    "pool_quant_parity": "rc 0 (real GGUF)",
-    "server_tests": "Ran 271 tests in 124.180s / FAILED (errors=2, skipped=7): 262 passed, 7 skipped, 2 errors; test_winjob reads tasklist as UTF-8 on an Italian (cp850) Windows; test_responses json_schema 502 fails identically on stock upstream 0.1.39 serve/ (not a fork change)"
+    "configure": {
+      "rc": 0,
+      "seconds": 21.4
+    },
+    "build": {
+      "rc": 0,
+      "seconds": 120.4
+    },
+    "ctest": {
+      "rc": 0,
+      "seconds": 6.5
+    },
+    "pool-quant-parity": {
+      "rc": 0,
+      "seconds": 1.0
+    },
+    "server-tests": {
+      "rc": 1,
+      "seconds": 123.5,
+      "summary": [
+        "ERROR: test_json_schema_text_format (serve.test_responses.OverHttp.test_json_schema_text_format)",
+        "ERROR: test_children_end_with_a_killed_server (serve.test_winjob.TestWinJob.test_children_end_with_a_killed_server)",
+        "Ran 278 tests in 123.017s",
+        "FAILED (errors=2, skipped=7)"
+      ]
+    }
   },
   "speed_131k": {
-    "method": "run_long.py L01/L02 (131,248-token prompt; L02 reuses the 131,072-token prefix), 1024 generated tokens, greedy, the Daily configuration with the whole arena registered",
-    "shipping_0139": {
+    "method": "run_long.py L01/L02 (131,248-token prompt; L02 reuses the 131,072-token prefix), 1024 generated tokens, greedy; r2 configuration (Daily config + STRATA_ELASTIC_CORE_ADAPT=1, --pcie-mode dma, --pool-tasks 96), PLE table on D:, row cache 16M rows",
+    "shipping_0139r2": {
+      "L01_tps": 53.1,
+      "L02_tps": 45.8,
+      "L01_prefill_s": 129.7
+    },
+    "daily_0139_r1_at_release": {
       "L01_tps": 51.4,
       "L02_tps": 44.2,
-      "L01_prefill_s": 123
+      "L01_prefill_s": 123,
+      "note": "5/10 morning, PLE table on C:"
     },
-    "port_0139_same_source_without_lab_commits": {
+    "lab_r2_series": {
       "L01_tps": [
-        46.4,
-        43.4
+        45.2,
+        46.8,
+        46.1,
+        46.3,
+        48.2
       ],
       "L02_tps": [
-        41.3,
-        41.8
+        44.2,
+        44.1,
+        44.7,
+        44.7,
+        43.6
+      ],
+      "note": "same day with other programs on the GPU (12-38%)"
+    }
+  },
+  "turns": {
+    "method": "run_turns.py: first turn ~12k tokens of code, then long requests of 14,000 tokens up to ~130k, 8 turns, one process, conversation cache on; B = r2 lab exe (build-pr949, same source as shipping), A = Daily r1",
+    "engine_cost_per_window_ms": {
+      "r2": 45.44,
+      "daily_r1": 50.5
+    },
+    "gpu_wait_ms": {
+      "r2": 24.02,
+      "daily_r1": 28.19
+    },
+    "cpu_ms_per_entry": {
+      "r2": 3.07,
+      "daily_r1": 3.51
+    },
+    "draft_ms": {
+      "r2": 3.26,
+      "daily_r1": 4.3
+    },
+    "tps_turns_with_normal_text_for_both_1_6_8": {
+      "r2": [
+        52.0,
+        52.3,
+        51.4
+      ],
+      "daily_r1": [
+        50.3,
+        50.8,
+        49.7
       ]
     },
-    "daily_0138": {
-      "L01_tps": 38.7,
-      "L02_tps": 38.0,
-      "L01_prefill_s": 129
-    },
-    "note": "decode +9-33% at 131k; per-layer host work 2.8 -> 0.5 ms per window (upstream 0.1.39); single runs, one prefill outlier (294 s) traced to the PLE table read from the SSD, not to the engine"
+    "note": "the Daily fell into repetition loops in turns 2-5 (zlib 0.03-0.06, 95-99% drafts accepted), so its raw aggregate (57.3 vs 54.8 t/s) is not comparable; no DMA stall, kernel pools stable"
   },
   "fidelity": {
-    "method": "teacher forcing (STRATA_LOGPOS, top-20) on the Daily's greedy answers to the code/explain/ledger tasks; KL(Daily||X) over the Daily's top-20 plus a rest bucket; Daily vs Daily (A/A) as the noise floor",
-    "code": {
-      "kl_aa": 0.0004,
-      "kl_0139": 0.0004,
-      "firm_agree_0139": 1.0,
-      "ppl_aa": "+0.32%",
-      "ppl_0139": "-0.16%"
-    },
-    "explain": {
-      "kl_aa": 0.0005,
-      "kl_0139": 0.002,
-      "firm_agree_0139": 0.996,
-      "ppl_aa": "-0.19%",
-      "ppl_0139": "-2.10%"
-    },
-    "ledger": {
-      "kl_aa": 0.0001,
-      "kl_0139": 0.0001,
-      "firm_agree_0139": 1.0,
-      "ppl_aa": "+0.13%",
-      "ppl_0139": "+1.07%"
-    },
-    "verdict": "no systematic perplexity shift (signs mixed, same pattern as the port build); explain sits above the A/A floor, 2 of 524 firm positions change their argmax"
+    "method": "teacher forcing with a fixed expert placement (fixed cache 5000, adaptive off, --pcie-frac 0.36, no elastic), code and explain, logpos compared byte for byte with TFX-enc (the reference every identical port since 0.1.39 matches)",
+    "shipping_r2_pool_tasks_96": "identical bit for bit (code, explain)",
+    "kernel_identity": "iq256_dump 972 cases byte for byte before/after #930 (also gather); q2_exact_parity 504 cases; attn_merge_parity 768/768; pool_tasks_test 168",
+    "verdict": "every change in r2 leaves the output bit-identical at a fixed placement; only the adaptive placement (as before) changes which experts run on the GPU"
   },
   "checks": {
-    "ctest": "8/8 (qsa_topk_active_parity, gr_parity, gdn_parity, router_dot_parity, expert_cache_elastic_test, expert_cache_per_layer_test, expert_profile_save_test)",
-    "pool_quant_parity": "64 native pool cases with the real IQ3_XXS GGUF, finite and bitwise serial",
-    "server_tests": "271 run: 262 pass, 7 skipped, 2 errors - test_winjob decodes tasklist as UTF-8 on an Italian cp850 Windows; test_responses json_schema 502 fails identically on stock upstream 0.1.39 serve/"
+    "ctest": "11/11 (qsa_topk_active_parity, gr_parity, gdn_parity, router_dot_parity, router_dot_parity_avx, expert_cache_elastic_test, expert_cache_per_layer_test, expert_profile_save_test, attn_merge_parity, q2_exact_parity, pool_tasks_test)",
+    "pool_quant_parity": "real GGUF, pass",
+    "server_tests": "276 of 278 (7 skipped); 2 errors not from the fork: test_winjob reads tasklist as UTF-8 on Italian Windows, test_responses json_schema 502 fails identically on upstream"
   },
-  "limitations": "single speed runs per arm; fidelity on three short tasks; general model quality, stock 11 GB cards and multi-GPU not validated",
-  "release_bullets": "- Decode at 131k (Daily configuration): L01 51.4 / L02 44.2 tok/s against 38.7 / 38.0 for the 0.1.38 Daily; the port build without this fork's lab commits measured 46.4-43.4 / 41.3-41.8.  Prefill unchanged (123 vs 129 s for 131k).\n- Teacher-forced fidelity against the 0.1.38 Daily on code/explain/ledger: KL 0.0004 / 0.0020 / 0.0001 (Daily A/A 0.0004 / 0.0005 / 0.0001), perplexity -0.16% / -2.10% / +1.07%: no systematic shift.\n- Full SM75 build, 8/8 CTest parity checks, 64 real-GGUF CPU pool cases bitwise; 262 of 271 server tests pass, 7 skipped, the 2 errors are a locale issue of the test and one that fails identically on stock upstream.",
-  "markdown": "## Daily 0.1.39 - 5 ottobre 2026\n\nUpstream v0.1.39 (`6f32ec0`) unito nel fork (`73cb2d4`) con port SM75, cache elastica a due zone, top-k #603, tail #614 e le opzioni di laboratorio di questa sessione spente. Eseguibile shipping validato sulla configurazione del Daily: a 131k L01 51,4 / L02 44,2 t/s contro 38,7 / 38,0 del Daily 0.1.38; fedelta' in teacher forcing KL 0,0004 / 0,0020 / 0,0001 (A/A 0,0004 / 0,0005 / 0,0001), perplessita' -0,16% / -2,10% / +1,07% senza spostamento sistematico. CTest 8/8, pool CPU 64 casi bitwise, test server 262/271 (7 saltati, 2 errori non del fork). Dettagli: `validation.json`."
+  "limitations": [
+    "DMA (--pcie-mode dma) ran ~3 hours of benchmarks on 5/10 without a stall; upstream issue #31 stays open: fall back to the automatic copy kernel if the engine stops progressing",
+    "single runs at 131k; speed differences under ~5% are within run-to-run noise",
+    "at temperature 0 very long generations can fall into repetition (seen in both builds)"
+  ],
+  "release_bullets": [
+    "PR #904 (Hardin22): graph branches, batched enqueues - bit-identical",
+    "Encapsulate 6784a365 (Karoly Sardi): QSA decode kernel - bit-identical, draft 3.7 -> 3.0 ms/window",
+    "#910 merge v2 (Hardin22): width-bounded attention merge - bit-identical",
+    "exact AVX2 Q2_0 kernel (fork) - bit-identical, pool -4%",
+    "#930 (sanastasiou): IQ3_S / IQ2_S AVX2 decode - bit-identical, 1.25-1.40x on IQ3_S rows",
+    "#949 (Unmaple): --pool-tasks (96 in this configuration) - bit-identical, CPU work per expert -4..-8%",
+    "#965 (signalnine): Claude Code billing stamp pinned in the server",
+    "PLE diagnostics (read mean/max/over 100 ms, chunks waiting > 1 s)",
+    "configuration: adaptive elastic core, DMA transfers, PLE table on D:, PLE row cache 16M rows"
+  ],
+  "markdown": "## Daily 0.1.39-r2 - 6 ottobre 2026\n\nSorgente del fork `14433b0` (upstream v0.1.39 `6f32ec0` + port SM75): PR #904, Encapsulate, merge v2 (#910), kernel Q2_0 esatto, #930, #949, #965 e diagnostica PLE, tutti identici bit per bit a posizionamento fisso (teacher forcing dell'eseguibile shipping uguale a `TFX-enc`). Configurazione: nucleo elastico adattivo, DMA, `--pool-tasks 96`, tabella PLE su D:, cache di righe PLE 16M. A 131k L01 53,1 / L02 45,8 t/s (0.1.39 r1: 51,4 / 44,2). Benchmark a turni fino a ~130k: costo per finestra -10% (45,4 contro 50,5 ms), +3,4% di t/s sui turni a testo normale, nessun blocco del DMA. CTest 11/11, pool CPU bitwise sul GGUF reale, test server 276/278 (2 errori non del fork). Dettagli: `validation.json`."
 }

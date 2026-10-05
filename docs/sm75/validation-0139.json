@@ -1,0 +1,71 @@
+{
+  "date": "2026-10-05",
+  "upstream_commit": "6f32ec070f23ced9f50e704d854d775da52591ab",
+  "version": "0.1.39",
+  "fork_commit": "73cb2d46df1fd76a7bdb9bde396c90594899e648",
+  "executable_sha256": "dd82377ab682108bb6a8e2480727a27e211400df8dd01a4801144a0843270791",
+  "build": {
+    "configure": "rc 0",
+    "build": "rc 0",
+    "ctest": "rc 0 (7 tests)",
+    "pool_quant_parity": "rc 0 (real GGUF)",
+    "server_tests": "Ran 271 tests in 124.180s / FAILED (errors=2, skipped=7): 262 passed, 7 skipped, 2 errors; test_winjob reads tasklist as UTF-8 on an Italian (cp850) Windows; test_responses json_schema 502 fails identically on stock upstream 0.1.39 serve/ (not a fork change)"
+  },
+  "speed_131k": {
+    "method": "run_long.py L01/L02 (131,248-token prompt; L02 reuses the 131,072-token prefix), 1024 generated tokens, greedy, the Daily configuration with the whole arena registered",
+    "shipping_0139": {
+      "L01_tps": 51.4,
+      "L02_tps": 44.2,
+      "L01_prefill_s": 123
+    },
+    "port_0139_same_source_without_lab_commits": {
+      "L01_tps": [
+        46.4,
+        43.4
+      ],
+      "L02_tps": [
+        41.3,
+        41.8
+      ]
+    },
+    "daily_0138": {
+      "L01_tps": 38.7,
+      "L02_tps": 38.0,
+      "L01_prefill_s": 129
+    },
+    "note": "decode +9-33% at 131k; per-layer host work 2.8 -> 0.5 ms per window (upstream 0.1.39); single runs, one prefill outlier (294 s) traced to the PLE table read from the SSD, not to the engine"
+  },
+  "fidelity": {
+    "method": "teacher forcing (STRATA_LOGPOS, top-20) on the Daily's greedy answers to the code/explain/ledger tasks; KL(Daily||X) over the Daily's top-20 plus a rest bucket; Daily vs Daily (A/A) as the noise floor",
+    "code": {
+      "kl_aa": 0.0004,
+      "kl_0139": 0.0004,
+      "firm_agree_0139": 1.0,
+      "ppl_aa": "+0.32%",
+      "ppl_0139": "-0.16%"
+    },
+    "explain": {
+      "kl_aa": 0.0005,
+      "kl_0139": 0.002,
+      "firm_agree_0139": 0.996,
+      "ppl_aa": "-0.19%",
+      "ppl_0139": "-2.10%"
+    },
+    "ledger": {
+      "kl_aa": 0.0001,
+      "kl_0139": 0.0001,
+      "firm_agree_0139": 1.0,
+      "ppl_aa": "+0.13%",
+      "ppl_0139": "+1.07%"
+    },
+    "verdict": "no systematic perplexity shift (signs mixed, same pattern as the port build); explain sits above the A/A floor, 2 of 524 firm positions change their argmax"
+  },
+  "checks": {
+    "ctest": "8/8 (qsa_topk_active_parity, gr_parity, gdn_parity, router_dot_parity, expert_cache_elastic_test, expert_cache_per_layer_test, expert_profile_save_test)",
+    "pool_quant_parity": "64 native pool cases with the real IQ3_XXS GGUF, finite and bitwise serial",
+    "server_tests": "271 run: 262 pass, 7 skipped, 2 errors - test_winjob decodes tasklist as UTF-8 on an Italian cp850 Windows; test_responses json_schema 502 fails identically on stock upstream 0.1.39 serve/"
+  },
+  "limitations": "single speed runs per arm; fidelity on three short tasks; general model quality, stock 11 GB cards and multi-GPU not validated",
+  "release_bullets": "- Decode at 131k (Daily configuration): L01 51.4 / L02 44.2 tok/s against 38.7 / 38.0 for the 0.1.38 Daily; the port build without this fork's lab commits measured 46.4-43.4 / 41.3-41.8.  Prefill unchanged (123 vs 129 s for 131k).\n- Teacher-forced fidelity against the 0.1.38 Daily on code/explain/ledger: KL 0.0004 / 0.0020 / 0.0001 (Daily A/A 0.0004 / 0.0005 / 0.0001), perplexity -0.16% / -2.10% / +1.07%: no systematic shift.\n- Full SM75 build, 8/8 CTest parity checks, 64 real-GGUF CPU pool cases bitwise; 262 of 271 server tests pass, 7 skipped, the 2 errors are a locale issue of the test and one that fails identically on stock upstream.",
+  "markdown": "## Daily 0.1.39 - 5 ottobre 2026\n\nUpstream v0.1.39 (`6f32ec0`) unito nel fork (`73cb2d4`) con port SM75, cache elastica a due zone, top-k #603, tail #614 e le opzioni di laboratorio di questa sessione spente. Eseguibile shipping validato sulla configurazione del Daily: a 131k L01 51,4 / L02 44,2 t/s contro 38,7 / 38,0 del Daily 0.1.38; fedelta' in teacher forcing KL 0,0004 / 0,0020 / 0,0001 (A/A 0,0004 / 0,0005 / 0,0001), perplessita' -0,16% / -2,10% / +1,07% senza spostamento sistematico. CTest 8/8, pool CPU 64 casi bitwise, test server 262/271 (7 saltati, 2 errori non del fork). Dettagli: `validation.json`."
+}
