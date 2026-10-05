@@ -82,3 +82,7 @@ completed model comparisons. The configured cache reserve remains 1,393 MiB.
 
 After any failure, retain the output directory and investigate. Do not silently
 relax a gate, label a partial run PASS, or promote unrelated performance claims.
+
+## Daily 0.1.39 - 5 ottobre 2026
+
+Upstream v0.1.39 (`6f32ec0`) unito nel fork (`73cb2d4`) con port SM75, cache elastica a due zone, top-k #603, tail #614 e le opzioni di laboratorio di questa sessione spente. Eseguibile shipping validato sulla configurazione del Daily: a 131k L01 51,4 / L02 44,2 t/s contro 38,7 / 38,0 del Daily 0.1.38; fedelta' in teacher forcing KL 0,0004 / 0,0020 / 0,0001 (A/A 0,0004 / 0,0005 / 0,0001), perplessita' -0,16% / -2,10% / +1,07% senza spostamento sistematico. CTest 8/8, pool CPU 64 casi bitwise, test server 262/271 (7 saltati, 2 errori non del fork). Dettagli: `validation.json`.
