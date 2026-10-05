@@ -108,12 +108,53 @@ double run(const Case& cs, int experts, bool gu, int nt, int threads, int iters)
     return best;
 }
 
+// `pool` mode: one verify window's CPU share of one layer as the engine runs it - ExpertPool(7 workers + the host),
+// run_split_multi_native, 10 experts with 13 entries (3 of them two tokens: the median window of the 2080 Ti logs,
+// "CPU experts 10.4 (13.5 entries)").  Each call takes the next 10 of `cs.blobs`' experts, so the weights come
+// from RAM, as a cold expert's do.  Returns the median us per call.
+double pool_window(c::ExpertPool& pool, const Case& cs, int experts, int reps) {
+    const c::NativeFmt& f = cs.f;
+    constexpr int kExp = 10, kTwo = 3, kEntries = kExp + kTwo;
+    std::mt19937 rng(11);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    std::vector<float> x((size_t) 2 * f.n_embd);
+    for (auto& v : x) v = nd(rng);
+    std::vector<c::ActQ> aq(2);
+    std::vector<std::vector<uint8_t>> na(2, std::vector<uint8_t>(c::kNativeActBytes + 64));
+    for (int t = 0; t < 2; ++t) {
+        c::act_quant_any(x.data() + (size_t) t * f.n_embd, (int) f.n_embd, aq[t]);
+        c::native_quant_act(f, x.data() + (size_t) t * f.n_embd, na[t].data());
+    }
+    std::vector<float> out((size_t) kEntries * f.n_embd);
+    std::vector<c::ExpertJobMulti> jobs(kExp);
+    std::vector<double> us;
+    for (int it = 0; it < reps + 30; ++it) {
+        int row = 0;
+        for (int j = 0; j < kExp; ++j) {
+            c::ExpertJobMulti& jb = jobs[j];
+            jb.blob = cs.blobs.data() + (size_t) ((it * kExp + j) % experts) * f.bytes;
+            jb.nt = j < kTwo ? 2 : 1;
+            for (int t = 0; t < jb.nt; ++t) {
+                jb.act[t] = &aq[t];
+                jb.nact[t] = na[t].data();
+                jb.out[t] = out.data() + (size_t) row++ * f.n_embd;
+            }
+        }
+        const auto t0 = Clock::now();
+        pool.run_split_multi_native(f, jobs.data(), kExp);
+        if (it >= 30) us.push_back(ms_since(t0) * 1e3);   // the first calls wake the workers and warm the code
+    }
+    std::sort(us.begin(), us.end());
+    return us[us.size() / 2];
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (argc < 2) { std::fprintf(stderr, "usage: cpu_format_bench shard1.gguf [experts=48] [iters=3] [threads=1,8]\n"); return 2; }
-    const int experts = argc > 2 ? std::atoi(argv[2]) : 48;
+    const bool pool_mode = argc > 2 && std::string(argv[2]) == "pool";   // cpu_format_bench shard1.gguf pool [reps]
+    const int experts = pool_mode ? 48 : (argc > 2 ? std::atoi(argv[2]) : 48);
     const int iters = argc > 3 ? std::atoi(argv[3]) : 3;
     std::vector<int> thread_list;
     for (const char* p = argc > 4 ? argv[4] : "1,8"; *p;) {
@@ -150,6 +191,44 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr, "  caso %s pronto (%zu byte/esperto)\n", cs.name.c_str(), cs.f.bytes);
         cases.push_back(std::move(cs));
+    }
+    if (pool_mode) {
+        // gate/up and down of the real layers recombined (speed does not depend on which layer a row came from), and
+        // a Q2_0 gate/up made of layer 1's real Q2_0 down blocks: 640 rows x 2560 = 2560 rows x 640, the same bytes
+        const int reps = argc > 3 ? std::atoi(argv[3]) : 300;
+        const Case &l0 = cases[0], &l1 = cases[1], &l35 = cases[2];
+        struct Mix { const char* name; const Case* gu; const Case* down; bool q2_gu; };
+        const Mix mixes[] = {
+            {"IQ3_XXS + IQ4_NL (L35)", &l35, &l35, false}, {"IQ3_XXS + Q2_0", &l35, &l1, false},
+            {"IQ2_XS + IQ4_NL (L0)", &l0, &l0, false},     {"IQ2_XXS + IQ4_NL", &l1, &l35, false},
+            {"IQ2_XXS + Q2_0 (L1)", &l1, &l1, false},      {"Q2_0 + IQ4_NL", &l1, &l35, true},
+            {"Q2_0 + Q2_0", &l1, &l1, true},
+        };
+        c::ExpertPool pool(7, true, true);
+        std::printf("pool: %d worker + host; finestra = 10 esperti, 13 voci; mediana di %d chiamate\n", pool.workers(), reps);
+        std::printf("%-26s %10s %10s %14s\n", "gate+up + down", "us/strato", "us/voce", "ms/finestra*48");
+        for (const Mix& m : mixes) {
+            Case cs;
+            const int gt = m.q2_gu ? 42 : m.gu->f.gu_type;
+            if (!c::native_fmt(gt, m.down->f.d_type, c::H, c::FF, cs.f, err)) { std::printf("%s: %s\n", m.name, err.c_str()); continue; }
+            cs.blobs.resize((size_t) experts * cs.f.bytes);
+            const size_t db = cs.f.bytes - cs.f.down_off;
+            for (int e = 0; e < experts; ++e) {
+                uint8_t* p = cs.blobs.data() + (size_t) e * cs.f.bytes;
+                if (m.q2_gu) {   // layer 1's down blocks of experts e and e+1 as gate and up
+                    const size_t ldb = l1.f.bytes - l1.f.down_off;
+                    if (ldb != cs.f.up_off) { std::printf("Q2_0 gate/up: %zu != %zu\n", ldb, cs.f.up_off); return 2; }
+                    std::memcpy(p, l1.blobs.data() + (size_t) e * l1.f.bytes + l1.f.down_off, ldb);
+                    std::memcpy(p + cs.f.up_off, l1.blobs.data() + (size_t) ((e + 1) % experts) * l1.f.bytes + l1.f.down_off, ldb);
+                } else {
+                    std::memcpy(p, m.gu->blobs.data() + (size_t) e * m.gu->f.bytes, cs.f.down_off);
+                }
+                std::memcpy(p + cs.f.down_off, m.down->blobs.data() + (size_t) e * m.down->f.bytes + m.down->f.down_off, db);
+            }
+            const double us = pool_window(pool, cs, experts, reps);
+            std::printf("%-26s %10.1f %10.1f %14.1f   (%zu byte/esperto)\n", m.name, us, us / 13, us * 48 / 1e3, cs.f.bytes);
+        }
+        return 0;
     }
     // layer 35's gate/up re-quantized to other formats (down kept as IQ4_NL)
     {
