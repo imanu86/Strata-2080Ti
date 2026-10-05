@@ -211,7 +211,7 @@ int main(int argc, char** argv) {
         auto row_ptr = [&](int e, int m, int r) {
             return l1.blobs.data() + (size_t) e * l1.f.bytes + (m ? l1.f.up_off : 0) + (size_t) r * l1.f.gu_row;
         };
-        long long same_s = 0, same_g = 0, total = 0;
+        long long same_s = 0, same_g = 0, same_v = 0, total = 0;
         for (int e = 0; e < experts; ++e)
             for (int m = 0; m < 2; ++m)
                 for (int r = 0; r < rows; ++r) {
@@ -219,11 +219,14 @@ int main(int argc, char** argv) {
                     tr->vec_dot((int) c::H, &ref, 0, row_ptr(e, m, r), 0, act.data(), 0, 1);
                     const float a = c::iq2xxs_dot_1tok(c::Iq1TokVariant::kScalar, (int) c::H, row_ptr(e, m, r), act.data());
                     const float b = c::iq2xxs_dot_1tok(c::Iq1TokVariant::kGather, (int) c::H, row_ptr(e, m, r), act.data());
+                    const float v3 = c::iq2xxs_dot_1tok(c::Iq1TokVariant::kVsign, (int) c::H, row_ptr(e, m, r), act.data());
                     same_s += std::memcmp(&ref, &a, 4) == 0;
                     same_g += std::memcmp(&ref, &b, 4) == 0;
+                    same_v += std::memcmp(&ref, &v3, 4) == 0;
                     ++total;
                 }
-        std::printf("bit-identical to ggml: scalar %lld/%lld, gather %lld/%lld\n", same_s, total, same_g, total);
+        std::printf("bit-identical to ggml: scalar %lld/%lld, gather %lld/%lld, vsign %lld/%lld\n", same_s, total, same_g,
+                    total, same_v, total);
         auto timed = [&](int which, int threads) {
             double best = 1e30;
             for (int rep = 0; rep < 6; ++rep) {
@@ -238,7 +241,7 @@ int main(int argc, char** argv) {
                                 for (int r = 0; r < rows; ++r) {
                                     float v = 0.f;
                                     if (which == 0) tr->vec_dot((int) c::H, &v, 0, row_ptr(e, m, r), 0, act.data(), 0, 1);
-                                    else v = c::iq2xxs_dot_1tok(which == 1 ? c::Iq1TokVariant::kScalar : c::Iq1TokVariant::kGather,
+                                    else v = c::iq2xxs_dot_1tok(which == 1 ? c::Iq1TokVariant::kScalar : which == 2 ? c::Iq1TokVariant::kGather : c::Iq1TokVariant::kVsign,
                                                                 (int) c::H, row_ptr(e, m, r), act.data());
                                     acc += v;
                                 }
@@ -249,9 +252,9 @@ int main(int argc, char** argv) {
             }
             return best * 1e3 / experts;   // us per expert (gate + up)
         };
-        const char* names[] = {"ggml vec_dot", "variante scalare", "variante gather"};
+        const char* names[] = {"ggml vec_dot", "variante scalare", "variante gather", "variante vsign"};
         for (int threads : {1, 8})
-            for (int which = 0; which < 3; ++which)
+            for (int which = 0; which < 4; ++which)
                 std::printf("%-18s %d thread: %8.1f us/esperto gate+up\n", names[which], threads, timed(which, threads));
         return 0;
     }

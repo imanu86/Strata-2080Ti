@@ -4,7 +4,7 @@
 
 namespace strata::kernels::cpu {
 
-enum class Iq1TokVariant { kScalar, kGather };
+enum class Iq1TokVariant { kScalar, kGather, kVsign };
 
 /// One IQ2_XXS row (n weights) against one q8_K activation, the same float ggml_vec_dot_iq2_xxs_q8_K returns.
 float iq2xxs_dot_1tok(Iq1TokVariant v, int n, const void* row, const void* act);
