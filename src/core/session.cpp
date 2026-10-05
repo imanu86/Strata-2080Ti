@@ -69,6 +69,16 @@ uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k, int
     n += moe_buffers_bytes(g, k);
     n += block_buffers_bytes(g);
     n += ple_hist_bytes();                       // the PLE's NG_HIST normalized history rows
+    if (std::getenv("STRATA_TRACE") != nullptr) {   // lab: what the session arena is made of (MiB)
+        const uint64_t qf = g.n_qsa_layers() > 0 ? qsa_state_bytes(g, max_cells, true) : 0;
+        const uint64_t qr = g.n_qsa_layers() > 0 ? qsa_state_bytes(g, max_cells, false) : 0;
+        std::fprintf(stderr, "strata trace: session %lld cells: GDN buffers %.1f, GDN states %lld x %.1f, QSA states "
+                             "%.1f + %lld x %.1f, QSA buffers %.1f, MoE buffers %.1f, block buffers %.1f MiB\n",
+                     (long long) max_cells, gdn_buffers_bytes(g) / 1048576.0, (long long) gdn_n,
+                     gdn_state_floats(g) * 4 / 1048576.0, qf / 1048576.0, (long long) (q_n - 1), qr / 1048576.0,
+                     qsa_buffers_bytes(g, max_cells) / 1048576.0, moe_buffers_bytes(g, k) / 1048576.0,
+                     block_buffers_bytes(g) / 1048576.0);
+    }
     return align_up(n, SESSION_STATE_ALIGN) + 4096;
 }
 

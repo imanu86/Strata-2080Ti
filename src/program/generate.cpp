@@ -68,6 +68,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <psapi.h>
+#include <dxgi1_4.h>
 #include <io.h>
 #else
 #include <unistd.h>
@@ -905,13 +906,73 @@ void stall_report(std::FILE* f, uint64_t layers_during) {
 #endif
 }
 
+#if defined(_WIN32) && !defined(STRATA_USE_HIP)
+/// Lab (STRATA_TRACE on Windows): under WDDM cudaMemGetInfo lags what the process holds (an allocation counts once
+/// touched) and the card's own figure is not this process's budget.  So each mark also reads Windows' budget and this
+/// process's usage (DXGI QueryVideoMemoryInfo, the card's adapter by LUID) and the whole card's use (NVML, as
+/// nvidia-smi).  dxgi.dll and nvml.dll are loaded at run time; a missing one leaves its figures at -1.
+struct WinVram { long long budget = -1, usage = -1, card_used = -1; };
+WinVram win_vram() {
+    WinVram r;
+    static IDXGIAdapter3* adapter = [] {
+        cudaDeviceProp p{};
+        int dev = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&p, dev) != cudaSuccess) {
+            (void) cudaGetLastError();
+            return (IDXGIAdapter3*) nullptr;
+        }
+        LUID luid{};
+        std::memcpy(&luid, p.luid, sizeof luid);
+        using CreateFactory = HRESULT(WINAPI*)(REFIID, void**);
+        HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+        const auto create = dxgi ? (CreateFactory) (void*) GetProcAddress(dxgi, "CreateDXGIFactory1") : nullptr;
+        IDXGIFactory4* factory = nullptr;
+        if (create == nullptr || FAILED(create(__uuidof(IDXGIFactory4), (void**) &factory))) return (IDXGIAdapter3*) nullptr;
+        IDXGIAdapter3* a = nullptr;
+        if (FAILED(factory->EnumAdapterByLuid(luid, __uuidof(IDXGIAdapter3), (void**) &a))) a = nullptr;
+        factory->Release();
+        return a;
+    }();
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+    if (adapter != nullptr && SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local))) {
+        r.budget = (long long) local.Budget;
+        r.usage = (long long) local.CurrentUsage;
+    }
+    struct NvmlMem { unsigned long long total, free, used; };
+    using Init = int (*)();
+    using ByIndex = int (*)(unsigned, void**);
+    using MemInfo = int (*)(void*, NvmlMem*);
+    static void* nvdev = nullptr;
+    static MemInfo meminfo = [] {
+        HMODULE nvml = LoadLibraryW(L"nvml.dll");
+        if (nvml == nullptr) return (MemInfo) nullptr;
+        const auto init = (Init) (void*) GetProcAddress(nvml, "nvmlInit_v2");
+        const auto by_index = (ByIndex) (void*) GetProcAddress(nvml, "nvmlDeviceGetHandleByIndex_v2");
+        const auto mi = (MemInfo) (void*) GetProcAddress(nvml, "nvmlDeviceGetMemoryInfo");
+        if (init == nullptr || by_index == nullptr || mi == nullptr || init() != 0 || by_index(0, &nvdev) != 0)
+            return (MemInfo) nullptr;
+        return mi;
+    }();
+    NvmlMem m{};
+    if (meminfo != nullptr && meminfo(nvdev, &m) == 0) r.card_used = (long long) m.used;
+    return r;
+}
+#endif
+
 /// STRATA_TRACE=1: the VRAM left at a step of the startup (finds what fills the card after the cache is sized)
 void mem_mark(const char* where) {
     static const bool on = std::getenv("STRATA_TRACE") != nullptr;
     if (!on) return;
     size_t free_b = 0, total_b = 0;
     cudaMemGetInfo(&free_b, &total_b);
+#if defined(_WIN32) && !defined(STRATA_USE_HIP)
+    const WinVram w = win_vram();
+    std::fprintf(stderr, "strata trace: %lld MiB free after %s [WDDM budget %lld MiB, process usage %lld MiB, "
+                         "card used %lld MiB]\n", (long long) (free_b >> 20), where, w.budget >= 0 ? w.budget >> 20 : -1,
+                 w.usage >= 0 ? w.usage >> 20 : -1, w.card_used >= 0 ? w.card_used >> 20 : -1);
+#else
     std::fprintf(stderr, "strata trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
+#endif
 }
 
 /// #463's A/B: STRATA_ADAPT_NOWAIT=1 lets a verify window start before the adaptive tier's copies have landed (0.1.37)
@@ -2091,6 +2152,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     void* arena = nullptr;
+    mem_mark("the CUDA context and its modules (before the weight arena)");
     if (const cudaError_t ce = cudaMalloc(&arena, pool_bytes); ce != cudaSuccess) {
         // #486: the arena is the first large allocation and its size does not depend on the context, so what is
         // missing is held by something else: say how much was free
@@ -2113,6 +2175,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "strata generate: %llu MiB of weights loaded from %s (%zu canonical tensors skipped: "
                          "served natively)\n",
                  (unsigned long long) (pool_bytes >> 20), o.pack.c_str(), skip.size());
+    mem_mark("the dense weights");
 
     strata::core::NativeDense native_dense;
     if (!o.native_dense_gguf.empty()) {
@@ -2703,6 +2766,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: session_init failed\n");
             return 1;
         }
+        mem_mark("the session (KV, recurrent states, buffers)");
         if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1)
             std::fprintf(stderr, "strata generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
                                  "%.2f GiB of pinned RAM\n",
@@ -2764,6 +2828,7 @@ int main(int argc, char** argv) {
         static const strata::core::ModelGeometry draft_geometry{};
         // with a layer split across GPUs the drafter reads the last stage's residual: it lives on that device
         const strata::core::OnDevice on_mtp(last_st ? last_st->dev : -1);
+        mem_mark("everything before the drafter");
         if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, o.spec, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
     }
     // Create the additional contexts after MTP has secured CUDA0 memory, but
@@ -3142,6 +3207,7 @@ int main(int argc, char** argv) {
             if (!auto_cache || attempt - failed >= 6) break;
             cudaMemset(xcache.device_slot(0), 0, (size_t) xcache.bytes());
             cudaDeviceSynchronize();
+            mem_mark("writing the expert cache's slots");
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
             const int64_t want = (int64_t) o.vram_reserve_mib << 20;
@@ -6765,6 +6831,7 @@ int main(int argc, char** argv) {
                              100.0 * (double) req_hits / (double) req_look,
                              (long long) req_hits, (long long) req_look);
             }
+            mem_mark("a request");
             // the resident RAM mode, cumulative: experts read from experts.bin since the copy was made (what the plain
             // mmap mode reads through the OS file cache, from the SSD when the RAM could not keep it)
             if (src.complement_ready())
