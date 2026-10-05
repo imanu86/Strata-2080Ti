@@ -1110,6 +1110,9 @@ if(STRATA_NATIVE_EXPERTS)
   if(STRATA_PARITY_POOL_QUANT)
     add_executable(cpu_format_bench src/kernels/cpu/cpu_format_bench.cpp)
     target_link_libraries(cpu_format_bench PRIVATE strata_kernels_cpu)
+    # lab: every iq256 kernel output on fixed inputs to a file, for byte-for-byte A/B of two builds
+    add_executable(iq256_dump src/kernels/cpu/iq256_dump.cpp)
+    target_link_libraries(iq256_dump PRIVATE strata_kernels_cpu)
   endif()
   # the router lookahead's dot on each rung this CPU has (AVX2, the older CPUs' AVX1) against a double reference
   add_executable(router_dot_parity src/kernels/cpu/router_dot_parity.cpp)

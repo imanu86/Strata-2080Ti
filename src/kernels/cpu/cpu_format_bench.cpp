@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
     cases.reserve(16);   // `base` below references cases[2] while more cases are appended
     std::string err;
     // the model's own formats, real rows
-    for (int layer : {0, 1, 35}) {
+    for (int layer : {0, 1, 35, 20, 21}) {   // 20: IQ3_S gate/up, 21: IQ2_S (after 35: cases[2] stays layer 35)
         const auto *g = tensor(layer, "gate"), *u = tensor(layer, "up"), *d = tensor(layer, "down");
         if (!g || !u || !d) { std::fprintf(stderr, "layer %d missing\n", layer); return 2; }
         Case cs;
@@ -262,9 +262,10 @@ int main(int argc, char** argv) {
         // gate/up and down of the real layers recombined (speed does not depend on which layer a row came from), and
         // a Q2_0 gate/up made of layer 1's real Q2_0 down blocks: 640 rows x 2560 = 2560 rows x 640, the same bytes
         const int reps = argc > 3 ? std::atoi(argv[3]) : 300;
-        const Case &l0 = cases[0], &l1 = cases[1], &l35 = cases[2];
+        const Case &l0 = cases[0], &l1 = cases[1], &l35 = cases[2], &l20 = cases[3], &l21 = cases[4];
         struct Mix { const char* name; const Case* gu; const Case* down; bool q2_gu; };
         const Mix mixes[] = {
+            {"IQ3_S (L20)", &l20, &l20, false},            {"IQ2_S (L21)", &l21, &l21, false},
             {"IQ3_XXS + IQ4_NL (L35)", &l35, &l35, false}, {"IQ3_XXS + Q2_0", &l35, &l1, false},
             {"IQ2_XS + IQ4_NL (L0)", &l0, &l0, false},     {"IQ2_XXS + IQ4_NL", &l1, &l35, false},
             {"IQ2_XXS + Q2_0 (L1)", &l1, &l1, false},      {"Q2_0 + IQ4_NL", &l1, &l35, true},
