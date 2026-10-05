@@ -5074,6 +5074,12 @@ int main(int argc, char** argv) {
             res_upload();
         };
         // the VRAM tier follows the conversation (the same rule as the speculative loop below)
+        static const bool core_adapt = [] {
+            const char* v = std::getenv("STRATA_ELASTIC_CORE_ADAPT");
+            const bool on = v != nullptr && v[0] == '1';
+            if (on) std::fprintf(stderr, "strata serve: STRATA_ELASTIC_CORE_ADAPT: the core's experts are swappable\n");
+            return on;
+        }();
         auto adapt = [&]() -> bool {
             if (!pending.empty()) return true;   // the previous swaps are still in flight
             struct Swap { float gain; int32_t layer, in, out; };
@@ -5086,7 +5092,9 @@ int main(int argc, char** argv) {
                 const int32_t* r = host_res.data() + l * g.n_expert;
                 for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {
                     if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e))) cand.emplace_back(u[e], e); }
-                    else if (r[e] >= el_core) vict.emplace_back(u[e], e);   // fork: the core never leaves
+                    // fork: the core never leaves - unless STRATA_ELASTIC_CORE_ADAPT=1, where the core keeps its
+                    // size (never shrunk, never lent) but its experts are swap victims like the tail's
+                    else if (r[e] >= el_core || core_adapt) vict.emplace_back(u[e], e);
                 }
                 if (cand.empty() || vict.empty()) continue;
                 std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
