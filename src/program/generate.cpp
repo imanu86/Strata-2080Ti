@@ -277,6 +277,47 @@ static const char* pipe_dbg_env(const char* name) {
 // fork lab P3, STRATA_PIPELINE_ELASTIC=1 (opt-in): the elastic cache of CUDA0's stage stays on beside --pipeline-windows
 // across GPUs.  The decode loop decides at each verdict and resizes only at a quiet point (no window in flight on either
 // stage); without it the cache is fixed under the pipeline, as before.
+// lab bench (deterministic work), STRATA_FORCE_IDS=<file>[;<file>...] (opt-in): the k-th generation request of the
+// process (GEN/GENI, counted from 0) generates exactly the token ids of the k-th file - int32 little-endian, or a text
+// list (decimal ids separated by spaces, commas, newlines, brackets) - whatever the target picks.  Requests past the
+// last file are not forced.  STRATA_FORCE_TRACE=<file>: one line per verified window appended ("W <request> <pos>
+// <rows> <accepted> <row tokens...>") to compare two runs.
+static const std::vector<std::vector<int32_t>>& force_id_lists() {
+    static const std::vector<std::vector<int32_t>> lists = [] {
+        std::vector<std::vector<int32_t>> out;
+        const char* v = std::getenv("STRATA_FORCE_IDS");
+        if (v == nullptr || v[0] == 0) return out;
+        std::string all(v);
+        size_t at = 0;
+        while (at <= all.size()) {
+            const size_t semi = all.find(';', at);
+            const std::string path = all.substr(at, semi == std::string::npos ? std::string::npos : semi - at);
+            at = semi == std::string::npos ? all.size() + 1 : semi + 1;
+            if (path.empty()) continue;
+            std::ifstream f(path, std::ios::binary);
+            const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            std::vector<int32_t> ids;
+            const bool text = !bytes.empty() && bytes.find_first_not_of("0123456789 ,;\r\n\t[]") == std::string::npos;
+            if (text) {
+                long long cur = -1;
+                for (const char c : bytes) {
+                    if (c >= '0' && c <= '9') cur = (cur < 0 ? 0 : cur * 10) + (c - '0');
+                    else if (cur >= 0) { ids.push_back((int32_t) cur); cur = -1; }
+                }
+                if (cur >= 0) ids.push_back((int32_t) cur);
+            } else {
+                ids.resize(bytes.size() / 4);
+                if (!ids.empty()) std::memcpy(ids.data(), bytes.data(), ids.size() * 4);
+            }
+            std::fprintf(stderr, "strata force: list %zu: %s, %zu ids (%s)\n", out.size(), path.c_str(), ids.size(),
+                         text ? "text" : "int32");
+            out.push_back(std::move(ids));
+        }
+        return out;
+    }();
+    return lists;
+}
+
 static bool pipe_elastic_env() {
     static const bool on = [] { const char* v = std::getenv("STRATA_PIPELINE_ELASTIC"); return v != nullptr && v[0] == '1'; }();
     return on;
@@ -8915,7 +8956,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             char* endp = nullptr;
-            const long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);
+            long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);   // (STRATA_FORCE_IDS may lower it)
             // optional sampling keys between max_new and the ids: temperature=F, top_p=F, top_k=N, min_p=F,
             // penalty_last_n=N, penalty_repeat=F, penalty_freq=F, penalty_present=F, seed=N (text requests
             // only).  Absent keys keep today's behavior: greedy, no penalties.
@@ -10117,6 +10158,44 @@ int main(int argc, char** argv) {
                 std::string extra;
                 if (in >> extra) { std::printf("ERR neuron probe: trailing control data\n"); return 1; }
             }
+            // lab bench: STRATA_FORCE_IDS - this request's forced ids (see force_id_lists), its windows' rows and acceptance
+            static int64_t force_req = 0;
+            const int64_t force_k = force_req++;
+            const std::vector<int32_t>* forced = nullptr;
+            if (force_k < (int64_t) force_id_lists().size() && !force_id_lists()[(size_t) force_k].empty()) {
+                forced = &force_id_lists()[(size_t) force_k];
+                if ((long long) forced->size() < max_new) max_new = (long long) forced->size();
+                std::fprintf(stderr, "strata force: request %lld generates the %zu ids of list %lld (max_new %lld)\n",
+                             (long long) force_k, forced->size(), (long long) force_k, max_new);
+            }
+            std::vector<int64_t> force_rows(16, 0);   // windows by rows
+            int64_t force_windows = 0, force_acc = 0, force_off = 0, force_over = 0;
+            static std::FILE* force_trace = [] {
+                const char* v = std::getenv("STRATA_FORCE_TRACE");
+                return v != nullptr && v[0] != 0 ? std::fopen(v, "a") : nullptr;
+            }();
+            // the target's picks for the rows of a window starting at generated index `at` replaced by the forced ids
+            // (`over`: how many differed); then a verified window's rows and acceptance counted and traced
+            auto force_rows_out = [&](int32_t* out, int T, int64_t at) {
+                if (forced == nullptr) return;
+                for (int i = 0; i < T; ++i) {
+                    const int64_t k = at + i;
+                    if (k >= (int64_t) forced->size()) break;
+                    if (out[i] != (*forced)[(size_t) k]) ++force_over;
+                    out[i] = (*forced)[(size_t) k];
+                }
+            };
+            auto force_note = [&](int64_t pos, int T, int acc, const int32_t* rows) {
+                force_rows[(size_t) std::min<int>(T, 15)] += 1;
+                ++force_windows;
+                force_acc += acc;
+                force_off += T - 1;
+                if (force_trace != nullptr) {
+                    std::fprintf(force_trace, "W %lld %lld %d %d", (long long) force_k, (long long) pos, T, acc);
+                    for (int i = 0; i < T; ++i) std::fprintf(force_trace, " %d", (int) rows[i]);
+                    std::fputc('\n', force_trace);
+                }
+            };
             // the verify windows: the first holds the last prompt token alone
             int64_t p = n - 1;
             int32_t x = (int32_t) ids[(size_t) (n - 1)];
@@ -10655,6 +10734,7 @@ int main(int argc, char** argv) {
                         if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);
                         if (v.done(err)) {
                             if (!v.pl_finish(outp.data(), err)) return die(err);
+                            force_rows_out(outp.data(), A.T, produced_n);   // lab bench: STRATA_FORCE_IDS
                             A.s1_done = true;
                             tre("F1", A.seq, A.T);
                         } else if (!err.empty()) return die(err);
@@ -10821,6 +10901,7 @@ int main(int argc, char** argv) {
                     chain_kind = 0;
                     int a = 0;
                     while (a < A.T - 1 && A.tok[a + 1] == outp[(size_t) a]) ++a;
+                    force_note(A.p, A.T, a, A.tok);
                     if (!V1(A).pl_commit_async(a + 1, err)) return die(err);
                     for (int i = 0; i <= a; ++i) consumed.push_back(A.tok[i]);
                     draft_offered += A.T - 1;
@@ -11174,7 +11255,9 @@ int main(int argc, char** argv) {
                 }
                 if (!neuron_forced.empty() && produced_n < (int64_t) neuron_forced.size())
                     outv[0] = neuron_forced[(size_t) produced_n];
+                force_rows_out(outv.data(), T, produced_n);   // lab bench: STRATA_FORCE_IDS
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
+                force_note(p, T, a, window.data());
                 if (from_sfx) { ++sfx_windows; sfx_drafts += T - 1; sfx_ok += a; }
                 if (chain_n > 0) { ++chain_windows; chain_drafts += chain_n; chain_ok += std::max(0, a - (T_mtp - 1)); }
                 if (strata::core::MtpDrafter::top2_env() && !from_sfx && !first_window && a < T_mtp - 1 && a < 8) {
@@ -11267,6 +11350,20 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            {   // lab bench: the verified windows' work, to compare two runs (forced or not)
+                std::string h;
+                char hb[32];
+                for (int r = 1; r < 16; ++r)
+                    if (force_rows[(size_t) r] > 0) {
+                        std::snprintf(hb, sizeof hb, " %d:%lld", r, (long long) force_rows[(size_t) r]);
+                        h += hb;
+                    }
+                std::fprintf(stderr, "strata work: request %lld%s, %lld windows, rows/window%s, accepted %lld of %lld drafts, "
+                                     "%lld tokens; target picks replaced %lld\n", (long long) force_k,
+                             forced != nullptr ? " (forced)" : "", (long long) force_windows, h.c_str(),
+                             (long long) force_acc, (long long) force_off, (long long) produced_n, (long long) force_over);
+                if (force_trace != nullptr) std::fflush(force_trace);
+            }
             if(closed_env) std::fprintf(stderr,"CLOSED_DONE mode=%d windows=%lld pool_calls=%lld refreshes=%lld refill_ms=%.3f h2d_bytes=%lld\n",
                 closed_mode,(long long)(ver.closed_windows-closed_windows0),(long long)(ver.closed_pool_calls-closed_pool0),
                 (long long)(closed_refreshes-closed_refresh0),closed_refill_ms-closed_ms0,(long long)(closed_refill_bytes-closed_bytes0));
