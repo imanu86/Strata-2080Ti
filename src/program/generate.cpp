@@ -5837,6 +5837,9 @@ int main(int argc, char** argv) {
             return (int64_t) ((need + (uint64_t) blob - 1) / (uint64_t) blob);
         };
         auto part_slots = [&](const PfPart& p, int64_t c) -> int64_t {
+            // counted on the part's own device: bytes_needed follows `init`, whose sm_75 images and prompt_f16 mode are
+            // the stage device's (a 2080 Ti after an sm_86 CUDA0 was priced without its sm_75 buffers and overran)
+            const strata::core::OnDevice on(p.dev);
             return cache_slots_for(*p.cache, strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr));
         };
         auto part_bytes = [&](const PfPart& p, int32_t first) -> uint64_t {
