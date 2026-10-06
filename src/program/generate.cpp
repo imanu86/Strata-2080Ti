@@ -5386,6 +5386,10 @@ int main(int argc, char** argv) {
         while (c > 0 && off[S] - off[c - 1] <= tail) --c;   // the smallest core whose tail fits in `tail`
         el_core = tail == 0 ? 0 : c;
     }
+    // lab P3 (STRATA_PIPELINE_ELASTIC): the prompt path may borrow the core too - nothing decodes while a prompt is read,
+    // and the lent slots are refilled before the decode as the tail's are.  The small tail is the decode's elastic zone
+    // only (with it the 131k prompt read fell from ~85 s to 134 s: a 1.5 GiB tail is a small loan)
+    const int64_t el_lend_floor = pipe_elastic_env() ? 0 : el_core;
     // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
     // or with --prefill auto the largest chunk whose buffers take at most kAutoLendPct % of the slots (a
     // lent slot's expert is streamed during the prompt and refilled after it; measured on a 12 GB card, 32K Q2_0
@@ -5422,7 +5426,7 @@ int main(int argc, char** argv) {
     };
     auto plan_lend = [&](int64_t& chunk) -> int64_t {
         auto slots_for = lend_slots;
-        const int64_t tail_slots = xcache.slots() - el_core;   // fork: only the tail is lent (all of it without a core)
+        const int64_t tail_slots = xcache.slots() - el_lend_floor;   // fork: only the tail is lent (all of it without a core)
         // 0.1.39's list with its ring (also the size up to which a prompt keeps that ring under #583)
         auto old_rule = [&]() -> int64_t {
             strata::prefill::Prefill::set_ring_budget(0, 0);
@@ -5915,7 +5919,7 @@ int main(int argc, char** argv) {
             // (no split) this reduces to plan_lend exactly, so the single-GPU loan is unchanged from main.
             auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
                 const int64_t k = part_slots(p, c);
-                if (p.cache == &xcache && k > xcache.slots() - el_core) return false;
+                if (p.cache == &xcache && k > xcache.slots() - el_lend_floor) return false;
                 if (k <= 0 || k + 128 > p.cache->slots()) return false;
                 return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
             };
@@ -5951,7 +5955,7 @@ int main(int argc, char** argv) {
                     int64_t budget = std::max<int64_t>(0, std::min(p.cache->slots() - 128,
                                                                   kAutoLendPct * p.cache->slots() / 100));
                     // fork: the two-zone cache lends only its tail (fits_one refuses the core as well)
-                    if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_core));
+                    if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_lend_floor));
                     const uint64_t avail = part_bytes(p, (int32_t) (p.cache->slots() - budget));
                     const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
                     room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
@@ -10244,6 +10248,7 @@ int main(int argc, char** argv) {
                 bool b_done = false;     // B has been made from the chain in flight
                 int chain_n = 0;
                 int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
+                double pl_chain_t0 = 0.0, pl_chain_ms[2] = {0, 0}, pl_chain_n[2] = {0, 0};   // lab P3: chain -> B latency
                 // lab P3 (STRATA_PIPELINE_ELASTIC): the elastic tail beside the windows, as an epoch handoff at the gaps
                 // of stage 0 (see el_gap): its events, the time they took on this thread, and the verdict intervals of
                 // the two windows after each against the run's
@@ -10737,6 +10742,10 @@ int main(int argc, char** argv) {
                                     if (!V0(B).prestage(B.T, B.tok, B.p, prev, err)) return die(err);
                                 }
                                 b_done = true;
+                                if (chain_kind == 1 || chain_kind == 2) {   // lab P3: the chain's latency to B
+                                    pl_chain_ms[chain_kind - 1] += ms_now() - pl_chain_t0;
+                                    pl_chain_n[chain_kind - 1] += 1;
+                                }
                                 tre("CD", A.seq, chain_kind, (int) (1000.0f * B.p_on));
                                 if (pl_log)
                                     std::fprintf(stderr, "strata pipeline: chain %d for p=%lld T=%d: B T=%d p_on %.3f (%d "
@@ -10808,6 +10817,42 @@ int main(int argc, char** argv) {
                     ++rounds;
                     ++dec_windows;
                     dec_T += A.T;
+                    // upstream #910 (Hardin22 730d6c89), STRATA_PL_EARLY_CHAIN=1 (opt-in): the chain first.  The request's
+                    // end is decided as below, without printing; the printing, the suffix drafter, the calibration, the
+                    // policy and the tiers follow the launch (the chain needs none of them; its stream is non-blocking)
+                    static const bool pl_early_chain = [] {
+                        const char* v = std::getenv("STRATA_PL_EARLY_CHAIN");
+                        return v != nullptr && std::atoi(v) != 0;
+                    }();
+                    const bool on_v = B.launched && a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
+                    bool e_last = false, e_stop = false, e_launched = false;
+                    if (pl_early_chain) {
+                        bool e_eos = false;
+                        int n_emit = 0;
+                        for (int i = 0; i <= a && produced_n + n_emit < max_new && !e_eos; ++i) {
+                            ++n_emit;
+                            e_eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outp[(size_t) i]) != o.eos_ids.end();
+                        }
+                        e_stop = stop_req.load();
+                        e_last = e_eos || produced_n + n_emit >= max_new || e_stop;
+                        if (!e_last) {
+                            mtp.set_source_R(V1(A).final_R(0));
+                            if (on_v) {   // the chain over A, forced through B's drafts (as below)
+                                chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
+                                if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
+                                    return die(err);
+                                tre("CL", A.seq, 1);
+                                pl_chain_t0 = ms_now();
+                            } else {      // fresh (as below)
+                                chain_n = strata::kernels::kVerifyMaxT - 1;
+                                if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
+                                    return die(err);
+                                tre("CL", A.seq, 2);
+                                pl_chain_t0 = ms_now();
+                            }
+                            e_launched = true;
+                        }
+                    }
                     bool eos = false;
                     for (int i = 0; i <= a && produced_n < max_new && !eos; ++i) {
                         std::printf("T %d\n", (int) outp[(size_t) i]);
@@ -10818,9 +10863,11 @@ int main(int argc, char** argv) {
                     }
                     std::fflush(stdout);
                     if (eos) finish = "stop";
-                    else if (stop_req.load()) finish = "cancel";
-                    const bool last = eos || produced_n >= max_new || stop_req.load();
-                    const bool on = B.launched && a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
+                    else if (pl_early_chain ? e_stop : stop_req.load()) finish = "cancel";
+                    // (early chain: decided before the printing - a stop request arriving in between ends the request at
+                    // the next verdict)
+                    const bool last = pl_early_chain ? e_last : (eos || produced_n >= max_new || stop_req.load());
+                    const bool on = on_v;
                     if (B.made) {   // the gate's calibration: would B have been on the path, by its estimate p_on
                         const bool would = a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
                         const int bin = std::min(9, std::max(0, (int) (B.p_on * 10.0f)));
@@ -10851,13 +10898,16 @@ int main(int argc, char** argv) {
                     if (!last && !ajob && !pl_adapt()) return die("an adaptive refill failed");
                     if (on && !last) {
                         ++pl_on;
-                        // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
-                        mtp.set_source_R(V1(A).final_R(0));
-                        chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
-                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
-                            return die(err);
+                        if (!e_launched) {
+                            // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
+                            mtp.set_source_R(V1(A).final_R(0));
+                            chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
+                            if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
+                                return die(err);
+                            tre("CL", A.seq, 1);
+                            pl_chain_t0 = ms_now();
+                        }
                         chain_kind = 1;
-                        tre("CL", A.seq, 1);
                         early_used = false;
                         b_done = false;
                         A = B;
@@ -10876,12 +10926,15 @@ int main(int argc, char** argv) {
                         // would finish it, and the other would wait for it forever)
                         B = PW{};
                         if (!last) {
-                            mtp.set_source_R(V1(A).final_R(0));
-                            chain_n = strata::kernels::kVerifyMaxT - 1;
-                            if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
-                                return die(err);
+                            if (!e_launched) {
+                                mtp.set_source_R(V1(A).final_R(0));
+                                chain_n = strata::kernels::kVerifyMaxT - 1;
+                                if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
+                                    return die(err);
+                                tre("CL", A.seq, 2);
+                                pl_chain_t0 = ms_now();
+                            }
                             chain_kind = 2;
-                            tre("CL", A.seq, 2);
                             early_used = false;
                             b_done = false;
                             PW nA;
@@ -10944,6 +10997,9 @@ int main(int argc, char** argv) {
                                          "the path, %lld rolled back, %lld below the gate (theta %.2f)\n",
                                  (long long) dec_windows, pl_ms, avg(pl_ms, (double) dec_windows), (long long) pl_spec,
                                  (long long) pl_on, (long long) pl_undo, (long long) pl_gate, theta);
+                    std::fprintf(stderr, "strata pipeline: the chain from its launch to B: forced %.2f ms (%.0f), fresh %.2f ms "
+                                         "(%.0f)\n", avg(pl_chain_ms[0], pl_chain_n[0]), pl_chain_n[0],
+                                 avg(pl_chain_ms[1], pl_chain_n[1]), pl_chain_n[1]);
                     std::fprintf(stderr, "strata pipeline: %lld B from a running lookup (%lld after a chain window); yield %s\n",
                                  (long long) pl_lk_next, (long long) pl_lk_any, pl_yield ? "on" : "off");
                     if (el_on)
