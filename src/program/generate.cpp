@@ -10717,6 +10717,11 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata decode prefetch: per layer-window %.2f copied one layer ahead, %.2f used (%.0f%%)\n",
                                  (d1.pf_issued - ds0.pf_issued) / (w * L), (d1.pf_used - ds0.pf_used) / (w * L),
                                  100.0 * (double) (d1.pf_used - ds0.pf_used) / (double) (d1.pf_issued - ds0.pf_issued));
+                {   // fork: the window graphs' launch on the host (WDDM submission), per stage
+                    std::fprintf(stderr, "strata decode launch: window graph launch %.2f ms/window on stage 0", ver.ms_launch / w);
+                    for (int k = 1; k < n_stages; ++k) std::fprintf(stderr, ", %.2f on stage %d", stage_ver(k).ms_launch / w, k);
+                    std::fprintf(stderr, " (cumulative since start)\n");
+                }
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();
                     if (pr.empty()) continue;

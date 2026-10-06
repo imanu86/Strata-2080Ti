@@ -270,6 +270,7 @@ public:
     bool pcie_balance_on() const { return bal_ != nullptr && m_bal_ != nullptr; }
 
     double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;
+    double ms_launch = 0;   ///< fork: host time inside the window graph's cudaGraphLaunch (WDDM submission)
     /// STRATA_DECODE_TIMING: the PLE gather subset of ms_host, including submit/wait/dequantization.
     double ms_ple_gather = 0;
     int64_t windows = 0;
