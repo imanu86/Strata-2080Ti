@@ -6080,7 +6080,11 @@ int main(int argc, char** argv) {
         // the prompt path's own buffers (no loan) are not priced into them: with the whole arena pinned (#253) a
         // `--prefill auto` split could stop at start with "device buffers for a chunk of 2048 tokens do not fit".  A
         // chunk that does not fit is tried again one size smaller, down to 512 tokens (a smaller chunk only reads slower).
-        const int64_t sp_chunk_max = (o.elastic && xcache.elastic() && o.prefill_auto && borrow != nullptr) ? o.prefill_auto_max : 0;
+        // fork: the largest chunk the elastic cache may later lend CUDA0's prompt path.  Under a layer split the later
+        // stages' prompt paths are laid out for the start's chunk only, so the chunk may shrink but never grow past it
+        // (a growth to more than the start's 6656 failed a later stage's relayout: "a chunk of at most 6656")
+        const int64_t sp_chunk_max = (o.elastic && xcache.elastic() && o.prefill_auto && borrow != nullptr && !multi_gpu)
+                                         ? o.prefill_auto_max : 0;
         auto init_prompt_paths = [&]() -> int {   // 0: ready; 1: failed (err set); 2: failed with "do not fit"
             for (size_t i = 0; i < stages.size(); ++i) {
                 GpuStage& st = *stages[i];
