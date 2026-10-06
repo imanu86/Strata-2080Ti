@@ -2411,8 +2411,11 @@ bool Verifier::window_logprobs(const int32_t* targets, int T, int64_t pos0, int3
     return true;
 }
 
-namespace { bool g_commit_async = false; }
-void Verifier::set_commit_async(bool on) { g_commit_async = on && std::getenv("STRATA_COMMIT_SYNC") == nullptr; }
+namespace { bool g_commit_async = false; bool g_commit_async_split = false; }
+void Verifier::set_commit_async(bool on, bool split) {
+    g_commit_async = on && std::getenv("STRATA_COMMIT_SYNC") == nullptr;
+    g_commit_async_split = g_commit_async && split;   // fork lab: the earlier stages of a split too
+}
 
 bool Verifier::commit(int n_keep, std::string& err) {
     const OnDevice on_device(device_);
@@ -2430,7 +2433,7 @@ bool Verifier::commit(int n_keep, std::string& err) {
         // set_commit_async: no wait here - the next window runs on the same stream after it, and the drafter (its own
         // stream) reads only this window's final rows and its own K/V. h_commit_ is next written after the next window's
         // results are read, i.e. after this graph has run.  Everything else waits on commit_done_ (wait_commit).
-        if (!g_commit_async || next_ != nullptr) {
+        if (!g_commit_async || (next_ != nullptr && !g_commit_async_split)) {
             const cudaError_t se = cudaStreamSynchronize(cs_);
             if (se != cudaSuccess) { err = std::string("verify: commit: ") + cudaGetErrorString(se); return false; }
         } else {

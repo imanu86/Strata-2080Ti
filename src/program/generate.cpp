@@ -773,8 +773,9 @@ void usage() {
                  "  --vision             --serve takes images too (GENI requests; embeddings from strata-vision)\n"
                  "  --prompt-cache N     --serve: keep N conversation checkpoints between requests (default 6, ~118 MB\n"
                  "                       of RAM each; 0 = read every prompt from the start)\n"
-                 "  --prompt-cache-file PATH  persist one text system-prefix across restarts (default off; single GPU,\n"
-                 "                       up to 32768 tokens/512 MiB; replaces its prior prefix when instructions change)\n"
+                 "  --prompt-cache-file PATH  persist one text system-prefix across restarts (default off; one GPU or a\n"
+                 "                       --layer-split, up to 262144 tokens/8 GiB; replaces its prior prefix when\n"
+                 "                       instructions change)\n"
                  "  --conversation-cache-mib N  --serve: RAM budget for parked conversations (default 0 = off)\n"
                  "  --conversation-cache-slots N  --serve: at most N parked conversations (default 4)\n"
                  "  --conversation-cache-min-free-mib N  --serve: physical RAM floor when parking or restoring a\n"
@@ -2034,11 +2035,14 @@ int main(int argc, char** argv) {
     if (o.serve && o.conversation_cache_mib > 0 && (o.prompt_cache == 0 || o.conversation_cache_slots == 0))
         std::fprintf(stderr, "strata serve: warning: conversation caching is disabled by %s\n",
                      o.prompt_cache == 0 ? "--prompt-cache 0" : "--conversation-cache-slots 0");
-    // parking with --layer-split saves every stage (SavedConversation::stage_images)
+    // parking with --layer-split saves every stage (SavedConversation::stage_images); so does the prefix file (format
+    // v2: one image per stage, each validated and restored against its own stage).  A peer device and the remote
+    // expert caches stay rejected, as before.
     if (!o.prompt_cache_file.empty() && (!o.serve || o.prompt_cache <= 0 || o.prompt_cache_root <= 0 ||
-            o.turn_token < 0 || !o.layer_split.empty() || o.peer_device >= 1 ||
+            o.turn_token < 0 || o.peer_device >= 1 ||
             std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int slots) { return slots > 0; }))) {
-        std::fprintf(stderr, "strata: --prompt-cache-file requires --serve, enabled root checkpoints and one GPU\n");
+        std::fprintf(stderr, "strata: --prompt-cache-file requires --serve, enabled root checkpoints, no peer device "
+                             "and no remote expert caches\n");
         return 2;
     }
     // Layer split (multi-GPU): the later stages run layers [K_i, K_i+1) on their own GPUs (--split-device, default
@@ -3080,7 +3084,13 @@ int main(int argc, char** argv) {
             }
         }
     }
-    strata::core::Verifier::set_commit_async(!multi_gpu);   // see Verifier::set_commit_async
+    // see Verifier::set_commit_async; fork lab STRATA_SPLIT_COMMIT_ASYNC=1: also under a layer split (each stage's commit
+    // graph on its own stream with its own event, the draft overlapping them; wait_commit waits for every stage)
+    static const bool split_commit_async = [] {
+        const char* v = std::getenv("STRATA_SPLIT_COMMIT_ASYNC");
+        return v != nullptr && v[0] == '1';
+    }();
+    strata::core::Verifier::set_commit_async(!multi_gpu || split_commit_async, multi_gpu && split_commit_async);
     // --pipeline-windows (opt-in): one conversation's windows with the two stages of a layer split overlapped.  Decided
     // here, before any stage sizes its expert cache (the second verifier per stage and the snapshots are allocated
     // after the caches, so their room is kept out of them).  What it does not support turns it off, said once.
@@ -6602,6 +6612,28 @@ int main(int argc, char** argv) {
 #else
                 settings.emplace_back(device_properties.uuid.bytes, sizeof(device_properties.uuid.bytes));
 #endif
+                // A layer split: every later stage's own card and layer carve too (each stage image is that card's
+                // running state and K/V).  Nothing is added without a split, so one GPU's identity is unchanged.
+                for (size_t k = 0; k < stages.size(); ++k) {
+                    const GpuStage& stage_k = *stages[k];
+                    cudaDeviceProp stage_properties{};
+                    if (cudaGetDeviceProperties(&stage_properties, stage_k.dev) != cudaSuccess) {
+                        cudaGetLastError(); prefix_disk_enabled = false; err = "stage device identity unavailable";
+                        break;
+                    }
+                    settings.push_back("stage " + std::to_string(k + 1) + ":" + std::to_string(stage_k.dev) + ":" +
+                                       std::to_string(stage_k.lb) + ":" + std::to_string(stage_k.le));
+                    settings.emplace_back(stage_properties.name);
+                    settings.push_back(std::to_string(stage_properties.major) + ":" +
+                                       std::to_string(stage_properties.minor));
+#if defined(STRATA_USE_HIP)
+                    settings.emplace_back(stage_properties.gcnArchName);
+                    settings.push_back(std::to_string(stage_properties.pciDomainID) + ":" +
+                        std::to_string(stage_properties.pciBusID) + ":" + std::to_string(stage_properties.pciDeviceID));
+#else
+                    settings.emplace_back(stage_properties.uuid.bytes, sizeof(stage_properties.uuid.bytes));
+#endif
+                }
             }
             // Conservative compatibility: all engine options except the cache destination,
             // and all STRATA_/CUDA_ environment overrides. Exact request tokens are checked separately.
@@ -8965,9 +8997,26 @@ int main(int argc, char** argv) {
                             strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), bytes + held + 1024 * 1024, floor)) {
                         std::vector<int32_t> prefix(ids.begin(), ids.begin() + disk_root);
                         strata::core::SavedConversation image;
+                        // One GPU: the whole-session form, as before.  A layer split: the same checks as a parked
+                        // image - each later stage's image against its own session (the draft K/V with the last
+                        // stage's), then the first stage's without the draft - all before any GPU write.
+                        auto disk_image_valid = [&](const strata::core::SavedConversation& im) -> bool {
+                            if (stages.empty()) return strata::core::conversation_snapshot_validate(im, ss, g, mtp.kv_state(), err);
+                            if (im.stage_images.size() != stages.size()) { err = "stage count differs"; return false; }
+                            for (size_t i = 0; i < stages.size(); ++i) {
+                                const strata::core::OnDevice on(stages[i]->dev);
+                                if (!strata::core::conversation_snapshot_validate(im.stage_images[i], stages[i]->ss, g,
+                                        use_mtp && i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err)) {
+                                    err = "stage CUDA" + std::to_string(stages[i]->dev) + ": " + err;
+                                    return false;
+                                }
+                            }
+                            return strata::core::conversation_snapshot_validate(im, ss, g,
+                                       static_cast<const strata::core::QsaState*>(nullptr), err);
+                        };
                         if (strata::core::prefix_cache_read(o.prompt_cache_file, prefix_identity, prefix,
                                 int32_t(ids[size_t(disk_root)]), want_cvec, image, err) &&
-                                strata::core::conversation_snapshot_validate(image, ss, g, mtp.kv_state(), err)) {
+                                disk_image_valid(image)) {
                             incoming.emplace(std::move(image)); incoming_tokens = disk_root;
                             incoming_live = true; incoming_disk = true;
                             slot_source = -1;   // 0.1.39 batch slots: the disk root is the longer match
@@ -9068,6 +9117,9 @@ int main(int argc, char** argv) {
                     live = incoming->live.ids;
                     live_imgs.clear(); checks.clear();
                     incoming->live.used = ++check_clock;
+                    // a layer split: the root checkpoint carries each later stage's running state in its stage
+                    // parts, as checkpoint_at saves one (the stage images hold the same ids; restored above)
+                    for (auto& si : incoming->stage_images) incoming->live.stage_parts.push_back(std::move(si.live));
                     checks.push_back(std::move(incoming->live)); // keep the restored root pinned in RAM
                 } else {
                     live = std::move(incoming->live.ids);
@@ -9728,11 +9780,41 @@ int main(int argc, char** argv) {
                         const strata::core::ConversationView view{prefix, no_images, no_checkpoints, want_cvec};
                         size_t estimate = 0;
                         const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
-                        if (strata::core::conversation_snapshot_bytes(view, ss, g, mtp.kv_state(), estimate, err) &&
+                        // A layer split saves one image per stage, as parking does: the first stage's without the
+                        // draft, each later stage's on its own device, the draft K/V with the last one; the size is
+                        // the sum of the stages'.  Every stage is at `to` here (checkpoint_at just read them all).
+                        const size_t n_st = stages.size();
+                        const strata::core::QsaState* const no_draft = nullptr;
+                        auto disk_draft_of = [&](size_t k) -> const strata::core::QsaState* {
+                            return use_mtp && k + 1 == n_st ? &mtp.kv_state() : nullptr;
+                        };
+                        bool sized = n_st == 0
+                            ? strata::core::conversation_snapshot_bytes(view, ss, g, mtp.kv_state(), estimate, err)
+                            : strata::core::conversation_snapshot_bytes(view, ss, g, no_draft, estimate, err);
+                        for (size_t k = 0; sized && k < n_st; ++k) {
+                            const strata::core::OnDevice on(stages[k]->dev);
+                            size_t stage_bytes = 0;
+                            sized = strata::core::conversation_snapshot_bytes(view, stages[k]->ss, g, disk_draft_of(k),
+                                                                              stage_bytes, err) &&
+                                    stage_bytes <= SIZE_MAX - estimate;
+                            if (sized) estimate += stage_bytes;
+                        }
+                        if (sized &&
                                 estimate <= strata::core::prefix_cache_max_bytes &&
                                 strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), estimate, floor)) {
                             strata::core::SavedConversation image;
-                            if (!strata::core::conversation_snapshot_save(image, view, ss, g, mtp.kv_state(), err)) {
+                            bool captured = n_st == 0
+                                ? strata::core::conversation_snapshot_save(image, view, ss, g, mtp.kv_state(), err)
+                                : strata::core::conversation_snapshot_save(image, view, ss, g, no_draft, err);
+                            for (size_t k = 0; captured && k < n_st; ++k) {   // the later stages, in stage order
+                                const strata::core::OnDevice on(stages[k]->dev);
+                                strata::core::SavedConversation part;
+                                captured = strata::core::conversation_snapshot_save(part, view, stages[k]->ss, g,
+                                                                                    disk_draft_of(k), err);
+                                if (!captured) err = "stage CUDA" + std::to_string(stages[k]->dev) + ": " + err;
+                                else image.stage_images.push_back(std::move(part));
+                            }
+                            if (!captured) {
                                 // A CUDA copy/synchronization error can poison the live session.
                                 std::printf("ERR capturing prefix disk cache: %s\n", err.c_str()); return 1;
                             }
@@ -9881,6 +9963,14 @@ int main(int argc, char** argv) {
                                drive.d.pcie_experts, drive.d.pf_issued, drive.d.pf_used};
             };
             const DecSnap ds0 = dec_snap();
+            // fork: the later stages' own host waits too ("decode timing" reads the first stage's verifier only)
+            struct StSnap { double wait, pool, host, launch; };
+            auto st_snap = [&](int k) {
+                strata::core::Verifier& v = stage_ver(k);
+                return StSnap{v.ms_wait, v.ms_pool, v.ms_host, v.ms_launch};
+            };
+            std::vector<StSnap> st0;
+            for (int k = 0; k < n_stages; ++k) st0.push_back(st_snap(k));
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             int64_t dec_windows = 0, dec_T = 0;
             const int64_t decode_hits0 = drive.d.cache_hits;
@@ -10717,10 +10807,12 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata decode prefetch: per layer-window %.2f copied one layer ahead, %.2f used (%.0f%%)\n",
                                  (d1.pf_issued - ds0.pf_issued) / (w * L), (d1.pf_used - ds0.pf_used) / (w * L),
                                  100.0 * (double) (d1.pf_used - ds0.pf_used) / (double) (d1.pf_issued - ds0.pf_issued));
-                {   // fork: the window graphs' launch on the host (WDDM submission), per stage
-                    std::fprintf(stderr, "strata decode launch: window graph launch %.2f ms/window on stage 0", ver.ms_launch / w);
-                    for (int k = 1; k < n_stages; ++k) std::fprintf(stderr, ", %.2f on stage %d", stage_ver(k).ms_launch / w, k);
-                    std::fprintf(stderr, " (cumulative since start)\n");
+                for (int k = 0; k < n_stages; ++k) {   // fork: each stage's host side of the window, this request only
+                    const StSnap s1 = st_snap(k);
+                    std::fprintf(stderr, "strata decode stage %d: GPU-reach wait %.2f + per-layer host %.2f + host staging %.2f + "
+                                         "graph launch %.2f ms/window\n", k, (s1.wait - st0[(size_t) k].wait) / w,
+                                 (s1.pool - st0[(size_t) k].pool) / w, (s1.host - st0[(size_t) k].host) / w,
+                                 (s1.launch - st0[(size_t) k].launch) / w);
                 }
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();

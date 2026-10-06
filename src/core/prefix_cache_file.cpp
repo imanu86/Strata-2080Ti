@@ -158,7 +158,13 @@ public:
 };
 
 constexpr char magic[8] = {'S', 'T', 'R', 'A', 'P', 'F', 'X', '1'};
+// v2: the payload ends with a layer split's stage images (a count, then each
+// one in the top-level image's encoding). A v1 file is rejected by version
+// before any payload byte is interpreted: a clean miss, never a misread.
+constexpr uint64_t format_version = 2;
 constexpr size_t header_bytes = 8 + 8 + 8 + 32 + 32;
+// SavedConversation::kv holds at most n_layers + 1 (the draft) layers.
+constexpr uint64_t max_kv_layers = 129;
 void require(bool ok, const char *why) {
   if (!ok)
     throw std::runtime_error(why);
@@ -277,6 +283,97 @@ std::filesystem::path temporary_path(const std::filesystem::path &path) {
              std::chrono::steady_clock::now().time_since_epoch().count());
   return tmp;
 }
+
+// One image (the top-level one, or a stage image) in the shared encoding.
+// `top` (non-null for a stage image) adds the stage-image rules.
+void write_image(Writer &w, const SavedConversation &image, int32_t next_token,
+                 const SavedConversation *top) {
+  require(!image.live.ids.empty() &&
+              image.live.ids.size() <= prefix_cache_max_tokens &&
+              next_token >= 0,
+          "invalid prefix length/frontier");
+  require(image.live.imgs.empty() && image.live.stage_parts.empty() &&
+              image.checkpoints.empty(),
+          "only one text prefix is supported");
+  require(image.kv.size() <= max_kv_layers, "invalid prefix snapshot size");
+  if (top) {
+    require(image.stage_images.empty(), "nested stage image");
+    require(image.geometry == top->geometry && image.cvec == top->cvec &&
+                image.live.ids == top->live.ids,
+            "stage image differs from its prefix");
+  }
+  for (auto n : image.geometry) {
+    require(n >= 0, "negative geometry");
+    w.number(uint64_t(n));
+  }
+  require(image.layer_lo >= 0 && image.layer_hi > image.layer_lo,
+          "invalid layer carve");
+  w.number(uint64_t(image.layer_lo));
+  w.number(uint64_t(image.layer_hi));
+  w.number(image.cvec ? 1 : 0);
+  w.number(uint64_t(next_token));
+  w.number(image.live.ids.size());
+  for (auto id : image.live.ids) {
+    require(id >= 0, "negative token");
+    w.number(uint64_t(id));
+  }
+  for (auto *v : {&image.live.gdn, &image.live.ple, &image.live.tails,
+                  &image.live.dead, &image.live.block_pos})
+    w.blob(*v);
+  w.number(image.kv.size());
+  for (const auto &k : image.kv) {
+    require(k.format >= 0, "invalid KV format");
+    w.number(uint64_t(k.format));
+    for (auto n : {k.cells, k.heads, k.head_dim, k.page_size, k.pooled_rows,
+                   k.idx_dim}) {
+      require(n >= 0, "invalid KV geometry");
+      w.number(uint64_t(n));
+    }
+    for (auto *v : {&k.k, &k.v, &k.k_scale, &k.v_scale, &k.pooled})
+      w.blob(*v);
+  }
+}
+
+// The exact expected prefix is checked before any large field is allocated.
+// `top`: the already-decoded top-level image when this is a stage image.
+void read_image(Reader &r, SavedConversation &image,
+                const std::vector<int32_t> &prefix, int32_t next_token,
+                bool cvec, const SavedConversation *top) {
+  for (auto &n : image.geometry)
+    n = signed_number(r);
+  if (top)
+    require(image.geometry == top->geometry, "stage image geometry differs");
+  image.layer_lo = signed_number(r);
+  image.layer_hi = signed_number(r);
+  require(image.layer_hi > image.layer_lo, "invalid layer carve");
+  const auto cv = r.number();
+  require(cv <= 1 && bool(cv) == cvec, "steering mode changed");
+  image.cvec = bool(cv);
+  require(r.number() == uint64_t(next_token), "prefix frontier changed");
+  require(r.number() == prefix.size(), "prefix length changed");
+  image.live.ids.reserve(prefix.size());
+  for (auto expected : prefix) {
+    require(expected >= 0 && r.number() == uint64_t(expected),
+            "prefix tokens changed");
+    image.live.ids.push_back(expected);
+  }
+  for (auto *v : {&image.live.gdn, &image.live.ple, &image.live.tails,
+                  &image.live.dead, &image.live.block_pos})
+    r.blob(*v);
+  const auto layers = r.number();
+  require(layers <= max_kv_layers, "invalid KV layer count");
+  image.kv.resize(size_t(layers));
+  for (auto &k : image.kv) {
+    const auto format = r.number();
+    require(format <= INT_MAX, "invalid KV format");
+    k.format = int(format);
+    for (auto *n : {&k.cells, &k.heads, &k.head_dim, &k.page_size,
+                    &k.pooled_rows, &k.idx_dim})
+      *n = signed_number(r);
+    for (auto *v : {&k.k, &k.v, &k.k_scale, &k.v_scale, &k.pooled})
+      r.blob(*v);
+  }
+}
 } // namespace
 
 PrefixDigest prefix_cache_digest(const void *p, size_t n) {
@@ -369,7 +466,14 @@ bool prefix_cache_write(const std::filesystem::path &path,
     require(image.live.imgs.empty() && image.live.stage_parts.empty() &&
                 image.checkpoints.empty(),
             "only one text prefix is supported");
-    require(!image.kv.empty() && image.kv.size() <= 129 &&
+    require(image.stage_images.size() <= prefix_cache_max_stage_images,
+            "too many stage images");
+    // Every image's own rules are rechecked as it is written; here only what
+    // spans them: at least one K/V layer, and the whole image's byte cap.
+    uint64_t kv_layers = image.kv.size();
+    for (const auto &stage : image.stage_images)
+      kv_layers += stage.kv.size();
+    require(kv_layers >= 1 && image.kv.size() <= max_kv_layers &&
                 image.bytes() <= prefix_cache_max_bytes,
             "invalid prefix snapshot size");
     if (std::filesystem::exists(path)) {
@@ -387,41 +491,22 @@ bool prefix_cache_write(const std::filesystem::path &path,
     std::array<uint8_t, header_bytes> header{};
     std::memcpy(header.data(), magic, 8);
     uint8_t b[8];
-    u64_bytes(1, b);
+    u64_bytes(format_version, b);
     std::memcpy(header.data() + 8, b, 8);
     std::memcpy(header.data() + 24, identity.data(), identity.size());
     raw_write(out, header.data(), header.size());
     Writer w{out};
     w.hash.update(identity.data(), identity.size());
-    for (auto n : image.geometry) {
-      require(n >= 0, "negative geometry");
-      w.number(uint64_t(n));
-    }
-    require(image.layer_lo >= 0 && image.layer_hi > image.layer_lo,
-            "invalid layer carve");
-    w.number(uint64_t(image.layer_lo));
-    w.number(uint64_t(image.layer_hi));
-    w.number(image.cvec ? 1 : 0);
-    w.number(uint64_t(next_token));
-    w.number(image.live.ids.size());
-    for (auto id : image.live.ids) {
-      require(id >= 0, "negative token");
-      w.number(uint64_t(id));
-    }
-    for (auto *v : {&image.live.gdn, &image.live.ple, &image.live.tails,
-                    &image.live.dead, &image.live.block_pos})
-      w.blob(*v);
-    w.number(image.kv.size());
-    for (const auto &k : image.kv) {
-      require(k.format >= 0, "invalid KV format");
-      w.number(uint64_t(k.format));
-      for (auto n : {k.cells, k.heads, k.head_dim, k.page_size, k.pooled_rows,
-                     k.idx_dim}) {
-        require(n >= 0, "invalid KV geometry");
-        w.number(uint64_t(n));
-      }
-      for (auto *v : {&k.k, &k.v, &k.k_scale, &k.v_scale, &k.pooled})
-        w.blob(*v);
+    write_image(w, image, next_token, nullptr);
+    // v2: the later stages of a layer split, in stage order, each carving the
+    // layers after the previous image's (no overlap; the restore checks the
+    // exact carve against each stage's session)
+    w.number(image.stage_images.size());
+    int64_t previous_hi = image.layer_hi;
+    for (const auto &stage : image.stage_images) {
+      require(stage.layer_lo >= previous_hi, "stage images out of layer order");
+      write_image(w, stage, next_token, &image);
+      previous_hi = stage.layer_hi;
     }
     const auto digest = w.hash.finish();
     u64_bytes(w.size, b);
@@ -471,7 +556,7 @@ bool prefix_cache_read(const std::filesystem::path &path,
     std::array<uint8_t, header_bytes> header{};
     raw_read(in, header.data(), header.size());
     require(std::memcmp(header.data(), magic, 8) == 0 &&
-                get_u64(header.data() + 8) == 1,
+                get_u64(header.data() + 8) == format_version,
             "unsupported cache format/version");
     require(get_u64(header.data() + 16) == size - header_bytes,
             "invalid cache payload size");
@@ -480,37 +565,23 @@ bool prefix_cache_read(const std::filesystem::path &path,
     Reader r{in, {}, size - header_bytes};
     r.hash.update(identity.data(), identity.size());
     SavedConversation image;
-    for (auto &n : image.geometry)
-      n = signed_number(r);
-    image.layer_lo = signed_number(r);
-    image.layer_hi = signed_number(r);
-    const auto cv = r.number();
-    require(cv <= 1 && bool(cv) == cvec, "steering mode changed");
-    image.cvec = bool(cv);
-    require(r.number() == uint64_t(next_token), "prefix frontier changed");
-    require(r.number() == prefix.size(), "prefix length changed");
-    image.live.ids.reserve(prefix.size());
-    for (auto expected : prefix) {
-      require(expected >= 0 && r.number() == uint64_t(expected),
-              "prefix tokens changed");
-      image.live.ids.push_back(expected);
+    read_image(r, image, prefix, next_token, cvec, nullptr);
+    // v2: the stage images, bounded before any is allocated; each one is
+    // checked against the same expected prefix, frontier and steering mode
+    const auto stages = r.number();
+    require(stages <= prefix_cache_max_stage_images,
+            "invalid stage image count");
+    image.stage_images.resize(size_t(stages));
+    uint64_t kv_layers = image.kv.size();
+    int64_t previous_hi = image.layer_hi;
+    for (auto &stage : image.stage_images) {
+      read_image(r, stage, prefix, next_token, cvec, &image);
+      require(stage.layer_lo >= previous_hi,
+              "stage images out of layer order");
+      previous_hi = stage.layer_hi;
+      kv_layers += stage.kv.size();
     }
-    for (auto *v : {&image.live.gdn, &image.live.ple, &image.live.tails,
-                    &image.live.dead, &image.live.block_pos})
-      r.blob(*v);
-    const auto layers = r.number();
-    require(layers >= 1 && layers <= 129, "invalid KV layer count");
-    image.kv.resize(size_t(layers));
-    for (auto &k : image.kv) {
-      const auto format = r.number();
-      require(format <= INT_MAX, "invalid KV format");
-      k.format = int(format);
-      for (auto *n : {&k.cells, &k.heads, &k.head_dim, &k.page_size,
-                      &k.pooled_rows, &k.idx_dim})
-        *n = signed_number(r);
-      for (auto *v : {&k.k, &k.v, &k.k_scale, &k.v_scale, &k.pooled})
-        r.blob(*v);
-    }
+    require(kv_layers >= 1, "invalid KV layer count");
     require(r.remaining == 0 && in.peek() == std::char_traits<char>::eof(),
             "trailing cache data");
     const auto digest = r.hash.finish();

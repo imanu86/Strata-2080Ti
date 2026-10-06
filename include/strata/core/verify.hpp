@@ -181,7 +181,7 @@ public:
     /// the same stream and the drafter reads nothing it writes, so it overlaps the draft. Whoever reads or writes
     /// the session from another stream or the host afterwards (a new request, a checkpoint, a snapshot, the prompt
     /// path, the end of a run) calls wait_commit() first.  STRATA_COMMIT_SYNC=1 keeps the wait.
-    static void set_commit_async(bool on);
+    static void set_commit_async(bool on, bool split = false);
     /// Waits for the last commit graph when commit() did not (an event recorded after it, not the whole device);
     /// false with `err` when it failed.  Free when nothing is pending.
     bool wait_commit(std::string& err);

@@ -748,9 +748,13 @@ A changed system prompt is recomputed and replaces the file automatically.
 The one file holds one prefix, not a collection of chats or the model weights.
 
 The option defaults off. It requires `--serve`, enabled prompt caching/root
-checkpoints, and one session GPU without layer split, peer or remote expert tiers.
+checkpoints, and no peer device or remote expert tiers; one GPU or a
+`--layer-split` (file format v2: one image per stage, each validated against its
+own stage before any GPU write; v1 files are a clean miss and get rewritten).
+With a split the key also covers every stage's device and layer carve.
 Only text roots qualify, with the ordinary 2048-token minimum by default, a
-32768-token cap and a 512 MiB file-payload cap. A long first request whose MTP
+262144-token cap and an 8 GiB file-payload cap (a 131072-token fp16 root is
+about 3.55 GiB; physical-RAM admission still decides). A long first request whose MTP
 window skipped old draft cells is not saved. Model initialization still runs.
 Only the repeated prefix prefill is avoided; this does not accelerate token decode.
 
