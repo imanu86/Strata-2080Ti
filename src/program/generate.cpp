@@ -350,8 +350,16 @@ static const std::vector<std::map<int64_t, std::vector<int32_t>>>& force_window_
     return lists;
 }
 
+// Owner 6/10: with two cards and --pipeline-windows the elastic cache rides beside the pipeline BY DEFAULT (main sets
+// g_pipe_elastic_auto before the first call).  STRATA_PIPELINE_ELASTIC=0 turns it off, =1 forces it on.
+static bool g_pipe_elastic_auto = false;
 static bool pipe_elastic_env() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_PIPELINE_ELASTIC"); return v != nullptr && v[0] == '1'; }();
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_PIPELINE_ELASTIC");
+        if (v != nullptr && v[0] == '0') return false;
+        if (v != nullptr && v[0] == '1') return true;
+        return g_pipe_elastic_auto;
+    }();
     return on;
 }
 
@@ -4283,6 +4291,7 @@ int main(int argc, char** argv) {
         // STRATA_TEST_CACHE_FAIL=N: the first N opens fail as an out-of-commit cudaMalloc does (tests the retry)
         // fork: under a layer split only CUDA0's stage (the card with the display) is elastic; the later stages keep
         // fixed caches.  Not with windows pipelined across the stages (lab P3: unless STRATA_PIPELINE_ELASTIC=1).
+        g_pipe_elastic_auto = multi_gpu && o.pipeline_windows > 0;   // before the first pipe_elastic_env()
         const bool el_split_ok = !multi_gpu || o.pipeline_windows == 0 || pipe_elastic_env();
         // lab P3: with the opt-in the resident RAM mode keeps it too - an expert that leaves the tail is computed by the
         // CPU from the RAM copy, or read from the model files when the copy does not hold it (the mmap fallback)
