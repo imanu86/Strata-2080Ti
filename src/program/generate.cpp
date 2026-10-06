@@ -4186,6 +4186,7 @@ int main(int argc, char** argv) {
         int fake_fails = std::getenv("STRATA_TEST_CACHE_FAIL") ? std::atoi(std::getenv("STRATA_TEST_CACHE_FAIL")) : 0;
         int failed = 0;
         int zero_reads = 0;
+        int el_oom_tries = 0;
         for (int attempt = 0;; ++attempt) {
             bool ok = false;
             if (fake_fails > 0) {
@@ -4198,6 +4199,15 @@ int main(int argc, char** argv) {
                     cudaMemGetInfo(&fb, &tb);
                     ok = xcache.open_sized_elastic(sized_slots, g.n_layers, g.n_expert, (uint64_t) tb,
                                                    (uint64_t) o.elastic_chunk_mib << 20, err);
+                    // the arena maps whole chunks: a card a little tighter than the sizing read (the --batch slots,
+                    // a desktop program) fails its last ones; a smaller arena stays elastic, the fixed cache is last
+                    if (!ok && auto_cache && el_oom_tries < 4 && err.find("out of memory") != std::string::npos &&
+                        shrink_to(cache_bytes() - (512ll << 20))) {
+                        ++el_oom_tries;
+                        std::fprintf(stderr, "strata generate: %s; trying a smaller elastic cache: %d slots\n",
+                                     err.c_str(), o.expert_cache);
+                        continue;
+                    }
                     if (!ok) {
                         std::fprintf(stderr, "strata generate: %s - the cache stays fixed\n", err.c_str());
                         o.elastic = false;
