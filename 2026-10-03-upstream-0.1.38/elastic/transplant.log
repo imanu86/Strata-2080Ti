@@ -1,0 +1,67 @@
+Checking patch include/strata/core/expert_cache.hpp...
+Checking patch src/core/expert_cache.cpp...
+Checking patch include/strata/prefill/prefill.hpp...
+Hunk #1 succeeded at 62 (offset 2 lines).
+Checking patch src/prefill/prefill.cpp...
+Hunk #1 succeeded at 664 (offset 78 lines).
+Hunk #2 succeeded at 681 (offset 78 lines).
+Hunk #3 succeeded at 694 (offset 78 lines).
+Hunk #4 succeeded at 771 (offset 78 lines).
+Checking patch src/program/generate.cpp...
+error: while searching for:
+    /// Plan v0.3 P4: `--expert-cache auto` sizes the VRAM tier from what is free after the weights, the session
+    /// and the KV state, minus this reserve for the graphs, the hit scratch and the head.
+    int vram_reserve_mib = 700;
+    /// Plan v0.3 P5: batched prompt processing in chunks of this many tokens (0 = the token path).
+    int64_t prefill_chunk = 0;
+    /// `--prefill auto`: the largest chunk (up to 8192) whose buffers the expert cache can lend.  Every expert a chunk
+
+error: patch failed: src/program/generate.cpp:327
+Hunk #2 succeeded at 562 (offset -28 lines).
+error: while searching for:
+        else if (a == "--expert-cache-remote-placement")
+            o.expert_cache_remote_placement = next("--expert-cache-remote-placement");
+        else if (a == "--vram-reserve-mib") o.vram_reserve_mib = std::atoi(next("--vram-reserve-mib"));
+        else if (a == "--prefill") {
+            const std::string v = next("--prefill");
+            o.prefill_auto = v == "auto" || v.rfind("auto:", 0) == 0;
+
+error: patch failed: src/program/generate.cpp:1125
+Hunk #4 succeeded at 3001 (offset 151 lines).
+Hunk #5 succeeded at 4011 (offset 178 lines).
+Hunk #6 succeeded at 4043 (offset 178 lines).
+Hunk #7 succeeded at 4203 (offset 178 lines).
+Hunk #8 succeeded at 4335 (offset 178 lines).
+Hunk #9 succeeded at 4355 (offset 178 lines).
+Hunk #10 succeeded at 6522 (offset 1863 lines).
+error: while searching for:
+            for (float& v : drive.d.usage) v *= 0.7f;
+            return true;
+        };
+        // #477: write the learned profile (between requests and at QUIT: a prompt's lent slots are back by then).
+        // A swap still in flight counts as done - its expert is resident once the copy lands.  `why`: for the log.
+        auto save_profile = [&](const char* why) {
+
+error: patch failed: src/program/generate.cpp:4609
+Hunk #12 succeeded at 5557 (offset -34 lines).
+Hunk #13 succeeded at 5607 (offset -34 lines).
+Hunk #14 succeeded at 5853 (offset -42 lines).
+Applied patch include/strata/core/expert_cache.hpp cleanly.
+Applied patch src/core/expert_cache.cpp cleanly.
+Applied patch include/strata/prefill/prefill.hpp cleanly.
+Applied patch src/prefill/prefill.cpp cleanly.
+Applying patch src/program/generate.cpp with 3 rejects...
+Rejected hunk #1.
+Hunk #2 applied cleanly.
+Rejected hunk #3.
+Hunk #4 applied cleanly.
+Hunk #5 applied cleanly.
+Hunk #6 applied cleanly.
+Hunk #7 applied cleanly.
+Hunk #8 applied cleanly.
+Hunk #9 applied cleanly.
+Hunk #10 applied cleanly.
+Rejected hunk #11.
+Hunk #12 applied cleanly.
+Hunk #13 applied cleanly.
+Hunk #14 applied cleanly.

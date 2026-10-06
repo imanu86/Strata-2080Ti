@@ -1,0 +1,28 @@
+{
+  "upstream": "99f3dbd0b21d1401b3769e0c0d963913607f380b",
+  "files": {
+    "include/strata/core/expert_cache.hpp": "6f553bcb5c409ef66c2ea85e9b697f0b6d6cd73dbe880fe50ba21c7600e9d614",
+    "src/core/expert_cache.cpp": "8556816251688b7caa8be1691d4af70273018221ca5631df59265fcd6c6a94ac",
+    "include/strata/prefill/prefill.hpp": "895e8baf9bad78e1960a9f3775082dcf5d6f7a8d4d0728d182778c57e47a60cd",
+    "src/prefill/prefill.cpp": "7da2921d4973b60ba88572fb0b06ca68c9f85bbc018537dfc7ff8350dcd67795",
+    "src/program/generate.cpp": "5b388b9713283ee32f88d2b0f0a5f6677084eb6ad40e1ee3bdd3793b8d647288",
+    "CMakeLists.txt": "7c35862b9090ba20031e8174e314aeb0860e1c15e3bc03b938df8e3f2ff8d3de",
+    "tests/core/expert_cache_elastic_test.cpp": "52e748cf2edc88c519b6af375813b2802f5d847819f7a5172ddb6290e0af20fa"
+  },
+  "patch_sha256": "2c208843302ff2b133fd3deaa846299022dc31c4e698fafa1fe5772d63cdf84e",
+  "shipping": {
+    "sha256": "56f4474bb7eb9d565311abd08629648695f913361002178341e49435f2eaf47e",
+    "shipping_exe_sha256": "da751ecfe933eef00f88c773204b847fe459270ade769a48dff4e631b026217e",
+    "shipping_patch_separate": true,
+    "readout_added_lines_sha256": "55f32dc38f80de208a1f1f0c6c89c43908d12b815126f0ae3a3c03738972b7ef",
+    "same_readout_as_pristine_A": true
+  },
+  "final_shipping": {
+    "sha256": "4c229bd2540b8500b37aed87473b5f1ed40b4f692a0374cca0e2afba5fb40fc0",
+    "shipping_exe_sha256": "da41a3c31cf4f653adf939a303ffd1ced82964b351a3962b817ad4f4acaf7828",
+    "shipping_patch_separate": true,
+    "readout_added_lines_sha256": "55f32dc38f80de208a1f1f0c6c89c43908d12b815126f0ae3a3c03738972b7ef",
+    "same_readout_as_pristine_A": true
+  },
+  "revision_limit": "Full 2560-row gate uses V1. Final CLI/mode/default refinements are checked by 42 CLI cases, CTest, unchanged numeric-body comparison and 64-row/fresh/follow bitwise sanity. V1 unit-test text erroneously labeled its largest successful mapping 8 MiB; final test corrects this to 6 MiB."
+}

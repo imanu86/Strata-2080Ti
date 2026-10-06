@@ -1,0 +1,14 @@
+Internal ctest changing into directory: C:/Users/imanu/source/repos/moe-aggressive-commit/docs/porto/strata_adattivo/corse_2080ti/20261006_elastic_pr/build
+Test project C:/Users/imanu/source/repos/moe-aggressive-commit/docs/porto/strata_adattivo/corse_2080ti/20261006_elastic_pr/build
+    Start  5: expert_profile_save_test
+1/4 Test  #5: expert_profile_save_test .........   Passed    0.04 sec
+    Start  8: expert_cache_per_layer_test
+2/4 Test  #8: expert_cache_per_layer_test ......   Passed    0.20 sec
+    Start  9: expert_cache_elastic_test
+3/4 Test  #9: expert_cache_elastic_test ........   Passed    0.16 sec
+    Start 10: expert_cache_segmented_test
+4/4 Test #10: expert_cache_segmented_test ......   Passed    0.36 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =   0.78 sec

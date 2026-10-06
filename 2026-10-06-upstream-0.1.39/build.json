@@ -1,0 +1,28 @@
+{
+  "pr_head": "b87e665bb04db99e3397135a2be4a58561fa5345",
+  "upstream": "6f32ec070f23ced9f50e704d854d775da52591ab",
+  "upstream_exe_sha256": "5bdf59d371a75efc0e562cab1c05e72c0567cacf304b57481c8fcceb95067fa4",
+  "pr_exe_sha256": "0e1ee410f368396cfb64d4c18a46ab77e6b8cb280fcc42263d4030fc42e487fc",
+  "steps": {
+    "configure": {
+      "rc": 0,
+      "seconds": 18.5
+    },
+    "build-upstream": {
+      "rc": 0,
+      "seconds": 118.5
+    },
+    "reconfigure": {
+      "rc": 0,
+      "seconds": 2.2
+    },
+    "build-pr": {
+      "rc": 0,
+      "seconds": 10.2
+    },
+    "ctest": {
+      "rc": 0,
+      "seconds": 0.8
+    }
+  }
+}

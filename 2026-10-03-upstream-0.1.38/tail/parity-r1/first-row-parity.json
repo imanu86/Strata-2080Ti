@@ -1,0 +1,10 @@
+{
+  "B": {
+    "fresh": true,
+    "follow": true
+  },
+  "A2": {
+    "fresh": true,
+    "follow": true
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "before_generate_sha256": "5b388b9713283ee32f88d2b0f0a5f6677084eb6ad40e1ee3bdd3793b8d647288",
+  "after_generate_sha256": "3b994e3ee104bc64579a7ce0f25d820539b61cccc95f761b61be1dd86f0bc957",
+  "post_argument_parsing_body_unchanged": true,
+  "unchanged_body_sha256": "9ea3af773ce6a440fbe872e99ac7d0f990c3e8ca4a8b660f7d57657e67468685",
+  "changes": "help strings and strict parsing for six elastic numeric flags; no numerical kernel or cache/prefill computation change",
+  "unit_display_correction": "initial test printed8MiB reservation limit; largest successful map is6MiB;35 functional checks unchanged"
+}

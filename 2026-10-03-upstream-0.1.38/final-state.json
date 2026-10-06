@@ -1,0 +1,32 @@
+{
+  "recorded_at_utc": "2026-10-03T10:19:41.036237+00:00",
+  "daily_hashes": {
+    "D:\\ds4_work\\strata\\Strata\\strata-2080ti-sota.json": "ccffa537cdb264f99317948c1c6f41ffbc1e5ce370cafb1ca8c0ca717e77e112",
+    "D:\\ds4_work\\strata\\Strata\\build-0136-daily\\strata.exe": "c35505ca79b790bd37ed7073fcadd399dd30d1b88e85bb99a6eb24a52d945d0a",
+    "D:\\ds4_work\\strata\\Strata\\build-0136-daily\\source\\serve\\server.py": "73f90f417e9207811fdc47e5e6240f69bbde0f61ff027b9e0d8cb7b7bb2f4d81",
+    "C:\\Users\\imanu\\Desktop\\SERVER IA LOCALE\\Strata 2080 Ti - SOTA 30-9 - porta 8100.bat": "1103f2ffb7727aafe1754f964c1969a03c0838a659edfc5984b1f4afbd2bd2c4",
+    "D:\\ds4_work\\strata\\Strata\\data\\expert-profile.bin": "8f59b4aa8873209dff11c11e37bcda9529a1335b724a1afeea37bf6388975baf"
+  },
+  "daily_unchanged": true,
+  "repositories": {
+    "C:\\Users\\imanu\\source\\repos\\moe-aggressive-commit": {
+      "branch": "research/ds4-iq1-subbit-tier-planner",
+      "status": "## research/ds4-iq1-subbit-tier-planner...origin/research/ds4-iq1-subbit-tier-planner\n?? .codex-f10-work/\n?? .codex_build_4patch.bat\n?? .codex_build_q1fix.bat\n?? .codex_ds4_repro.ps1\n?? .codex_runs/\n?? ds4-0731-merge/\n?? ds4-0731-moeio/\n?? ds4-0731-prefill/\n?? ds4-0731-tiering/\n?? ds4-0731-vittima/\n?? ds4-p4a/\n?? ds4-port-blk10/\n?? ds4-port-blk3/\n?? ds4-port-blk4/\n?? ds4-port-blk5/\n?? ds4-port-blk6/\n?? ds4-port-guard/\n?? ds4-port-kv/\n?? ds4-port-merge/\n?? ds4-port-nucleo/\n?? ds4-port-obs/\n?? ds4-port/\n?? ds4-stock/\n?? ds4-superchunk-prep2/\n?? ds4-upstream-cuda-measure/\n?? ds4-vram-mass-prep1/\n?? reap-loop-ledger-main/\n?? reap-loop-p4a-ledger-sparse/\n?? reap-loop-p4a-ledger/\n?? reap-loop-p4a-runtime-ledger/\n?? reap-loop-superchunk-prep2-ledger/\n?? reap-loop-vram-mass-ledger/",
+      "head": "c9357baa100a6e6f66db5171319a52540bfef304"
+    },
+    "C:\\Users\\imanu\\source\\repos\\Strata-2080Ti": {
+      "branch": "main",
+      "status": "## main...origin/main",
+      "head": "2c394674ed933a817741506b0b35e370f4d45c21"
+    },
+    "D:\\ds4_work\\strata\\Strata": {
+      "branch": "main",
+      "status": "## main...origin/main\n?? curva_auto_r1032.json\n?? curva_auto_r700.json\n?? curva_n1100_r1032.json\n?? curva_n600_r1032.json\n?? f0_A.json\n?? f0_A2.json\n?? f0_B.json\n?? f0_a0129_fissa_r1393.json\n?? f0_ab_elastica.json\n?? f0_ab_fissa.json\n?? f0_abc_elastica.json\n?? f0_abc_fissa.json\n?? f0_addestra.json\n?? f0_b0129_elastica_r500.json\n?? f0_c0129_elastica_r1393.json\n?? f0_d0129_duezone.json\n?? f0_e0129_tempi.json\n?? f0_elastico_fumo.json\n?? f0_elastico_fumo2.json\n?? f0_f0129_minp03.json\n?? f0_g0129_pcie05.json\n?? f0_h0129_adapt1.json\n?? f0_i0129_131k.json\n?? f0_j0129_mmap_131k.json\n?? f0_k_multi_off.json\n?? f0_k_multi_on.json\n?? f0_m_multi_off.json\n?? f0_m_multi_on1.json\n?? f0_m_multi_on2.json\n?? f0_n0130_base.json\n?? f0_n0130_pr186.json\n?? f0_n0130_pr258.json\n?? f0_n0130_pr284.json\n?? f0_n0130_prio_high.json\n?? f0_n0130_prio_norm.json\n?? f0_nsys.json\n?? f0_q0130_validazione_131k_20261001.json\n?? f0_sm75_fissa.json\n?? f0_verifica_p2.json\n?? f0_verifica_p2_3072.json\n?? prova_hog_duezone_4g.json\n?? prova_hog_duezone_4g_passo.json\n?? prova_hog_no.json\n?? prova_hog_si.json\n?? prova_o0130_validazione_4g_20261001.json\n?? prova_p0130_validazione_4g_20261001.json\n?? strata-stall-21888.dmp\n?? strata-stall-29788.dmp",
+      "head": "2c394674ed933a817741506b0b35e370f4d45c21"
+    }
+  },
+  "strata_engines": [],
+  "available_ram_gib": 70.50593566894531,
+  "gpu_csv": "NVIDIA GeForce RTX 2080 Ti, 22528, 17980, 32",
+  "artificial_pressure": false
+}

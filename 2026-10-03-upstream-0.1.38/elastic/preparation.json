@@ -1,0 +1,19 @@
+{
+  "upstream": "99f3dbd0b21d1401b3769e0c0d963913607f380b",
+  "source_export": true,
+  "fork_commit": "2c394674ed933a817741506b0b35e370f4d45c21",
+  "selected_hunks": {
+    "include/strata/core/expert_cache.hpp": 2,
+    "src/core/expert_cache.cpp": 3,
+    "include/strata/prefill/prefill.hpp": 1,
+    "src/prefill/prefill.cpp": 4,
+    "src/program/generate.cpp": 14
+  },
+  "transplant_exit": 1,
+  "rejects": [
+    "src\\program\\generate.cpp.rej"
+  ],
+  "checkpoint_excluded": true,
+  "sm75_kernel_changes_excluded": true,
+  "daily_unchanged": true
+}

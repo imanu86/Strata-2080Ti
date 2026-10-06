@@ -1,0 +1,19 @@
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -5764,6 +5764,16 @@
+                 for (int i = 0; i <= a; ++i) consumed.push_back(window[(size_t) i]);
+                 draft_offered += T - 1;
+                 draft_accepted += a;
++                // Test-only readout, identical in both QA binaries; excluded from shipping patch.
++                if (first_window) {
++                    if (const char* fl = std::getenv("STRATA_TEST_FIRST_LOGITS")) {
++                        std::vector<float> row((size_t) ver.vocab());
++                        std::FILE* f = ver.copy_logits(0, row.data()) ? std::fopen(fl, "wb") : nullptr;
++                        if (f == nullptr || std::fwrite(row.data(), sizeof(float), row.size(), f) != row.size())
++                            std::fprintf(stderr, "strata test: cannot write first logits %s\n", fl);
++                        if (f) std::fclose(f);
++                    }
++                }
+                 first_window = false;
+                 bool eos = false;
+                 for (int i = 0; i <= a && produced_n < max_new && !eos; ++i) {

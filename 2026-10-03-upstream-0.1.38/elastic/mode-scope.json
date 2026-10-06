@@ -1,0 +1,8 @@
+{
+  "post_cli_generate_sha256": "3b994e3ee104bc64579a7ce0f25d820539b61cccc95f761b61be1dd86f0bc957",
+  "final_generate_sha256": "6c50144fe96769e32e3958a76fad978ddd58c4d1b22f5af619858c35675f39bc",
+  "mode_guard": "peer or remote tiers disable elastic before allocations; one-GPU tested configuration unchanged",
+  "default_guard": "extra wait before lend only when elastic is active; fixed default retains upstream behavior",
+  "inference_body_after_undoing_optin_wait_guard_matches_full_gate": true,
+  "core_prefill_kernel_changes_since_full_gate": false
+}

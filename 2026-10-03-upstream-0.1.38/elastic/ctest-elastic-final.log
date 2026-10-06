@@ -1,0 +1,25 @@
+Internal ctest changing into directory: C:/Users/imanu/Documents/Codex/2026-10-01/https-github-com-imanu86-moe-aggressive/strata-main-alignment/elastic038_20261003/build
+UpdateCTestConfiguration  from :C:/Users/imanu/Documents/Codex/2026-10-01/https-github-com-imanu86-moe-aggressive/strata-main-alignment/elastic038_20261003/build/DartConfiguration.tcl
+UpdateCTestConfiguration  from :C:/Users/imanu/Documents/Codex/2026-10-01/https-github-com-imanu86-moe-aggressive/strata-main-alignment/elastic038_20261003/build/DartConfiguration.tcl
+Test project C:/Users/imanu/Documents/Codex/2026-10-01/https-github-com-imanu86-moe-aggressive/strata-main-alignment/elastic038_20261003/build
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 9
+    Start 9: expert_cache_elastic_test
+
+9: Test command: C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\build\expert_cache_elastic_test.exe
+9: Working Directory: C:/Users/imanu/Documents/Codex/2026-10-01/https-github-com-imanu86-moe-aggressive/strata-main-alignment/elastic038_20261003/build
+9: Test timeout computed to be: 60
+9: elastic VMM: 35 checks passed; largest successful physical mapping 6 MiB
+1/1 Test #9: expert_cache_elastic_test ........   Passed    0.18 sec
+
+The following tests passed:
+	expert_cache_elastic_test
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.19 sec

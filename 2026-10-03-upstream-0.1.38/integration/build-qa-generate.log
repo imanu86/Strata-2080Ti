@@ -1,0 +1,559 @@
+generate.cpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/device.hpp
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cstdint
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\yvals_core.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sal.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\concurrencysal.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vadefs.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xkeycheck.h
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\stdint.h
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\stdexcept
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\exception
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\yvals.h
+Nota: file incluso      C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\crtdbg.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_new_debug.h
+Nota: file incluso        C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_new.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\crtdefs.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\use_ansi.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cstdlib
+Nota: file incluso      C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\math.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_math.h
+Nota: file incluso      C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\stdlib.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_malloc.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_search.h
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\stddef.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wstdlib.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\limits.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cstddef
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xtr1common
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cstring
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\string.h
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_memory.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_memcpy_s.h
+Nota: file incluso          C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\errno.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_string.h
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wstring.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\malloc.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_exception.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\eh.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_terminate.h
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xstring
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_sanitizer_annotate_container.hpp
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_string_view.hpp
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\iosfwd
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cstdio
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\stdio.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wstdio.h
+Nota: file incluso          C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_stdio_config.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cwchar
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\wchar.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wconio.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wctype.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wdirect.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wio.h
+Nota: file incluso          C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_share.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wprocess.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_wtime.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\sys/stat.h
+Nota: file incluso          C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\sys/types.h
+Nota: file incluso         C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\intrin.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\intrin0.inl.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\setjmp.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\immintrin.h
+Nota: file incluso           C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\wmmintrin.h
+Nota: file incluso            C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\nmmintrin.h
+Nota: file incluso             C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\smmintrin.h
+Nota: file incluso              C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\tmmintrin.h
+Nota: file incluso               C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\pmmintrin.h
+Nota: file incluso                C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\emmintrin.h
+Nota: file incluso                 C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmmintrin.h
+Nota: file incluso                  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\mmintrin.h
+Nota: file incluso           C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\zmmintrin.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\ammintrin.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_iter_core.hpp
+Nota: file incluso        C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility
+Nota: file incluso         C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\initializer_list
+Nota: file incluso         C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\compare
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\concepts
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\climits
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\limits
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cfloat
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\float.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\intrin0.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\new
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xatomic.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\tuple
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xpolymorphic_allocator.h
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\string
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cctype
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\ctype.h
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_bit_utils.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/expert_cache.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/conversation_snapshot.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/conversation_cache.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/conversation_buffer.hpp
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\algorithm
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_heap_algorithms.hpp
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_minmax.hpp
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\array
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\deque
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/layer.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/layout.hpp
+Nota: file incluso     C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/weights.hpp
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xtree
+Nota: file incluso        C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xnode_handle.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\set
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/gr.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/kv_stream.hpp
+Nota: file incluso     C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/qsa.hpp
+Nota: file incluso     C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/qsa_decode_attn.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/ngram.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/ple.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/session.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/hit_hook.hpp
+Nota: file incluso    C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt/host_config.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\builtin_types.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\device_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt/host_defines.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt/host_defines.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_types.h
+Nota: file incluso        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt/host_defines.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\surface_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_types.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\texture_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_types.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_types.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\library_types.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\channel_descriptor.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime_api.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt/host_defines.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\builtin_types.h
+Nota: file incluso        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\device_types.h
+Nota: file incluso        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_types.h
+Nota: file incluso        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\surface_types.h
+Nota: file incluso        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\texture_types.h
+Nota: file incluso        C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_device_runtime_api.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime_api.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_functions.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\builtin_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\device_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\surface_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\texture_types.h
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_types.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt/host_defines.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\driver_types.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\crt/host_defines.h
+Nota: file incluso     C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_functions.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime_api.h
+Nota: file incluso      C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\vector_functions.hpp
+Nota: file incluso       C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime_api.h
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/conversation_memory.hpp
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\istream
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_ostream.hpp
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\ios
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xlocnum
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cmath
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\iterator
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\streambuf
+Nota: file incluso        C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xiosbase
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\share.h
+Nota: file incluso         C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\system_error
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_system_error_abi.hpp
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\cerrno
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xcall_once.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xerrc.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\atomic
+Nota: file incluso           C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xatomic_wait.h
+Nota: file incluso           C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xthreads.h
+Nota: file incluso            C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_threads_core.hpp
+Nota: file incluso            C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xtimec.h
+Nota: file incluso             C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\ctime
+Nota: file incluso              C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\time.h
+Nota: file incluso         C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xlocale
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory
+Nota: file incluso           C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\typeinfo
+Nota: file incluso            C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_typeinfo.h
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xfacet
+Nota: file incluso          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xlocinfo
+Nota: file incluso           C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_xlocinfo_types.hpp
+Nota: file incluso           C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\clocale
+Nota: file incluso            C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\locale.h
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\optional
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xsmf_control.h
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/coupled_draft.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/sampler.hpp
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/coupled_draft.hpp(54): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/expert_source.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/pool.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/expert.hpp
+Nota: file incluso    C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/native_expert.hpp
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\chrono
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_chrono.hpp
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\ratio
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xfilesystem_abi.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_tzdb.hpp
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\format
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_format_ucd_tables.hpp
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_formatter.hpp
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_print.hpp
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_ranges_tuple_formatter.hpp
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\bit
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\charconv
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xbit_ops.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xcharconv.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xcharconv_ryu.h
+Nota: file incluso        C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xcharconv_ryu_tables.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xcharconv_tables.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\locale
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xlocbuf
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xlocmes
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xlocmon
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xloctime
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\forward_list
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\iomanip
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\condition_variable
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\mutex
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\thread
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\process.h
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_startup.h
+Nota: file incluso         C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\math.h
+Nota: file incluso         C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_startup.h
+Nota: file incluso       C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\stop_token
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xhash
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\list
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/pinned.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/remote_experts.hpp
+Nota: file incluso   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/on_device.hpp
+Nota: file incluso   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/peer_experts.hpp
+Nota: file incluso   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cpu/expert_layout.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/iq_kernels.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/s2_expert_grouped.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/verify_kernels.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/shared_expert.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/s_gemv.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/native_moe.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/native_gdn.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/gdn.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/native_router.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/native_qsa.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/native_qsa_indexer.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/rope_scaling.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/native_rope.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/mrope.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/kv_q4.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/native_head.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/verify.hpp
+Nota: file incluso   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/mtp.hpp
+Nota: file incluso   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/prefill/prefill.hpp
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/native_dense.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/program/logits_selection.hpp
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\string_view
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/program/conv_cache.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/spec/draft_policy.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/spec/suffix_drafter.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/kernels/cvec.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/progress.hpp
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/emulate.hpp
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/core/emulate.hpp(17): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+Nota: file incluso  C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/artifact/gguf_reader.hpp
+Nota: file incluso   C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\include\strata/artifact/gguf_split.hpp
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_filebuf.hpp
+Nota: file incluso   C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\windows.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\winapifamily.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\winpackagefamily.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\sdkddkver.h
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\excpt.h
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\stdarg.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\windef.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\minwindef.h
+Nota: file incluso      C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\specstrings.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\specstrings_strict.h
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\specstrings_undef.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\driverspecs.h
+Nota: file incluso        C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\sdv_driverspecs.h
+Nota: file incluso      C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winnt.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\kernelspecs.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\basetsd.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\guiddef.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack4.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack4.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack4.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack2.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack2.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack2.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack8.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack1.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack1.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\apiset.h
+Nota: file incluso       C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\ktmtypes.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winbase.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\apisetcconv.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\minwinbase.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\apiquery2.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\processenv.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\fileapifromapp.h
+Nota: file incluso      C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\fileapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\debugapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\utilapiset.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\handleapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\errhandlingapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\fibersapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\namedpipeapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\profileapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\heapapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\ioapiset.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\synchapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\interlockedapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\processthreadsapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\sysinfoapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\memoryapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\enclaveapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\threadpoollegacyapiset.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\threadpoolapiset.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\jobapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\jobapi2.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\wow64apiset.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\libloaderapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\securitybaseapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\namespaceapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\systemtopologyapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\processtopologyapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\securityappcontainer.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\realtimeapiset.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\winerror.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\timezoneapi.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\wingdi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack1.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack2.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack2.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack4.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack4.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winuser.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\pshpack2.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\poppack.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\tvout.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winnls.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\datetimeapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\stringapiset.h
+Nota: file incluso      C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winnls.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\wincon.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\wincontypes.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\consoleapi.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\consoleapi2.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\consoleapi3.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winver.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\verrsrc.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winreg.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\reason.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winnetwk.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\wnnc.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\stralign.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\winsvc.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\mcx.h
+Nota: file incluso    C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\imm.h
+Nota: file incluso     C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\ime_cmodes.h
+Nota: file incluso  C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\psapi.h
+Nota: file incluso  C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\io.h
+Nota: file incluso   C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\ucrt\corecrt_io.h
+Nota: file incluso  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include\cuda_runtime.h
+Nota: file incluso  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\iostream
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\ostream
+Nota: file incluso  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\future
+Nota: file incluso   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\ppltasks.h
+Nota: file incluso    C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\pplwin.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\pplinterface.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\ppltaskscheduler.h
+Nota: file incluso      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\crtdefs.h
+Nota: file incluso     C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\pplcancellation_token.h
+Nota: file incluso  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\filesystem
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(118): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(880): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(889): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1246): warning C4456: se si dichiara 'parsed', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1126): note: vedere la dichiarazione di 'parsed'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2518): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3360): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3637): warning C4244: '=': conversione da 'const int64_t' a 'int32_t'. Possibile perdita di dati.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4086): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4183): warning C4456: se si dichiara 'sp', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3596): note: vedere la dichiarazione di 'sp'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4330): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4785): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5419): warning C4456: se si dichiara 'tok', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3676): note: vedere la dichiarazione di 'tok'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5473): warning C4456: se si dichiara 'hdr', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3616): note: vedere la dichiarazione di 'hdr'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5767): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5768): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5771): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6011): warning C4456: se si dichiara 'sbuf', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2139): note: vedere la dichiarazione di 'sbuf'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6286): warning C4456: se si dichiara 'pool', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2868): note: vedere la dichiarazione di 'pool'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6294): warning C4456: se si dichiara 'pool', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2868): note: vedere la dichiarazione di 'pool'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6801): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6826): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6905): warning C4456: se si dichiara 'sbuf', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2139): note: vedere la dichiarazione di 'sbuf'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(7162): warning C4456: se si dichiara 'hdr', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3616): note: vedere la dichiarazione di 'hdr'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1110): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1264): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1373): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1375): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1384): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1386): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1524): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1630): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1865): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(1903): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2165): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2208): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2209): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2442): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2444): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2550): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2808): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(2819): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3045): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3371): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3474): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3624): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(3648): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4234): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4505): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4507): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4973): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5270): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5340): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5470): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5621): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5639): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5673): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5730): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(5823): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6026): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6112): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6114): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6197): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6239): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6357): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6404): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6970): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(6972): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(7137): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(7157): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1461): warning C4244: '=': conversione da '__int64' a 'int'. Possibile perdita di dati.
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1461): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4747): note: vedere il riferimento all'istanza 'void std::vector<int32_t,std::allocator<int>>::assign<std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,0>(_Iter,_Iter)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Ty=int64_t,
+            _Iter=std::_Vector_iterator<std::_Vector_val<std::_Simple_types<int64_t>>>
+        ]
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic-tail038_final_20261003\source\src\program\generate.cpp(4747): note: vedere il primo riferimento a 'std::vector<int32_t,std::allocator<int>>::assign' in 'main::<lambda_32>::operator ()'
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1491): note: vedere il riferimento all'istanza 'void std::vector<int32_t,std::allocator<int>>::_Assign_counted_range<__int64*>(_Iter,const unsigned __int64)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Iter=__int64 *
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(4813): warning C4244: '=': conversione da '__int64' a 'int'. Possibile perdita di dati.
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(4813): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1491): note: vedere il riferimento all'istanza 'void std::vector<int32_t,std::allocator<int>>::_Assign_counted_range<__int64*>(_Iter,const unsigned __int64)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Iter=__int64 *
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1475): note: vedere il riferimento all'istanza '_OutIt *std::_Copy_n_unchecked4<__int64*,unsigned __int64,int*>(_InIt,_SizeTy,_OutIt)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _OutIt=int *,
+            _InIt=__int64 *,
+            _SizeTy=unsigned __int64
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: 'inizializzazione': conversione da '__int64' a '_Ty'. Possibile perdita di dati.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1436): note: vedere il riferimento all'istanza 'int *std::_Uninitialized_copy_n<__int64*,std::allocator<int>>(_InIt,size_t,int *,_Alloc &)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _InIt=__int64 *,
+            _Alloc=std::allocator<int>
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(1938): note: vedere il riferimento all'istanza 'void std::_Uninitialized_backout_al<std::allocator<int>>::_Emplace_back<__int64&>(__int64 &)' della funzione modello di cui Š in corso la compilazione
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: vedere il riferimento all'istanza 'void std::_Default_allocator_traits<_Alloc>::construct<_Ty,__int64&>(_Alloc &,_Objty *const ,__int64 &)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Alloc=std::allocator<int>,
+            _Ty=int,
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: vedere il riferimento all'istanza '_Ty *std::construct_at<_Objty,__int64&>(_Ty *const ,__int64 &) noexcept(<expr>)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Ty=int,
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: 'inizializzazione': conversione da '__int64' a '_Objty'. Possibile perdita di dati.
+        with
+        [
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: vedere il riferimento all'istanza 'void std::_Default_allocator_traits<_Alloc>::construct<_Ty,__int64&>(_Alloc &,_Objty *const ,__int64 &)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Alloc=std::allocator<int>,
+            _Ty=int,
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: vedere il riferimento all'istanza '_Ty *std::construct_at<_Objty,__int64&>(_Ty *const ,__int64 &) noexcept' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Ty=int,
+            _Objty=int
+        ]

@@ -1,0 +1,261 @@
+{
+  "status": "completed",
+  "exe_sha256": "da41a3c31cf4f653adf939a303ffd1ced82964b351a3962b817ad4f4acaf7828",
+  "checks": 42,
+  "cases": [
+    {
+      "flag": "--elastic-reserve-mib",
+      "value": "x",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-reserve-mib",
+      "value": "1junk",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-reserve-mib",
+      "value": "2147483648",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-reserve-mib",
+      "value": "-1",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-reserve-mib",
+      "value": "0",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-reserve-mib",
+      "value": "1",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-reserve-mib",
+      "value": "2147483647",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-chunk-mib",
+      "value": "x",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-chunk-mib",
+      "value": "1junk",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-chunk-mib",
+      "value": "2147483648",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-chunk-mib",
+      "value": "-1",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-chunk-mib",
+      "value": "0",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-chunk-mib",
+      "value": "1",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-chunk-mib",
+      "value": "64",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-period-ms",
+      "value": "x",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-period-ms",
+      "value": "1junk",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-period-ms",
+      "value": "2147483648",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-period-ms",
+      "value": "-1",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-period-ms",
+      "value": "0",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-period-ms",
+      "value": "1",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-period-ms",
+      "value": "2147483647",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-stable-ms",
+      "value": "x",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-stable-ms",
+      "value": "1junk",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-stable-ms",
+      "value": "2147483648",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-stable-ms",
+      "value": "-1",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-stable-ms",
+      "value": "0",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-stable-ms",
+      "value": "1",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-stable-ms",
+      "value": "2147483647",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-tail-mib",
+      "value": "x",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-tail-mib",
+      "value": "1junk",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-tail-mib",
+      "value": "2147483648",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-tail-mib",
+      "value": "-2",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-tail-mib",
+      "value": "-1",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-tail-mib",
+      "value": "0",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-tail-mib",
+      "value": "1",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-shrink-step-mib",
+      "value": "x",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-shrink-step-mib",
+      "value": "1junk",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-shrink-step-mib",
+      "value": "2147483648",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-shrink-step-mib",
+      "value": "-1",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-shrink-step-mib",
+      "value": "0",
+      "expected": 2,
+      "actual": 2
+    },
+    {
+      "flag": "--elastic-shrink-step-mib",
+      "value": "1",
+      "expected": 0,
+      "actual": 0
+    },
+    {
+      "flag": "--elastic-shrink-step-mib",
+      "value": "64",
+      "expected": 0,
+      "actual": 0
+    }
+  ],
+  "method": "parser then --help; no model or pressure allocation",
+  "inference_body": "unchanged by CLI polish"
+}

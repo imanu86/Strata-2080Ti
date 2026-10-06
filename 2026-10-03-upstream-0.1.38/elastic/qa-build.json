@@ -1,0 +1,7 @@
+{
+  "sha256": "56f4474bb7eb9d565311abd08629648695f913361002178341e49435f2eaf47e",
+  "shipping_exe_sha256": "da751ecfe933eef00f88c773204b847fe459270ade769a48dff4e631b026217e",
+  "shipping_patch_separate": true,
+  "readout_added_lines_sha256": "55f32dc38f80de208a1f1f0c6c89c43908d12b815126f0ae3a3c03738972b7ef",
+  "same_readout_as_pristine_A": true
+}

@@ -1,0 +1,13 @@
+{
+  "upstream": "99f3dbd0b21d1401b3769e0c0d963913607f380b",
+  "patch_sha256": "6fbe07b09da81965dabebd5431d273924adf0b8f9b03c79706748ff083090242",
+  "scope": "new optional one-file checkpoint alternative; no change to Prefill kernels or chunk partition; not the original Daily grid patch",
+  "original_grid_author": "Claude Opus 5.5",
+  "tail_alternative_author": "Codex",
+  "source_sha256": "4d2ddd9017ae6210cfa34b6ad79ea560abd3a0baeebc717099cd69bcdc2b4e9b",
+  "files": {
+    "src/program/generate.cpp": "4d2ddd9017ae6210cfa34b6ad79ea560abd3a0baeebc717099cd69bcdc2b4e9b",
+    "docs/PROMPT_CACHE_TAIL.md": "0afb0fd39d29ba857c31af62790f5e63f82440b8cd08d74e463a524a0b860158"
+  },
+  "pristine_apply_check": true
+}

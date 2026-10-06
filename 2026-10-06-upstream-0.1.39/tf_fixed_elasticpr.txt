@@ -1,0 +1,2 @@
+code: PR senza --elastic identica bit per bit a upstream 0.1.39
+explain: PR senza --elastic identica bit per bit a upstream 0.1.39

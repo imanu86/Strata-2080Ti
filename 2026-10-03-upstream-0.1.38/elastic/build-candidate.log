@@ -1,0 +1,1140 @@
+[1/129] Building CXX object ggml\src\CMakeFiles\ggml-base.dir\ggml.cpp.obj
+[2/129] Building C object ggml\src\CMakeFiles\ggml-base.dir\ggml-alloc.c.obj
+[3/129] Building C object ggml\src\CMakeFiles\ggml-base.dir\ggml.c.obj
+[4/129] Building CXX object ggml\src\CMakeFiles\ggml-base.dir\ggml-backend.cpp.obj
+[5/129] Building CXX object ggml\src\CMakeFiles\ggml-base.dir\ggml-backend-meta.cpp.obj
+[6/129] Building CXX object ggml\src\CMakeFiles\ggml-base.dir\ggml-opt.cpp.obj
+[7/129] Building CXX object ggml\src\CMakeFiles\ggml-base.dir\ggml-threading.cpp.obj
+[8/129] Building C object ggml\src\CMakeFiles\ggml-base.dir\ggml-quants.c.obj
+[9/129] Building CXX object ggml\src\CMakeFiles\ggml-base.dir\gguf.cpp.obj
+[10/129] Building CUDA object CMakeFiles\strata_core.dir\src\core\device.cu.obj
+device.cu
+tmpxft_00001380_00000000-10_device.cudafe1.cpp
+[11/129] Building CXX object CMakeFiles\strata_core.dir\src\platform\memory.cpp.obj
+[12/129] Building CXX object CMakeFiles\strata_core.dir\src\core\graph.cpp.obj
+[13/129] Building CUDA object CMakeFiles\strata_core.dir\src\core\pinned.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\pinned.cu(42): warning #177-D: variable "strata::core::<unnamed>::kSharedArenaMagic" was declared but never referenced
+  constexpr char kSharedArenaMagic[16] = "STRATA-ARENA-V1";
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+pinned.cu
+tmpxft_00009a40_00000000-10_pinned.cudafe1.cpp
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\pinned.cu(59): warning C4100: 'shared_pack_hash': parametro senza riferimenti
+[14/129] Building CXX object CMakeFiles\strata_core.dir\src\core\weights.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(92): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(102): warning C4996: 'sscanf': This function or variable may be unsafe. Consider using sscanf_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(109): warning C4996: 'sscanf': This function or variable may be unsafe. Consider using sscanf_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(124): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(135): warning C4996: 'sscanf': This function or variable may be unsafe. Consider using sscanf_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(147): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(158): warning C4996: 'sscanf': This function or variable may be unsafe. Consider using sscanf_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(166): warning C4996: 'sscanf': This function or variable may be unsafe. Consider using sscanf_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\weights.cpp(279): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[15/129] Building CXX object CMakeFiles\strata_core.dir\src\core\layout.cpp.obj
+[16/129] Linking CXX static library ggml\src\ggml-base.lib
+[17/129] Building C object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\ggml-cpu.c.obj
+[18/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\ggml-cpu.cpp.obj
+[19/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\iqp.cpp.obj
+[20/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\hbm.cpp.obj
+[21/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\repack.cpp.obj
+[22/129] Building C object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\quants.c.obj
+[23/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\traits.cpp.obj
+[24/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\amx\amx.cpp.obj
+[25/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\amx\mmq.cpp.obj
+[26/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\binary-ops.cpp.obj
+[27/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\unary-ops.cpp.obj
+[28/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\vec.cpp.obj
+[29/129] Building C object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\arch\x86\quants.c.obj
+[30/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\arch\x86\repack.cpp.obj
+[31/129] Building CXX object ggml\src\CMakeFiles\ggml-cpu.dir\ggml-cpu\ops.cpp.obj
+[32/129] Linking CXX static library strata_core.lib
+[33/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\dequant_s2.cu.obj
+dequant_s2.cu
+tmpxft_00007e7c_00000000-10_dequant_s2.cudafe1.cpp
+[34/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\s2_gemv.cu.obj
+s2_gemv.cu
+tmpxft_0000793c_00000000-10_s2_gemv.cudafe1.cpp
+[35/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\s2_gemv_quads.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\s2_gemv_quads.cu(31): warning #177-D: variable "strata::kernels::<unnamed>::CODES_PER_BYTE_S2" was declared but never referenced
+  constexpr int CODES_PER_BYTE_S2 = 4;
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+s2_gemv_quads.cu
+tmpxft_00005f70_00000000-10_s2_gemv_quads.cudafe1.cpp
+[36/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\s_gemv.cu.obj
+s_gemv.cu
+tmpxft_00006d9c_00000000-10_s_gemv.cudafe1.cpp
+[37/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\s2_gemv_fast.cu.obj
+s2_gemv_fast.cu
+tmpxft_00002ab8_00000000-10_s2_gemv_fast.cudafe1.cpp
+[38/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\router_top10.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(89): warning #221-D: floating-point value does not fit in required floating-point type
+      float mx = -((float)(1e+300));
+                   ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(96): warning #221-D: floating-point value does not fit in required floating-point type
+          float v = (tid < nw) ? s_red[tid] : -((float)(1e+300));
+                                                ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(146): warning #221-D: floating-point value does not fit in required floating-point type
+          float bv = -((float)(1e+300));
+                       ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(162): warning #221-D: floating-point value does not fit in required floating-point type
+              float v = (tid < nw) ? s_red[tid] : -((float)(1e+300));
+                                                    ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(89): warning #221-D: floating-point value does not fit in required floating-point type
+      float mx = -((float)(1e+300));
+                   ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(96): warning #221-D: floating-point value does not fit in required floating-point type
+          float v = (tid < nw) ? s_red[tid] : -((float)(1e+300));
+                                                ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(146): warning #221-D: floating-point value does not fit in required floating-point type
+          float bv = -((float)(1e+300));
+                       ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\router_top10.cu(162): warning #221-D: floating-point value does not fit in required floating-point type
+              float v = (tid < nw) ? s_red[tid] : -((float)(1e+300));
+                                                    ^
+
+router_top10.cu
+tmpxft_00003c30_00000000-10_router_top10.cudafe1.cpp
+[39/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\quantize_act.cu.obj
+quantize_act.cu
+tmpxft_0000b244_00000000-10_quantize_act.cudafe1.cpp
+[40/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\rope.cu.obj
+rope.cu
+tmpxft_00005564_00000000-10_rope.cudafe1.cpp
+[41/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\s2_gemv_q8.cu.obj
+s2_gemv_q8.cu
+tmpxft_00008dfc_00000000-10_s2_gemv_q8.cudafe1.cpp
+[42/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\sampler.cu.obj
+sampler.cu
+tmpxft_0000b210_00000000-10_sampler.cudafe1.cpp
+[43/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\s2_expert_grouped.cu.obj
+s2_expert_grouped.cu
+tmpxft_00004a54_00000000-10_s2_expert_grouped.cudafe1.cpp
+[44/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\shared_expert.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\shared_expert.cu(71): warning #177-D: function "strata::kernels::<unnamed>::to_f16_kernel" was declared but never referenced
+  __declspec(__global__) void to_f16_kernel(const float* __restrict in, uint16_t* __restrict out, int n) {
+                              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+shared_expert.cu
+tmpxft_000070c4_00000000-10_shared_expert.cudafe1.cpp
+[45/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\gr.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\gr.cu(112): warning #177-D: function "strata::kernels::<unnamed>::block_sum" was declared but never referenced
+  __declspec(__device__) double block_sum(double v, double* scratch) {
+                                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+gr.cu
+tmpxft_00006fb4_00000000-10_gr.cudafe1.cpp
+[46/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\gdn.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\gdn.cu(35): warning #177-D: function "strata::kernels::<unnamed>::softplus_f" was declared but never referenced
+  __declspec(__device__) __forceinline float softplus_f(float x) { return x > 20.0f ? x : log1pf(expf(x)); }
+                                             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+gdn.cu
+tmpxft_000068ec_00000000-10_gdn.cudafe1.cpp
+[47/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\qsa.cu.obj
+qsa.cu
+tmpxft_00005ae8_00000000-10_qsa.cudafe1.cpp
+[48/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\elementwise.cu.obj
+elementwise.cu
+tmpxft_00004290_00000000-10_elementwise.cudafe1.cpp
+[49/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\bf16_gemv.cu.obj
+bf16_gemv.cu
+tmpxft_000066fc_00000000-10_bf16_gemv.cudafe1.cpp
+[50/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_bf16.cu.obj
+native_bf16.cu
+tmpxft_00006458_00000000-10_native_bf16.cudafe1.cpp
+[51/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_gr_norm.cu.obj
+native_gr_norm.cu
+tmpxft_00003668_00000000-10_native_gr_norm.cudafe1.cpp
+[52/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_moe.cu.obj
+native_moe.cu
+tmpxft_0000b5fc_00000000-10_native_moe.cudafe1.cpp
+[53/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_gdn.cu.obj
+native_gdn.cu
+tmpxft_00006b64_00000000-10_native_gdn.cudafe1.cpp
+[54/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_gr_postops.cu.obj
+native_gr_postops.cu
+tmpxft_0000b56c_00000000-10_native_gr_postops.cudafe1.cpp
+[55/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_router.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\native_router.cu(56): warning #221-D: floating-point value does not fit in required floating-point type
+      float maximum = -((float)(1e+300));
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\native_router.cu(87): warning #221-D: floating-point value does not fit in required floating-point type
+              values[expert / 32] = -((float)(1e+300));
+                                      ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\native_router.cu(56): warning #221-D: floating-point value does not fit in required floating-point type
+      float maximum = -((float)(1e+300));
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\native_router.cu(87): warning #221-D: floating-point value does not fit in required floating-point type
+              values[expert / 32] = -((float)(1e+300));
+                                      ^
+
+native_router.cu
+tmpxft_0000b564_00000000-10_native_router.cudafe1.cpp
+[56/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_mmvq.cu.obj
+native_mmvq.cu
+tmpxft_00008adc_00000000-10_native_mmvq.cudafe1.cpp
+[57/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_gdn_preprocess.cu.obj
+native_gdn_preprocess.cu
+tmpxft_0000b434_00000000-10_native_gdn_preprocess.cudafe1.cpp
+[58/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_qsa.cu.obj
+native_qsa.cu
+tmpxft_00007d48_00000000-10_native_qsa.cudafe1.cpp
+[59/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_rope.cu.obj
+native_rope.cu
+tmpxft_00008e58_00000000-10_native_rope.cudafe1.cpp
+[60/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_ple_postops.cu.obj
+native_ple_postops.cu
+tmpxft_00007b1c_00000000-10_native_ple_postops.cudafe1.cpp
+[61/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_flash_attn.cu.obj
+native_flash_attn.cu
+tmpxft_0000891c_00000000-10_native_flash_attn.cudafe1.cpp
+[62/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_qsa_indexer.cu.obj
+native_qsa_indexer.cu
+tmpxft_0000b590_00000000-10_native_qsa_indexer.cudafe1.cpp
+[63/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\native_qsa_score.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\native_qsa_score.cu(31): warning #177-D: variable "strata::kernels::<unnamed>::STRIDE" was declared but never referenced
+  constexpr int D=128, HEADS=4, R=4, ROWS=32, WARPS=2, STRIDE=36, COMBINE=68;
+                                                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\native_qsa_score.cu(31): warning #177-D: variable "strata::kernels::<unnamed>::COMBINE" was declared but never referenced
+  constexpr int D=128, HEADS=4, R=4, ROWS=32, WARPS=2, STRIDE=36, COMBINE=68;
+                                                                  ^
+
+native_qsa_score.cu
+tmpxft_00009f18_00000000-10_native_qsa_score.cudafe1.cpp
+[64/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\kv_q8.cu.obj
+kv_q8.cu
+tmpxft_0000b0d4_00000000-10_kv_q8.cudafe1.cpp
+[65/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\ple.cu.obj
+ple.cu
+tmpxft_00006b70_00000000-10_ple.cudafe1.cpp
+[66/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\kv_q4.cu.obj
+kv_q4.cu
+tmpxft_0000ace8_00000000-10_kv_q4.cudafe1.cpp
+[67/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\kv_stream.cu.obj
+kv_stream.cu
+tmpxft_0000b74c_00000000-10_kv_stream.cudafe1.cpp
+[68/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\cvec.cu.obj
+cvec.cu
+tmpxft_0000b1a8_00000000-10_cvec.cudafe1.cpp
+[69/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\qsa_decode_attn.cu.obj
+qsa_decode_attn.cu
+tmpxft_000012d4_00000000-10_qsa_decode_attn.cudafe1.cpp
+[70/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\fused_gr.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\fused_gr.cu(321): warning #177-D: variable "strata::kernels::<unnamed>::TQ3" was declared but never referenced
+  constexpr int TQ3 = N / 8 / 32;                    
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fused_gr.cu
+tmpxft_00005e14_00000000-10_fused_gr.cudafe1.cpp
+[71/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\fused_gdn.cu.obj
+fused_gdn.cu
+tmpxft_0000a1d8_00000000-10_fused_gdn.cudafe1.cpp
+[72/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\qsa_prompt_attn.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(141): warning #221-D: floating-point value does not fit in required floating-point type
+      if (t < 16) { S.mrow[t] = -((float)(1e+300)); S.lsum[t] = 0.0f; }
+                                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(301): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid][c] = c < nh ? sc[0] * qdown : -((float)(1e+300));
+                                                       ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(302): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid][c + 1] = c + 1 < nh ? sc[1] * qdown : -((float)(1e+300));
+                                                               ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(303): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid + 8][c] = c < nh ? sc[2] * qdown : -((float)(1e+300));
+                                                           ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(304): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid + 8][c + 1] = c + 1 < nh ? sc[3] * qdown : -((float)(1e+300));
+                                                                   ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(311): warning #221-D: floating-point value does not fit in required floating-point type
+              float x[PER], mx = -((float)(1e+300));
+                                   ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(321): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float e = x[j] == -((float)(1e+300)) ? 0.0f : exp2f(x[j] - m_new);
+                                            ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(329): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float a = m_old == -((float)(1e+300)) ? 0.0f : exp2f(m_old - m_new);
+                                             ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(486): warning #221-D: floating-point value does not fit in required floating-point type
+      if (t < 16) { S.mrow[t] = -((float)(1e+300)); S.lsum[t] = 0.0f; }
+                                  ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(578): warning #221-D: floating-point value does not fit in required floating-point type
+              float x[4], mx = -((float)(1e+300));
+                                 ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(583): warning #221-D: floating-point value does not fit in required floating-point type
+                                    : -((float)(1e+300));
+                                        ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(593): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float e = x[j] == -((float)(1e+300)) ? 0.0f : exp2f(x[j] - m_new);
+                                            ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(601): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float a = m_old == -((float)(1e+300)) ? 0.0f : exp2f(m_old - m_new);
+                                             ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(141): warning #221-D: floating-point value does not fit in required floating-point type
+      if (t < 16) { S.mrow[t] = -((float)(1e+300)); S.lsum[t] = 0.0f; }
+                                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(301): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid][c] = c < nh ? sc[0] * qdown : -((float)(1e+300));
+                                                       ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(302): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid][c + 1] = c + 1 < nh ? sc[1] * qdown : -((float)(1e+300));
+                                                               ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(303): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid + 8][c] = c < nh ? sc[2] * qdown : -((float)(1e+300));
+                                                           ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(304): warning #221-D: floating-point value does not fit in required floating-point type
+              S.s[gid + 8][c + 1] = c + 1 < nh ? sc[3] * qdown : -((float)(1e+300));
+                                                                   ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(311): warning #221-D: floating-point value does not fit in required floating-point type
+              float x[PER], mx = -((float)(1e+300));
+                                   ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(321): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float e = x[j] == -((float)(1e+300)) ? 0.0f : exp2f(x[j] - m_new);
+                                            ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(329): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float a = m_old == -((float)(1e+300)) ? 0.0f : exp2f(m_old - m_new);
+                                             ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(486): warning #221-D: floating-point value does not fit in required floating-point type
+      if (t < 16) { S.mrow[t] = -((float)(1e+300)); S.lsum[t] = 0.0f; }
+                                  ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(578): warning #221-D: floating-point value does not fit in required floating-point type
+              float x[4], mx = -((float)(1e+300));
+                                 ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(583): warning #221-D: floating-point value does not fit in required floating-point type
+                                    : -((float)(1e+300));
+                                        ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(593): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float e = x[j] == -((float)(1e+300)) ? 0.0f : exp2f(x[j] - m_new);
+                                            ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\kernels\cuda\qsa_prompt_attn.cu(601): warning #221-D: floating-point value does not fit in required floating-point type
+                  const float a = m_old == -((float)(1e+300)) ? 0.0f : exp2f(m_old - m_new);
+                                             ^
+
+qsa_prompt_attn.cu
+tmpxft_00005784_00000000-10_qsa_prompt_attn.cudafe1.cpp
+[73/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\dequant_bf16.cu.obj
+dequant_bf16.cu
+tmpxft_0000b6e8_00000000-10_dequant_bf16.cudafe1.cpp
+[74/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\qsa_select.cu.obj
+qsa_select.cu
+tmpxft_0000b7c0_00000000-10_qsa_select.cudafe1.cpp
+[75/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\verify_kernels.cu.obj
+verify_kernels.cu
+tmpxft_00006494_00000000-10_verify_kernels.cudafe1.cpp
+[76/129] Building CXX object CMakeFiles\strata_kernels.dir\src\kernels\ngram.cpp.obj
+[77/129] Building CXX object CMakeFiles\strata_kernels.dir\src\ngram\ple_reader.cpp.obj
+[78/129] Building CXX object CMakeFiles\strata_kernels.dir\src\platform\direct_file.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\platform\direct_file.cpp(63): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[79/129] Building CUDA object CMakeFiles\strata_kernels.dir\src\kernels\cuda\iq_kernels.cu.obj
+iq_kernels.cu
+tmpxft_00007578_00000000-10_iq_kernels.cudafe1.cpp
+[80/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\expert.cpp.obj
+[81/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\expert_layout.cpp.obj
+[82/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\q2_avx2.cpp.obj
+[83/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\pool.cpp.obj
+[84/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\native_expert.cpp.obj
+[85/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\iq_avx512.cpp.obj
+[86/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\kq_avx2.cpp.obj
+[87/129] Linking CXX static library ggml\src\ggml-cpu.lib
+[88/129] Linking CXX static library strata_kernels.lib
+[89/129] Building CXX object CMakeFiles\strata_kernels_cpu.dir\src\kernels\cpu\iq_avx2.cpp.obj
+[90/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\layer.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\layer.cpp(502): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\layer.cpp(503): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\layer.cpp(848): warning C4189: 'width': variabile locale inizializzata ma senza riferimenti
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\layer.cpp(848): warning C4189: 'n_bid': variabile locale inizializzata ma senza riferimenti
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\layer.cpp(1170): warning C4189: 'hcd': variabile locale inizializzata ma senza riferimenti
+[91/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\session.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\session.cpp(915): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[92/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\remote_experts.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\remote_experts.cpp(77): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\remote_experts.cpp(202): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[93/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\expert_source.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\expert_source.cpp(845): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\expert_source.cpp(1414): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\expert_source.cpp(1420): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\expert_source.cpp(1878): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\expert_source.cpp(2506): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[94/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\expert_cache.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\expert_cache.cpp(19): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\expert_cache.cpp(126): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[95/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\native_head.cpp.obj
+[96/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\native_dense.cpp.obj
+[97/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\verify.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(59): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(132): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(334): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(361): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(407): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(913): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(1189): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(1306): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\verify.cpp(1324): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[98/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\mtp.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/core/coupled_draft.hpp(54): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\mtp.cpp(88): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\mtp.cpp(187): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\mtp.cpp(309): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\mtp.cpp(741): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[99/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\conversation_snapshot.cpp.obj
+[100/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\conversation_state.cpp.obj
+[101/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\conversation_memory.cpp.obj
+[102/129] Linking CXX static library strata_kernels_cpu.lib
+[103/129] Building CXX object CMakeFiles\strata_engine.dir\src\core\peer_experts.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\core\peer_experts.cpp(183): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[104/129] Building CUDA object CMakeFiles\strata_mmq.dir\src\prefill\moe_fused.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused.cu(41): warning #177-D: variable "strata::prefill::fused::<unnamed>::MAGIC" was declared but never referenced
+  constexpr int MAGIC = 0x4B400000;       
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused.cu(46): warning #177-D: variable "strata::prefill::fused::<unnamed>::O_GU_CODES" was declared but never referenced
+  constexpr size_t O_GU_CODES = 0, O_D_CODES = (size_t) 1280 * 640, O_GU_SC = O_D_CODES + (size_t) 2560 * 160,
+                   ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused.cu(47): warning #177-D: variable "strata::prefill::fused::<unnamed>::O_D_SC" was declared but never referenced
+                   O_D_SC = O_GU_SC + (size_t) 1280 * 40 * 2;
+                   ^
+
+moe_fused.cu
+tmpxft_00007718_00000000-10_moe_fused.cudafe1.cpp
+[105/129] Building CUDA object CMakeFiles\strata_mmq.dir\src\prefill\moe_mmq.cu.obj
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+moe_mmq.cu
+tmpxft_00008060_00000000-10_moe_mmq.cudafe1.cpp
+[106/129] Building CUDA object CMakeFiles\strata_mmq.dir\src\prefill\moe_fused_iq.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused_iq.cu(49): warning #177-D: variable "strata::prefill::fused::<unnamed>::MAGIC" was declared but never referenced
+  constexpr int MAGIC = 0x4B400000;       
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused_iq.cu(50): warning #177-D: variable "strata::prefill::fused::<unnamed>::MAGICF" was declared but never referenced
+  constexpr float MAGICF = 12582912.0f;
+                  ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused_iq.cu(59): warning #177-D: variable "strata::prefill::fused::<unnamed>::GU_ROWS_K" was declared but never referenced
+  constexpr int GU_ROWS_K = 2560, D_ROWS_K = 640;   
+                ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused_iq.cu(59): warning #177-D: variable "strata::prefill::fused::<unnamed>::D_ROWS_K" was declared but never referenced
+  constexpr int GU_ROWS_K = 2560, D_ROWS_K = 640;   
+                                  ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused_iq.cu(70): warning #177-D: function "strata::prefill::fused::<unnamed>::block_bytes" was declared but never referenced
+  __declspec(__host__) __declspec(__device__) constexpr int block_bytes(int t) {
+                                                            ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\moe_fused_iq.cu(74): warning #177-D: function "strata::prefill::fused::<unnamed>::per16" was declared but never referenced
+  __declspec(__host__) __declspec(__device__) constexpr bool per16(int t) { return t == T_IQ2_XS || t == T_IQ2_S; }
+                                                             ^
+
+moe_fused_iq.cu
+tmpxft_0000b7e0_00000000-10_moe_fused_iq.cudafe1.cpp
+[107/129] Building CUDA object CMakeFiles\strata_mmq.dir\src\prefill\ggml_cuda_host.cu.obj
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:/ds4_work/strata/Strata/third_party/llama.cpp/ggml/src/ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+ggml_cuda_host.cu
+tmpxft_0000b0f8_00000000-10_ggml_cuda_host.cudafe1.cpp
+[108/129] Building CUDA object CMakeFiles\strata_mmq.dir\D_\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\quantize.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+quantize.cu
+tmpxft_000078d8_00000000-10_quantize.cudafe1.cpp
+[109/129] Building CUDA object CMakeFiles\strata_mmq.dir\ae374c873d24c9e1c4fb696a3e499af2\src\ggml-cuda\template-instances\mmq-instance-q2_0.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-q2_0.cu
+tmpxft_00007578_00000000-10_mmq-instance-q2_0.cudafe1.cpp
+[110/129] Building CUDA object CMakeFiles\strata_mmq.dir\cc2f8eb3b2e2fb113f1987b5980a406f\ggml-cuda\template-instances\mmq-instance-iq2_xxs.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-iq2_xxs.cu
+tmpxft_00006a18_00000000-10_mmq-instance-iq2_xxs.cudafe1.cpp
+[111/129] Building CUDA object CMakeFiles\strata_mmq.dir\ae374c873d24c9e1c4fb696a3e499af2\src\ggml-cuda\template-instances\mmq-instance-iq2_xs.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-iq2_xs.cu
+tmpxft_00007d3c_00000000-10_mmq-instance-iq2_xs.cudafe1.cpp
+[112/129] Building CUDA object CMakeFiles\strata_mmq.dir\ae374c873d24c9e1c4fb696a3e499af2\src\ggml-cuda\template-instances\mmq-instance-iq2_s.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-iq2_s.cu
+tmpxft_000043ac_00000000-10_mmq-instance-iq2_s.cudafe1.cpp
+[113/129] Building CUDA object CMakeFiles\strata_mmq.dir\cc2f8eb3b2e2fb113f1987b5980a406f\ggml-cuda\template-instances\mmq-instance-iq3_xxs.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-iq3_xxs.cu
+tmpxft_0000775c_00000000-10_mmq-instance-iq3_xxs.cudafe1.cpp
+[114/129] Building CUDA object CMakeFiles\strata_mmq.dir\ae374c873d24c9e1c4fb696a3e499af2\src\ggml-cuda\template-instances\mmq-instance-iq3_s.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-iq3_s.cu
+tmpxft_000082d0_00000000-10_mmq-instance-iq3_s.cudafe1.cpp
+[115/129] Building CUDA object CMakeFiles\strata_mmq.dir\ae374c873d24c9e1c4fb696a3e499af2\src\ggml-cuda\template-instances\mmq-instance-iq4_nl.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-iq4_nl.cu
+tmpxft_00006b0c_00000000-10_mmq-instance-iq4_nl.cudafe1.cpp
+[116/129] Building CUDA object CMakeFiles\strata_mmq.dir\ae374c873d24c9e1c4fb696a3e499af2\src\ggml-cuda\template-instances\mmq-instance-iq4_xs.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-iq4_xs.cu
+tmpxft_00000efc_00000000-10_mmq-instance-iq4_xs.cudafe1.cpp
+[117/129] Linking CXX static library strata_engine.lib
+[118/129] Building CUDA object CMakeFiles\strata_prefill.dir\src\prefill\gemm.cu.obj
+gemm.cu
+tmpxft_0000a7f0_00000000-10_gemm.cudafe1.cpp
+[119/129] Building CUDA object CMakeFiles\strata_prefill.dir\src\prefill\kernels.cu.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\kernels.cu(626): warning #221-D: floating-point value does not fit in required floating-point type
+      float mx = -((float)(1e+300));
+                   ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\kernels.cu(648): warning #221-D: floating-point value does not fit in required floating-point type
+          if ((ex & 31) == lane) { v[ex / 32] = -((float)(1e+300)); selected_sum += best; }
+                                                  ^
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\kernels.cu(626): warning #221-D: floating-point value does not fit in required floating-point type
+      float mx = -((float)(1e+300));
+                   ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\kernels.cu(648): warning #221-D: floating-point value does not fit in required floating-point type
+          if ((ex & 31) == lane) { v[ex / 32] = -((float)(1e+300)); selected_sum += best; }
+                                                  ^
+
+kernels.cu
+tmpxft_00000590_00000000-10_kernels.cudafe1.cpp
+[120/129] Building CXX object CMakeFiles\strata_prefill.dir\src\prefill\prefill.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(104): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(141): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(165): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(175): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(238): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(506): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(607): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(709): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(717): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(724): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(898): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(903): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(935): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(966): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1076): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1092): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1106): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1110): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1341): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1585): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2128): warning C4457: se si dichiara 'n', il parametro della funzione verr… nascosto
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1307): note: vedere la dichiarazione di 'n'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2132): warning C4456: se si dichiara 'g', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1311): note: vedere la dichiarazione di 'g'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2162): warning C4457: se si dichiara 'n', il parametro della funzione verr… nascosto
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1307): note: vedere la dichiarazione di 'n'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2383): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2540): warning C4244: 'argomento': conversione da 'const int64_t' a 'int32_t'. Possibile perdita di dati.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1367): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1813): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1834): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1845): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1867): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1913): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1914): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1915): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1920): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(1935): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2547): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2621): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2623): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2650): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\prefill\prefill.cpp(2710): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+[121/129] Building CXX object CMakeFiles\strata_spec.dir\src\spec\suffix_drafter.cpp.obj
+[122/129] Building CXX object CMakeFiles\strata_spec.dir\src\spec\controller.cpp.obj
+[123/129] Building CXX object CMakeFiles\strata_spec.dir\src\spec\draft_policy.cpp.obj
+[124/129] Building CUDA object CMakeFiles\strata_mmq.dir\ae374c873d24c9e1c4fb696a3e499af2\src\ggml-cuda\template-instances\mmq-instance-q8_0.cu.obj
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(636): warning #221-D: floating-point value does not fit in required floating-point type
+              return -((float)(1e+300));
+                       ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                  ^
+
+D:\ds4_work\strata\Strata\third_party\llama.cpp\ggml\src\ggml-cuda\common.cuh(638): warning #221-D: floating-point value does not fit in required floating-point type
+              return make_half2(-((float)(1e+300)), -((float)(1e+300)));
+                                                      ^
+
+mmq-instance-q8_0.cu
+tmpxft_00008270_00000000-10_mmq-instance-q8_0.cudafe1.cpp
+[125/129] Linking CXX static library strata_mmq.lib
+[126/129] Linking CXX static library strata_prefill.lib
+[127/129] Linking CXX static library strata_spec.lib
+[128/129] Building CXX object CMakeFiles\strata.dir\src\program\generate.cpp.obj
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/core/coupled_draft.hpp(54): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(236): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(237): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(238): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(239): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(240): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/kernels/cpu/pool.hpp(243): warning C4324: 'strata::kernels::cpu::ExpertPool': la struttura Š stata compilata in base all'identificatore di allineamento
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\include\strata/core/emulate.hpp(17): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(118): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(870): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(879): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2494): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3336): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3613): warning C4244: '=': conversione da 'const int64_t' a 'int32_t'. Possibile perdita di dati.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4062): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4159): warning C4456: se si dichiara 'sp', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3572): note: vedere la dichiarazione di 'sp'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4306): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4760): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5387): warning C4456: se si dichiara 'tok', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3652): note: vedere la dichiarazione di 'tok'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5441): warning C4456: se si dichiara 'hdr', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3592): note: vedere la dichiarazione di 'hdr'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5734): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5735): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5738): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5978): warning C4456: se si dichiara 'sbuf', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2115): note: vedere la dichiarazione di 'sbuf'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6243): warning C4456: se si dichiara 'pool', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2844): note: vedere la dichiarazione di 'pool'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6251): warning C4456: se si dichiara 'pool', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2844): note: vedere la dichiarazione di 'pool'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6758): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6783): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6862): warning C4456: se si dichiara 'sbuf', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2115): note: vedere la dichiarazione di 'sbuf'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(7119): warning C4456: se si dichiara 'hdr', la dichiarazione locale precedente verr… nascosta
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3592): note: vedere la dichiarazione di 'hdr'
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1100): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1241): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1349): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1351): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1360): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1362): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1500): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1606): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1841): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(1879): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2141): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2184): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2185): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2418): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2420): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2526): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2784): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(2795): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3021): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3347): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3450): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3600): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(3624): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4210): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4481): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4483): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4941): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5238): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5308): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5438): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5589): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5607): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5641): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5697): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5790): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(5993): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6154): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6196): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6314): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6361): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6927): warning C4996: 'getenv': This function or variable may be unsafe. Consider using _dupenv_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(6929): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(7094): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(7114): warning C4996: 'fopen': This function or variable may be unsafe. Consider using fopen_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1461): warning C4244: '=': conversione da '__int64' a 'int'. Possibile perdita di dati.
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1461): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4722): note: vedere il riferimento all'istanza 'void std::vector<int32_t,std::allocator<int>>::assign<std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,0>(_Iter,_Iter)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Ty=int64_t,
+            _Iter=std::_Vector_iterator<std::_Vector_val<std::_Simple_types<int64_t>>>
+        ]
+C:\Users\imanu\Documents\Codex\2026-10-01\https-github-com-imanu86-moe-aggressive\strata-main-alignment\elastic038_20261003\source\src\program\generate.cpp(4722): note: vedere il primo riferimento a 'std::vector<int32_t,std::allocator<int>>::assign' in 'main::<lambda_32>::operator ()'
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1491): note: vedere il riferimento all'istanza 'void std::vector<int32_t,std::allocator<int>>::_Assign_counted_range<__int64*>(_Iter,const unsigned __int64)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Iter=__int64 *
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(4813): warning C4244: '=': conversione da '__int64' a 'int'. Possibile perdita di dati.
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(4813): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1491): note: vedere il riferimento all'istanza 'void std::vector<int32_t,std::allocator<int>>::_Assign_counted_range<__int64*>(_Iter,const unsigned __int64)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Iter=__int64 *
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1475): note: vedere il riferimento all'istanza '_OutIt *std::_Copy_n_unchecked4<__int64*,unsigned __int64,int*>(_InIt,_SizeTy,_OutIt)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _OutIt=int *,
+            _InIt=__int64 *,
+            _SizeTy=unsigned __int64
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(462): warning C4244: 'inizializzazione': conversione da '__int64' a '_Ty'. Possibile perdita di dati.
+        with
+        [
+            _Ty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(462): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1436): note: vedere il riferimento all'istanza 'int *std::_Uninitialized_copy_n<__int64*,std::allocator<int>>(_InIt,size_t,int *,_Alloc &)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _InIt=__int64 *,
+            _Alloc=std::allocator<int>
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(1938): note: vedere il riferimento all'istanza 'void std::_Uninitialized_backout_al<std::allocator<int>>::_Emplace_back<__int64&>(__int64 &)' della funzione modello di cui Š in corso la compilazione
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: vedere il riferimento all'istanza 'void std::_Default_allocator_traits<_Alloc>::construct<_Ty,__int64&>(_Alloc &,_Objty *const ,__int64 &)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Alloc=std::allocator<int>,
+            _Ty=int,
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: vedere il riferimento all'istanza '_Ty *std::construct_at<_Objty,__int64&>(_Ty *const ,__int64 &) noexcept(<expr>)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Ty=int,
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(463): warning C4244: 'inizializzazione': conversione da '__int64' a '_Objty'. Possibile perdita di dati.
+        with
+        [
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(463): note: il contesto di creazione dell'istanza del modello (prima il meno recente) Š
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(1844): note: vedere il riferimento all'istanza 'void std::_Default_allocator_traits<_Alloc>::construct<_Ty,__int64&>(_Alloc &,_Objty *const ,__int64 &)' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Alloc=std::allocator<int>,
+            _Ty=int,
+            _Objty=int
+        ]
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(730): note: vedere il riferimento all'istanza '_Ty *std::construct_at<_Objty,__int64&>(_Ty *const ,__int64 &) noexcept' della funzione modello di cui Š in corso la compilazione
+        with
+        [
+            _Ty=int,
+            _Objty=int
+        ]
+[129/129] Linking CXX executable strata.exe

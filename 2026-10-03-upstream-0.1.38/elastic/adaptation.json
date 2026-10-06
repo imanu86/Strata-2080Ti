@@ -1,0 +1,40 @@
+{
+  "files": {
+    "include/strata/core/expert_cache.hpp": "6f553bcb5c409ef66c2ea85e9b697f0b6d6cd73dbe880fe50ba21c7600e9d614",
+    "src/core/expert_cache.cpp": "8556816251688b7caa8be1691d4af70273018221ca5631df59265fcd6c6a94ac",
+    "include/strata/prefill/prefill.hpp": "895e8baf9bad78e1960a9f3775082dcf5d6f7a8d4d0728d182778c57e47a60cd",
+    "src/prefill/prefill.cpp": "7da2921d4973b60ba88572fb0b06ca68c9f85bbc018537dfc7ff8350dcd67795",
+    "src/program/generate.cpp": "6c50144fe96769e32e3958a76fad978ddd58c4d1b22f5af619858c35675f39bc",
+    "CMakeLists.txt": "7c35862b9090ba20031e8174e314aeb0860e1c15e3bc03b938df8e3f2ff8d3de",
+    "tests/core/expert_cache_elastic_test.cpp": "9408c819e2f1ea8047809e7b32381889664223d6ec65ad800ac1b9edd939b1dd",
+    "docs/ELASTIC_CACHE.md": "a343955274341aec81dbed3d2bed1d9468c47b4bd336322c4087fa2603a0170a"
+  },
+  "scope": "Daily elastic cache only; CUDA guard/link and upstream038 context adaptation; no checkpoint/topk/sm75 kernel port",
+  "upstream": "99f3dbd0b21d1401b3769e0c0d963913607f380b",
+  "original_author": "Claude Opus 5.5",
+  "porter": "Codex",
+  "rejected_original_hunks_retained": true,
+  "upstream_adaptations": [
+    "HIP compile guard (not hardware tested)",
+    "CUDA driver link",
+    "resident CPU complement falls back to fixed cache",
+    "batched-embedding token buffers cover chunk_max"
+  ],
+  "patch_sha256": "04d88af8556163782f39ab916dc238ec8fa0a1c29108a9ae109ee52701366eee",
+  "pre_lf_file_hashes": {
+    "include/strata/core/expert_cache.hpp": "c9db5736de6039284557e5245a0645a55325dc705623126019ce04d7c604ceea",
+    "src/core/expert_cache.cpp": "8556816251688b7caa8be1691d4af70273018221ca5631df59265fcd6c6a94ac",
+    "include/strata/prefill/prefill.hpp": "2400a653bcf548badf0834d001c8c7a93b79f7284f72bff367e3249c79e4fa32",
+    "src/prefill/prefill.cpp": "7da2921d4973b60ba88572fb0b06ca68c9f85bbc018537dfc7ff8350dcd67795",
+    "src/program/generate.cpp": "5b388b9713283ee32f88d2b0f0a5f6677084eb6ad40e1ee3bdd3793b8d647288",
+    "CMakeLists.txt": "7c35862b9090ba20031e8174e314aeb0860e1c15e3bc03b938df8e3f2ff8d3de",
+    "tests/core/expert_cache_elastic_test.cpp": "52e748cf2edc88c519b6af375813b2802f5d847819f7a5172ddb6290e0af20fa"
+  },
+  "original_elastic_commits": [
+    "b8a51dbc413d99f1c04c151f1bb16e238c84af10",
+    "50a37fa0bcf73c2dcdbe4fbe0f639fa50b23ce59",
+    "16755a67abfa84b5d2b76501b7260526db62078a",
+    "8966cafb1287598d4f63028b5345f66c85387dd6"
+  ],
+  "original_coauthor": "Claude Opus 5.5 <noreply@anthropic.com>"
+}
