@@ -1332,7 +1332,9 @@ class IncrementalPrompts(unittest.TestCase):
         self.assertIsNotNone(self.svc.prompts)
         msgs = [{"role": "system", "content": "Be brief."}]
         for turn in range(6):
-            msgs.append({"role": "user", "content": f"question {turn} <|im_end|> é你 " * (turn + 1)})
+            # no control-token text here: since #931 a message holding one is encoded in full (its tag stays text),
+            # outside the incremental encoder this test is about; the literal tests cover that case
+            msgs.append({"role": "user", "content": f"question {turn} é你 " * (turn + 1)})
             status, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 64, "messages": msgs})
             self.assertEqual(status, 200, b)
             prompt = self.svc.template.render(msgs)
