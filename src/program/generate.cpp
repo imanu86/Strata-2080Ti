@@ -7212,8 +7212,10 @@ int main(int argc, char** argv) {
                     if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
                     // fork: the core never leaves - unless STRATA_ELASTIC_CORE_ADAPT=1, where the core keeps its
                     // size (never shrunk, never lent) but its experts are swap victims like the tail's
-                    // (lab P3: el_core counts CUDA0's slots; a later stage's layers hold slots of their own cache)
-                    else if (r[e] >= el_core || core_adapt || (multi_gpu && stage_of(l) != 0)) vict.emplace_back(u[e], e);
+                    // (lab P3, STRATA_PIPELINE_ELASTIC only: el_core counts CUDA0's slots, a later stage's layers hold
+                    // slots of their own cache - without the opt-in the rule stays as it was)
+                    else if (r[e] >= el_core || core_adapt || (pipe_elastic_env() && multi_gpu && stage_of(l) != 0))
+                        vict.emplace_back(u[e], e);
                 }
                 if (cand.empty() || vict.empty()) continue;
                 std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
@@ -9458,8 +9460,9 @@ int main(int argc, char** argv) {
             float pl_theta = [] {   // a speculative window is launched only when its estimated chance is at least this
                 const char* v = pipe_dbg_env("STRATA_PIPELINE_THETA");
                 // architectds d6f62341: 0.10 once the verified path is served first (a wrong guess costs little then);
-                // measured there, RTX 3060 + RTX 5070 Ti, against 0.20: 150K +2.4%, short chats -0.1%.  Was 0.20.
-                return v ? (float) std::atof(v) : 0.10f;
+                // measured there, RTX 3060 + RTX 5070 Ti, against 0.20: 150K +2.4%, short chats -0.1%.  Lab P3: 0.10
+                // only in the STRATA_PIPELINE_ELASTIC=1 profile, where the verified path is served first; else 0.20
+                return v ? (float) std::atof(v) : pipe_elastic_env() ? 0.10f : 0.2f;
             }();
             int pl_force_miss = [] {   // exactness test: every k-th speculative window gets a wrong first token
                 const char* v = pipe_dbg_env("STRATA_PIPELINE_FORCE_MISS");
@@ -10546,13 +10549,14 @@ int main(int argc, char** argv) {
                 // runs through its drafts with a match of 12+ tokens and the policy's rate for such matches is >= 0.85
                 // (that rate is B's p_on).  The chain still runs; an off-path verdict starts afresh.  STRATA_PIPELINE_
                 // LOOKUP_NEXT=0 / LOOKUP_ANY=0 (read under STRATA_PIPELINE_DEBUG=1): off.
+                // (lab P3: on by default only in the STRATA_PIPELINE_ELASTIC=1 profile; else off, as before the port)
                 static const bool pl_lookup_next = [] {
                     const char* v = pipe_dbg_env("STRATA_PIPELINE_LOOKUP_NEXT");
-                    return v == nullptr || std::atoi(v) != 0;
+                    return v != nullptr ? std::atoi(v) != 0 : pipe_elastic_env();
                 }();
                 static const bool pl_lookup_any = [] {
                     const char* v = pipe_dbg_env("STRATA_PIPELINE_LOOKUP_ANY");
-                    return v == nullptr || std::atoi(v) != 0;
+                    return v != nullptr ? std::atoi(v) != 0 : pipe_elastic_env();
                 }();
                 int64_t pl_lk_next = 0, pl_lk_any = 0;
                 auto lookup_next = [&]() {
@@ -10585,11 +10589,12 @@ int main(int argc, char** argv) {
                     ++pl_lk_next;
                     tre("CD", A.seq + 1, 4, (int) (1000.0f * B.p_on));
                 };
-                // architectds 6175807a: the verified path served first (see the loop's order); STRATA_PIPELINE_YIELD=0
-                // (read under STRATA_PIPELINE_DEBUG=1): the previous order
+                // architectds 6175807a: the verified path served first (see the loop's order).  Lab P3: on by default only
+                // in the STRATA_PIPELINE_ELASTIC=1 profile; STRATA_PIPELINE_YIELD=0/1 (read under STRATA_PIPELINE_DEBUG=1)
+                // sets it either way
                 static const bool pl_yield = [] {
                     const char* v = pipe_dbg_env("STRATA_PIPELINE_YIELD");
-                    return v == nullptr || std::atoi(v) != 0;
+                    return v != nullptr ? std::atoi(v) != 0 : pipe_elastic_env();
                 }();
                 const Clock::time_point pl_t0 = Clock::now();
                 for (int st = 0; st < 2; ++st)
