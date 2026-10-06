@@ -2018,8 +2018,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata: elastic cache does not support peer or remote expert tiers; using fixed cache\n");
         o.elastic = false;
     }
-    if (o.elastic && o.batch != 0) {   // 0.1.39's batch slots share the cache between requests: not validated with it
-        std::fprintf(stderr, "strata: elastic cache is not validated with --batch/--slots; using fixed cache\n");
+    // --batch: the elastic step runs between two batch windows and at a request's start, before its prompt lends any
+    // slot; the pipelined groups (--batch-groups > 1) keep windows of several stages in flight: not with it
+    if (o.elastic && o.batch != 0 && o.batch_groups > 1) {
+        std::fprintf(stderr, "strata: elastic cache is not validated with --batch-groups; using fixed cache\n");
         o.elastic = false;
     }
     {   // --host-core / STRATA_HOST_CORE, before the pool and the session pin any thread
@@ -8354,6 +8356,15 @@ int main(int argc, char** argv) {
             if (batch_on() || (piped && pipe_inflight())) {
                 if (!try_next_line(line)) {
                     if (!(piped ? pump(true) : batch_step())) return 1;
+                    // fork: the elastic cache's step between two batch windows (nothing lent, no window in flight),
+                    // as after a round of the single-request decode
+                    if (!piped) {
+                        std::string ee;
+                        if (!elastic_step(false, ee)) {
+                            std::printf("ERR %s\n", ee.c_str());
+                            return 1;
+                        }
+                    }
                     continue;
                 }
                 // a request reads its prompt through every stage: the groups in flight finish first
@@ -9603,6 +9614,11 @@ int main(int argc, char** argv) {
                         if (i >= o.prompt_cache_root) root_at = i;
                         break;
                     }
+            // a root past the drafter's window (Claude Code's ~40K system turn): its draft K/V are computed in full, or
+            // the prefix file below would skip it as incomplete; costs the draft layer's K/V of the extra cells once
+            if (use_mtp)
+                mtp.set_full_prefix(prefix_disk_enabled && root_at > 0 && req_imgs.empty() &&
+                                    root_at <= int64_t(strata::core::prefix_cache_max_tokens));
             // Reader snapshots are process-cumulative; p50/p99 are not request-local deltas.
             const std::string prefill_io_before = prefill_stats_on ? ple_table.io_report() : std::string{};
             std::vector<strata::prefill::PrefillStats> prefill_stats_before;

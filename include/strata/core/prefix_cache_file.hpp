@@ -7,8 +7,9 @@
 
 namespace strata::core {
 using PrefixDigest = std::array<uint8_t, 32>;
-constexpr uint64_t prefix_cache_max_bytes = 512ULL * 1024 * 1024;
-constexpr size_t prefix_cache_max_tokens = 32768;
+// 64K tokens: an agent client's system turn (Claude Code: tools + system prompt, ~40K tokens) fits
+constexpr uint64_t prefix_cache_max_bytes = 1536ULL * 1024 * 1024;
+constexpr size_t prefix_cache_max_tokens = 65536;
 
 // SHA-256 payload integrity and cache-key hashing (CNG on Windows).
 PrefixDigest prefix_cache_digest(const void *bytes, size_t size);
