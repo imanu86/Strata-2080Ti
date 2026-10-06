@@ -10,6 +10,10 @@ If the periodic checkpoint before that branch is far away, the engine has to
 read the gap again. The extra checkpoint can reduce that gap. It uses the
 existing bounded checkpoint cache; it does not add another unbounded history.
 
+The tail is the first chunk boundary within one chunk of the prompt's end, where the chunk is the size that chunk
+really had (`--prefill auto` chunks differ from `--prefill N`). The tail checkpoint is evicted first (only one stays
+alive, the root is never dropped), so it never pushes out a periodic checkpoint when `--prompt-cache` is full.
+
 The option does not split prefill chunks or alter the periodic checkpoint
 schedule. It selects the first completed batched chunk within one configured
 chunk of the prompt's end, excluding the short final suffix controlled by

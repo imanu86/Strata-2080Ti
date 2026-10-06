@@ -13,13 +13,62 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
+#include <cstdlib>
 #include <limits>
 #include <utility>
 #include <cstring>
 
 namespace strata::core {
+
+// See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
+// not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
+// NVIDIA's reference snippet): an expert cache that pushes the system into swap would be far slower than a smaller one.
+size_t device_free_bytes() {
+    size_t free_b = 0, total_b = 0;
+    cudaMemGetInfo(&free_b, &total_b);
+#if defined(__linux__) && !defined(STRATA_HIP_GFX906)   // (the gfx906 compat layer has no cudaDevAttrIntegrated; that GPU is discrete)
+    // per device: a box can mix an integrated GPU (an APU) with a discrete one, and the answer is the CURRENT device's
+    static std::atomic<int> uma_cache[64];   // 0 unknown, 1 integrated (unified memory), 2 discrete
+    bool unified_memory = false;
+    {
+        int dev = 0, v = 0;
+        if (cudaGetDevice(&dev) == cudaSuccess && dev >= 0 && dev < 64) {
+            int c = uma_cache[dev].load(std::memory_order_acquire);
+            if (c == 0) {
+                c = cudaDeviceGetAttribute(&v, cudaDevAttrIntegrated, dev) == cudaSuccess && v ? 1 : 2;
+                uma_cache[dev].store(c, std::memory_order_release);
+            }
+            unified_memory = c == 1;
+        }
+    }
+    if (unified_memory) {
+        if (FILE* m = std::fopen("/proc/meminfo", "r")) {
+            char line[256];
+            unsigned long long kb = 0;
+            while (std::fgets(line, sizeof line, m))
+                if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
+            std::fclose(m);
+            // STRATA_UMA_HEADROOM_GIB: a whole number of GiB, 0..1024; anything else keeps the default 6 (said once)
+            static const long gib = [] {
+                const char* h = std::getenv("STRATA_UMA_HEADROOM_GIB");
+                if (h == nullptr) return 6L;
+                char* end = nullptr;
+                const long v = std::strtol(h, &end, 10);
+                if (end != h && *end == '\0' && v >= 0 && v <= 1024) return v;
+                std::fprintf(stderr, "strata: STRATA_UMA_HEADROOM_GIB=%s is not a whole number of GiB (0-1024): using 6\n", h);
+                return 6L;
+            }();
+            const unsigned long long head = (unsigned long long) gib << 30;
+            const unsigned long long avail = kb << 10;
+            if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);
+        }
+    }
+#endif
+    return free_b;
+}
 
 bool read_expert_profile(const std::string& path, int64_t n_layers, int64_t n_expert,
                          std::vector<std::pair<int32_t, int32_t>>& ranked, int64_t& slots, std::string& err) {
@@ -401,6 +450,12 @@ bool ExpertCache::ensure_blocking_staging(std::size_t bytes, std::string& err) {
 }
 #endif
 
+namespace {
+bool g_cache_vmm = false;   // set_vmm
+}  // namespace
+
+void ExpertCache::set_vmm(bool enabled) { g_cache_vmm = enabled; }
+
 bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int64_t blob_bytes,
                        std::string& err) {
     close();
@@ -423,6 +478,7 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
     // and the two numbers are named in the refusal.
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+        free_b = device_free_bytes();   // unified memory: what the OS can give back counts (see the header)
         if ((uint64_t) free_b < want) {
             char buf[320];
             std::snprintf(buf, sizeof buf,
@@ -438,6 +494,18 @@ bool ExpertCache::open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int6
 
     if (seg_req_ > 0) {   // #533: --vram-elastic: physical segments behind one address range (zeroed below)
         if (!open_segmented(want, err)) return false;
+    } else if (g_cache_vmm && vmm_available()) {
+        // the elastic K/V: every chunk mapped now; the K/V may later take some of them (and give them back)
+        auto r = std::make_unique<VmmRange>();
+        if (!r->reserve(want) || !r->map_range(0, r->chunks(), [] { return (VmmChunk) 0; })) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf, "ExpertCache: mapping %.2f GiB of VRAM failed: out of memory",
+                          (double) want / 1073741824.0);
+            err = buf;
+            return false;
+        }
+        base_ = r->base();
+        vmm_ = std::move(r);
     } else if (cudaMalloc((void**) &base_, (size_t) want) != cudaSuccess) {
         base_ = nullptr;
         char buf[256];
@@ -604,7 +672,7 @@ bool ExpertCache::open_sized_elastic(const std::vector<int64_t>& slot_bytes, int
     if (!drv_ok(cuMemAddressReserve(&va, va_bytes_, 0, 0, 0), "cuMemAddressReserve", err)) return false;
     va_ = (unsigned long long) va;
     device_ = dev;
-    vmm_ = true;
+    elastic_vmm_ = true;
     mapped_ = 0;
     handles_.clear();
     if (!map_to(off.back(), err)) { close(); return false; }
@@ -640,7 +708,7 @@ bool ExpertCache::open_sized_elastic(const std::vector<int64_t>&, int64_t, int64
 #endif
 
 bool ExpertCache::elastic_grow(const std::vector<int64_t>& slot_bytes, std::string& err) {
-    if (!vmm_) { err = "ExpertCache: grow needs the elastic arena"; return false; }
+    if (!elastic_vmm_) { err = "ExpertCache: grow needs the elastic arena"; return false; }
     if (slot_bytes.empty()) return true;
     if ((uint64_t) slot_bytes.size() > (uint64_t) (n_layers_ * n_expert_ - slots_)) {
         err = "ExpertCache (elastic): more slots than (layer, expert) pairs";
@@ -671,7 +739,7 @@ bool ExpertCache::elastic_grow(const std::vector<int64_t>& slot_bytes, std::stri
 }
 
 bool ExpertCache::elastic_shrink(int64_t n_slots, std::string& err) {
-    if (!vmm_) { err = "ExpertCache: shrink needs the elastic arena"; return false; }
+    if (!elastic_vmm_) { err = "ExpertCache: shrink needs the elastic arena"; return false; }
     if (n_slots < 0 || n_slots > slots_) { err = "ExpertCache (elastic): shrink outside 0..slots"; return false; }
     if (n_slots == slots_) return true;
     off_.resize((size_t) n_slots + 1);
@@ -688,7 +756,7 @@ void ExpertCache::close() {
     blocking_staging_bytes_ = 0;
 #endif
     off_.clear();
-    if (vmm_) {
+    if (elastic_vmm_) {   // the fork's elastic arena (open_sized_elastic)
         unmap_above(0);
 #if !defined(STRATA_EC_NO_VMM)
         if (va_ != 0) cuMemAddressFree((CUdeviceptr) va_, va_bytes_);
@@ -697,10 +765,13 @@ void ExpertCache::close() {
         va_bytes_ = 0;
         chunk_ = 0;
         mapped_ = 0;
-        vmm_ = false;
+        elastic_vmm_ = false;
         base_ = nullptr;   // never cudaMalloc'd
     } else if (!segs_.empty()) {
         release_segmented();
+    } else if (vmm_) {   // the elastic K/V's VmmRange (set_vmm)
+        vmm_.reset();   // unmaps and frees every chunk it still holds
+        base_ = nullptr;
     } else if (base_ != nullptr) {
         cudaFree(base_);
         base_ = nullptr;
