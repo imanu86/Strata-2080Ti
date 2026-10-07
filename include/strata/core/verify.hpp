@@ -56,6 +56,16 @@ struct VerifyHits {
     int64_t blob = 0;
 };
 
+/// Lab measurement, STRATA_EXPERT_USAGE=<csv path>: every routed entry of the decode verify windows (all stages,
+/// serial and pipelined) adds one call and its gate weight ("mass") to its (layer, expert) cell.  The serve loop
+/// writes one CSV per request with each cell's residency on the GPU caches, then resets the counters.
+struct ExpertUsage {   // per cell (layer * 1024 + expert)
+    std::vector<uint32_t> calls, rcalls, flips;   ///< calls; calls when resident at the call; residency changes seen
+    std::vector<double> mass, rmass;              ///< gate weight summed; the part on resident experts
+};
+bool expert_usage_on();
+void expert_usage_take(ExpertUsage& u);   // copy out and reset
+
 class Verifier {
 public:
     Verifier() = default;

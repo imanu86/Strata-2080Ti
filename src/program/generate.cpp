@@ -11473,6 +11473,41 @@ int main(int argc, char** argv) {
                     if (st == 0) std::fprintf(stderr, "strata decode GPU stages (ms/window):%s\n", pr.c_str());   // text as before
                     else std::fprintf(stderr, "strata decode GPU stages, stage %d (ms/window):%s\n", st, pr.c_str());
                 }
+                if (strata::core::expert_usage_on()) {   // lab STRATA_EXPERT_USAGE: one CSV per request
+                    static int usage_req = 0;
+                    strata::core::ExpertUsage u;
+                    strata::core::expert_usage_take(u);
+                    const std::string path = std::string(std::getenv("STRATA_EXPERT_USAGE")) + "_req" +
+                                             std::to_string(usage_req++) + ".csv";
+                    if (FILE* f = std::fopen(path.c_str(), "w"); f != nullptr && !u.calls.empty()) {
+                        std::fprintf(f, "layer,expert,calls,mass,calls_res,mass_res,flips,resident_end\n");
+                        long long res_n = 0, used = 0, dead = 0, flips = 0;
+                        double m_all = 0, m_res = 0, c_all = 0, c_res = 0;
+                        for (int64_t l = 0; l < g.n_layers; ++l) {
+                            const strata::core::ExpertCache* c = &xcache;   // the card that runs layer l
+                            for (auto& st : stages) if (l >= st->lb && l < st->le) c = &st->cache;
+                            for (int64_t e = 0; e < g.n_expert; ++e) {
+                                const size_t i = (size_t) (l * 1024 + e);
+                                const int res = c->slot_of(l, e) >= 0 ? 1 : 0;
+                                res_n += res;
+                                used += u.calls[i] > 0;
+                                dead += res && u.calls[i] == 0;
+                                flips += u.flips[i];
+                                m_all += u.mass[i]; m_res += u.rmass[i];
+                                c_all += u.calls[i]; c_res += u.rcalls[i];
+                                std::fprintf(f, "%lld,%lld,%u,%.6f,%u,%.6f,%u,%d\n", (long long) l, (long long) e, u.calls[i],
+                                             u.mass[i], u.rcalls[i], u.rmass[i], u.flips[i], res);
+                            }
+                        }
+                        std::fclose(f);
+                        std::fprintf(stderr, "strata expert usage: %lld resident at the end of %lld, %lld never called; %lld "
+                                             "experts called; AT THE CALL %.2f%% of the calls and %.2f%% of the gate mass were "
+                                             "resident; %lld residency flips seen -> %s\n",
+                                     res_n, (long long) (g.n_layers * g.n_expert), dead, used,
+                                     c_all > 0 ? 100.0 * c_res / c_all : 0.0, m_all > 0 ? 100.0 * m_res / m_all : 0.0, flips,
+                                     path.c_str());
+                    }
+                }
                 const double ple_ms = d1.ple - ds0.ple;
                 std::fprintf(stderr, "strata decode PLE primary: gather %.3f ms total (%.3f ms/window), other staging %.3f ms/window\n",
                              ple_ms, ple_ms / w, std::max(0.0, d1.host - ds0.host - ple_ms) / w);

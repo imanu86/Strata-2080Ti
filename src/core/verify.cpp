@@ -55,8 +55,56 @@
 #include <cstring>
 #include <exception>
 #include <immintrin.h>
+#include <mutex>
 
 namespace strata::core {
+
+// ---- lab STRATA_EXPERT_USAGE: calls and gate mass per (layer, expert) over the decode verify windows, plus the
+// share that was resident AT THE CALL (the stage's host residency table) and how often a cell's residency flipped
+namespace {
+constexpr int64_t kUseExperts = 1024;   // cell = layer * kUseExperts + expert (up to 64 layers)
+std::mutex g_use_mu;
+std::vector<uint32_t> g_use_calls, g_use_rcalls, g_use_flips;
+std::vector<double> g_use_mass, g_use_rmass;
+std::vector<int8_t> g_use_last;
+void expert_usage_add(int64_t layer, const int32_t* id, const volatile float* w, int64_t entries, const int32_t* h_res,
+                      int64_t n_expert) {
+    if (layer < 0 || layer >= 64) return;
+    std::lock_guard<std::mutex> lk(g_use_mu);
+    if (g_use_calls.empty()) {
+        g_use_calls.assign(64 * kUseExperts, 0); g_use_rcalls.assign(64 * kUseExperts, 0); g_use_flips.assign(64 * kUseExperts, 0);
+        g_use_mass.assign(64 * kUseExperts, 0.0); g_use_rmass.assign(64 * kUseExperts, 0.0);
+        g_use_last.assign(64 * kUseExperts, -1);
+    }
+    for (int64_t i = 0; i < entries; ++i) {
+        const int32_t e = id[i];
+        if (e < 0 || e >= kUseExperts) continue;
+        const size_t c = (size_t) (layer * kUseExperts + e);
+        const int8_t res = h_res != nullptr && e < n_expert ? (h_res[layer * n_expert + e] >= 0 ? 1 : 0) : -1;
+        ++g_use_calls[c];
+        g_use_mass[c] += (double) w[i];
+        if (res == 1) { ++g_use_rcalls[c]; g_use_rmass[c] += (double) w[i]; }
+        if (res >= 0 && g_use_last[c] >= 0 && res != g_use_last[c]) ++g_use_flips[c];
+        if (res >= 0) g_use_last[c] = res;
+    }
+}
+}  // namespace
+
+bool expert_usage_on() {
+    static const bool on = std::getenv("STRATA_EXPERT_USAGE") != nullptr;
+    return on;
+}
+
+void expert_usage_take(ExpertUsage& u) {
+    std::lock_guard<std::mutex> lk(g_use_mu);
+    u.calls = g_use_calls; u.rcalls = g_use_rcalls; u.flips = g_use_flips; u.mass = g_use_mass; u.rmass = g_use_rmass;
+    std::fill(g_use_calls.begin(), g_use_calls.end(), 0u);
+    std::fill(g_use_rcalls.begin(), g_use_rcalls.end(), 0u);
+    std::fill(g_use_flips.begin(), g_use_flips.end(), 0u);
+    std::fill(g_use_mass.begin(), g_use_mass.end(), 0.0);
+    std::fill(g_use_rmass.begin(), g_use_rmass.end(), 0.0);
+}
+
 namespace {
 
 constexpr float EPS = 1e-6f;
@@ -2112,6 +2160,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         const int tb = gtb[grp], n = gte[grp] - gtb[grp];
         progress_at("verify window: the CPU experts of layer", l);
         if (remote_opt_) remote_opt_->begin(h_w_ + (size_t) tb * ss.k, tb, n);
+        if (expert_usage_on())   // lab STRATA_EXPERT_USAGE: before any probe rewrites the ids
+            expert_usage_add(l, h_ids_ + (size_t) tb * ss.k, h_w_ + (size_t) tb * ss.k, (int64_t) n * ss.k, h_res_, g.n_expert);
         if (pool != nullptr) {
             ++closed_pool_calls;
             if (routed_keep_skip_) {   // lab: zero-weight entries leave the plan (no CPU job, no fetch, no group)
@@ -3210,9 +3260,35 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
         set_plan_slot(grp);
         const int tb = gtb[grp], n = gte[grp] - gtb[grp];
         progress_at("verify window (pipelined): the CPU experts of layer", l);
-        if (pool != nullptr)
+        if (expert_usage_on())   // lab STRATA_EXPERT_USAGE (pipelined windows)
+            expert_usage_add(l, h_ids_ + (size_t) tb * ss.k, h_w_ + (size_t) tb * ss.k, (int64_t) n * ss.k, h_res_, g.n_expert);
+        if (pool != nullptr) {
+            // lab probes, as in run(): STRATA_ROUTED_KEEP_SKIP and STRATA_ROUTED_MISS_W apply to pipelined windows too
+            if (routed_keep_skip_) {
+                int32_t* id = h_ids_ + (size_t) tb * ss.k;
+                const volatile float* wr = h_w_ + (size_t) tb * ss.k;
+                for (int64_t i = 0; i < (int64_t) n * ss.k; ++i)
+                    if (wr[i] == 0.0f) id[i] = -1;
+            }
+            if (routed_miss_w_ > 0.0f) {
+                int32_t* id = h_ids_ + (size_t) tb * ss.k;
+                const volatile float* wr = h_w_ + (size_t) tb * ss.k;
+                for (int64_t t = 0; t < (int64_t) n; ++t)
+                    for (int64_t j = 0; j < (int64_t) ss.k; ++j) {
+                        const int64_t i = t * (int64_t) ss.k + j;
+                        const float wi = wr[i];
+                        if (id[i] < 0 || !(wi < routed_miss_w_)) continue;
+                        int rank = 0;
+                        for (int64_t q = 0; q < (int64_t) ss.k; ++q) {
+                            const float wq = wr[t * (int64_t) ss.k + q];
+                            rank += wq > wi || (wq == wi && q < j);
+                        }
+                        if (rank >= routed_min_keep_) id[i] = -(id[i] + 2);
+                    }
+            }
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
+        }
         if (g_trace) trace_ev(*(volatile uint32_t*) h_flagA_ == want ? "SERVED" : "SERVED-NO-PLAN-YET", fl_k_, l,
                               (int64_t) ms_since(b));
         progress_tick();
