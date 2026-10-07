@@ -56,6 +56,8 @@
 #include "strata/core/native_head.hpp"
 #include "strata/core/verify.hpp"
 #include "strata/core/mtp.hpp"
+#include "strata/core/fp_lab.hpp"
+#include "strata/kernels/fused_gr.hpp"
 #include "strata/prefill/prefill.hpp"
 #include "strata/core/native_dense.hpp"
 #include "strata/program/logits_selection.hpp"
@@ -6682,6 +6684,69 @@ int main(int argc, char** argv) {
             const strata::core::OnDevice on(mtp.device());
             cudaStreamSynchronize(mtp.stream());
         };
+        // ---- FABLE hot toggles (fp_lab.hpp, docs/FABLE_PLAN.md): `lab=NAME:V,...` on the request line sets the lab
+        // levers for that request over the environment's defaults; applied at the request's start, when nothing is in
+        // flight.  The kernel variants (EXPERT_V, HC_FUSE_NORM, SHEXP_FUSE) and the device plan (DEVPLAN) are baked into
+        // the captured window / draft graphs, so a change drops them all (recaptured at the next window, ~1-2 s once);
+        // MTP_PRIORITY swaps the chain stream; the rest is read per request or per layer.
+        strata::core::FpLab fp_lab_cur = strata::core::fp_lab();   // what the graphs and kernels hold now
+        bool fp_lab_said = false;
+        auto fp_lab_apply = [&](const std::string& spec) {
+            using strata::core::FpLab;
+            FpLab want = strata::core::fp_lab_env();
+            std::string pe;
+            if (!spec.empty() && !strata::core::fp_lab_parse(spec, want, pe)) {
+                std::fprintf(stderr, "strata lab: %s - the rest of the key is ignored\n", pe.c_str());
+            }
+            const FpLab cur = fp_lab_cur;
+            strata::core::fp_lab() = want;
+            std::string changed;
+            if (want.expert_v != cur.expert_v) {
+                strata::kernels::native_expert_set_fp_variant(want.expert_v);
+                changed += " EXPERT_V";
+            }
+            if (want.shexp_fuse != cur.shexp_fuse) {
+                strata::kernels::shared_expert_set_fp_fuse(want.shexp_fuse);
+                changed += " SHEXP_FUSE";
+            }
+            if (want.hc_fuse_norm != cur.hc_fuse_norm) {
+                strata::kernels::fused_gr_set_fp_fuse_norm(want.hc_fuse_norm);
+                {   // the new level is checked bit for bit on every card before it runs there (once per level and card)
+                    const strata::core::OnDevice on(ver.device());
+                    strata::kernels::fused_gr_check();
+                }
+                for (auto& st : stages) {
+                    const strata::core::OnDevice on(st->dev);
+                    strata::kernels::fused_gr_check();
+                }
+                changed += " HC_FUSE_NORM";
+            }
+            std::vector<strata::core::Verifier*> all = {&ver, &ver_b, &ver_same};
+            for (auto& st : stages) { all.push_back(&st->ver); all.push_back(&st->ver_b); }
+            if (want.devplan != cur.devplan) {
+                for (strata::core::Verifier* v : all) {
+                    std::string e;
+                    if (!v->set_fp_devplan(want.devplan != 0, e)) std::fprintf(stderr, "strata lab: %s\n", e.c_str());
+                }
+                changed += " DEVPLAN";
+            }
+            if (!changed.empty()) {
+                for (strata::core::Verifier* v : all) {
+                    std::string e;
+                    if (!v->drop_graphs(e)) std::fprintf(stderr, "strata lab: %s\n", e.c_str());
+                }
+                std::string e;
+                if (!mtp.drop_graphs(e)) std::fprintf(stderr, "strata lab: %s\n", e.c_str());
+                pl_prepared = false;
+                std::fprintf(stderr, "strata lab: graphs recaptured (%s changed)\n", changed.c_str() + 1);
+            }
+            if (want.mtp_priority != cur.mtp_priority) mtp.set_chain_priority(want.mtp_priority);
+            if (!strata::core::fp_lab_same(want, cur) || (!fp_lab_said && !spec.empty())) {
+                std::fprintf(stderr, "strata lab: %s\n", strata::core::fp_lab_describe(want).c_str());
+                fp_lab_said = true;
+            }
+            fp_lab_cur = want;
+        };
         std::vector<int64_t> cur;
         // ---- the conversation cache (see ConvCheckpoint).  `live` is what the session holds right now: the tokens
         // it has consumed, so a request that starts with exactly them continues without any copy.  `checks` are the
@@ -7194,15 +7259,12 @@ int main(int argc, char** argv) {
         // adaptive tier's fence asks for it (fp_fence_*: the tier marks the evicted experts, waits for this thread to
         // upload the marks, THEN records the fence events - so a window launched after the marks either planned from
         // the new table or is covered by the fence).  card 0 = CUDA0's table (d_res), k = stages[k - 1]'s.
-        static const bool fp_devplan = [] {
-            const char* v = std::getenv("STRATA_FP_DEVPLAN");
-            return v != nullptr && std::atoi(v) != 0;
-        }();
+        auto fp_devplan = [] { return strata::core::fp_lab().devplan != 0; };   // hot toggle: the request's value
         std::vector<int32_t> fp_res_shadow;   // [card][layer * n_expert], the rows as last uploaded (empty: unknown)
         int64_t fp_res_uploads = 0;
         std::atomic<bool> fp_fence_req{false}, fp_fence_ack{false};
         auto fp_res_sync = [&](int card) -> bool {
-            if (!fp_devplan || host_res.empty()) return true;
+            if (!fp_devplan() || host_res.empty()) return true;
             const size_t n = host_res.size(), ncards = 1 + stages.size();
             if (card < 0 || (size_t) card >= ncards) return true;
             int32_t* dst = card == 0 ? d_res : stages[(size_t) card - 1]->d_res;
@@ -7229,7 +7291,7 @@ int main(int argc, char** argv) {
         };
         // the tier's fence request (see above): the marks of every card uploaded, then the ack
         auto fp_fence_serve = [&]() -> bool {
-            if (!fp_devplan || !fp_fence_req.load()) return true;
+            if (!fp_devplan() || !fp_fence_req.load()) return true;
             fp_fence_req.store(false);
             bool ok = true;
             for (size_t c = 0; c <= stages.size(); ++c) ok = fp_res_sync((int) c) && ok;
@@ -7244,7 +7306,7 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(st->dev);
                 res_put(st->d_res);
             }
-            if (fp_devplan && !fp_res_shadow.empty() && fp_res_shadow.size() == host_res.size() * (1 + stages.size()))
+            if (fp_devplan() && !fp_res_shadow.empty() && fp_res_shadow.size() == host_res.size() * (1 + stages.size()))
                 for (size_t c = 0; c <= stages.size(); ++c)   // every card holds host_res now
                     std::memcpy(fp_res_shadow.data() + c * host_res.size(), host_res.data(), host_res.size() * sizeof(int32_t));
         };
@@ -7581,10 +7643,7 @@ int main(int argc, char** argv) {
         // (ExpertSource::copy_blob, as the asynchronous tier's job does) and the loop queues the pinned -> device copies at
         // a LATER gap of stage 0 (el_gap), where they are truly asynchronous; the fills publish as before once their event
         // has passed.  One growth in flight at a time (the bounce holds it); a source already pinned copies directly.
-        static const bool fp_el_async = [] {
-            const char* v = std::getenv("STRATA_FP_EL_ASYNC");
-            return v != nullptr && std::atoi(v) != 0;
-        }();
+        auto fp_el_async = [] { return strata::core::fp_lab().el_async != 0; };   // hot toggle: the request's value
         struct ElAsyncItem { int32_t i, slot; int64_t bytes; size_t off; };
         std::vector<ElAsyncItem> el_async_q;         // the growth's blobs the worker bounces (queued at the next gap)
         uint8_t* el_bounce = nullptr;
@@ -7671,7 +7730,7 @@ int main(int argc, char** argv) {
             }
             // FABLE STRATA_FP_EL_ASYNC (pipe_gap): the pageable blobs go to the worker's bounce, the pinned ones straight
             // to the device as before
-            const bool bounce = pipe_gap && fp_el_async && el_async_q.empty() && el_async_state.load() == 0;
+            const bool bounce = pipe_gap && fp_el_async() && el_async_q.empty() && el_async_state.load() == 0;
             size_t bounce_bytes = 0;
             for (size_t j = 0; j < pick.size(); ++j) {
                 const int32_t i = pick[j];
@@ -9150,6 +9209,7 @@ int main(int argc, char** argv) {
             // the missed experts and the draft-probability floor, for this request only
             double req_pcie_frac = o.pcie_frac, req_spec_min_p = o.spec_min_p;
             bool req_pcie_set = false;   // the request names its own share (the measured one holds meanwhile)
+            std::string req_lab;         // FABLE lab=NAME:V,...: the STRATA_FP_* levers for this request (fp_lab.hpp)
             if (endp != nullptr) {   // GENI takes the same keys (#75: image requests were always greedy); its
                                      // embedding file path is the first token without an =
                 for (;;) {
@@ -9175,6 +9235,7 @@ int main(int argc, char** argv) {
                     else if (key == "seed") req_seed = std::strtoull(tok.c_str() + eq + 1, nullptr, 10);
                     else if (key == "pcie_frac") { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
+                    else if (key == "lab") req_lab = tok.substr(eq + 1);
                     // unknown keys are skipped: the ids start at the first token without '='
                 }
             }
@@ -9325,6 +9386,9 @@ int main(int argc, char** argv) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
             }
+            // FABLE hot toggles: this request's lab levers (the environment's defaults without `lab=`); a lever baked
+            // into the captured graphs drops them here, with nothing in flight, and they are recaptured at the next window
+            fp_lab_apply(req_lab);
             auto kv_quiesce = [&] { cudaDeviceSynchronize(); apply_pending(true); };
             if (kvg.on) {   // the elastic K/V: this prompt's cells (it gives back what it does not need below)
                 // a failed growth may leave the tier half-changed: the engine stops (as for any CUDA failure)
@@ -10662,7 +10726,7 @@ int main(int argc, char** argv) {
                 // adapt()'s fence, on the tier's thread: it waits on the HOST.  A device-side wait (the refill streams
                 // waiting for the stages' events) would queue copies behind windows that need this loop, beside it.
                 adapt_fence = [&]() {
-                    if (fp_devplan) {   // FABLE: the evicted experts' marks reach the cards first (fp_fence_serve)
+                    if (fp_devplan()) {   // FABLE: the evicted experts' marks reach the cards first (fp_fence_serve)
                         fp_fence_ack.store(false);
                         fp_fence_req.store(true);
                         while (!fp_fence_ack.load()) std::this_thread::yield();
@@ -10930,26 +10994,15 @@ int main(int argc, char** argv) {
                 // launch's host cost (~1.2 ms of pl_launch for 1397 nodes, F0->L1 in the trace) overlaps stage 0's
                 // ~10 ms instead of sitting on the critical path.  A always goes to stage 1, so nothing is wasted; a
                 // speculative B still gets its stage 1 after A's verdict (B's stage 0 may be done by then anyway).
-                static const bool fp_early_l1 = [] {
-                    const char* v = std::getenv("STRATA_FP_EARLY_L1");
-                    const bool on = v != nullptr && std::atoi(v) != 0;
-                    if (on) std::fprintf(stderr, "strata pipeline: STRATA_FP_EARLY_L1: stage 1 launched behind stage 0's event\n");
-                    return on;
-                }();
+                const bool fp_early_l1 = strata::core::fp_lab().early_l1 != 0;   // hot toggle: this request's value
                 int64_t pl_early_l1 = 0;
                 // FABLE STRATA_FP_CHAIN_TRIM=1 (opt-in): the chain's tail steps are launched as its outputs land, at most
                 // STRATA_FP_CHAIN_TRIM_AHEAD (2) beyond them, and none once B's size is decided (MtpDrafter::set_chain_ahead):
                 // a forced chain of B.T + S - 1 outputs whose B stops at a low-probability draft skips its remaining steps
                 // (0.73-0.84 ms each on stage 1's card).  Only with a spec_min_p rule: without one B always takes S - 1
                 // drafts and every step is needed, so the chain is launched whole as before.
-                static const int fp_chain_ahead = [] {
-                    const char* v = std::getenv("STRATA_FP_CHAIN_TRIM");
-                    if (v == nullptr || std::atoi(v) == 0) return 0;
-                    const char* a = std::getenv("STRATA_FP_CHAIN_TRIM_AHEAD");
-                    const int n = a != nullptr ? std::max(1, std::atoi(a)) : 2;
-                    std::fprintf(stderr, "strata pipeline: STRATA_FP_CHAIN_TRIM: the chain's steps launched as outputs land, %d ahead\n", n);
-                    return n;
-                }();
+                const int fp_chain_ahead = strata::core::fp_lab().chain_trim != 0   // hot toggle: this request's value
+                                               ? std::max(1, strata::core::fp_lab().chain_trim_ahead) : 0;
                 const bool fp_chain_trim = fp_chain_ahead > 0 && req_spec_min_p > 0.0;
                 mtp.set_chain_ahead(fp_chain_trim ? fp_chain_ahead : 0);
                 const int64_t fp_trim0 = mtp.chain_trimmed;
@@ -11395,14 +11448,14 @@ int main(int argc, char** argv) {
                     if (fp_early_l1)
                         std::fprintf(stderr, "strata pipeline: STRATA_FP_EARLY_L1: %lld stage-1 windows launched behind stage 0's "
                                              "event (of %lld)\n", (long long) pl_early_l1, (long long) dec_windows);
-                    if (fp_devplan)
+                    if (fp_devplan())
                         std::fprintf(stderr, "strata pipeline: STRATA_FP_DEVPLAN: %lld residency table uploads so far (all requests)\n",
                                      (long long) fp_res_uploads);
                     if (fp_chain_ahead > 0)
                         std::fprintf(stderr, "strata pipeline: STRATA_FP_CHAIN_TRIM: %lld chain steps never launched this request%s\n",
                                      (long long) (mtp.chain_trimmed - fp_trim0),
                                      fp_chain_trim ? "" : " (off: the request has no spec_min_p rule)");
-                    if (fp_el_async && el_on)
+                    if (fp_el_async() && el_on)
                         std::fprintf(stderr, "strata pipeline: STRATA_FP_EL_ASYNC: %lld growths bounced through pinned memory so far "
                                              "(all requests); the loop-thread ms above exclude the worker's reads\n",
                                      (long long) pl_el_async_n);

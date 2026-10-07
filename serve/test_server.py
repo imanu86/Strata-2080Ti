@@ -1256,6 +1256,13 @@ class SamplingKeys(unittest.TestCase):
         bad = self.keys(strata_tune={"pcie_frac": 3, "spec_min_p": True, "pool_workers": 2})
         self.assertFalse([x for x in bad if x.split("=")[0] in ("pcie_frac", "spec_min_p", "pool_workers")])
 
+    def test_lab_key(self):
+        k = self.keys(temperature=0, strata_lab="EARLY_L1:1,CHAIN_TRIM:1")
+        self.assertIn("lab=EARLY_L1:1,CHAIN_TRIM:1", k)
+        for bad in ("EARLY_L1:1 CHAIN_TRIM:1", "", 1, True, "x" * 201, "EARLY_L1=1"):
+            self.assertFalse([x for x in self.keys(strata_lab=bad) if x.startswith("lab=")], bad)
+        self.assertNotIn("lab=", " ".join(self.keys(temperature=0)))
+
     def test_checkpoint_key(self):
         self.assertIn("ckpt=0", self.keys(temperature=0, strata_checkpoint=False))
         for absent in ({}, {"strata_checkpoint": True}, {"strata_checkpoint": 0}, {"cache_prompt": False}):

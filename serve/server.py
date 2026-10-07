@@ -881,6 +881,12 @@ class StrataEngine:
         # extends: no conversation checkpoint for it (#830).  It still reuses a cached prefix.  Absent = as before.
         if sampling.get("strata_checkpoint") is False:
             keys += " ckpt=0"
+        # FABLE lab (docs/FABLE_PLAN.md): "strata_lab": "EARLY_L1:1,CHAIN_TRIM:1" sets the engine's STRATA_FP_* levers for
+        # this request only (the environment's defaults when absent), so an A/B alternates on one running engine.
+        # Letters, digits and '_' ':' ',' '-' '.' only: the key travels on the space-separated request line.
+        lab = sampling.get("strata_lab")
+        if isinstance(lab, str) and 0 < len(lab) <= 200 and all(c.isalnum() or c in "_:,.-" for c in lab):
+            keys += f" lab={lab}"
         return keys + StrataEngine.projection_key(sampling)
 
     @staticmethod

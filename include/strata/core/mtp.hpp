@@ -155,6 +155,13 @@ public:
     /// No more steps: the chain ends after the steps launched so far (chain_poll then reports its end).
     void chain_close();
     int64_t chain_trimmed = 0;   ///< steps never launched because of chain_close (statistics)
+    // FABLE hot toggles (fp_lab.hpp), between requests with the drafter idle:
+    /// the chain stream's priority for the next chains: 1 highest, 0 the device default, -1 lowest (the three streams
+    /// are created at load; a no-op without the forcing graphs or when the wanted stream could not be created)
+    void set_chain_priority(int mode);
+    /// Destroy every captured draft graph (round, step, prefill, coupled): recaptured lazily / by prepare_chain.
+    /// False with `err` while a chain is in flight.
+    bool drop_graphs(std::string& err);
 
     double ms_draft = 0, ms_prefill = 0;
     int64_t rounds = 0;
@@ -239,6 +246,7 @@ private:
     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
     int chain_ahead_ = 0, chain_launched_ = 0, chain_want_ = 0;   ///< FABLE trim: see set_chain_ahead
     bool chain_open_ = false;
+    cudaStream_t cs_pri_[3] = {};   ///< FABLE: the chain stream at the default (0), highest (1) and lowest (2) priority
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
     int64_t n_vocab_ = 0;

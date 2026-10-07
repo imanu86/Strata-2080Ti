@@ -1,5 +1,6 @@
 // src/core/verify.cpp - see include/strata/core/verify.hpp.
 #include "strata/core/verify.hpp"
+#include "strata/core/fp_lab.hpp"
 #include "strata/core/remote_expert_opt.hpp"
 #include "strata/core/dma_batch.hpp"
 #if defined(_WIN32)
@@ -118,12 +119,19 @@ inline bool g_lfuse_pair() { static const bool on = [] { const char* v = std::ge
 inline bool g_qdedup() { static const bool on = [] { const char* v = std::getenv("STRATA_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 // S26 STRATA_QFUSE=1: activation q8_1 images written by their producers (the GDN output norm) - the same bytes
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
-// FABLE (lab, two-card pipeline): STRATA_FP_DEVPLAN=1 - the pipelined stages plan all-resident groups on the device
-// (see init); STRATA_FP_PROBE_WAITA=1 - the upper bound of removing waitA: service() raises flag A with an
-// "all resident" plan before the CPU jobs (the GPU never waits for the host's plan; the outputs are WRONG for any
-// non-resident expert: a timing probe only, never for text)
-inline bool fp_devplan_env() { static const bool on = [] { const char* v = std::getenv("STRATA_FP_DEVPLAN"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
-inline bool fp_probe_waita_env() { static const bool on = [] { const char* v = std::getenv("STRATA_FP_PROBE_WAITA"); if (v != nullptr && std::atoi(v) != 0) { std::fprintf(stderr, "strata verify: STRATA_FP_PROBE_WAITA: flag A raised with an all-resident plan before the CPU jobs - the text is WRONG (timing probe)\n"); return true; } return false; }(); return on; }
+// FABLE (lab, two-card pipeline; the levers live in fp_lab.hpp, switchable per request): STRATA_FP_DEVPLAN=1 - the
+// pipelined stages plan all-resident groups on the device (see init / set_fp_devplan); STRATA_FP_PROBE_WAITA=1 - the
+// upper bound of removing waitA: service() raises flag A with an "all resident" plan before the CPU jobs (the GPU never
+// waits for the host's plan; the outputs are WRONG for any non-resident expert: a timing probe only, never for text)
+inline bool fp_probe_waita_on() {
+    const bool on = fp_lab().probe_waita != 0;
+    static bool said = false;
+    if (on && !said) {
+        said = true;
+        std::fprintf(stderr, "strata verify: STRATA_FP_PROBE_WAITA: flag A raised with an all-resident plan before the CPU jobs - the text is WRONG (timing probe)\n");
+    }
+    return on;
+}
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -773,7 +781,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         // (waitA -> 0 for them), the rows still published for the host's CPU share.  Sound only because the serve
         // loop then keeps each card's residency table in step with host_res at that stage's gaps (fp_res_sync, before
         // every pipelined launch) and the adaptive tier's fence waits for that upload before any slot is overwritten.
-        if (always_publish_ && !all_resident_ && hits.d_res != nullptr && fp_devplan_env()) {
+        if (always_publish_ && !all_resident_ && hits.d_res != nullptr && fp_lab().devplan != 0) {
             device_plan_ = true;
             std::fprintf(stderr, "strata verify: STRATA_FP_DEVPLAN: device-planned groups in the pipelined windows (layers %lld-%lld)\n",
                          (long long) lb_, (long long) (le_ - 1));
@@ -3289,7 +3297,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
         // GPU never waits for the host's plan - the upper bound of what removing waitA can give.  Every entry is a VRAM
         // hit from the host table; a non-resident expert reads slot 0 (wrong text, a timing probe).  The pool then runs
         // as usual, its own plan written to a scratch block the GPU never reads (its publish re-raises flag A to `want`).
-        const bool probe = pool != nullptr && fp_probe_waita_env();
+        const bool probe = pool != nullptr && fp_probe_waita_on();
         if (probe) {
             const volatile int32_t* ids = h_ids_ + (size_t) tb * ss.k;
             const int64_t K = ss.k, ne = (int64_t) n * K;
@@ -3452,6 +3460,63 @@ bool Verifier::pl_commit_async(int n_keep, std::string& err) {
             ss_->ple_prev[1] = last_tokens_[t];
         }
     ms_commit += ms_since(t0);
+    return true;
+}
+
+// FABLE hot toggles: see verify.hpp
+bool Verifier::drop_graphs(std::string& err) {
+    if (fl_active_ || b_running_) { err = "verify: cannot drop the graphs with a window in flight"; return false; }
+    if (g_ == nullptr) return true;   // never initialized: nothing captured
+    const OnDevice on_device(device_);
+    if (!wait_commit(err)) return false;
+    if (cs_ != nullptr && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "verify: the stream failed before dropping the graphs"; return false; }
+    if (commit_live_ && ev_commit_ != nullptr) {   // a pipelined commit: its graph has run (the stream is synchronized)
+        commit_live_ = false;
+    }
+    for (auto& e : exec_)
+        if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    for (auto& e : exec_nr_)
+        if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    if (commit_exec_) { cudaGraphExecDestroy(commit_exec_); commit_exec_ = nullptr; }
+    for (auto& kv : exec_bm_)
+        if (kv.second) cudaGraphExecDestroy(kv.second);
+    for (auto& kv : commit_bm_)
+        if (kv.second) cudaGraphExecDestroy(kv.second);
+    exec_bm_.clear();
+    commit_bm_.clear();
+    bm_used_.clear();
+    cudaGetLastError();
+    return true;
+}
+
+bool Verifier::set_fp_devplan(bool on, std::string& err) {
+    if (g_ == nullptr || !always_publish_) return true;   // only the pipelined stages toggle (init decides the rest)
+    const bool want = on && !all_resident_ && hits_.d_res != nullptr;
+    if (want == device_plan_) return true;
+    if (fl_active_) { err = "verify: cannot change the device plan with a window in flight"; return false; }
+    const OnDevice on_device(device_);
+    if (want) {
+        if (skip_ == nullptr && (cudaMalloc((void**) &skip_, 64) != cudaSuccess || cudaMemset(skip_, 0, 64) != cudaSuccess)) {
+            cudaGetLastError();
+            if (skip_) cudaFree(skip_);
+            skip_ = nullptr;
+            err = "verify: STRATA_FP_DEVPLAN: the skip words could not be allocated";
+            return false;
+        }
+        if (slot_off_d_ == nullptr && hits_.slot_off != nullptr && hits_.n_slots > 0 &&
+            (cudaMalloc((void**) &slot_off_d_, (size_t) hits_.n_slots * sizeof(unsigned long long)) != cudaSuccess ||
+             cudaMemcpy(slot_off_d_, hits_.slot_off, (size_t) hits_.n_slots * sizeof(unsigned long long),
+                        cudaMemcpyHostToDevice) != cudaSuccess)) {
+            cudaGetLastError();
+            if (slot_off_d_) cudaFree(slot_off_d_);
+            slot_off_d_ = nullptr;
+            err = "verify: STRATA_FP_DEVPLAN: the slot offsets could not be uploaded";
+            return false;
+        }
+    }
+    device_plan_ = want;
+    std::fprintf(stderr, "strata verify: STRATA_FP_DEVPLAN %s for layers %lld-%lld (graphs recaptured)\n", want ? "on" : "off",
+                 (long long) lb_, (long long) (le_ - 1));
     return true;
 }
 

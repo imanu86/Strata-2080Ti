@@ -1,5 +1,6 @@
 // src/core/mtp.cpp - see include/strata/core/mtp.hpp.
 #include "strata/core/mtp.hpp"
+#include "strata/core/fp_lab.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/on_device.hpp"
 
@@ -141,6 +142,8 @@ MtpDrafter::~MtpDrafter() {
     if (cscratch_) cudaFree(cscratch_);
     if (h_cparams_) cudaFreeHost(h_cparams_);
     if (h_chist_) cudaFreeHost(h_chist_);
+    for (cudaStream_t& s : cs_pri_)
+        if (s) { cudaStreamSynchronize(s); cudaStreamDestroy(s); if (s == cs_) cs_ = nullptr; s = nullptr; }
     if (cs_) cudaStreamDestroy(cs_);
     if (side_) cudaStreamDestroy(side_);
     if (sh_fork_) cudaEventDestroy(sh_fork_);
@@ -445,16 +448,23 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     // priority).  FABLE: on the owner's two-card split the chain's steps inflate stage 1's windows (0.73-0.84 ms per
     // step at the highest priority), so STRATA_MTP_PRIORITY=-1 puts the chain stream at the LOWEST priority: the
     // windows go first and the chain fills the gaps.  1 (default): highest; 0: the device default; -1: lowest.
+    // FABLE hot toggles: with the forcing graphs all three priorities get a stream now (default, highest, lowest) and
+    // set_chain_priority picks one per request; the environment chooses the first.
     bool prio = false;
 #if !defined(STRATA_USE_HIP)   // (HIP: the default priority)
-    static const int prio_mode = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr ? 1 : std::atoi(v); }();
+    const int prio_mode = fp_lab().mtp_priority;
     int prio_lo = 0, prio_hi = 0;
-    if (force_on_ && prio_mode != 0 && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
-        prio = cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_mode > 0 ? prio_hi : prio_lo) == cudaSuccess;
+    if (force_on_ && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess) {
+        if (cudaStreamCreateWithPriority(&cs_pri_[1], cudaStreamNonBlocking, prio_hi) != cudaSuccess) cs_pri_[1] = nullptr;
+        if (cudaStreamCreateWithPriority(&cs_pri_[2], cudaStreamNonBlocking, prio_lo) != cudaSuccess) cs_pri_[2] = nullptr;
+        const int want = prio_mode > 0 ? 1 : prio_mode < 0 ? 2 : 0;
+        if (want != 0 && cs_pri_[want] != nullptr) { cs_ = cs_pri_[want]; prio = true; }
+    }
     if (prio && prio_mode < 0) std::fprintf(stderr, "strata mtp: STRATA_MTP_PRIORITY=-1: the chain stream at the lowest priority\n");
     cudaGetLastError();
 #endif
     if (!prio && cudaStreamCreateWithFlags(&cs_, cudaStreamNonBlocking) != cudaSuccess) { err = "mtp: stream"; return false; }
+    if (!prio) cs_pri_[0] = cs_;   // the default-priority stream (created on demand otherwise, set_chain_priority)
     if (cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking) != cudaSuccess ||
         cudaEventCreateWithFlags(&sh_fork_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&sh_join_, cudaEventDisableTiming) != cudaSuccess) {
@@ -1551,6 +1561,37 @@ void MtpDrafter::chain_close() {
     if (!chain_live_ || !chain_open_) return;
     chain_trimmed += chain_want_ - chain_launched_;
     chain_open_ = false;
+}
+
+// FABLE hot toggles: see mtp.hpp
+void MtpDrafter::set_chain_priority(int mode) {
+    if (!force_on_ || cs_ == nullptr || chain_live_) return;
+    const OnDevice on_device(device_);
+    const int want = mode > 0 ? 1 : mode < 0 ? 2 : 0;
+    if (cs_pri_[want] == nullptr) {
+        if (want != 0) return;   // the priority stream could not be created at load: keep the current one
+        if (cudaStreamCreateWithFlags(&cs_pri_[0], cudaStreamNonBlocking) != cudaSuccess) { cs_pri_[0] = nullptr; cudaGetLastError(); return; }
+    }
+    if (cs_pri_[want] == cs_) return;
+    cudaStreamSynchronize(cs_);   // the drafter is idle between requests; the switch waits for anything left
+    cs_ = cs_pri_[want];
+    std::fprintf(stderr, "strata mtp: the chain stream at the %s priority (lab MTP_PRIORITY=%d)\n",
+                 want == 1 ? "highest" : want == 2 ? "lowest" : "default", mode);
+}
+
+bool MtpDrafter::drop_graphs(std::string& err) {
+    if (chain_live_) { err = "mtp: cannot drop the graphs with a chain in flight"; return false; }
+    if (g_ == nullptr) return true;   // not loaded: nothing captured
+    const OnDevice on_device(device_);
+    if (cs_ != nullptr && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp: the stream failed before dropping the graphs"; return false; }
+    for (auto& e : prefill_exec_) if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    for (auto& e : prefill_dev_exec_) if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    for (auto& e : round_exec_) if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    for (auto& e : step_exec_) if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    for (auto& e : round_exec_c_) if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    for (auto& e : step_exec_c_) if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+    cudaGetLastError();
+    return true;
 }
 
 int MtpDrafter::chain_outputs_ready(std::string& err) {

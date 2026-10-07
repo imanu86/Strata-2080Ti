@@ -243,6 +243,15 @@ public:
     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
     void diag_pipelined(std::FILE* f, const char* name) const;
 
+    // ---- FABLE hot toggles (fp_lab.hpp): between requests, with nothing in flight on this verifier.
+    /// Destroy every captured window / commit graph (the kernel variants a graph holds are decided at capture): the
+    /// next run / capture_all records them again.  False with `err` when a window is in flight.
+    bool drop_graphs(std::string& err);
+    /// STRATA_FP_DEVPLAN per request: the device-planned groups of a pipelined (set_always_publish) stage on or off;
+    /// a no-op on other verifiers.  The caller drops the graphs when the value changed.
+    bool set_fp_devplan(bool on, std::string& err);
+    bool fp_devplan() const { return device_plan_ && always_publish_; }
+
     /// Measurement hook (STRATA_LOGPOS): after run(), write one line per row t of the last window's head -
     /// "pos target logprob top top_logprob hit extra_logprob target_logprob_without_extra" - where row t is the
     /// distribution at pos0 + t, targets[t] is the token at pos0 + t + 1, extra_logprob is the log-probability of
