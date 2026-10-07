@@ -234,6 +234,15 @@ The `STRATA_PIPELINE_*` tuning and test variables (THETA, FORCE_MISS, SWITCH, LO
 `STRATA_PIPELINE_DEBUG=1`. `--pipeline-windows` and `--adapt-async 1` exclude each other (the engine says so and keeps the
 pipeline).
 
+**The draft layer's window (`--mtp-window N`, default 32768).** The draft layer attends to the last N cells of the
+context (0 = every cell); the main layers are not affected, so only the drafts change, never the verified text. With
+`--pipeline-windows 2` the drafter's chain runs on the last card beside its verify windows (each chain step is
+0.7-0.8 ms there at 131K context), and its attention cost grows with N: a smaller window (8192, 16384) makes the chain
+cheaper at a possible cost in acceptance on long contexts; measure both (`STRATA_DECODE_TIMING=1` prints the chain's
+latency to B and the tokens per window). The value is part of the conversation cache's fingerprint (a saved
+conversation is read back only with the same N). The lab switches of the two-card decode (`STRATA_FP_*`) are
+described in [FABLE_PLAN.md](FABLE_PLAN.md).
+
 ## Several conversations at once
 
 With a layer split, `--batch N --batch-groups G --trim-stage-weights` decodes several conversations together and
