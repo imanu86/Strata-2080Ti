@@ -133,6 +133,11 @@ public:
 
     // Optional probe counter on the same GPU: [n_layers,512]. Null leaves prefill unchanged.
     float* closed_usage = nullptr;
+    // docs/PREFILL_SEED.md: the prompt's routing per (layer, expert) on the same GPU, both [n_layers, n_expert]:
+    // the mass (sum of the normalized gate weights) and the count (choices).  A stage adds its own layers' rows only.
+    // Null leaves prefill unchanged; the driver zeroes them before a prompt and reads them after it.
+    float* seed_mass = nullptr;
+    float* seed_count = nullptr;
     const PrefillStats& stats() const { return stats_; }
 
     /// multi-GPU: the experts the peer GPU holds are computed THERE for every prompt chunk (up to `cap_rows` routed

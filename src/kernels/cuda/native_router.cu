@@ -172,6 +172,16 @@ __global__ void count_closed(const int32_t* ids, float* counts, int stride,
     const int id = ids[(size_t) l * stride * 10 + i];
     if (id >= 0 && id < 512) atomicAdd(counts + l * 512 + id, 1.0f);
 }
+// docs/PREFILL_SEED.md: one layer's prompt routing added to the per-expert mass and count (router_mass_count)
+__global__ void mass_count(const int32_t* ids, const float* weights, float* mass, float* count, int n, int n_expert) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    const int id = ids[i];
+    const float w = weights[i];
+    if (id < 0 || id >= n_expert || !(w > 0.0f) || !isfinite(w)) return;
+    atomicAdd(mass + id, w);
+    atomicAdd(count + id, 1.0f);
+}
 __launch_bounds__(256, 1)
 __global__ void route_multi(const float* __restrict__ logits, int32_t* __restrict__ ids,
                             float* __restrict__ weights, int n_tok) {
@@ -274,6 +284,16 @@ void closed_router_count(const int32_t* ids, float* counts, int layers, int stri
     count_closed<<<dim3((unsigned)((stride*10+255)/256),(unsigned)layers),256,0,
                    static_cast<cudaStream_t>(stream)>>>(ids,counts,stride,keep_device,keep_host);
     auto e=cudaGetLastError(); if(e!=cudaSuccess)throw std::runtime_error(cudaGetErrorString(e));
+}
+void router_mass_count(const int32_t* ids, const float* weights, float* mass, float* count, int n_tok, int n_expert,
+                       void* stream) {
+    if (!ids || !weights || !mass || !count || !stream || n_tok < 1 || n_expert < 1)
+        throw std::invalid_argument("router mass: invalid window");
+    const int n = n_tok * 10;
+    mass_count<<<(unsigned) ((n + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(ids, weights, mass, count,
+                                                                                            n, n_expert);
+    const auto e = cudaGetLastError();
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e));
 }
 void native_router_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_router_enabled() { return enabled.load(std::memory_order_relaxed); }

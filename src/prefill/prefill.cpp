@@ -2619,6 +2619,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
                     if (closed_usage)
                         strata::kernels::closed_router_count(m.ids, closed_usage + l * 512, 1, (int)T, nullptr, (int)T, m.cs);
+                    if (seed_mass)   // docs/PREFILL_SEED.md: the prompt's routing mass, read by the driver at its end
+                        strata::kernels::router_mass_count(m.ids, m.w, seed_mass + l * m.g->n_expert,
+                                                           seed_count + l * m.g->n_expert, (int) T, (int) m.g->n_expert, m.cs);
                     // the shared expert and its scalar gate
                     if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
                     if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;

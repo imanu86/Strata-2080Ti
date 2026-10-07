@@ -34,5 +34,10 @@ void routed_lookahead_compare(const int32_t* ids, const int32_t* pred, const int
 // Accumulate only committed rows of [layers,stride,10], into [layers,512].
 void closed_router_count(const int32_t* ids, float* counts, int layers, int stride,
                          const int32_t* keep_device, int keep_host, void* stream);
+// docs/PREFILL_SEED.md: for one layer's [n_tok,10] routing add every (id, weight) pair to mass[id] (the normalized
+// gate weight) and count[id] (one per choice), both [n_expert]; a pair with a weight that is not > 0 (the router's
+// fallback) or an id out of range adds nothing.  The routing itself is untouched.
+void router_mass_count(const int32_t* ids, const float* weights, float* mass, float* count, int n_tok, int n_expert,
+                       void* stream);
 void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream);
 }
