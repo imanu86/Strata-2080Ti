@@ -26,6 +26,15 @@ namespace strata::kernels {
 void shared_expert_set_native_bf16(bool enabled);
 bool shared_expert_native_bf16_enabled();
 
+/// STRATA_FP_SHEXP_FUSE (opt-in, default 0): fewer launches in shared_expert_multi, every output bitwise the default's.
+/// 1: the scalar gate runs before the down projection, whose IQ4_NL kernel applies sigmoid(g[t]) in its epilogue
+/// (no sigmoid_scale launch). 2: also the SwiGLU + Q8_1 quantization runs in that kernel's prologue (no swiglu launch).
+/// Only the non-deferred-gate path with the native BF16 gate and a type 20 (IQ4_NL) down weight; anything else, and any
+/// layout the scaled kernels do not replace, runs the default sequence. `on` -1 = the environment variable (read once).
+/// Set before graph capture; captured graphs keep the kernels they captured.
+void shared_expert_set_fp_fuse(int on);
+int shared_expert_fp_fuse_level();
+
 /// Optional native GGUF projections. Each supported type with nonnull data
 /// replaces only that canonical projection; absent or unsupported entries fall
 /// back independently. Any active entry selects pinned FP32 SwiGLU arithmetic.

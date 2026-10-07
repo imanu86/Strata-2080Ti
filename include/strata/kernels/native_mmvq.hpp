@@ -126,6 +126,20 @@ void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
 void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
                       float* y, int n_in, int n_out, int ncols, void* stream);
 
+/// STRATA_FP_SHEXP_FUSE (opt-in, shared_expert_multi): native_iq4_nl_mmvq with column j's outputs multiplied by
+/// sigmoid(col_scale[j]) (sigmoid_scale_rows' expression) in the kernel's epilogue: every output is bitwise
+/// (float) (native_iq4_nl_mmvq's output * gt), one multiply, so one launch replaces the call and the scale launch.
+/// col_scale is ncols raw gate values (device, 4-byte aligned). Returns false, nothing launched, where the default
+/// call would not run the exact layout these kernels replace (STRATA_TSUM=1, multi_exact off, STRATA_NO_MMVQ_ROWS2=1
+/// at n_in >= 2048, AMD wave layout); the caller then runs native_iq4_nl_mmvq and the scale itself.
+bool native_iq4_nl_mmvq_scaled(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                               const float* col_scale, void* stream);
+/// The same with the SwiGLU + Q8_1 quantization of the input (native_swiglu_quantize_q8_1 on gate, up: ncols rows of
+/// n_in floats) recomputed in the kernel's prologue instead of read from a q8_1 image: bitwise the image's blocks, so
+/// bitwise native_swiglu_quantize_q8_1 + native_iq4_nl_mmvq_scaled. Also false (nothing launched) for n_in > 1024.
+bool native_iq4_nl_swiglu_mmvq_scaled(const void* weights, const float* gate, const float* up, float* y, int n_in,
+                                      int n_out, int ncols, const float* col_scale, void* stream);
+
 // Storage/dispatch helpers take stable GGML type IDs, avoiding a ggml runtime
 // dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q3_K=11, Q4_K=12, Q5_K=13,
 // Q6_K=14, IQ4_NL=20, IQ4_XS=23, Q2_0=42. Unsupported IDs throw in the byte-count

@@ -1610,6 +1610,213 @@ void small_f32(const void* weights, const float* x, void* scratch_q8_1,
     small_mmvq<Weight, Qi>(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
+// ============================ STRATA_FP_SHEXP_FUSE (opt-in): the shared expert's down projection, scaled ============================
+//
+// shared_expert_multi's IQ4_NL down projection with the per-token sigmoid gate applied in its epilogue (level 1) and, on
+// top, the SwiGLU + Q8_1 quantization of its input recomputed in its prologue (level 2).  These are the kernels of
+// native_small_mmvq_kernel (ncols = 1) and native_mmvq_multi_kernel<SmallTraits<IQ4NLBlock, 4>, NCOLS, 4, 2> (2..8
+// columns, the default exact layout): same thread-to-block mapping, same accumulation order, same cross-warp and warp
+// reductions.  Each output is that kernel's float `sum` times `gt`, one IEEE multiply, which is what sigmoid_scale_rows
+// does to the stored `sum` in another kernel.  Rows per block never enter a (row, column) sum, so level 2 runs 8 rows
+// per block to recompute the SwiGLU q8_1 image fewer times.  These kernels have no PDL prefetch (a plain loop: the
+// prefetching kernel applies the first block first too, so every sum adds the same terms in the same order).
+constexpr int FP_MAX_G = 32;   // q8_1 blocks per column the level-2 prologue keeps in shared memory (n_in <= 1024)
+using FpIq4nlF = SmallTraits<IQ4NLBlock, 4>;
+static_assert(!B6X<FpIq4nlF>::ok, "the scaled IQ4_NL kernels replace the default exact layout, not a B6 rows kernel");
+
+// sigmoid_scale_rows_vec4_kernel's expression (shared_expert.cu), term for term
+__device__ __forceinline__ float fp_gate_sigmoid(const float* g, int t) {
+    return __fdividef(1.0f, 1.0f + __expf(-__ldg(g + t)));
+}
+
+// Every warp quantizes whole 32-element groups of swiglu(gate, up): lane = i % 32 and a group's 32 lanes are one warp,
+// as in native_swiglu_quantize_q8_1_kernel (same expressions, same butterflies), so every q8_1 block is bitwise the
+// one that kernel stores.  Group t = column * (n_in / 32) + block, the layout of the global image.
+template<int NCOLS>
+__device__ __forceinline__ void fp_swiglu_q81_prologue(const float* gate, const float* up, Q81Block* hq, int n_in) {
+    const int lane = int(threadIdx.x);
+    const int total = NCOLS * (n_in / Q8K);
+    for (int t = int(threadIdx.y); t < total; t += WARPS) {
+        const int i = t * Q8K + lane;
+        const float gi = gate[i];
+        const float xi = __fmul_rn(__fdividef(gi, __fadd_rn(1.0f, __expf(-gi))), up[i]);
+        const float amax = warp_max(fabsf(xi));
+        const float sum = warp_sum(xi);
+        const float d = q8_1_finite(amax / 127.0f);
+        const int8_t q = q8_1_quant(xi, d, amax);
+        hq[t].qs[lane] = q;
+        if (lane == 0) hq[t].ds = q8_1_ds(d, sum);
+    }
+    __syncthreads();
+}
+
+template<int ROWS, bool HF>
+__launch_bounds__(WARPS * WARP, 1)
+__global__ void fp_iq4nl_small_scaled_kernel(const IQ4NLBlock* __restrict__ w, const Q81Block* x,
+                                             const float* gate, const float* up, float* y,
+                                             const float* col_scale, int n_in, int n_out) {
+    constexpr int Qi = 4;
+    constexpr int BLOCKS_PER_ITER = 2 * WARPS * WARP / Qi;
+    __shared__ int hq_raw[HF ? FP_MAX_G * 9 : 1];   // Q81Block = 9 ints
+    const Q81Block* xs = x;
+    if constexpr (HF) {
+        fp_swiglu_q81_prologue<1>(gate, up, reinterpret_cast<Q81Block*>(hq_raw), n_in);
+        xs = reinterpret_cast<const Q81Block*>(hq_raw);
+    }
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int row0 = ROWS * int(blockIdx.x);
+    const int blocks_per_row = n_in / 32;
+    float tmp[ROWS] = {};
+    for (int kbx = tid / (Qi / 2); kbx < blocks_per_row; kbx += BLOCKS_PER_ITER) {
+        const int kqs = 2 * (tid % (Qi / 2));
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                tmp[i] += small_q8_dot(w + block, xs + kbx, kqs);
+            }
+        }
+    }
+    __shared__ float partial[WARPS - 1][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][i][threadIdx.x] = tmp[i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+    const float gt = fp_gate_sigmoid(col_scale, 0);
+#pragma unroll
+    for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+        for (int l = 0; l < WARPS - 1; ++l) tmp[i] += partial[l][i][threadIdx.x];
+        tmp[i] = warp_sum(tmp[i]);
+        if (threadIdx.x == i && row0 + i < n_out) y[row0 + i] = tmp[i] * gt;
+    }
+}
+
+template<int NCOLS, int ROWS, bool HF>
+__launch_bounds__(WARPS * WARP, (ROWS <= 2 ? 4 : 2))
+__global__ void fp_iq4nl_multi_scaled_kernel(const IQ4NLBlock* __restrict__ w, const Q81Block* x,
+                                             const float* gate, const float* up, float* y,
+                                             const float* col_scale, int n_in, int n_out) {
+    using F = FpIq4nlF;
+    constexpr int BPI = F::BPI;   // native_mmvq_multi_kernel's F::BPI * NW / WARPS with NW = WARPS
+    __shared__ int hq_raw[HF ? FP_MAX_G * NCOLS * 9 : 1];   // Q81Block = 9 ints
+    const Q81Block* xs = x;
+    if constexpr (HF) {
+        fp_swiglu_q81_prologue<NCOLS>(gate, up, reinterpret_cast<Q81Block*>(hq_raw), n_in);
+        xs = reinterpret_cast<const Q81Block*>(hq_raw);
+    }
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int row0 = ROWS * int(blockIdx.x);
+    const int blocks_per_row = n_in / F::DIV;
+    const int x_stride = n_in / Q8K;   // Q8_1 blocks per activation column
+    float tmp[NCOLS][ROWS] = {};
+    for (int kbx = tid / F::T; kbx < blocks_per_row; kbx += BPI) {
+        const int kby = kbx * F::KBY;
+        const int kqs = F::kqs(tid);
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                const F::W wv = F::load(w + block, kqs);   // once per (row, block)
+#pragma unroll
+                for (int j = 0; j < NCOLS; ++j)             // then per column
+                    tmp[j][i] += F::apply(wv, xs + std::size_t(j) * x_stride + kby, kqs);
+            }
+        }
+    }
+    __shared__ float partial[WARPS - 1][NCOLS][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j)
+#pragma unroll
+            for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][j][i][threadIdx.x] = tmp[j][i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int j = 0; j < NCOLS; ++j) {
+        const float gt = fp_gate_sigmoid(col_scale, j);
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+            for (int l = 0; l < WARPS - 1; ++l) tmp[j][i] += partial[l][j][i][threadIdx.x];
+            tmp[j][i] = warp_sum(tmp[j][i]);
+            if (threadIdx.x == i && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = tmp[j][i] * gt;
+        }
+    }
+}
+
+template<int NCOLS, bool HF>
+void fp_iq4nl_multi_launch(const IQ4NLBlock* w, const Q81Block* x, const float* gate, const float* up, float* y,
+                           const float* col_scale, int n_in, int n_out, cudaStream_t s) {
+    constexpr int ROWS = HF ? 8 : 2;
+    const unsigned blocks = unsigned((std::size_t(n_out) + ROWS - 1) / ROWS);
+    fp_iq4nl_multi_scaled_kernel<NCOLS, ROWS, HF><<<blocks, dim3(WARP, WARPS), 0, s>>>(w, x, gate, up, y, col_scale,
+                                                                                     n_in, n_out);
+}
+
+bool fp_rows1_env() {   // STRATA_NO_MMVQ_ROWS2, as launch_multi_n reads it
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_NO_MMVQ_ROWS2");
+        return v != nullptr && v[0] != '\0' && v[0] != '0';
+    }();
+    return on;
+}
+
+// false (nothing launched): the layout the default call would run is not the one these kernels replace
+template<bool HF>
+bool fp_iq4nl_scaled(const void* weights, const void* x_q8_1, const float* gate, const float* up, float* y, int n_in,
+                     int n_out, int ncols, const float* col_scale, void* stream) {
+    validate_shape(n_in, ncols, 32);
+    if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
+    validate_pointer(weights);
+    validate_pointer(y);
+    validate_pointer(col_scale);
+    validate_stream(stream);
+    if constexpr (HF) {
+        validate_pointer(gate);
+        validate_pointer(up);
+        if (n_in / Q8K > FP_MAX_G) return false;
+    } else {
+        validate_pointer(x_q8_1);
+    }
+#if defined(STRATA_HIP_GFX906)
+    if (!g_wave_off) return false;   // the AMD wave layout
+#endif
+    if (ncols > 1 && (!g_multi_exact || s26_tsum_on() || (fp_rows1_env() && n_in / FpIq4nlF::DIV >= FpIq4nlF::BPI)))
+        return false;
+    const auto s = static_cast<cudaStream_t>(stream);
+    const auto* w = static_cast<const IQ4NLBlock*>(weights);
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    if (ncols == 1) {
+        const dim3 threads(WARP, WARPS);
+        if constexpr (HF) {
+            fp_iq4nl_small_scaled_kernel<8, true><<<unsigned((std::size_t(n_out) + 7) / 8), threads, 0, s>>>(
+                w, x, gate, up, y, col_scale, n_in, n_out);
+        } else if (n_in / 32 < 2 * WARPS * WARP / 4) {   // small_mmvq's small-K rule: 4 rows per block
+            fp_iq4nl_small_scaled_kernel<WARPS, false><<<unsigned((std::size_t(n_out) + WARPS - 1) / WARPS), threads, 0, s>>>(
+                w, x, gate, up, y, col_scale, n_in, n_out);
+        } else {
+            fp_iq4nl_small_scaled_kernel<1, false><<<unsigned(n_out), threads, 0, s>>>(w, x, gate, up, y, col_scale, n_in,
+                                                                                      n_out);
+        }
+    } else {
+        switch (ncols) {
+            case 2: fp_iq4nl_multi_launch<2, HF>(w, x, gate, up, y, col_scale, n_in, n_out, s); break;
+            case 3: fp_iq4nl_multi_launch<3, HF>(w, x, gate, up, y, col_scale, n_in, n_out, s); break;
+            case 4: fp_iq4nl_multi_launch<4, HF>(w, x, gate, up, y, col_scale, n_in, n_out, s); break;
+            case 5: fp_iq4nl_multi_launch<5, HF>(w, x, gate, up, y, col_scale, n_in, n_out, s); break;
+            case 6: fp_iq4nl_multi_launch<6, HF>(w, x, gate, up, y, col_scale, n_in, n_out, s); break;
+            case 7: fp_iq4nl_multi_launch<7, HF>(w, x, gate, up, y, col_scale, n_in, n_out, s); break;
+            default: fp_iq4nl_multi_launch<8, HF>(w, x, gate, up, y, col_scale, n_in, n_out, s); break;
+        }
+    }
+    launch_check();
+    return true;
+}
+
 // ============================ STRATA_Q8_PACKED=1: the packed Q8_0 decode layout (opt-in) ============================
 //
 // A lossless load-time repack of a Q8_0 matrix: the SAME int8 values in a qs plane (row-major, n_in bytes per row)
@@ -2390,6 +2597,16 @@ void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
 void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
                       float* y, int n_in, int n_out, int ncols, void* stream) {
     small_f32<IQ4NLBlock, 4>(weights, x, scratch_q8_1, y, n_in, n_out, ncols, stream);
+}
+
+bool native_iq4_nl_mmvq_scaled(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols,
+                               const float* col_scale, void* stream) {
+    return fp_iq4nl_scaled<false>(weights, x_q8_1, nullptr, nullptr, y, n_in, n_out, ncols, col_scale, stream);
+}
+
+bool native_iq4_nl_swiglu_mmvq_scaled(const void* weights, const float* gate, const float* up, float* y, int n_in,
+                                      int n_out, int ncols, const float* col_scale, void* stream) {
+    return fp_iq4nl_scaled<true>(weights, nullptr, gate, up, y, n_in, n_out, ncols, col_scale, stream);
 }
 
 bool native_mmvq_supported(int ggml_type) noexcept {

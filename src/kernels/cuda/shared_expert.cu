@@ -43,6 +43,7 @@ namespace {
 
 constexpr int THREADS = 128;
 bool native_bf16 = false;
+int fp_fuse = -1;   // shared_expert_set_fp_fuse; -1 = STRATA_FP_SHEXP_FUSE
 
 // `f32_to_f16` used to live here as a private copy.  Round 198 found it - and the identical one in
 // `quantize_act.cu` - returning a NaN for every FINITE value that overflows fp16 (1e30, 65536, 1e45) instead
@@ -161,6 +162,16 @@ __global__ void moe_combine_kernel(const float* __restrict__ parts, const float*
 void shared_expert_set_native_bf16(bool enabled) { native_bf16 = enabled; }
 bool shared_expert_native_bf16_enabled() { return native_bf16; }
 
+void shared_expert_set_fp_fuse(int on) { fp_fuse = on; }
+int shared_expert_fp_fuse_level() {
+    static const int env = [] {
+        const char* v = std::getenv("STRATA_FP_SHEXP_FUSE");
+        return v ? std::atoi(v) : 0;
+    }();
+    const int l = fp_fuse >= 0 ? fp_fuse : env;
+    return l < 0 ? 0 : l > 2 ? 2 : l;
+}
+
 namespace {
 __global__ void scale_rows_kernel(float* __restrict__ out, const float* __restrict__ g, int n) {
     const int t = blockIdx.y;
@@ -231,19 +242,39 @@ void shared_expert_multi(int n_tok, const float* x, const uint16_t* x_bf16, cons
         native_mmvq(nw.up_type, nw.up_data, x_q8_1, up, (int) n_embd, (int) n_ff, n_tok, stream);
     }
     const int n = (int) (n_ff * n_tok);
-    if (fused_swiglu_q81_enabled()) {
-        native_swiglu_quantize_q8_1(gate, up, nw.q8_1, (int) n_ff, n_tok, stream);
-    } else {
-        native_swiglu_kernel<<<(unsigned) ((n + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate, up, gate, n);
-        native_quantize_q8_1(gate, nw.q8_1, (int) n_ff, n_tok, stream);
+    static const bool batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
+    // STRATA_FP_SHEXP_FUSE: the batched / single-token native BF16 gate branches below, with the gate computed before the
+    // down projection (g depends on x only; the same call, so the same bytes) and sigmoid(g[t]) applied by the down kernel
+    const int fuse = (!gate_deferred && native_bf16 && (n_tok == 1 || batch)) ? shared_expert_fp_fuse_level() : 0;
+    if (fuse > 0) {
+        if (n_tok > 1) bf16_gemv_fp32_mmvf_multi(x, n_embd, gate_inp_bf16, g, 1, n_embd, 1, n_tok, stream);
+        else bf16_gemv_fp32_mmvf(x, gate_inp_bf16, g, n_embd, 1, stream);
     }
-    native_mmvq(nw.down_type, nw.down_data, nw.q8_1, out, (int) n_ff, (int) n_embd, n_tok, stream);
+    bool scaled = false;   // the down kernel applied sigmoid(g[t]) to `out`
+    if (fuse > 1 && fused_swiglu_q81_enabled() && nw.down_type == 20)   // level 2: SwiGLU + q8_1 in the down kernel's prologue
+        scaled = native_iq4_nl_swiglu_mmvq_scaled(nw.down_data, gate, up, out, (int) n_ff, (int) n_embd, n_tok, g, stream);
+    if (!scaled) {
+        if (fused_swiglu_q81_enabled()) {
+            native_swiglu_quantize_q8_1(gate, up, nw.q8_1, (int) n_ff, n_tok, stream);
+        } else {
+            native_swiglu_kernel<<<(unsigned) ((n + THREADS - 1) / THREADS), THREADS, 0, cs>>>(gate, up, gate, n);
+            native_quantize_q8_1(gate, nw.q8_1, (int) n_ff, n_tok, stream);
+        }
+        if (fuse > 0 && nw.down_type == 20)   // level 1: sigmoid(g[t]) in the down kernel's epilogue
+            scaled = native_iq4_nl_mmvq_scaled(nw.down_data, nw.q8_1, out, (int) n_ff, (int) n_embd, n_tok, g, stream);
+        if (!scaled) native_mmvq(nw.down_type, nw.down_data, nw.q8_1, out, (int) n_ff, (int) n_embd, n_tok, stream);
+    }
+    if (fuse > 0) {
+        if (!scaled) launch_sigmoid_scale_rows(out, g, (int) n_embd, n_tok, cs);   // a kernel layout the scaled one does not replace
+        const cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) throw std::runtime_error(std::string("shared_expert_multi: ") + cudaGetErrorString(e));
+        return;
+    }
     if (gate_deferred) {   // the caller computed g (raw) with the router and scales `out` in the combine
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) throw std::runtime_error(std::string("shared_expert_multi: ") + cudaGetErrorString(e));
         return;
     }
-    static const bool batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
     if (native_bf16 && batch && n_tok > 1) {   // one gemv for all rows (outputs identical), fused sigmoid+scale
         bf16_gemv_fp32_mmvf_multi(x, n_embd, gate_inp_bf16, g, 1, n_embd, 1, n_tok, stream);
         launch_sigmoid_scale_rows(out, g, (int) n_embd, n_tok, cs);
