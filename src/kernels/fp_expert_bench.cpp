@@ -6,9 +6,14 @@
 // The model's routed expert formats at its geometry (n_embd 2560, n_ff 640): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS
 // (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type pairs (e.g.
 // "21/20,16/42"); the default runs every one of the 5 x 2 pairs.  Each pair goes through `native_expert_grouped` (gate/up
-// + SwiGLU + down) with the opt-in kernel variants STRATA_FP_EXPERT_V / native_expert_set_fp_variant: 0 = the default
-// kernels, 4 = persistent gate/up and down (STRATA_FP_EXPERT_PERSIST_K blocks per SM, default 2); the IQ3_S / IQ4_NL pair
-// also 1 = IQ3_S codebook in shared memory, 2 = two rows per sub-warp, 3 = 1 + 2.
+// + SwiGLU + down) with the opt-in kernel choices of STRATA_FP_EXPERT_V / native_expert_set_fp_variant and friends:
+//   0        the default kernels
+//   4        persistent gate/up and down (STRATA_FP_EXPERT_PERSIST_K blocks per SM, default 2)
+//   1 2 3    the IQ3_S / IQ4_NL pair only: IQ3_S codebook in shared memory, two rows per sub-warp, 1 + 2
+//   0t<k>    T = 1 only: the default kernels' rows in ceil(tiles / k) blocks of k row tiles each (STRATA_FP_DEF_TILES_T1=k)
+//   auto     the selection the engine makes with STRATA_FP_EXPERT_V=4: variant 4 for T <= STRATA_FP_EXPERT_V4_TMAX (the
+//            environment's, else 1 here) on the pairs of STRATA_FP_EXPERT_V4_PAIRS (unset = every pair), the default
+//            kernels otherwise, with STRATA_FP_DEF_TILES_T1 as set in the environment (unset = 1, the default launch).
 //
 // For T = 1..4 tokens a verify window is built: every token picks 10 experts out of `groups` distinct ones (at most
 // 10 T; every expert picked by at least one token, a group holds the tokens that picked it, 1..T entries).  Per variant:
@@ -54,10 +59,38 @@ const char* type_name(int t) {
 // values per block (the i-quants' super-block, IQ4_NL's 32, Q2_0's 64); every block starts with its fp16 scale d
 int qk_of(int t) { return t == 20 ? 32 : t == 42 ? 64 : 256; }
 
-// the variants to run for a pair: 0 and 4 everywhere, 1-3 for the IQ3_S / IQ4_NL pair they were written for
-std::vector<int> variants_of(const Pair& p) {
-    if (p.gu == 21 && p.d == 20) return {0, 1, 2, 3, 4};
-    return {0, 4};
+// A kernel choice the bench times: variant 0-4, or 0 with STRATA_FP_DEF_TILES_T1 = tiles, or the engine's selection.
+struct Choice {
+    std::string name;
+    int variant = 0;     // native_expert_set_fp_variant
+    int tiles_t1 = 1;    // native_expert_set_fp_def_tiles_t1
+    int tmax = 0;        // native_expert_set_fp_v4_tmax (auto only; 0 = every call)
+    bool pairs_env = false;   // auto: the environment's STRATA_FP_EXPERT_V4_PAIRS table (else every pair)
+};
+
+int env_int(const char* name, int dflt) {
+    const char* v = std::getenv(name);
+    return v != nullptr && v[0] != '\0' ? std::atoi(v) : dflt;
+}
+
+// the choices for a pair at T: 0 and 4 everywhere, 1-3 for the IQ3_S / IQ4_NL pair they were written for, the tiles
+// launches at T = 1, and the engine's selection last
+std::vector<Choice> choices_of(const Pair& p, int T) {
+    std::vector<Choice> c;
+    c.push_back({"0", 0, 1, 0, false});
+    if (p.gu == 21 && p.d == 20)
+        for (int v = 1; v <= 3; ++v) c.push_back({std::to_string(v), v, 1, 0, false});
+    c.push_back({"4", 4, 1, 0, false});
+    if (T == 1)
+        for (int k : {2, 4, 8}) c.push_back({"0t" + std::to_string(k), 0, k, 0, false});
+    Choice a;
+    a.name = "auto";
+    a.variant = 4;
+    a.tmax = std::max(0, env_int("STRATA_FP_EXPERT_V4_TMAX", 1));
+    a.tiles_t1 = std::max(1, env_int("STRATA_FP_DEF_TILES_T1", 1));
+    a.pairs_env = true;
+    c.push_back(a);
+    return c;
 }
 
 bool g_cuda_error = false;
@@ -151,8 +184,16 @@ struct StreamEvents {
     }
 };
 
+// the kernel choice in force for the next calls (the engine's setters; the pairs table from the environment or none)
+void apply_choice(const Choice& c, const char* pairs_env) {
+    K::native_expert_set_fp_variant(c.variant);
+    K::native_expert_set_fp_def_tiles_t1(c.tiles_t1);
+    K::native_expert_set_fp_v4_tmax(c.tmax);
+    K::native_expert_set_fp_v4_pairs(c.pairs_env ? pairs_env : "");
+}
+
 bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& pool, size_t P, size_t stride,
-                const std::vector<float>& xh, const K::NativeExpertLayout& L, const std::vector<int>& variants,
+                const std::vector<float>& xh, const K::NativeExpertLayout& L, const Pair& pair, const char* pairs_env,
                 long long& bad) {
     if (!ck(cudaSetDevice(dev), "set device")) return false;
     cudaDeviceProp pr{};
@@ -189,7 +230,6 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
     if (!ck(cudaStreamSynchronize(se.s), "quantize")) return false;
 
     std::mt19937 rng(20261007u);
-    const int variant_before = K::native_expert_fp_variant();
     bool ok = true;
     for (int T = 1; T <= kMaxT && ok; ++T) {
         const Window w = build_window(T, groups_req, rng);
@@ -206,13 +246,14 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
              ck(cudaMemcpy(dtok, w.tok.data(), w.tok.size() * sizeof(int32_t), cudaMemcpyHostToDevice), "copy tok");
         if (!ok) break;
         std::printf("# T=%d: %d groups, %d entries, %.1f MB of weights per call\n", T, G, NE, (double) G * (double) L.bytes / 1e6);
-        auto call = [&](size_t i) {
-            K::native_expert_grouped(L, dptr + (i % P) * (size_t) G, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, stream);
+        auto call = [&](size_t i) {   // the engine passes the window's tokens (T) for the per-call kernel choices
+            K::native_expert_grouped(L, dptr + (i % P) * (size_t) G, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, stream, 0, T);
         };
         std::vector<float> ref, res((size_t) NE * kEmbd);
-        for (size_t vi = 0; vi < variants.size() && ok; ++vi) {
-            const int v = variants[vi];
-            K::native_expert_set_fp_variant(v);
+        const std::vector<Choice> choices = choices_of(pair, T);
+        for (size_t vi = 0; vi < choices.size() && ok; ++vi) {
+            const Choice& c = choices[vi];
+            apply_choice(c, pairs_env);
             ok = ck(cudaMemset(dout, 0, (size_t) NE * kEmbd * sizeof(float)), "memset out");
             call(0);
             ok = ok && ck(cudaStreamSynchronize(se.s), "run") && ck(cudaGetLastError(), "kernel") &&
@@ -241,12 +282,12 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
             std::sort(rounds, rounds + 5);
             const double us = rounds[2];
             const double gbps = (double) G * (double) L.bytes / (us * 1e-6) / 1e9;
-            std::printf("%d %d %d/%d %d %.1f %.1f %.1f%% %s\n", dev, T, L.gu_type, L.d_type, v, us, gbps,
+            std::printf("%d %d %d/%d %s %.1f %.1f %.1f%% %s\n", dev, T, L.gu_type, L.d_type, c.name.c_str(), us, gbps,
                         peak > 0.0 ? 100.0 * gbps * 1e9 / peak : 0.0, same ? "identical" : "DIFFERENT");
             if (!same) ++bad;
         }
     }
-    K::native_expert_set_fp_variant(variant_before);
+    apply_choice(Choice{"0", 0, 1, 0, false}, pairs_env);
     return ok;
 }
 
@@ -305,8 +346,18 @@ int main(int argc, char** argv) {
         const char* v = std::getenv(name);
         if (v != nullptr && v[0] != '\0' && v[0] != '0') std::printf("# warning: %s is set, the variants are bypassed\n", name);
     }
+    const char* pairs_env_raw = std::getenv("STRATA_FP_EXPERT_V4_PAIRS");
+    const std::string pairs_env = pairs_env_raw != nullptr ? pairs_env_raw : "";
+    if (!pairs_env.empty() && !K::native_expert_set_fp_v4_pairs(pairs_env.c_str())) {
+        std::printf("fp_expert_bench: STRATA_FP_EXPERT_V4_PAIRS '%s' is malformed\n", pairs_env.c_str());
+        return 1;
+    }
     K::iq_set_old_kernels(false);
-    std::printf("# n_embd %d, n_ff %d, %d pair(s); variants 0 and 4 per pair, 1-3 for 21/20\n", kEmbd, kFf, (int) pairs.size());
+    std::printf("# n_embd %d, n_ff %d, %d pair(s); choices 0 and 4 per pair, 1-3 for 21/20, 0t2/0t4/0t8 at T=1, auto\n", kEmbd, kFf,
+                (int) pairs.size());
+    std::printf("# auto: V=4 for T <= %d (STRATA_FP_EXPERT_V4_TMAX, 1 when unset) on pairs %s, STRATA_FP_DEF_TILES_T1=%d\n",
+                std::max(0, env_int("STRATA_FP_EXPERT_V4_TMAX", 1)), pairs_env.empty() ? "(all)" : pairs_env.c_str(),
+                std::max(1, env_int("STRATA_FP_DEF_TILES_T1", 1)));
     std::printf("# dev T gu/d v us GB/s pct identical|DIFFERENT\n");
     long long bad = 0;
     bool ok = true;
@@ -324,10 +375,9 @@ int main(int argc, char** argv) {
         std::vector<float> xh((size_t) kMaxT * kEmbd);
         std::normal_distribution<float> nd(0.0f, 1.0f);
         for (float& v : xh) v = nd(rng);
-        const std::vector<int> variants = variants_of(p);
         for (int dev = 0; dev < n_dev; ++dev) {
             if (only >= 0 && dev != only) continue;
-            ok = run_device(dev, reps, groups_req, pool, P, stride, xh, L, variants, bad) && ok;
+            ok = run_device(dev, reps, groups_req, pool, P, stride, xh, L, p, pairs_env.c_str(), bad) && ok;
         }
     }
     std::printf("\nfp_expert_bench: %s (%lld variant comparisons differ%s)\n", (bad || !ok || g_cuda_error) ? "FAILED" : "ok",
