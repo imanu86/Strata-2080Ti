@@ -116,6 +116,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <set>
 #include <vector>
@@ -2137,6 +2138,64 @@ int main(int argc, char** argv) {
         else (void) cudaGetLastError();
     }
 #endif
+    // Lab-only synthetic continuation: the target still runs, but the fixture supplies future draft IDs.
+    // This is a decode ceiling experiment, never a measurement of actual generation quality.
+    enum class LabDraftOracle { Off, Quality, Instant };
+    LabDraftOracle lab_oracle = LabDraftOracle::Off;
+    const char* lab_oracle_env = std::getenv("STRATA_LAB_DRAFT_ORACLE");
+    // A hot BAB uses one process. Only the oracle treatment changes at a GEN boundary; geometry and
+    // allocations stay fixed. Fixture paths remain explicit, one per absolute request (no cycling/fallback).
+    const char* lab_oracle_switch = std::getenv("STRATA_LAB_DRAFT_ORACLE_SWITCH");
+    const bool lab_oracle_hot = lab_oracle_switch != nullptr && lab_oracle_switch[0] != 0;
+    int64_t lab_prefix_tokens = 0;
+    if (const char* value = std::getenv("STRATA_LAB_PREFIX_TOKENS"); value && value[0]) {
+        char* end = nullptr;
+        lab_prefix_tokens = std::strtoll(value, &end, 10);
+        if (!lab_oracle_hot || o.prompt_cache_file.empty() || end == value || *end != '\0' ||
+            lab_prefix_tokens <= 0 || (uint64_t) lab_prefix_tokens > strata::core::prefix_cache_max_tokens) {
+            std::fprintf(stderr, "strata lab oracle: STRATA_LAB_PREFIX_TOKENS requires hot switching, prefix cache "
+                                 "and a positive supported token count\n");
+            return 2;
+        }
+    }
+    const bool lab_oracle_log = lab_oracle_hot || (lab_oracle_env != nullptr && lab_oracle_env[0] != 0);
+    if (lab_oracle_env != nullptr && lab_oracle_env[0] != 0) {
+        const std::string mode(lab_oracle_env);
+        if (mode == "quality") lab_oracle = LabDraftOracle::Quality;
+        else if (mode == "instant") lab_oracle = LabDraftOracle::Instant;
+        else if (mode != "0" && mode != "off") {
+            std::fprintf(stderr, "strata lab oracle: STRATA_LAB_DRAFT_ORACLE accepts 0, off, quality or instant\n");
+            return 2;
+        }
+    }
+    const bool lab_oracle_on = lab_oracle != LabDraftOracle::Off;
+    const bool lab_oracle_instant = lab_oracle == LabDraftOracle::Instant;
+    const char* lab_oracle_name = lab_oracle_instant ? "instant" : lab_oracle_on ? "quality" : "off";
+    if (lab_oracle_hot)
+        std::fprintf(stderr, "strata lab oracle: hot switch=%s startup=%s; explicit fixture per request\n",
+                     lab_oracle_switch, lab_oracle_name);
+    if (lab_oracle_on || lab_oracle_hot) {
+        const char* fi = std::getenv("STRATA_FORCE_IDS");
+        const char* fw = std::getenv("STRATA_FORCE_WINDOWS");
+        if (!o.serve || o.batch != 0 || o.pipeline_windows != 2 || o.spec != 4 || o.mtp.empty() ||
+            (o.mtp_max_t != 0 && o.mtp_max_t != 4) || o.suffix_draft != 0 || o.lookup_chain != 0 ||
+            o.coupled_draft || !o.spec_oracle.empty() || !o.spec_follow.empty() || o.spec_corrupt != 0 ||
+            fi == nullptr || fi[0] == 0 || fw != nullptr ||
+            std::getenv("STRATA_NEURON_PROBE_CONTROL") != nullptr ||
+            std::getenv("STRATA_CLOSED_ROUTING") != nullptr ||
+            ((lab_oracle_instant || lab_oracle_hot) && std::getenv("STRATA_STATE_HASH") != nullptr)) {
+            std::fprintf(stderr, "strata lab oracle: requires single-chat --serve, --pipeline-windows 2, MTP, "
+                                 "--spec 4, --suffix-draft 0, --lookup-chain 0 and STRATA_FORCE_IDS; "
+                                 "FORCE_WINDOWS, coupled/other oracle/probe modes and instant/hot STATE_HASH are unsupported\n");
+            return 2;
+        }
+        const auto& fixtures = force_id_lists();
+        if (fixtures.empty() || std::any_of(fixtures.begin(), fixtures.end(),
+                                          [](const std::vector<int32_t>& f) { return f.empty(); })) {
+            std::fprintf(stderr, "strata lab oracle: every STRATA_FORCE_IDS fixture must exist and be nonempty\n");
+            return 2;
+        }
+    }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                                      [](int slots) { return slots > 0; }))) {
@@ -4166,6 +4225,17 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: STRATA_MTP_DEVICE accepts 0, last, or the last stage's device index\n");
             return 2;
         }
+    }
+    if (lab_oracle_on || lab_oracle_hot) {
+#if defined(STRATA_USE_HIP)
+        std::fprintf(stderr, "strata lab oracle: this experiment requires CUDA\n");
+        return 2;
+#else
+        if (!multi_gpu || split_auto || stages.size() != 1 || !last_st || last_st->dev == 0 || mtp_cross_device) {
+            std::fprintf(stderr, "strata lab oracle: requires an explicit two-GPU split with MTP on the last stage\n");
+            return 2;
+        }
+#endif
     }
     if (mtp_cross_device)
         std::fprintf(stderr, "strata generate: MTP placement: target CUDA%d, drafter CUDA0, pinned-host transport\n",
@@ -7251,6 +7321,7 @@ int main(int argc, char** argv) {
             return use_mtp && mtp.device() == device ? &mtp.kv_state() : nullptr;
         };
         strata::core::PrefixDigest prefix_identity{};
+        std::vector<std::filesystem::path> prefix_cache_assets;   // validate a lab hot-switch destination too
         bool prefix_disk_enabled = !o.prompt_cache_file.empty();
         if (prefix_disk_enabled) {
             const auto identity_start = Clock::now();
@@ -7260,6 +7331,7 @@ int main(int argc, char** argv) {
             for (const auto& p : o.native_head_shards) assets.emplace_back(p);
             for (const auto& p : o.native_dense_gguf) assets.emplace_back(p);
             for (const auto& item : o.cvec_files) assets.emplace_back(item.first);
+            prefix_cache_assets = assets;
             std::vector<std::string> settings;
             if (mtp_cross_device) settings.push_back("draft-device=0");
             // Activations are local to this device/runtime, not portable model files.
@@ -9576,6 +9648,64 @@ int main(int argc, char** argv) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
                 continue;
             }
+            // Read the treatment once, before this request changes any session state or starts prefill. A bad
+            // switch file is fatal: continuing with the startup/previous mode would invalidate the hot BAB.
+            LabDraftOracle request_oracle = lab_oracle;
+            std::string oracle_prefix_file;
+            if (lab_oracle_hot) {
+                std::ifstream control(lab_oracle_switch);
+                std::string first, mode, extra;
+                if (!std::getline(control, first)) {
+                    std::printf("ERR lab oracle: cannot read the switch file\n");
+                    return 1;
+                }
+                std::istringstream first_line(first);
+                if (!(first_line >> mode) || (first_line >> extra)) {
+                    std::printf("ERR lab oracle: first switch line must contain exactly one mode token\n");
+                    return 1;
+                }
+                if (std::getline(control, oracle_prefix_file)) {
+                    const size_t begin = oracle_prefix_file.find_first_not_of(" \t\r");
+                    const size_t end = oracle_prefix_file.find_last_not_of(" \t\r");
+                    oracle_prefix_file = begin == std::string::npos ? std::string() : oracle_prefix_file.substr(begin, end - begin + 1);
+                    if (oracle_prefix_file.empty() || geni || !prefix_disk_enabled || o.prompt_cache_file.empty() ||
+                        std::getenv("STRATA_CKPT_REREAD") != nullptr || (control >> extra)) {
+                        std::printf("ERR lab oracle: optional second switch line requires an enabled prefix disk cache and one path\n");
+                        return 1;
+                    }
+                    try {
+                        const std::filesystem::path selected(oracle_prefix_file);
+                        if (!selected.is_absolute() || selected.filename().empty())
+                            throw std::runtime_error("prefix path must be an absolute file path");
+                        const auto destination = std::filesystem::weakly_canonical(selected);
+                        for (const auto& path : prefix_cache_assets) {
+                            if (path.empty()) continue;
+                            const auto asset = std::filesystem::canonical(path);
+                            const auto relative = destination.lexically_relative(asset);
+                            if (destination == asset || (std::filesystem::is_directory(asset) && !relative.empty() &&
+                                    *relative.begin() != "..")) throw std::runtime_error("prefix path overlaps model assets");
+                        }
+                    } catch (const std::exception& e) {
+                        std::printf("ERR lab oracle: invalid prefix switch path: %s\n", e.what());
+                        return 1;
+                    }
+                }
+                if (mode == "0" || mode == "off") request_oracle = LabDraftOracle::Off;
+                else if (mode == "quality") request_oracle = LabDraftOracle::Quality;
+                else if (mode == "instant") request_oracle = LabDraftOracle::Instant;
+                else {
+                    std::printf("ERR lab oracle: switch mode must be 0, off, quality or instant\n");
+                    return 1;
+                }
+            }
+            // Deliberately request-local: every decode wrapper, guard, proof counter and live-cache decision
+            // below uses this selected mode, including a control request after an instant request.
+            const bool lab_oracle_on = request_oracle != LabDraftOracle::Off;
+            const bool lab_oracle_instant = request_oracle == LabDraftOracle::Instant;
+            const char* lab_oracle_name = lab_oracle_instant ? "instant" : lab_oracle_on ? "quality" : "off";
+            if (lab_oracle_hot)
+                std::fprintf(stderr, "strata lab oracle: selected mode=%s before GEN; switch=%s\n",
+                             lab_oracle_name, lab_oracle_switch);
             char* endp = nullptr;
             long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);   // (STRATA_FORCE_IDS may lower it)
             // optional sampling keys between max_new and the ids: temperature=F, top_p=F, top_k=N, min_p=F,
@@ -9643,6 +9773,10 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
+            if (lab_prefix_tokens > 0 && (lab_prefix_tokens >= n - 1 || !prefix_disk_enabled)) {
+                std::printf("ERR lab oracle: explicit prefix must be shorter than this request's n-1 and cache must be enabled\n");
+                return 1;
+            }
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {
@@ -9777,6 +9911,28 @@ int main(int argc, char** argv) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
             }
+            // The hot lab requests an actual disk restore, not a RAM checkpoint hit. Clear only session metadata
+            // after all prior work is idle; the existing validated prefix-cache path below restores GPU state.
+            if (!oracle_prefix_file.empty()) {
+                if (pl_prepared) pl_drain();
+                apply_pending(true);
+                for (int k = 0; k < n_stages; ++k) {
+                    const strata::core::OnDevice on(stage_ver(k).device());
+                    if (cudaDeviceSynchronize() != cudaSuccess) {
+                        std::printf("ERR lab oracle: cannot quiesce a stage before prefix switching\n");
+                        return 1;
+                    }
+                }
+                live_ok = false;
+                live.clear(); live_imgs.clear(); checks.clear();
+                tail_ckpt_len = -1; check_clock = 0; cvec_cached = want_cvec;
+                conversations = strata::core::ConversationCache(
+                    o.prompt_cache > 0 ? (size_t) o.conversation_cache_mib * 1024 * 1024 : 0,
+                    (size_t) o.conversation_cache_slots);
+                o.prompt_cache_file = oracle_prefix_file;
+                std::fprintf(stderr, "strata lab oracle: prefix switch=%s ram_sessions=cleared prefix_tokens=%lld\n",
+                             o.prompt_cache_file.c_str(), (long long) lab_prefix_tokens);
+            }
             auto kv_quiesce = [&] { cudaDeviceSynchronize(); apply_pending(true); };
             if (kvg.on) {   // the elastic K/V: this prompt's cells (it gives back what it does not need below)
                 // a failed growth may leave the tier half-changed: the engine stops (as for any CUDA failure)
@@ -9854,6 +10010,7 @@ int main(int argc, char** argv) {
                 int64_t disk_root = -1, last_turn = -1;
                 for (int64_t i = n - 1; i > 0; --i) if (ids[size_t(i)] == o.turn_token) { last_turn = i; break; }
                 for (int64_t i = 1; i < last_turn; ++i) if (ids[size_t(i)] == o.turn_token) { disk_root = i; break; }
+                if (!oracle_prefix_file.empty() && lab_prefix_tokens > 0) disk_root = lab_prefix_tokens;
                 if (disk_root >= o.prompt_cache_root && disk_root <= int64_t(strata::core::prefix_cache_max_tokens) &&
                         disk_root > std::max({resume, slot_tokens, incoming ? incoming_tokens : int64_t(0)})) {
                     const auto t0 = Clock::now();
@@ -10586,6 +10743,9 @@ int main(int argc, char** argv) {
                         if (i >= o.prompt_cache_root) root_at = i;
                         break;
                     }
+            // The lab fixture has no natural turn boundary at 131k. Pin only this explicit text prefix; after
+            // a disk restore read_from>0, so it is never republished by the measured request.
+            if (!oracle_prefix_file.empty() && lab_prefix_tokens > 0 && read_from == 0) root_at = lab_prefix_tokens;
             // a root past the drafter's window (Claude Code's ~40K system turn): its draft K/V are computed in full, or
             // the prefix file below would skip it as incomplete; costs the draft layer's K/V of the extra cells once
             if (use_mtp)
@@ -10830,6 +10990,31 @@ int main(int argc, char** argv) {
             // lab bench: STRATA_FORCE_IDS - this request's forced ids (see force_id_lists), its windows' rows and acceptance
             static int64_t force_req = 0;
             const int64_t force_k = force_req++;
+            const long long oracle_requested = max_new;
+            if (lab_oracle_on || lab_oracle_hot) {
+                const auto& fixtures = force_id_lists();
+                if (max_new <= 0 || force_k >= (int64_t) fixtures.size() ||
+                    (int64_t) fixtures[(size_t) force_k].size() < max_new ||
+                    !req_sp.greedy || hist_n != 0 || mtp.coupled() || !pipe || pl_pw != 2 ||
+                    S_mtp != 4 || pl_force_miss != 0 || cancelled ||
+                    n - 1 + max_new > o.max_context ||
+                    !std::isfinite(pl_theta) || pl_theta > 1.0f) {
+                    std::printf("ERR lab oracle: missing/short fixture or unsupported request; "
+                                "requires greedy, no penalties, pipeline2, spec4, no forced misses and sufficient context\n");
+                    return 1;
+                }
+                for (int64_t i = 0; i < max_new; ++i) {
+                    const int32_t id = fixtures[(size_t) force_k][(size_t) i];
+                    if (id < 0 || id >= n_vocab ||
+                        std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) id) != o.eos_ids.end()) {
+                        std::printf("ERR lab oracle: fixture has an invalid or EOS token within the requested continuation\n");
+                        return 1;
+                    }
+                }
+            }
+            int64_t oracle_real_chains = 0, oracle_bypassed_chains = 0, oracle_delivered = 0, oracle_padded = 0;
+            int64_t oracle_output_ok = 0, oracle_all_accept = 0, oracle_target_rows = 0;
+            int64_t oracle_stage0_launches = 0, oracle_stage1_launches = 0;
             const std::vector<int32_t>* forced = nullptr;
             if (force_k < (int64_t) force_id_lists().size() && !force_id_lists()[(size_t) force_k].empty()) {
                 forced = &force_id_lists()[(size_t) force_k];
@@ -10977,6 +11162,10 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: --pipeline-windows: a request with %s decodes serially\n",
                                  pl_serial);
             }
+            if ((lab_oracle_on || lab_oracle_hot) && (!pl_want || pl_serial != nullptr)) {
+                std::printf("ERR lab oracle: request cannot enter the qualified two-stage decode pipeline\n");
+                return 1;
+            }
             if (pl_want && pl_serial == nullptr && !cancelled && produced_n < max_new) {
                 pl_ran = true;
                 if (!pl_prepare(err)) {
@@ -11002,6 +11191,59 @@ int main(int argc, char** argv) {
                 const float theta = pl_theta;
                 const int force_miss = pl_force_miss;
                 static const bool pl_log = pipe_dbg_env("STRATA_PIPELINE_LOG") != nullptr;
+                // chain_base is captured at launch, BEFORE A may rotate to B. If p0=n-1 and F is the fixture,
+                // window row i predicts F[p-p0+i], and MTP output j after accepted row a is F[p-p0+a+1+j].
+                int64_t oracle_chain_base = 0;
+                int oracle_chain_size = 0, oracle_published = 0;
+                int32_t oracle_chain_tok[8] = {};
+                float oracle_chain_prob[8] = {};
+                auto oracle_publish = [&](int ready) {
+                    if (!lab_oracle_on) return;
+                    for (; oracle_published < std::min(ready, oracle_chain_size); ++oracle_published) {
+                        const int j = oracle_published;
+                        const int64_t index = oracle_chain_base + j;
+                        // The real chain may run past the requested continuation. Such private padding is never
+                        // used by a verify window: A and B are bounded before staging/launch/commit below.
+                        const bool valid = index >= 0 && index < max_new;
+                        oracle_chain_tok[j] = valid ? (*forced)[(size_t) index] : forced->back();
+                        oracle_chain_prob[j] = 1.0f;
+                        if (valid) ++oracle_delivered; else ++oracle_padded;
+                    }
+                };
+                auto chain_launch = [&](int T, const int32_t* tokens, int64_t pos, int accepted,
+                                        const int32_t* force, int n_force, int n_out, int n_early,
+                                        std::string& e) -> bool {
+                    if (lab_oracle_on) {
+                        if (n_out < 1 || n_out > 7) { e = "lab oracle: chain size out of range"; return false; }
+                        oracle_chain_base = pos - (n - 1) + accepted + 1;
+                        oracle_chain_size = n_out;
+                        oracle_published = 0;
+                        std::fill(std::begin(oracle_chain_tok), std::end(oracle_chain_tok), -1);
+                        std::fill(std::begin(oracle_chain_prob), std::end(oracle_chain_prob), 0.0f);
+                    }
+                    if (lab_oracle_instant) { ++oracle_bypassed_chains; return true; }
+                    const bool ok = mtp.chain_launch(T, tokens, pos, accepted, force, n_force, n_out, n_early, e);
+                    if (ok && lab_oracle_log) ++oracle_real_chains;
+                    return ok;
+                };
+                auto chain_outputs_ready = [&](std::string& e) {
+                    const int ready = lab_oracle_instant ? oracle_chain_size : mtp.chain_outputs_ready(e);
+                    if (ready >= 0) oracle_publish(ready);
+                    return ready;
+                };
+                auto chain_poll = [&](std::string& e) {
+                    const int ready = lab_oracle_instant ? 1 : mtp.chain_poll(e);
+                    if (ready == 1) oracle_publish(oracle_chain_size);
+                    return ready;
+                };
+                auto chain_tok = [&]() -> const int32_t* { return lab_oracle_on ? oracle_chain_tok : mtp.chain_tok(); };
+                auto chain_prob = [&]() -> const float* { return lab_oracle_on ? oracle_chain_prob : mtp.chain_prob(); };
+                auto oracle_remaining = [&](int64_t pos) -> int64_t {
+                    return std::max<int64_t>(0, max_new - (pos - (n - 1)));
+                };
+                auto oracle_bound = [&](PW& w) {
+                    if (lab_oracle_on) w.T = (int) std::min<int64_t>(w.T, oracle_remaining(w.p));
+                };
                 const int dev0 = PV[0][0]->device();
                 cudaStream_t s0 = PV[0][0]->stream();
                 // the snapshot of the GDN state window `seq` reads (overlapped: before its launch, on the side stream)
@@ -11112,7 +11354,9 @@ int main(int argc, char** argv) {
                     B.seq = A.seq + 1;
                     B.p = A.p + A.T;
                     B.tok[0] = oc[base];
+                    if (lab_oracle_on && oracle_remaining(B.p) <= 0) return;
                     B.T = t_rule(op, base + 1, avail);
+                    oracle_bound(B);
                     for (int i = 1; i < B.T; ++i) {
                         B.tok[i] = oc[base + i];
                         B.prob[i - 1] = op[base + i];
@@ -11289,7 +11533,7 @@ int main(int argc, char** argv) {
                     return v ? (float) std::atof(v) : 0.75f;
                 }();
                 auto pick_lookup = [&](PW& w, const int32_t* chain0) {
-                    if (o.suffix_draft <= 0 || w.seq == 0) return;
+                    if (lab_oracle_on || o.suffix_draft <= 0 || w.seq == 0) return;
                     const int k = sfx.propose(2 * S - 1, pl_sbuf.data());
                     const int match = sfx.last_match();
                     if (k <= 0 || pl_sbuf[0] != chain0[0]) return;
@@ -11335,7 +11579,7 @@ int main(int argc, char** argv) {
                 }();
                 int64_t pl_lk_next = 0, pl_lk_any = 0;
                 auto lookup_next = [&]() {
-                    if (!pl_lookup_next || o.suffix_draft <= 0 || pl_lookup_pon <= 0.0f || b_done) return;
+                    if (lab_oracle_on || !pl_lookup_next || o.suffix_draft <= 0 || pl_lookup_pon <= 0.0f || b_done) return;
                     if (!A.lookup && !pl_lookup_any) return;
                     const int k = sfx.propose(2 * S - 1, pl_sbuf.data());   // after A's row 0 (its predecessor's bonus)
                     if (k < A.T) return;                                     // A's drafts and B's row 0 at least
@@ -11461,7 +11705,7 @@ int main(int argc, char** argv) {
                     // is decided, then B once ITS size is decided - its bonus guess and a draft below spec_min_p (or
                     // S_mtp - 1 drafts) - so stage 0 need not wait for the whole chain
                     if (chain_kind != 0) {
-                        const int k_ready = mtp.chain_outputs_ready(err);
+                        const int k_ready = chain_outputs_ready(err);
                         if (k_ready < 0) return die(err);
                         if (chain_kind == 2 && !early_used) {
                             // A's size is decided by its first outputs: a draft below spec_min_p ends it (the serial
@@ -11470,26 +11714,28 @@ int main(int argc, char** argv) {
                             bool decided = k >= S_mtp - 1;
                             if (!decided && req_spec_min_p > 0.0)
                                 for (int j = 0; j < k; ++j)
-                                    if (mtp.chain_prob()[j] < (float) req_spec_min_p) { decided = true; break; }
+                                    if (chain_prob()[j] < (float) req_spec_min_p) { decided = true; break; }
                             if (decided) {
-                                A.T = t_rule(mtp.chain_prob(), 0, std::min(k, S_mtp - 1));
+                                A.T = t_rule(chain_prob(), 0, std::min(k, S_mtp - 1));
+                                oracle_bound(A);
                                 for (int i = 1; i < A.T; ++i) {
-                                    A.tok[i] = mtp.chain_tok()[i - 1];
-                                    A.prob[i - 1] = mtp.chain_prob()[i - 1];
+                                    A.tok[i] = chain_tok()[i - 1];
+                                    A.prob[i - 1] = chain_prob()[i - 1];
                                 }
-                                pick_lookup(A, mtp.chain_tok());
+                                pick_lookup(A, chain_tok());
                                 A.ready = true;
                                 early_used = true;
                                 tre("CE", A.seq, A.T);
                             }
                         }
-                        const int r = mtp.chain_poll(err);
+                        const int r = chain_poll(err);
                         if (r < 0) return die(err);
                         const int k = r == 1 ? chain_n : k_ready;
-                        const int32_t* oc = mtp.chain_tok();
-                        const float* op = mtp.chain_prob();
+                        const int32_t* oc = chain_tok();
+                        const float* op = chain_prob();
                         if (r == 1 && chain_kind == 2 && !early_used) {
                             A.T = t_rule(op, 0, std::min(chain_n, S_mtp - 1));
+                            oracle_bound(A);
                             for (int i = 1; i < A.T; ++i) {
                                 A.tok[i] = oc[i - 1];
                                 A.prob[i - 1] = op[i - 1];
@@ -11544,6 +11790,8 @@ int main(int argc, char** argv) {
                     }
                     // ---- stage 0: A (never while a wrong window still holds stage 0's state)
                     if (A.ready && !A.launched && !doomed) {
+                        oracle_bound(A);
+                        if (lab_oracle_on && A.T < 1) return die("lab oracle: attempted A past fixture end");
                         if (force_win != nullptr) force_window(A.p, A.tok[0], A.T, A.tok, S);   // lab bench replay
                         if (A.p + A.T > o.max_context) { ending = true; continue; }
                         if (ajob) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
@@ -11551,10 +11799,13 @@ int main(int argc, char** argv) {
                         if (!snap_take(A.seq)) return die("the GDN snapshot failed");
                         if (!V0(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.launched = true;
+                        if (lab_oracle_log) ++oracle_stage0_launches;
                         tre("L0", A.seq, A.T, 0);
                     }
                     // ---- stage 0: B, speculatively, right behind A
                     if (B.ready && !B.launched && A.finished && !A.committed && !doomed) {
+                        oracle_bound(B);
+                        if (lab_oracle_on && B.T < 1) return die("lab oracle: attempted B past fixture end");
                         if (force_win != nullptr) force_window(B.p, B.tok[0], B.T, B.tok, S);   // lab bench replay
                         if (B.p_on >= theta && B.p + B.T <= o.max_context) {
                             if (ajob) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
@@ -11573,6 +11824,7 @@ int main(int argc, char** argv) {
                                 return die(err.empty() ? std::string("the GDN snapshot failed") : err);
                             A.committed = true;
                             B.launched = true;
+                            if (lab_oracle_log) ++oracle_stage0_launches;
                             B.spec = true;
                             tre("L0", B.seq, B.T, 1);
                             ++pl_spec;
@@ -11587,6 +11839,7 @@ int main(int argc, char** argv) {
                         if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
                         if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.s1 = true;
+                        if (lab_oracle_log) ++oracle_stage1_launches;
                         tre("L1", A.seq, A.T);
                     }
                     // ---- A's verdict
@@ -11595,11 +11848,17 @@ int main(int argc, char** argv) {
                     // wait is bounded even with B (made from its first outputs) in flight on stage 0; in practice the
                     // chain ended long before a verdict that needs a whole stage-1 window.
                     while (chain_kind != 0 && mtp.chain_live())
-                        if (mtp.chain_poll(err) < 0) return die(err);
+                        if (chain_poll(err) < 0) return die(err);
                     if (chain_kind != 0 && !B.launched && !B.made) B = PW{};
                     chain_kind = 0;
                     int a = 0;
                     while (a < A.T - 1 && A.tok[a + 1] == outp[(size_t) a]) ++a;
+                    if (lab_oracle_on && (a != A.T - 1 || A.T > oracle_remaining(A.p)))
+                        return die("lab oracle: non-perfect or out-of-budget verified window");
+                    if (lab_oracle_log) {
+                        oracle_all_accept += a == A.T - 1 ? 1 : 0;
+                        oracle_target_rows += A.T;
+                    }
                     force_note(A.p, A.T, a, A.tok);
                     if (!V1(A).pl_commit_async(a + 1, err)) return die(err);
                     for (int i = 0; i <= a; ++i) consumed.push_back(A.tok[i]);
@@ -11630,13 +11889,13 @@ int main(int argc, char** argv) {
                             mtp.set_source_R(V1(A).final_R(0));
                             if (on_v) {   // the chain over A, forced through B's drafts (as below)
                                 chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
-                                if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
+                                if (!chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
                                     return die(err);
                                 tre("CL", A.seq, 1);
                                 pl_chain_t0 = ms_now();
                             } else {      // fresh (as below)
                                 chain_n = strata::kernels::kVerifyMaxT - 1;
-                                if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
+                                if (!chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
                                     return die(err);
                                 tre("CL", A.seq, 2);
                                 pl_chain_t0 = ms_now();
@@ -11646,6 +11905,9 @@ int main(int argc, char** argv) {
                     }
                     bool eos = false;
                     for (int i = 0; i <= a && produced_n < max_new && !eos; ++i) {
+                        if (lab_oracle_log && forced != nullptr && produced_n < (int64_t) forced->size() &&
+                            outp[(size_t) i] == (*forced)[(size_t) produced_n]) ++oracle_output_ok;
+                        else if (lab_oracle_on) return die("lab oracle: output differs from fixture");
                         std::printf("T %d\n", (int) outp[(size_t) i]);
                         strata::core::progress_beat();
                         ++produced_n;
@@ -11696,7 +11958,7 @@ int main(int argc, char** argv) {
                             // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
                             mtp.set_source_R(V1(A).final_R(0));
                             chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
-                            if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
+                            if (!chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
                                 return die(err);
                             tre("CL", A.seq, 1);
                             pl_chain_t0 = ms_now();
@@ -11724,7 +11986,7 @@ int main(int argc, char** argv) {
                             if (!e_launched) {
                                 mtp.set_source_R(V1(A).final_R(0));
                                 chain_n = strata::kernels::kVerifyMaxT - 1;
-                                if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
+                                if (!chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
                                     return die(err);
                                 tre("CL", A.seq, 2);
                                 pl_chain_t0 = ms_now();
@@ -11782,7 +12044,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR an adaptive refill failed\n");
                     return 1;
                 }
-                while (mtp.chain_live() && mtp.chain_poll(err) == 0) {}
+                while (mtp.chain_live() && chain_poll(err) == 0) {}
                 mtp.set_source_R(ver.final_R_all());   // the serial loop's rows again
                 const double pl_ms = std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count();
                 dt_run += pl_ms;
@@ -12055,6 +12317,28 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            if (lab_oracle_on && (!pl_ran || produced_n != oracle_requested || oracle_output_ok != produced_n ||
+                oracle_target_rows != produced_n || oracle_all_accept != dec_windows ||
+                consumed.size() != (size_t) (n + produced_n - 1))) {
+                std::printf("ERR lab oracle: incomplete synthetic request or invalid final committed length\n");
+                return 1;
+            }
+            if (lab_oracle_log) {
+                std::fprintf(stderr, "strata lab oracle: request %lld mode=%s synthetic=1 requested=%lld produced=%lld "
+                                     "output_ids_ok=%lld invalid_output_ids=%lld windows=%lld all_accept=%lld drafts=%lld accepted=%lld "
+                                     "chain_launches=%lld chain_bypasses=%lld draft_ids_delivered=%lld padded_outputs=%lld "
+                                     "target_rows=%lld stage0_launches=%lld stage1_launches=%lld "
+                                     "mtp_setup=retained mtp_prefill=retained mtp_vram_bytes=%llu "
+                                     "decoded_live_cache=%s mtp_realign_ms=0\n",
+                             (long long) force_k, lab_oracle_name, oracle_requested, (long long) produced_n,
+                             (long long) oracle_output_ok, (long long) (produced_n - oracle_output_ok),
+                             (long long) dec_windows, (long long) oracle_all_accept,
+                             (long long) draft_offered, (long long) draft_accepted, (long long) oracle_real_chains,
+                             (long long) oracle_bypassed_chains, (long long) oracle_delivered, (long long) oracle_padded,
+                             (long long) oracle_target_rows, (long long) oracle_stage0_launches,
+                             (long long) oracle_stage1_launches, (unsigned long long) mtp.vram_bytes(),
+                             lab_oracle_instant ? "invalidated" : "normal");
+            }
             {   // lab bench: the verified windows' work, to compare two runs (forced or not)
                 std::string h;
                 char hb[32];
@@ -12157,7 +12441,9 @@ int main(int argc, char** argv) {
                 // (the checkpoints taken while reading it are still good)
                 live.swap(consumed);
                 live_imgs = imgs_below(req_imgs, (int64_t) live.size());
-                live_ok = o.prompt_cache > 0 && req_ckpt;   // ckpt=0: nothing to continue or park (#830)
+                // Instant has no decode MTP K/V. Keep valid prompt checkpoints, but never publish or park this
+                // target-only continuation as a complete session. The next request restores a prompt checkpoint.
+                live_ok = o.prompt_cache > 0 && req_ckpt && !lab_oracle_instant;   // ckpt=0: no continuation (#830)
             }
             static const bool state_hash = std::getenv("STRATA_STATE_HASH") != nullptr;
             if (state_hash && !cancelled && o.prompt_cache > 0) {   // every finished request, ckpt=0 too (parity gates)

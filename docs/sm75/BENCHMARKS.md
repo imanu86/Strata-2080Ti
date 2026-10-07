@@ -1,3 +1,38 @@
+# Synthetic draft oracle, 7 October 2026
+
+An opt-in laboratory oracle separates the value of perfect draft proposals
+from their execution cost. This is **not real model throughput**. One process
+ran 26 requests, including smoke and long B/A/B triplets; every measured request
+restored 131072 tokens from an unchanged SSD prefix and read the remaining
+176/167 prompt tokens. Actual prompts are 131248/131239 tokens, with 1024 output
+tokens in each long case. Draft windows are free to change; only output IDs are
+forced. Suffix and lookup speculation are disabled.
+
+| Proposals / execution | L01 B1 / A / B2 t/s | L02 B1 / A / B2 t/s |
+|---|---:|---:|
+| Perfect proposals, real MTP work | 141.12 / 71.25 / 144.58 | 143.34 / 65.04 / 144.75 |
+| Perfect proposals, no MTP decode work | 175.63 / 71.89 / 173.85 | 175.08 / 64.44 / 174.81 |
+
+Perfect proposals require 257 verified windows for 1024 outputs, instead of
+533/618 windows in the first control pair. All 767 offered drafts are accepted;
+quality mode retains real chain execution and readiness, while instant mode
+bypasses decode launches. Both preserve MTP initialization, prefill and VRAM.
+Instant invalidates decoded live state before reuse. The result motivates work
+on draft accuracy; it does not promise this speed for real generated answers.
+
+Windows, Ryzen5800X/96GiB, RTX3060 12GB plus modified RTX2080Ti22GB,
+split16/pipeline2/spec4, KV int8/resident32768/capacity262144. Auto/elastic cache
+starts at4434/9151 slots; early warmup/smoke growth reaches4699 on CUDA0.
+Eleven long requests report zero shrink/growth events; the final instant L02
+reports one growth costing21.0ms. Cache contents can evolve.
+Ten CPU hot-suite tests, nine initial parser tests, six negative CLI guards,
+all26 output/counter checks and Daily/isolation checks pass. An earlier cold
+instant attempt failed in nvcuda64.dll before READY and executed no request;
+that failure remains in the record. No multi-chat or free-generation quality
+claim. Defaults and Daily remain unchanged. The laboratory controls require
+explicit compatible forcing and fail closed on invalid modes or fixtures.
+See [source hashes, protocol, measurements and limits](oracle-20261007.json).
+
 # MTP placement experiment, 7 October 2026
 
 Main was integrated with upstream 0.1.40.3 (`d5ea713`) at `ccd4f3c`.
