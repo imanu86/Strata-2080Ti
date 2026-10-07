@@ -1,3 +1,28 @@
+# MTP placement experiment, 7 October 2026
+
+Main was integrated with upstream 0.1.40.3 (`d5ea713`) at `ccd4f3c`.
+The opt-in `STRATA_MTP_DEVICE=0` relocates the drafter to the first GPU;
+unset or `last` preserves the existing placement. The exercised setup is
+Windows, RTX3060 12GB + modified RTX2080Ti 22GB, split16/pipeline2,
+actual 131248/131239-token prompts and 1024 generated tokens per case.
+The existing deterministic bench ran B1/A/B2 with one executable.
+
+| MTP device | L01 decode t/s | L02 decode t/s |
+|---|---:|---:|
+| 3060, B1 | 63.85 | 57.53 |
+| 2080 Ti, control A | 71.39 | 65.37 |
+| 3060, B2 | 64.77 | 57.24 |
+
+The relocated configuration regresses in both repetitions and is not promoted.
+Forced IDs/windows match and the separate unforced conversation/checkpoint
+restore gate passes, including draft-KV verification on CUDA0. Forced timing
+is not a free-generation quality test. Full free 131k BAB and multi-chat
+performance were not run after this negative single-chat result. Daily is unchanged.
+The implementation remains experimental and disabled by default; CUDA two-stage
+single-chat serve only, with a native draft-head subset and pinned-host residual
+transport. See [the complete validation record](mtp-device-20261007.json) for
+build/source hashes, capacities, controls, failed first gate and limitations.
+
 # Validated0.1.38 SM75 source, 3 October2026
 
 Upstream main `99f3dbd0b21d1401b3769e0c0d963913607f380b`, automatic elastic expert cache, SM75 HC/GDN FP16 and vector

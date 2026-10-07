@@ -71,14 +71,18 @@ public:
     void kv_restore(int64_t upto);
     /// The VRAM bind() will allocate for a native head of `head_row_bytes` per vocabulary row: the draft logits and
     /// the draft head over rt/draft_vocab.bin's subset.  The expert cache is sized before bind(), so it reserves this.
-    uint64_t bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const;
-    /// The main model's embedding and head, and the verify window's final residuals (T rows, hc*n_embd each).
+    uint64_t bind_bytes(uint64_t head_row_bytes, int64_t n_vocab, int source_device = -1) const;
+    /// The embedding weights must be local to the drafter (or its mapped native embedding). `source_device`
+    /// owns the native head and every residual pointer passed to draft/prefill/set_source_R; -1 keeps them local.
+    /// CUDA cross-device drafting copies the head subset unchanged and stages residual windows through pinned RAM.
+    /// The caller must complete the source producer before passing residuals; the source rows may be reused on return.
     bool bind(const WeightTable& wt, const NativeHead* head, const float* window_R, std::string& err,
-              const MtpDrafter* shared = nullptr);
+              const MtpDrafter* shared = nullptr, int source_device = -1);
 
     /// Prompt cells [cell0, cell0 + n): residual rows `R_rows` (device, hc*n_embd each) and `next_tokens` (host,
-    /// the token at position cell+1).  Runs in batches of up to max_t rows.  `sync` false: returns without waiting
-    /// for the drafter's stream (the caller orders on it: `stream()`).
+    /// the token at position cell+1). Runs in batches of up to max_t rows. `sync` false: returns without waiting
+    /// for the drafter's stream (the caller orders on it: `stream()`). Cross-device async calls require
+    /// prepare_prefill(), n <= max_t and a free pinned staging slot; the source copy itself completes on return.
     bool prefill(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0, std::string& err,
                  bool sync = true);
     /// --pipeline-windows: capture the prefill graphs and size its input records for windows of up to max_t rows now,
@@ -124,7 +128,7 @@ public:
     /// Before `load`: the round/step graphs get the forcing kernel (a no-op while its token is -1), and the drafter's
     /// stream the highest priority (STRATA_MTP_PRIORITY=0: the default priority).
     void set_force_capture(bool on) { force_on_ = on; }
-    /// The rows the next round reads (null: the bound `window_R`), copied into the bound buffer before the round.
+    /// The source-device rows the next round reads (null: the bound `window_R`), staged before the round.
     void set_source_R(const float* rows) { src_R_ = rows; }
     /// Capture the round graphs for T = 1..max_t and every step graph now (a capture syncs the drafter's stream).
     bool prepare_chain(std::string& err);
@@ -159,12 +163,16 @@ public:
     /// (a saved prefix must serve later prompts of any length)
     void set_full_prefix(bool on) { full_prefix_ = on; }
     int device() const { return device_; }
-    bool idle(std::string& err) {
-        if (cs_ && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp: its stream failed"; return false; }
-        return true;
-    }
+    bool idle(std::string& err);
 
 private:
+    bool prefill_impl(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
+                      std::string& err, bool sync, cudaMemcpyKind residual_kind);
+    bool cross_device() const { return source_device_ >= 0 && source_device_ != device_; }
+    bool acquire_source_slot(bool wait, int& slot, std::string& err);
+    bool read_source_rows(float* host, const float* rows, int64_t n, std::string& err);
+    bool finish_source_slot(int slot, std::string& err);
+    bool stage_remote_rows(float* local, const float* rows, int n, std::string& err);
     bool record_forward(int T, int step_row0, cudaStream_t cs, std::string& err);
     /// The layer's front for T rows at step rows [row0, +T): the embedding, the fc projections, the attention
     /// hyper-connection read (R_, inj_, mixed_) and the K/V appended.
@@ -202,6 +210,21 @@ private:
     const float* window_R_ = nullptr;
     int max_t_ = 0;
     int device_ = -1;   ///< the device `load` ran on: the public calls switch to it (layer split)
+    int source_device_ = -1;   ///< head and residual input owner, fixed by the first bind
+    const float* bound_source_R_ = nullptr;
+    float* local_window_R_ = nullptr;   ///< stable graph input when the residual source is another device
+    cudaStream_t source_cs_ = nullptr; ///< D2H only, on source_device_; each source copy completes before return
+    struct SourceSlot {
+        float* host = nullptr;
+        cudaEvent_t consumed = nullptr;   ///< on device_, after the last H2D read of host
+        bool live = false;
+    };
+    SourceSlot source_slots_[2];
+    float* prefill_host_R_ = nullptr;   ///< large prompt chunks, reused only by synchronous prefill
+    int64_t prefill_host_cap_ = 0;
+    void* private_gr_arena_ = nullptr;
+    strata::kernels::GrWorkspace private_gr_;
+    bool source_already_staged_ = false;   ///< draft_first filled local_window_R_ itself
     int max_drafts_ = 1 << 30;
     bool hnorm_stream_ = false;
     bool q4_ = false, q4_head_ = false;

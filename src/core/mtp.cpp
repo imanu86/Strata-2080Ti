@@ -63,6 +63,17 @@ bool mtp_catchup_all() {
     }();
     return on;
 }
+bool mtp_prefill_per_group_sync() {
+    static const bool on = [] {
+        if (const char* v = std::getenv("STRATA_MTP_PREFILL_SYNC")) return std::atoi(v) != 0;
+#if defined(STRATA_USE_HIP)
+        return true;
+#else
+        return false;
+#endif
+    }();
+    return on;
+}
 constexpr int GGML_Q8_0 = 8;
 constexpr int GGML_Q4_0 = 2;
 using Clock = std::chrono::steady_clock;
@@ -127,7 +138,20 @@ bool read_file(const std::string& path, std::vector<uint8_t>& out) {
 }  // namespace
 
 MtpDrafter::~MtpDrafter() {
+    const OnDevice on_device(device_);
     if (cs_) cudaStreamSynchronize(cs_);
+    if (source_cs_) {
+        const OnDevice on_source(source_device_);
+        cudaStreamSynchronize(source_cs_);
+        cudaStreamDestroy(source_cs_);
+    }
+    for (auto& slot : source_slots_) {
+        if (slot.consumed) cudaEventDestroy(slot.consumed);
+        if (slot.host) cudaFreeHost(slot.host);
+    }
+    if (prefill_host_R_) cudaFreeHost(prefill_host_R_);
+    if (local_window_R_) cudaFree(local_window_R_);
+    if (private_gr_arena_) cudaFree(private_gr_arena_);
     for (auto& e : prefill_exec_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : prefill_dev_exec_) if (e) cudaGraphExecDestroy(e);
     if (pf_dev_) cudaFree(pf_dev_);
@@ -158,6 +182,12 @@ MtpDrafter::~MtpDrafter() {
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
     for (void* h : hosts) if (h) cudaFreeHost(h);
+}
+
+bool MtpDrafter::idle(std::string& err) {
+    const OnDevice on_device(device_);
+    if (cs_ && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp: its stream failed"; return false; }
+    return true;
 }
 
 const float* MtpDrafter::f32(const char* name) const {
@@ -243,7 +273,7 @@ bool MtpDrafter::make_q4_head(std::string& err) {
 
 bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, SessionState& ss, int max_t, std::string& err,
                       int64_t window, const MtpDrafter* shared) {
-    cudaGetDevice(&device_);   // a layer split's last stage on another GPU: the drafter lives there
+    cudaGetDevice(&device_);   // all draft weights/state live on the device selected by the caller
     g_ = &g;
     ss_ = &ss;
     if (ple_ss_ == nullptr) ple_ss_ = &ss;
@@ -510,8 +540,14 @@ void MtpDrafter::record_top2(int j) {
     top2_[(size_t) j] = b2 < 0 ? -1 : dhead_ != nullptr ? dvocab_host_[(size_t) b2] : (int32_t) b2;
 }
 
-uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const {
+uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab, int source_device) const {
     uint64_t bytes = head_logits_ ? 0 : (uint64_t) max_t_ * (uint64_t) n_vocab * sizeof(float);
+    if (source_device >= 0 && source_device != device_ && g_ != nullptr) {
+        if (local_window_R_ == nullptr)
+            bytes += (uint64_t) max_t_ * (uint64_t) g_->hc * (uint64_t) g_->n_embd * sizeof(float);
+        if (private_gr_arena_ == nullptr)
+            bytes += strata::kernels::gr_workspace_bytes({g_->n_embd, g_->hc, g_->hc_lr});
+    }
     if (dhead_ == nullptr && owns_draft_head_ && !full_head_env()) {
         if (FILE* f = std::fopen(vocab_file().c_str(), "rb")) {
             std::fseek(f, 0, SEEK_END);
@@ -631,15 +667,72 @@ void draft_head_hint(int64_t n_tokens, int64_t row_bytes) {
 }  // namespace
 
 bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float* window_R, std::string& err,
-                      const MtpDrafter* shared) {
+                      const MtpDrafter* shared, int source_device) {
     const OnDevice on_device(device_);
+    const int src_device = source_device < 0 ? device_ : source_device;
+    if (source_device_ >= 0 && source_device_ != src_device) {
+        err = "mtp: the source device cannot change after bind";
+        return false;
+    }
+    source_device_ = src_device;
+    if (cross_device()) {
+#if defined(STRATA_USE_HIP)
+        err = "mtp: cross-device drafting currently requires CUDA";
+        return false;
+#endif
+        if (shared != nullptr || full_head_env()) {
+            err = "mtp: cross-device drafting requires a private draft head subset";
+            return false;
+        }
+    }
     wt_ = &wt;
     head_ = head;
+    bound_source_R_ = window_R;
     window_R_ = window_R;
     const WeightRef* wo = wt.find("output.weight");
     if (!wo) { err = "mtp: output.weight is missing"; return false; }
     n_vocab_ = wo->ne1;
     if (head == nullptr || !head->loaded()) { err = "mtp: the draft layer needs the native head (--native)"; return false; }
+    if (cross_device()) {
+        const size_t residual_bytes = (size_t) max_t_ * (size_t) g_->hc * (size_t) g_->n_embd * sizeof(float);
+        if (local_window_R_ == nullptr) {
+            if (cudaMalloc((void**) &local_window_R_, residual_bytes) != cudaSuccess) {
+                err = "mtp: cross-device residual buffer does not fit";
+                return false;
+            }
+            vram_ += residual_bytes;
+        }
+        window_R_ = local_window_R_;
+        const strata::kernels::GrShapes gs{g_->n_embd, g_->hc, g_->hc_lr};
+        if (private_gr_arena_ == nullptr) {
+            const size_t bytes = strata::kernels::gr_workspace_bytes(gs);
+            if (cudaMalloc(&private_gr_arena_, bytes) != cudaSuccess) {
+                err = "mtp: private residual-mixer scratch does not fit";
+                return false;
+            }
+            strata::kernels::gr_workspace_init(gs, private_gr_arena_, private_gr_);
+            vram_ += bytes;
+        }
+        for (auto& slot : source_slots_) {
+            if (slot.host == nullptr &&
+                cudaHostAlloc((void**) &slot.host, residual_bytes, cudaHostAllocPortable) != cudaSuccess) {
+                err = "mtp: pinned cross-device staging allocation failed";
+                return false;
+            }
+            if (slot.consumed == nullptr &&
+                cudaEventCreateWithFlags(&slot.consumed, cudaEventDisableTiming) != cudaSuccess) {
+                err = "mtp: cross-device staging event creation failed";
+                return false;
+            }
+        }
+        if (source_cs_ == nullptr) {
+            const OnDevice on_source(source_device_);
+            if (cudaStreamCreateWithFlags(&source_cs_, cudaStreamNonBlocking) != cudaSuccess) {
+                err = "mtp: residual source stream creation failed";
+                return false;
+            }
+        }
+    }
     if (head_logits_ == nullptr &&
         cudaMalloc((void**) &head_logits_, (size_t) max_t_ * (size_t) n_vocab_ * sizeof(float)) != cudaSuccess) {
         err = "mtp: the draft logits do not fit";
@@ -672,8 +765,40 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
             cudaMemcpy(dvocab_, raw.data(), raw.size(), cudaMemcpyHostToDevice);
             dvocab_host_.resize((size_t) n_dvocab_);
             std::memcpy(dvocab_host_.data(), raw.data(), raw.size());
-            strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
-            cudaDeviceSynchronize();
+            if (cross_device()) {
+                // Read unchanged native blocks once at startup. The source card needs no temporary allocation
+                // after its expert cache has been sized, and this path needs neither peer access nor remote loads.
+                for (int32_t id : dvocab_host_) {
+                    if (id < 0 || (int64_t) id >= n_vocab_) {
+                        err = "mtp: a draft vocabulary token is outside the native head";
+                        return false;
+                    }
+                }
+                if (row_bytes <= 0 || head->weight_bytes() != (uint64_t) n_vocab_ * (uint64_t) row_bytes) {
+                    err = "mtp: inconsistent native head dimensions for cross-device copy";
+                    return false;
+                }
+                std::vector<uint8_t> source_head((size_t) head->weight_bytes());
+                {
+                    const OnDevice on_source(source_device_);
+                    if (cudaMemcpy(source_head.data(), head->weights(), source_head.size(), cudaMemcpyDeviceToHost) != cudaSuccess) {
+                        err = "mtp: reading the source device's native head failed";
+                        return false;
+                    }
+                }
+                std::vector<uint8_t> subset((size_t) n_dvocab_ * (size_t) row_bytes);
+                for (int64_t i = 0; i < n_dvocab_; ++i)
+                    std::memcpy(subset.data() + (size_t) i * (size_t) row_bytes,
+                                source_head.data() + (size_t) dvocab_host_[(size_t) i] * (size_t) row_bytes,
+                                (size_t) row_bytes);
+                if (cudaMemcpy(dhead_, subset.data(), subset.size(), cudaMemcpyHostToDevice) != cudaSuccess) {
+                    err = "mtp: uploading the unchanged draft head subset failed";
+                    return false;
+                }
+            } else {
+                strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
+                cudaDeviceSynchronize();
+            }
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + raw.size();
             std::fprintf(stderr, "strata mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
@@ -683,6 +808,10 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                 strata::kernels::native_q6_k_pack(dhead_, (int) (row_bytes / 210) * 256, (int) n_dvocab_,
                                                   "MTP draft head");
         }
+    }
+    if (cross_device() && dhead_ == nullptr) {
+        err = "mtp: cross-device drafting needs a valid draft_vocab.bin or --mtp-draft-vocab subset";
+        return false;
     }
     if (coupled_draft_env() && cparams_ == nullptr && !setup_coupled(err)) return false;
     return true;
@@ -987,7 +1116,8 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             for (int t = 0; t < T; ++t)
                 gr_read(R_ + (size_t) t * HC * N, f32("hyper_connection_mixer.hc_norm.weight"),
                         bf16("hyper_connection_mixer.input_mix_weight_down.weight"),
-                        bf16("hyper_connection_mixer.input_mix_weight_up.weight"), nullptr, EPS, gs, ss.block.gr,
+                        bf16("hyper_connection_mixer.input_mix_weight_up.weight"), nullptr, EPS, gs,
+                        private_gr_arena_ ? private_gr_ : ss.block.gr,
                         sample_ + t * N, dummy_inj_, cs);
         }
         native_quantize_q8_1(sample_, xq_, (int) N, T, cs);
@@ -1162,8 +1292,140 @@ bool MtpDrafter::prepare_prefill(std::string& err) {
     return true;
 }
 
-bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0, std::string& err,
-                         bool sync) {
+bool MtpDrafter::acquire_source_slot(bool wait, int& slot, std::string& err) {
+    const OnDevice on_device(device_);
+    for (int i = 0; i < 2; ++i) {
+        auto& s = source_slots_[i];
+        if (s.host == nullptr || s.consumed == nullptr) {
+            err = "mtp: cross-device residual staging was not bound";
+            return false;
+        }
+        if (s.live) {
+            const cudaError_t ce = cudaEventQuery(s.consumed);
+            if (ce == cudaErrorNotReady) continue;
+            if (ce != cudaSuccess) {
+                err = std::string("mtp: residual staging event: ") + cudaGetErrorString(ce);
+                return false;
+            }
+            s.live = false;
+        }
+        slot = i;
+        return true;
+    }
+    if (!wait) {
+        err = "mtp: both asynchronous residual staging slots are still in use";
+        return false;
+    }
+    const cudaError_t ce = cudaEventSynchronize(source_slots_[0].consumed);
+    if (ce != cudaSuccess) {
+        err = std::string("mtp: waiting for residual staging: ") + cudaGetErrorString(ce);
+        return false;
+    }
+    source_slots_[0].live = false;
+    slot = 0;
+    return true;
+}
+
+bool MtpDrafter::read_source_rows(float* host, const float* rows, int64_t n, std::string& err) {
+    if (!host || !rows || n < 1 || source_cs_ == nullptr) {
+        err = "mtp: invalid cross-device residual source";
+        return false;
+    }
+    const OnDevice on_source(source_device_);
+    const size_t bytes = (size_t) n * (size_t) g_->hc * (size_t) g_->n_embd * sizeof(float);
+    // The caller has completed the producer. Finish this one D2H per window/chunk before returning, so it
+    // can reuse that source window without adding another cross-device event to the verifier's ring.
+    cudaError_t ce = cudaMemcpyAsync(host, rows, bytes, cudaMemcpyDeviceToHost, source_cs_);
+    if (ce == cudaSuccess) ce = cudaStreamSynchronize(source_cs_);
+    if (ce != cudaSuccess) {
+        err = std::string("mtp: reading residuals from the source device: ") + cudaGetErrorString(ce);
+        return false;
+    }
+    return true;
+}
+
+bool MtpDrafter::finish_source_slot(int slot, std::string& err) {
+    auto& s = source_slots_[slot];
+    const cudaError_t ce = cudaEventRecord(s.consumed, cs_);
+    if (ce != cudaSuccess) {
+        // Even an error after a successful H2D enqueue must not let the host buffer be reused while in flight.
+        cudaStreamSynchronize(cs_);
+        s.live = false;
+        err = std::string("mtp: protecting residual staging: ") + cudaGetErrorString(ce);
+        return false;
+    }
+    s.live = true;
+    return true;
+}
+
+bool MtpDrafter::stage_remote_rows(float* local, const float* rows, int n, std::string& err) {
+    if (!local || n < 1 || n > max_t_) { err = "mtp: residual window out of range"; return false; }
+    int slot = -1;
+    if (!acquire_source_slot(true, slot, err) || !read_source_rows(source_slots_[slot].host, rows, n, err)) return false;
+    const size_t bytes = (size_t) n * (size_t) g_->hc * (size_t) g_->n_embd * sizeof(float);
+    const cudaError_t ce = cudaMemcpyAsync(local, source_slots_[slot].host, bytes, cudaMemcpyHostToDevice, cs_);
+    if (ce != cudaSuccess) {
+        cudaStreamSynchronize(cs_);
+        err = std::string("mtp: uploading residuals to the draft device: ") + cudaGetErrorString(ce);
+        return false;
+    }
+    return finish_source_slot(slot, err);
+}
+
+bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
+                         std::string& err, bool sync) {
+    if (!cross_device()) return prefill_impl(R_rows, next_tokens, n, cell0, err, sync, cudaMemcpyDeviceToDevice);
+    const OnDevice on_device(device_);
+    if (chain_live_) { err = "mtp: prefill cannot overlap a live draft chain"; return false; }
+    if (n < 0 || (n > 0 && (!R_rows || !next_tokens))) { err = "mtp: invalid prefill inputs"; return false; }
+    if (n == 0 || cell0 + n <= first_needed()) return true;
+    const Clock::time_point t0 = Clock::now();
+    const double prior_ms = ms_prefill;
+    const int64_t HCN = g_->hc * g_->n_embd;
+    const int64_t per_row = 1 + 4 + g_->n_head;
+    int slot = -1;
+    float* host_rows = nullptr;
+    if (!sync) {
+        // Pipeline callers reserve/capture up front. Never resize, capture, or wait for the drafter here.
+        if (n > max_t_ || pf_cap_ < n * per_row || prefill_dev_exec_[(int) n] == nullptr || mtp_prefill_per_group_sync()) {
+            err = "mtp: async cross-device prefill needs prepare_prefill, n <= max_t and STRATA_MTP_PREFILL_SYNC=0";
+            return false;
+        }
+        if (!acquire_source_slot(false, slot, err)) return false;
+        host_rows = source_slots_[slot].host;
+    } else {
+        // Skip only whole original groups: the first group that crosses first_needed still has the same rows.
+        const int64_t skip = first_needed() > cell0 ? ((first_needed() - cell0) / max_t_) * max_t_ : 0;
+        if (skip > 0) {
+            R_rows += (size_t) skip * (size_t) HCN;
+            next_tokens += skip;
+            cell0 += skip;
+            n -= skip;
+        }
+        if (prefill_host_cap_ < n) {
+            if (prefill_host_R_) cudaFreeHost(prefill_host_R_);
+            prefill_host_R_ = nullptr;
+            prefill_host_cap_ = 0;
+            if (cudaHostAlloc((void**) &prefill_host_R_, (size_t) n * (size_t) HCN * sizeof(float),
+                              cudaHostAllocPortable) != cudaSuccess) {
+                err = "mtp: pinned prompt residual staging allocation failed";
+                return false;
+            }
+            prefill_host_cap_ = n;
+        }
+        host_rows = prefill_host_R_;
+    }
+    if (!read_source_rows(host_rows, R_rows, n, err)) return false;
+    const bool ok = prefill_impl(host_rows, next_tokens, n, cell0, err, sync, cudaMemcpyHostToDevice);
+    // Record even on failure: the helper may already have enqueued an upload from this slot.
+    const bool protected_slot = slot < 0 || finish_source_slot(slot, err);
+    if (!ok || !protected_slot) cudaStreamSynchronize(cs_);
+    ms_prefill = prior_ms + ms_since(t0);
+    return ok && protected_slot;
+}
+
+bool MtpDrafter::prefill_impl(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
+                              std::string& err, bool sync, cudaMemcpyKind residual_kind) {
     const OnDevice on_device(device_);
     const Clock::time_point t0 = Clock::now();
     const int64_t HCN = g_->hc * g_->n_embd;
@@ -1179,14 +1441,7 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
     // in hipGraphLaunch or the final sync until the watchdog ends the engine.  R9700, full IQ3_XXS, --kv-resident
     // 32768, mixed load (chats, 32K and 7K prompts, deep follow-ups): E-4 hung in the first round on 2 of 2 tries,
     // the old loop ran 30 of 30 rounds clean, prompt speed unchanged.
-    static const bool per_group_sync = [] {
-        if (const char* v = std::getenv("STRATA_MTP_PREFILL_SYNC")) return std::atoi(v) != 0;
-#if defined(STRATA_USE_HIP)
-        return true;
-#else
-        return false;
-#endif
-    }();
+    const bool per_group_sync = mtp_prefill_per_group_sync();
     const int64_t NHp = g_->n_head, per_row = 1 + 4 + NHp;
     if (!per_group_sync && n > 0) {
         if (pf_cap_ < n * per_row) {
@@ -1226,7 +1481,7 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
             if (cudaMemcpyAsync(tok_, d_tk + c, (size_t) T * 4, cudaMemcpyDeviceToDevice, cs_) != cudaSuccess ||
                 cudaMemcpyAsync(step_, d_stp + c * 4, (size_t) T * 16, cudaMemcpyDeviceToDevice, cs_) != cudaSuccess ||
                 cudaMemcpyAsync(pos_, d_ps + c * NHp, (size_t) (T * NHp) * 4, cudaMemcpyDeviceToDevice, cs_) != cudaSuccess ||
-                cudaMemcpyAsync(Rin_, R_rows + (size_t) c * HCN, (size_t) T * HCN * sizeof(float), cudaMemcpyDeviceToDevice,
+                cudaMemcpyAsync(Rin_, R_rows + (size_t) c * HCN, (size_t) T * HCN * sizeof(float), residual_kind,
                                 cs_) != cudaSuccess ||
                 cudaGraphLaunch(prefill_dev_exec_[T], cs_) != cudaSuccess) {
                 err = std::string("mtp prefill: ") + cudaGetErrorString(cudaGetLastError());
@@ -1258,7 +1513,7 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
             h_step_[t * 4 + 3] = (int32_t) (cell + 1);
             for (int64_t h = 0; h < g_->n_head; ++h) h_pos_[t * g_->n_head + h] = (int32_t) cell;
         }
-        if (cudaMemcpyAsync(Rin_, R_rows + (size_t) c * HCN, (size_t) T * HCN * sizeof(float), cudaMemcpyDeviceToDevice,
+        if (cudaMemcpyAsync(Rin_, R_rows + (size_t) c * HCN, (size_t) T * HCN * sizeof(float), residual_kind,
                             cs_) != cudaSuccess ||
             cudaGraphLaunch(prefill_exec_[T], cs_) != cudaSuccess ||
             cudaStreamSynchronize(cs_) != cudaSuccess) {
@@ -1403,6 +1658,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
 bool MtpDrafter::neuron_probe_100(const float* R_row, const int32_t* roots, int64_t cell,
                                  std::vector<int32_t>& candidates, double& prediction_ms, std::string& err) {
     const OnDevice on_device(device_);
+    if (cross_device()) { err = "neuron probe: cross-device drafting is not supported by this diagnostic"; return false; }
     if (!R_row || !roots || cell < 0 || cell > 2048 || max_t_ < 4 || coupled_active_ ||
         (window_ > 0 && window_ < cell + 16)) {
         err = "neuron probe: requires short prefix, greedy MTP, window >= prefix+16, max_t >= 4";
@@ -1456,6 +1712,9 @@ bool MtpDrafter::neuron_probe_100(const float* R_row, const int32_t* roots, int6
 }
 
 bool MtpDrafter::stage_source_R(int T, std::string& err) {
+    if (source_already_staged_) return true;
+    if (cross_device())
+        return stage_remote_rows(local_window_R_, src_R_ ? src_R_ : bound_source_R_, T, err);
     if (src_R_ == nullptr || src_R_ == window_R_) return true;
     if (cudaMemcpyAsync((void*) window_R_, src_R_, (size_t) T * (size_t) (g_->hc * g_->n_embd) * sizeof(float),
                         cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
@@ -1571,6 +1830,23 @@ bool MtpDrafter::draft_first(int T, const float* R_row, int32_t token, int64_t c
     const OnDevice on_device(device_);
     // row 0 is the real pair; rows 1.. repeat it and only write cells the next round overwrites
     const int64_t HCN = g_->hc * g_->n_embd;
+    if (cross_device()) {
+        if (T < 1 || T > max_t_ || chain_live_) { err = "mtp: invalid first draft or a chain is still live"; return false; }
+        if (!stage_remote_rows(local_window_R_, R_row, 1, err)) return false;
+        for (int t = 1; t < T; ++t) {
+            if (cudaMemcpyAsync(local_window_R_ + (size_t) t * (size_t) HCN, local_window_R_,
+                                (size_t) HCN * sizeof(float), cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+                err = "mtp: repeating the first local residual failed";
+                return false;
+            }
+        }
+        std::vector<int32_t> toks((size_t) T, token);
+        // draft() normally stages the verifier's bound window. This call has just supplied its own first row.
+        source_already_staged_ = true;
+        const bool ok = draft(T, toks.data(), cell, 0, drafts, err, probs, min_p, n_drafts);
+        source_already_staged_ = false;
+        return ok;
+    }
     for (int t = 0; t < T; ++t)
         if (cudaMemcpy((void*) (window_R_ + (size_t) t * HCN), R_row, (size_t) HCN * sizeof(float),
                        cudaMemcpyDeviceToDevice) != cudaSuccess) {

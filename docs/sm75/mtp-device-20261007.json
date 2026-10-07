@@ -1,0 +1,909 @@
+{
+  "date": "2026-10-07",
+  "status": "experimental_default_off_performance_rejected",
+  "source_base": "ccd4f3c2df76faa29e35f47ffd566711f311cc5e",
+  "upstream": "d5ea7133741e67743c0e886bb426c0ce8d69cf6c",
+  "executable_sha256": "ac90b36e08e1cbfa709ff8594a9ff217c1da47060269627f5d97c5daf8f07ea8",
+  "source_sha256": {
+    "include/strata/core/mtp.hpp": "93ca7529951509710475efed0c11b6ec2e0cab6c26b76277ca77b534b47eefc1",
+    "src/core/mtp.cpp": "a5a56d2f0054fbb7b639ae4449583b0aa5a7c0b7700a2d8cfe55022719e79204",
+    "src/program/generate.cpp": "3854b053236ea3518242403205e9c84856bb74c085397b686dd8c356b1b70782"
+  },
+  "hardware": {
+    "cpu": "Ryzen 7 5800X",
+    "ram_gib": 96,
+    "os": "Windows WDDM",
+    "cuda": "12.6",
+    "architectures": [
+      75,
+      86
+    ],
+    "logical_0": "RTX 3060 12GB, Oculink x4, monitor 8K",
+    "logical_1": "RTX 2080 Ti modified 22GB, PCIe x16",
+    "cuda_visible_devices": "1,0"
+  },
+  "feature": {
+    "variable": "STRATA_MTP_DEVICE",
+    "default": "last",
+    "control": "1",
+    "treatment": "0",
+    "transport": "FP32 residuals via portable pinned host memory, private GR scratch and unchanged head subset",
+    "scope": "single-chat serve, explicit two-GPU layer split, CUDA, MTP spec >= 2",
+    "unsupported": [
+      "HIP relocation",
+      "automatic split",
+      "batch slots",
+      "shared drafter",
+      "full draft head",
+      "neuron probe"
+    ],
+    "rollback": "unset STRATA_MTP_DEVICE or use last; Daily was not changed"
+  },
+  "protocol": {
+    "basis": "existing run_long.py and deterministic replay fixtures; no new performance harness",
+    "order": [
+      "B1",
+      "A",
+      "B2"
+    ],
+    "single_executable": true,
+    "layer_split": 16,
+    "pipeline_windows": 2,
+    "spec": 4,
+    "spec_min_p": 0.5,
+    "kv": "int8",
+    "kv_resident": 32768,
+    "max_context": 262144,
+    "host_core": "last",
+    "cache": "auto/elastic",
+    "reserved_mib": [
+      1393,
+      384
+    ],
+    "actual_prompt_tokens": [
+      131248,
+      131239
+    ],
+    "reused_tokens": [
+      0,
+      131072
+    ],
+    "output_tokens_each": 1024,
+    "temperature": 0,
+    "seed": 73,
+    "forced_trace_sha256": "000af0df02e3b3d325f9614ffd75ec82aa7213e82220fcb55e58f97881c7791d",
+    "automatic_pcie_fractions_equal": true
+  },
+  "validation": {
+    "cuda_build": "PASS; source hashes equal before/after build",
+    "integrated_server_tests": "265 PASS before the MTP-only C++ change",
+    "forced_ids_and_windows": "PASS all arms; workload control, not quality proof",
+    "free_restore_gate": "PASS: existing A/B/A continuation, checkpoint reuse, three draft-KV verifications",
+    "restore_fixture": "32 paragraphs, spec4, no forced IDs/windows, no elasticity, explicit expert-cache 3000",
+    "prior_restore_attempt": "FAIL: auto capacities 3794/3792 differed; preserved, not counted as pass",
+    "daily_unchanged": true,
+    "compiler_interference": false,
+    "free_131k_BAB": "not run after repeated forced regression",
+    "multi_chat_performance": "not run; single-chat placement rejected",
+    "cancel_and_disk_prefix": "not qualified by this experiment"
+  },
+  "arms": [
+    {
+      "name": "DET-mtp-device0-v1-A",
+      "startup_slots": {
+        "0": {
+          "slots": 4434,
+          "gib": 6.22
+        },
+        "1": {
+          "slots": 9151,
+          "gib": 15.96
+        }
+      },
+      "pcie_probe": {
+        "0": {
+          "gb_s": 6.7,
+          "pcie_frac": 0.18,
+          "line": 2
+        },
+        "1": {
+          "gb_s": 13.1,
+          "pcie_frac": 0.36,
+          "line": 10
+        }
+      },
+      "cases": [
+        {
+          "case": "L01",
+          "decode_tps": 71.39470675181974,
+          "ttft_s": 75.35900000000402,
+          "generated_id_count": 1024,
+          "generated_ids_sha256": "ed8e949e3217316aee306058c2eeccf6a2b191192ec8a99f6141f6ff47d9b667",
+          "generated": 1024,
+          "prompt_tokens": 131248,
+          "prompt_ms": 75143.4,
+          "decode_ms": 14342.8,
+          "reused": 0,
+          "prompt_read": 131248,
+          "finish": "length",
+          "drafts_accepted": 503,
+          "drafts_offered": 690,
+          "hits": 670576,
+          "lookups": 692190,
+          "slots_last_observed": {
+            "0": {
+              "slots": 4698,
+              "gib": 6.59
+            },
+            "1": null
+          },
+          "slots_note": "CUDA0 last logged count; CUDA1 end inventory not reported. No event is not proof of unchanged inventory.",
+          "elastic_events": [
+            {
+              "line": 109,
+              "values": [
+                "+88",
+                "127",
+                "4522",
+                "6.34",
+                "976"
+              ]
+            },
+            {
+              "line": 111,
+              "values": [
+                "+88",
+                "126",
+                "4610",
+                "6.46",
+                "940"
+              ]
+            },
+            {
+              "line": 113,
+              "values": [
+                "+88",
+                "126",
+                "4698",
+                "6.59",
+                "738"
+              ]
+            }
+          ],
+          "elastic_summary": {
+            "line": 118,
+            "shrinks": "0",
+            "growths": "3",
+            "host_loop_ms": "77.6"
+          },
+          "pipeline": {
+            "line": 115,
+            "windows": "521",
+            "elapsed_ms": "14342",
+            "ms_per_window": "27.53",
+            "speculative": "483",
+            "on_path": "165",
+            "rolled_back": "318",
+            "below_gate": "37"
+          },
+          "ple_staging_ms": {
+            "line": 126,
+            "gather_total_ms": "0.000",
+            "gather_ms_per_window": "0.000",
+            "other_staging_ms_per_window": "0.492"
+          },
+          "stage_timing_ms_per_window_nonadditive": {
+            "0": {
+              "line": 124,
+              "gpu_reach_wait": "14.82",
+              "per_layer_host": "1.65",
+              "host_staging": "0.49",
+              "graph_launch": "0.00"
+            },
+            "1": {
+              "line": 125,
+              "gpu_reach_wait": "14.87",
+              "per_layer_host": "1.74",
+              "host_staging": "0.00",
+              "graph_launch": "0.00"
+            }
+          },
+          "kv_cumulative_primary": {
+            "line": 131,
+            "vram_hit_percent": "97.68",
+            "block_reads": "3927244",
+            "ram_mib": "366.9"
+          },
+          "ple_decode_deltas_nonadditive": {
+            "rows": 31616,
+            "ssd_reads": 18344,
+            "ssd_mb_rounded": 76.7,
+            "blocked_ms": 223.45,
+            "submit_ms": 13.574
+          },
+          "work_signature": {
+            "line": 122,
+            "request": "0",
+            "mode": "forced",
+            "verified_windows": "521",
+            "rows_per_window": "1:191 2:116 3:68 4:146",
+            "accepted": "503",
+            "offered": "690",
+            "generated": "1024",
+            "replaced_target_picks": "70",
+            "speculative_trace_windows": "694",
+            "speculative_trace_misses": "701"
+          },
+          "forced_ids_match": true,
+          "verified_windows": 521,
+          "forced_windows_match": true,
+          "work_matches_trace": true,
+          "trace_row_histogram": {
+            "1": 191,
+            "2": 116,
+            "3": 68,
+            "4": 146
+          }
+        },
+        {
+          "case": "L02",
+          "decode_tps": 65.36782166841151,
+          "ttft_s": 1.7029999999940628,
+          "generated_id_count": 1024,
+          "generated_ids_sha256": "549bdceff4a2a73d9489517d85dcb6eb75c483144b3a8672f5bf9f58c8d9c3e9",
+          "generated": 1024,
+          "prompt_tokens": 131239,
+          "prompt_ms": 1618.0,
+          "decode_ms": 15665.2,
+          "reused": 131072,
+          "prompt_read": 167,
+          "finish": "length",
+          "drafts_accepted": 426,
+          "drafts_offered": 614,
+          "hits": 669662,
+          "lookups": 683318,
+          "slots_last_observed": {
+            "0": {
+              "slots": 4698,
+              "gib": 6.59
+            },
+            "1": null
+          },
+          "slots_note": "CUDA0 last logged count; CUDA1 end inventory not reported. No event is not proof of unchanged inventory.",
+          "elastic_events": [],
+          "elastic_summary": {
+            "line": 137,
+            "shrinks": "0",
+            "growths": "0",
+            "host_loop_ms": "0.0"
+          },
+          "pipeline": {
+            "line": 134,
+            "windows": "600",
+            "elapsed_ms": "15664",
+            "ms_per_window": "26.11",
+            "speculative": "527",
+            "on_path": "166",
+            "rolled_back": "361",
+            "below_gate": "72"
+          },
+          "ple_staging_ms": {
+            "line": 145,
+            "gather_total_ms": "0.000",
+            "gather_ms_per_window": "0.000",
+            "other_staging_ms_per_window": "0.514"
+          },
+          "stage_timing_ms_per_window_nonadditive": {
+            "0": {
+              "line": 143,
+              "gpu_reach_wait": "14.05",
+              "per_layer_host": "1.26",
+              "host_staging": "0.51",
+              "graph_launch": "0.00"
+            },
+            "1": {
+              "line": 144,
+              "gpu_reach_wait": "14.50",
+              "per_layer_host": "1.03",
+              "host_staging": "0.00",
+              "graph_launch": "0.00"
+            }
+          },
+          "kv_cumulative_primary": {
+            "line": 150,
+            "vram_hit_percent": "97.80",
+            "block_reads": "7731268",
+            "ram_mib": "686.1"
+          },
+          "ple_decode_deltas_nonadditive": {
+            "rows": 30368,
+            "ssd_reads": 20643,
+            "ssd_mb_rounded": 86.3,
+            "blocked_ms": 274.66,
+            "submit_ms": 16.348
+          },
+          "work_signature": {
+            "line": 141,
+            "request": "1",
+            "mode": "forced",
+            "verified_windows": "600",
+            "rows_per_window": "1:254 2:175 3:75 4:95 5:1",
+            "accepted": "426",
+            "offered": "614",
+            "generated": "1024",
+            "replaced_target_picks": "77",
+            "speculative_trace_windows": "800",
+            "speculative_trace_misses": "826"
+          },
+          "forced_ids_match": true,
+          "verified_windows": 600,
+          "forced_windows_match": true,
+          "work_matches_trace": true,
+          "trace_row_histogram": {
+            "1": 254,
+            "2": 175,
+            "3": 75,
+            "4": 95,
+            "5": 1
+          }
+        }
+      ],
+      "isolation_pass": true,
+      "artifact_sha256": {
+        "result.json": "1609ffbc2382f59bc2d4962632fa210006e346724a8ff86c96d6deb6152ce605",
+        "engine.log": "b3f416bd8f3952169bc683aeb6008bc263669c696989049157c13594b4f89b4e",
+        "force_trace.txt": "000af0df02e3b3d325f9614ffd75ec82aa7213e82220fcb55e58f97881c7791d",
+        "isolation.json": "86310345298fb216f1f45d88597d967d664e488a3ad69f7732df573f8ebb6741"
+      }
+    },
+    {
+      "name": "DET-mtp-device0-v1-B1",
+      "startup_slots": {
+        "0": {
+          "slots": 3792,
+          "gib": 5.31
+        },
+        "1": {
+          "slots": 9616,
+          "gib": 16.78
+        }
+      },
+      "pcie_probe": {
+        "0": {
+          "gb_s": 6.7,
+          "pcie_frac": 0.18,
+          "line": 2
+        },
+        "1": {
+          "gb_s": 13.1,
+          "pcie_frac": 0.36,
+          "line": 10
+        }
+      },
+      "cases": [
+        {
+          "case": "L01",
+          "decode_tps": 63.84756394109065,
+          "ttft_s": 76.20300000000134,
+          "generated_id_count": 1024,
+          "generated_ids_sha256": "ed8e949e3217316aee306058c2eeccf6a2b191192ec8a99f6141f6ff47d9b667",
+          "generated": 1024,
+          "prompt_tokens": 131248,
+          "prompt_ms": 76019.0,
+          "decode_ms": 16038.2,
+          "reused": 0,
+          "prompt_read": 131248,
+          "finish": "length",
+          "drafts_accepted": 503,
+          "drafts_offered": 690,
+          "hits": 661659,
+          "lookups": 686761,
+          "slots_last_observed": {
+            "0": {
+              "slots": 4056,
+              "gib": 5.68
+            },
+            "1": null
+          },
+          "slots_note": "CUDA0 last logged count; CUDA1 end inventory not reported. No event is not proof of unchanged inventory.",
+          "elastic_events": [
+            {
+              "line": 110,
+              "values": [
+                "+87",
+                "126",
+                "3879",
+                "5.43",
+                "1000"
+              ]
+            },
+            {
+              "line": 112,
+              "values": [
+                "+88",
+                "126",
+                "3967",
+                "5.56",
+                "872"
+              ]
+            },
+            {
+              "line": 114,
+              "values": [
+                "+89",
+                "126",
+                "4056",
+                "5.68",
+                "722"
+              ]
+            }
+          ],
+          "elastic_summary": {
+            "line": 119,
+            "shrinks": "0",
+            "growths": "3",
+            "host_loop_ms": "77.9"
+          },
+          "pipeline": {
+            "line": 116,
+            "windows": "521",
+            "elapsed_ms": "16037",
+            "ms_per_window": "30.78",
+            "speculative": "485",
+            "on_path": "164",
+            "rolled_back": "321",
+            "below_gate": "35"
+          },
+          "ple_staging_ms": {
+            "line": 127,
+            "gather_total_ms": "0.000",
+            "gather_ms_per_window": "0.000",
+            "other_staging_ms_per_window": "0.186"
+          },
+          "stage_timing_ms_per_window_nonadditive": {
+            "0": {
+              "line": 125,
+              "gpu_reach_wait": "18.28",
+              "per_layer_host": "2.07",
+              "host_staging": "0.19",
+              "graph_launch": "0.00"
+            },
+            "1": {
+              "line": 126,
+              "gpu_reach_wait": "14.00",
+              "per_layer_host": "1.78",
+              "host_staging": "0.00",
+              "graph_launch": "0.00"
+            }
+          },
+          "kv_cumulative_primary": {
+            "line": 132,
+            "vram_hit_percent": "97.67",
+            "block_reads": "3902584",
+            "ram_mib": "366.6"
+          },
+          "ple_decode_deltas_nonadditive": {
+            "rows": 33264,
+            "ssd_reads": 18311,
+            "ssd_mb_rounded": 76.5,
+            "blocked_ms": 53.333,
+            "submit_ms": 15.03
+          },
+          "work_signature": {
+            "line": 123,
+            "request": "0",
+            "mode": "forced",
+            "verified_windows": "521",
+            "rows_per_window": "1:191 2:116 3:68 4:146",
+            "accepted": "503",
+            "offered": "690",
+            "generated": "1024",
+            "replaced_target_picks": "63",
+            "speculative_trace_windows": "691",
+            "speculative_trace_misses": "705"
+          },
+          "forced_ids_match": true,
+          "verified_windows": 521,
+          "forced_windows_match": true,
+          "work_matches_trace": true,
+          "trace_row_histogram": {
+            "1": 191,
+            "2": 116,
+            "3": 68,
+            "4": 146
+          }
+        },
+        {
+          "case": "L02",
+          "decode_tps": 57.526797150625825,
+          "ttft_s": 1.7660000000032596,
+          "generated_id_count": 1024,
+          "generated_ids_sha256": "549bdceff4a2a73d9489517d85dcb6eb75c483144b3a8672f5bf9f58c8d9c3e9",
+          "generated": 1024,
+          "prompt_tokens": 131239,
+          "prompt_ms": 1666.6,
+          "decode_ms": 17800.4,
+          "reused": 131072,
+          "prompt_read": 167,
+          "finish": "length",
+          "drafts_accepted": 426,
+          "drafts_offered": 614,
+          "hits": 663212,
+          "lookups": 680472,
+          "slots_last_observed": {
+            "0": {
+              "slots": 4056,
+              "gib": 5.68
+            },
+            "1": null
+          },
+          "slots_note": "CUDA0 last logged count; CUDA1 end inventory not reported. No event is not proof of unchanged inventory.",
+          "elastic_events": [],
+          "elastic_summary": {
+            "line": 138,
+            "shrinks": "0",
+            "growths": "0",
+            "host_loop_ms": "0.0"
+          },
+          "pipeline": {
+            "line": 135,
+            "windows": "600",
+            "elapsed_ms": "17800",
+            "ms_per_window": "29.67",
+            "speculative": "531",
+            "on_path": "170",
+            "rolled_back": "361",
+            "below_gate": "68"
+          },
+          "ple_staging_ms": {
+            "line": 146,
+            "gather_total_ms": "0.000",
+            "gather_ms_per_window": "0.000",
+            "other_staging_ms_per_window": "0.186"
+          },
+          "stage_timing_ms_per_window_nonadditive": {
+            "0": {
+              "line": 144,
+              "gpu_reach_wait": "18.22",
+              "per_layer_host": "1.40",
+              "host_staging": "0.19",
+              "graph_launch": "0.00"
+            },
+            "1": {
+              "line": 145,
+              "gpu_reach_wait": "13.76",
+              "per_layer_host": "0.93",
+              "host_staging": "0.00",
+              "graph_launch": "0.00"
+            }
+          },
+          "kv_cumulative_primary": {
+            "line": 151,
+            "vram_hit_percent": "97.78",
+            "block_reads": "7710684",
+            "ram_mib": "690.5"
+          },
+          "ple_decode_deltas_nonadditive": {
+            "rows": 33424,
+            "ssd_reads": 20790,
+            "ssd_mb_rounded": 87.0,
+            "blocked_ms": 69.128,
+            "submit_ms": 17.189
+          },
+          "work_signature": {
+            "line": 142,
+            "request": "1",
+            "mode": "forced",
+            "verified_windows": "600",
+            "rows_per_window": "1:254 2:175 3:75 4:95 5:1",
+            "accepted": "426",
+            "offered": "614",
+            "generated": "1024",
+            "replaced_target_picks": "73",
+            "speculative_trace_windows": "792",
+            "speculative_trace_misses": "829"
+          },
+          "forced_ids_match": true,
+          "verified_windows": 600,
+          "forced_windows_match": true,
+          "work_matches_trace": true,
+          "trace_row_histogram": {
+            "1": 254,
+            "2": 175,
+            "3": 75,
+            "4": 95,
+            "5": 1
+          }
+        }
+      ],
+      "isolation_pass": true,
+      "artifact_sha256": {
+        "result.json": "6d07312df8cc17fee4f8c12de93f3331966be9398e91502bf1168f273b2e8e5d",
+        "engine.log": "4122a2261bdd68f4003989ffe7d5c1e1d16fb9477696b37280e5c26ae96cc7c4",
+        "force_trace.txt": "000af0df02e3b3d325f9614ffd75ec82aa7213e82220fcb55e58f97881c7791d",
+        "isolation.json": "197244684869db30ac5f6b4d77f011f714adc997a420c63e4567398ecabd0446"
+      }
+    },
+    {
+      "name": "DET-mtp-device0-v1-B2",
+      "startup_slots": {
+        "0": {
+          "slots": 3808,
+          "gib": 5.33
+        },
+        "1": {
+          "slots": 9616,
+          "gib": 16.78
+        }
+      },
+      "pcie_probe": {
+        "0": {
+          "gb_s": 6.7,
+          "pcie_frac": 0.18,
+          "line": 2
+        },
+        "1": {
+          "gb_s": 13.1,
+          "pcie_frac": 0.36,
+          "line": 10
+        }
+      },
+      "cases": [
+        {
+          "case": "L01",
+          "decode_tps": 64.76913345983556,
+          "ttft_s": 76.79700000000594,
+          "generated_id_count": 1024,
+          "generated_ids_sha256": "ed8e949e3217316aee306058c2eeccf6a2b191192ec8a99f6141f6ff47d9b667",
+          "generated": 1024,
+          "prompt_tokens": 131248,
+          "prompt_ms": 76612.5,
+          "decode_ms": 15810.0,
+          "reused": 0,
+          "prompt_read": 131248,
+          "finish": "length",
+          "drafts_accepted": 503,
+          "drafts_offered": 690,
+          "hits": 663462,
+          "lookups": 689053,
+          "slots_last_observed": {
+            "0": {
+              "slots": 3988,
+              "gib": 5.58
+            },
+            "1": null
+          },
+          "slots_note": "CUDA0 last logged count; CUDA1 end inventory not reported. No event is not proof of unchanged inventory.",
+          "elastic_events": [
+            {
+              "line": 110,
+              "values": [
+                "+90",
+                "127",
+                "3898",
+                "5.46",
+                "904"
+              ]
+            },
+            {
+              "line": 112,
+              "values": [
+                "+90",
+                "126",
+                "3988",
+                "5.58",
+                "755"
+              ]
+            }
+          ],
+          "elastic_summary": {
+            "line": 117,
+            "shrinks": "0",
+            "growths": "2",
+            "host_loop_ms": "56.2"
+          },
+          "pipeline": {
+            "line": 114,
+            "windows": "521",
+            "elapsed_ms": "15809",
+            "ms_per_window": "30.34",
+            "speculative": "486",
+            "on_path": "168",
+            "rolled_back": "318",
+            "below_gate": "34"
+          },
+          "ple_staging_ms": {
+            "line": 125,
+            "gather_total_ms": "0.000",
+            "gather_ms_per_window": "0.000",
+            "other_staging_ms_per_window": "0.169"
+          },
+          "stage_timing_ms_per_window_nonadditive": {
+            "0": {
+              "line": 123,
+              "gpu_reach_wait": "18.31",
+              "per_layer_host": "1.94",
+              "host_staging": "0.17",
+              "graph_launch": "0.00"
+            },
+            "1": {
+              "line": 124,
+              "gpu_reach_wait": "13.94",
+              "per_layer_host": "1.61",
+              "host_staging": "0.00",
+              "graph_launch": "0.00"
+            }
+          },
+          "kv_cumulative_primary": {
+            "line": 130,
+            "vram_hit_percent": "97.70",
+            "block_reads": "3935464",
+            "ram_mib": "365.3"
+          },
+          "ple_decode_deltas_nonadditive": {
+            "rows": 33232,
+            "ssd_reads": 18296,
+            "ssd_mb_rounded": 76.5,
+            "blocked_ms": 46.339,
+            "submit_ms": 14.399
+          },
+          "work_signature": {
+            "line": 121,
+            "request": "0",
+            "mode": "forced",
+            "verified_windows": "521",
+            "rows_per_window": "1:191 2:116 3:68 4:146",
+            "accepted": "503",
+            "offered": "690",
+            "generated": "1024",
+            "replaced_target_picks": "70",
+            "speculative_trace_windows": "697",
+            "speculative_trace_misses": "695"
+          },
+          "forced_ids_match": true,
+          "verified_windows": 521,
+          "forced_windows_match": true,
+          "work_matches_trace": true,
+          "trace_row_histogram": {
+            "1": 191,
+            "2": 116,
+            "3": 68,
+            "4": 146
+          }
+        },
+        {
+          "case": "L02",
+          "decode_tps": 57.2428404523526,
+          "ttft_s": 1.7660000000032596,
+          "generated_id_count": 1024,
+          "generated_ids_sha256": "549bdceff4a2a73d9489517d85dcb6eb75c483144b3a8672f5bf9f58c8d9c3e9",
+          "generated": 1024,
+          "prompt_tokens": 131239,
+          "prompt_ms": 1684.1,
+          "decode_ms": 17888.7,
+          "reused": 131072,
+          "prompt_read": 167,
+          "finish": "length",
+          "drafts_accepted": 426,
+          "drafts_offered": 614,
+          "hits": 664814,
+          "lookups": 682299,
+          "slots_last_observed": {
+            "0": {
+              "slots": 4047,
+              "gib": 5.66
+            },
+            "1": null
+          },
+          "slots_note": "CUDA0 last logged count; CUDA1 end inventory not reported. No event is not proof of unchanged inventory.",
+          "elastic_events": [
+            {
+              "line": 133,
+              "values": [
+                "+59",
+                "83",
+                "4047",
+                "5.66",
+                "708"
+              ]
+            }
+          ],
+          "elastic_summary": {
+            "line": 138,
+            "shrinks": "0",
+            "growths": "1",
+            "host_loop_ms": "18.0"
+          },
+          "pipeline": {
+            "line": 135,
+            "windows": "600",
+            "elapsed_ms": "17888",
+            "ms_per_window": "29.81",
+            "speculative": "524",
+            "on_path": "158",
+            "rolled_back": "366",
+            "below_gate": "75"
+          },
+          "ple_staging_ms": {
+            "line": 146,
+            "gather_total_ms": "0.000",
+            "gather_ms_per_window": "0.000",
+            "other_staging_ms_per_window": "0.190"
+          },
+          "stage_timing_ms_per_window_nonadditive": {
+            "0": {
+              "line": 144,
+              "gpu_reach_wait": "18.14",
+              "per_layer_host": "1.41",
+              "host_staging": "0.19",
+              "graph_launch": "0.00"
+            },
+            "1": {
+              "line": 145,
+              "gpu_reach_wait": "13.73",
+              "per_layer_host": "0.90",
+              "host_staging": "0.00",
+              "graph_launch": "0.00"
+            }
+          },
+          "kv_cumulative_primary": {
+            "line": 151,
+            "vram_hit_percent": "97.80",
+            "block_reads": "7768236",
+            "ram_mib": "688.1"
+          },
+          "ple_decode_deltas_nonadditive": {
+            "rows": 33520,
+            "ssd_reads": 20884,
+            "ssd_mb_rounded": 87.3,
+            "blocked_ms": 73.096,
+            "submit_ms": 17.202
+          },
+          "work_signature": {
+            "line": 142,
+            "request": "1",
+            "mode": "forced",
+            "verified_windows": "600",
+            "rows_per_window": "1:254 2:175 3:75 4:95 5:1",
+            "accepted": "426",
+            "offered": "614",
+            "generated": "1024",
+            "replaced_target_picks": "75",
+            "speculative_trace_windows": "792",
+            "speculative_trace_misses": "841"
+          },
+          "forced_ids_match": true,
+          "verified_windows": 600,
+          "forced_windows_match": true,
+          "work_matches_trace": true,
+          "trace_row_histogram": {
+            "1": 254,
+            "2": 175,
+            "3": 75,
+            "4": 95,
+            "5": 1
+          }
+        }
+      ],
+      "isolation_pass": true,
+      "artifact_sha256": {
+        "result.json": "5e918918fce2b034c726f5c394db726d2e5513e2b10b7e39b80c331110e131fe",
+        "engine.log": "ac3b9d05e8bc9b93d9bdf2f03a6213ec1139655d620bdd590970c7608fda2593",
+        "force_trace.txt": "000af0df02e3b3d325f9614ffd75ec82aa7213e82220fcb55e58f97881c7791d",
+        "isolation.json": "00e712d96c5618a3a4833cc79d31851fbeacb304c6640aa9ba79f8bee55c2f00"
+      }
+    }
+  ],
+  "interpretation": {
+    "decision": "Do not promote MTP0 for this split; preserve default last-stage placement.",
+    "observed": "Both MTP0 repeats lose 9-12% throughput in each 131k case.",
+    "architecture_hypothesis": "Stage1/speculative windows get faster while stage0/fresh windows get slower; the latter dominate.",
+    "limits": [
+      "One BAB; not a hardware ceiling or proof about all placements.",
+      "Relocation also changes cache capacity; GPU contention, cache and transfer costs are not separately isolated.",
+      "Forced verified work is identical; speculative attempts and cache evolution can differ.",
+      "The old single-GPU inventory parser failed; a separate two-card nvidia-smi inventory was recorded.",
+      "Jump disconnection was not independently verified. Normal desktop/CGControl remained."
+    ]
+  }
+}
