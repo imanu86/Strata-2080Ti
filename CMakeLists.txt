@@ -1109,6 +1109,11 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(batch_plan_test tests/core/batch_plan_test.cpp)
   target_include_directories(batch_plan_test PRIVATE include)
   add_test(NAME batch_plan_test COMMAND batch_plan_test)
+  # the two slot groups of the pipelined batch windows: where a new slot goes, the re-split of an emptied group, the
+  # overlap accounting (STRATA_BATCH_PIPELINE=2; header-only, CPU)
+  add_executable(batch_groups_test tests/core/batch_groups_test.cpp)
+  target_include_directories(batch_groups_test PRIVATE include)
+  add_test(NAME batch_groups_test COMMAND batch_groups_test)
 endif()
 
 add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
