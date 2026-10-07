@@ -1,0 +1,4308 @@
+{
+  "schema": "strata.minp.record.v1",
+  "run": "DET-hot-minp-02",
+  "evidence_pass": true,
+  "completed_requests": 26,
+  "conclusion": "All tested long-request static thresholds 0, 0.2 and 0.8 were slower than their intervening 0.5 controls in both L01 and L02, in both B repetitions. Retain 0.5 for this tested setup; no claim of global optimality.",
+  "scope": "Single chat CUDA split16/pipeline2, fixed target continuation at ~131k context; original hot-oracle binary and allocation, oracle off, actual MTP proposals, no FORCE_WINDOWS.",
+  "provenance": {
+    "main_export": "05380702",
+    "binary_sha256": "74b05b5aa3102f3d2377d38c5c56c242a93bbc9d5433bf008456f42f35e6343c",
+    "build_record_source_base": "dae7cd0f38cb895928efbad39d2e55a623473d8d+oracle-working-tree",
+    "generate_cpp_sha256": "4cdf78f375d11278117ea129d65d878cb12d3f6ef94e76500397fbb8ab4fdd18",
+    "source_base_note": "The immutable build record retains its initial working-tree base label; main_export is the benchmark pin. Exact binary/source hashes identify this run, not the newer selective/telemetry source.",
+    "protocol_sha256": "6284e246f42900353bb244e447e1b049fc11a8179c318e893af8d53f6e52a02d",
+    "config_sha256": "f64dc2c5ab4c71197aea86e0e3badedcf8c84198fa819595d11c451e4d37c762",
+    "bench_sha256": {
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\hot_validation.py": "b579839f65d3c120a299aa6fe408e7a63ff17155cd2e3f93fc2f0f61d32c49f3",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\minp_contract.py": "97e51fd58c25e5fe561133c66f056d4e6fc45b158af429365783530966693475",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\run_minp.py": "786dfa889e243a84001a33e48556ce2672d3e8679aae8891887e3c0251d74b25",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\test_minp.py": "ea5bc63ca83959b7f26ea0bbd24432a444d0512891f14d679a0b247fb9cb3115"
+    }
+  },
+  "runtime": {
+    "startup_s": 193.78099999998813,
+    "first_GEN_utc": "2026-10-07T21:16:40.669834+00:00",
+    "final_GEN_utc": "2026-10-07T21:23:41.158023+00:00",
+    "visible_devices": "1,0",
+    "gpu_inventory": {
+      "fields": [
+        "index",
+        "uuid",
+        "name",
+        "memory.used",
+        "memory.total",
+        "utilization.gpu",
+        "clocks.sm",
+        "clocks.mem",
+        "temperature.gpu",
+        "power.draw",
+        "pstate"
+      ],
+      "rows": [
+        "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 2330, 12288, 16, 210, 405, 49, 20.82, P8",
+        "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 151, 22528, 0, 300, 405, 34, 22.36, P8"
+      ],
+      "rc": 0
+    },
+    "gpu_ordinal_note": "gpu_inventory contains raw nvidia-smi indices, not CUDA ordinal mapping. engine.log explicitly reports engine GPU0 as NVIDIA GeForce RTX 3060; no mapping is inferred from CUDA_VISIBLE_DEVICES.",
+    "shared_mutable_runtime": {
+      "owner": "hot-oracle",
+      "exclusive_lock": "D:\\ds4_work\\strata\\lab_locks\\bench.lock",
+      "cwd": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-oracle\\runtime",
+      "switch_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-oracle\\runtime\\oracle-switch.txt",
+      "append_trace_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-oracle\\runtime\\force_trace.txt",
+      "original_protocol": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-oracle\\bench\\protocol.json",
+      "original_protocol_sha256": "3ba708f582e0ba3d043caeba5d4d97ca4a38027078d6e9fd013b23293d58854d",
+      "original_config": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-oracle\\bench\\frozen_config.json",
+      "original_config_sha256": "f64dc2c5ab4c71197aea86e0e3badedcf8c84198fa819595d11c451e4d37c762",
+      "prefix_before_prepare_sha256": {
+        "L01": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f",
+        "L02": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f"
+      }
+    }
+  },
+  "validation": {
+    "cpu_tests": 14,
+    "cpu_tests_pass": true,
+    "wire_proof": "Each actual owned-stdin GEN write and flush records seed=73/spec_min_p plus prompt and line hashes; exact frozen Daily serializer tested.",
+    "prefix_tokens_reused": 131072,
+    "all26_restore_validated": true,
+    "oracle_mode": "off",
+    "forced_window_override": false,
+    "synthetic_draft_deliveries": 0,
+    "chain_bypasses": 0,
+    "mtp_vram_bytes": [
+      962957512
+    ],
+    "isolation": {
+      "daily_unchanged": true,
+      "owned_processes": {
+        "21088": 1791407606.8968272
+      },
+      "remaining_owned": [],
+      "compiler_observations": [],
+      "compiler_guard_clean": true,
+      "threads_stopped": true,
+      "protocol_sha256": "6284e246f42900353bb244e447e1b049fc11a8179c318e893af8d53f6e52a02d",
+      "bench_sha256": {
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\hot_validation.py": "b579839f65d3c120a299aa6fe408e7a63ff17155cd2e3f93fc2f0f61d32c49f3",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\minp_contract.py": "97e51fd58c25e5fe561133c66f056d4e6fc45b158af429365783530966693475",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\run_minp.py": "786dfa889e243a84001a33e48556ce2672d3e8679aae8891887e3c0251d74b25",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-minp-v2\\bench\\test_minp.py": "ea5bc63ca83959b7f26ea0bbd24432a444d0512891f14d679a0b247fb9cb3115"
+      }
+    }
+  },
+  "prefix_hashes": {
+    "before_prepare": {
+      "L01": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f",
+      "L02": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f"
+    },
+    "before_run": {
+      "L01": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f",
+      "L02": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f"
+    },
+    "after_warmup": {
+      "L01": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f",
+      "L02": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f"
+    },
+    "after_run": {
+      "L01": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f",
+      "L02": "dfce5bce99aec6c6c85f15a921a79582b7854181a6fdba67f6f0c10536299a7f"
+    },
+    "all_unchanged": true,
+    "verification": "Previously recorded hashes compared; SSD cache files were not opened or rehashed for this report."
+  },
+  "triplets": [
+    {
+      "phase": "minp0-smoke",
+      "case": "L01",
+      "performance_result": false,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        61.95786864931846,
+        68.7442713107241,
+        73.85524372230428
+      ],
+      "B_time_reduction_pct": [
+        -10.95325389550871,
+        6.920256645279558
+      ],
+      "B_tps_gain_pct": [
+        -9.87195373812474,
+        7.434761201378626
+      ],
+      "B_tps_spread_pct": 17.520215633423177
+    },
+    {
+      "phase": "minp0-smoke",
+      "case": "L02",
+      "performance_result": false,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        72.95719844357977,
+        84.98583569405099,
+        73.27796775769419
+      ],
+      "B_time_reduction_pct": [
+        -16.487252124645888,
+        -15.977337110481582
+      ],
+      "B_tps_gain_pct": [
+        -14.153696498054469,
+        -13.776257938446513
+      ],
+      "B_tps_spread_pct": 0.4387033877650427
+    },
+    {
+      "phase": "minp0-long",
+      "case": "L01",
+      "performance_result": true,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        61.50445667059078,
+        71.80019352395911,
+        62.32501521606817
+      ],
+      "B_time_reduction_pct": [
+        -16.739822462802742,
+        -15.202849570180486
+      ],
+      "B_tps_gain_pct": [
+        -14.33942772025083,
+        -13.196591600730379
+      ],
+      "B_tps_spread_pct": 1.3253041186002092
+    },
+    {
+      "phase": "minp0-long",
+      "case": "L02",
+      "performance_result": true,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        53.02265372168285,
+        65.55949652355405,
+        53.980822047792
+      ],
+      "B_time_reduction_pct": [
+        -23.644314122181395,
+        -21.449607539342107
+      ],
+      "B_tps_gain_pct": [
+        -19.12284789644013,
+        -17.66132305729664
+      ],
+      "B_tps_spread_pct": 1.7909106582171264
+    },
+    {
+      "phase": "minp0p2-long",
+      "case": "L01",
+      "performance_result": true,
+      "spec_min_p": [
+        0.2,
+        0.5,
+        0.2
+      ],
+      "tps": [
+        64.81710057411242,
+        69.92863727933896,
+        65.3540543127932
+      ],
+      "B_time_reduction_pct": [
+        -7.886092805681697,
+        -6.999692696418206
+      ],
+      "B_tps_gain_pct": [
+        -7.309647240525862,
+        -6.541787663145793
+      ],
+      "B_tps_spread_pct": 0.8249965042521004
+    },
+    {
+      "phase": "minp0p2-long",
+      "case": "L02",
+      "performance_result": true,
+      "spec_min_p": [
+        0.2,
+        0.5,
+        0.2
+      ],
+      "tps": [
+        57.24796082092682,
+        64.76790446734091,
+        56.3771100124426
+      ],
+      "B_time_reduction_pct": [
+        -13.135740624782576,
+        -14.883335547080083
+      ],
+      "B_tps_gain_pct": [
+        -11.610602053994212,
+        -12.955173590847535
+      ],
+      "B_tps_spread_pct": 1.5328497524306393
+    },
+    {
+      "phase": "minp0p8-long",
+      "case": "L01",
+      "performance_result": true,
+      "spec_min_p": [
+        0.8,
+        0.5,
+        0.8
+      ],
+      "tps": [
+        70.05397713668052,
+        71.45997473778236,
+        69.87662408559886
+      ],
+      "B_time_reduction_pct": [
+        -2.0070203842369243,
+        -2.265923222398228
+      ],
+      "B_tps_gain_pct": [
+        -1.9675316234872176,
+        -2.215716781307997
+      ],
+      "B_tps_spread_pct": 0.25348715653687204
+    },
+    {
+      "phase": "minp0p8-long",
+      "case": "L02",
+      "performance_result": true,
+      "spec_min_p": [
+        0.8,
+        0.5,
+        0.8
+      ],
+      "tps": [
+        62.08506381301725,
+        64.88116735412825,
+        62.50190740684225
+      ],
+      "B_time_reduction_pct": [
+        -4.503665405792414,
+        -3.806699740855489
+      ],
+      "B_tps_gain_pct": [
+        -4.309576499833268,
+        -3.6671040986358205
+      ],
+      "B_tps_spread_pct": 0.6691608115095649
+    }
+  ],
+  "requests": [
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 231.0,
+        "ms_per_window_rounded": 38.56,
+        "B_launched": 4,
+        "B_on_path": 1,
+        "B_rolled_back": 3,
+        "below_gate": 1,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 5.57,
+        "forced_count": 1,
+        "fresh_mean_ms": 5.62,
+        "fresh_count": 4,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 1,
+        "loop_thread_ms_rounded": 24.8,
+        "events": [
+          "strata elastic: +88 experts (127 MiB) -> 4522 slots, 6.34 GiB; 1030 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 24.83 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 89.9,
+        "hits": 7475,
+        "lookups": 8316,
+        "pcie_or_peer_reads": 4
+      },
+      "kv_stream": {
+        "hit_pct": 81.85,
+        "block_reads": 49296,
+        "ram_mib": 36.0
+      },
+      "ple": {
+        "before": {
+          "rows": 2800.0,
+          "cache_hit_pct": 2.3,
+          "ssd_reads": 2680.0,
+          "ssd_mb": 11.2,
+          "blocked_ms": 167.504,
+          "submit_ms": 5.728
+        },
+        "after": {
+          "rows": 3120.0,
+          "cache_hit_pct": 3.1,
+          "ssd_reads": 2968.0,
+          "ssd_mb": 12.4,
+          "blocked_ms": 172.26,
+          "submit_ms": 5.9
+        },
+        "delta": {
+          "rows": 320.0,
+          "ssd_reads": 288.0,
+          "ssd_mb": 1.200000000000001,
+          "blocked_ms": 4.756,
+          "submit_ms": 0.1720000000000006
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 5 windows 41.91 ms 2.80 tok | speculative 1 windows 20.64 ms 1.00 tok | forced-chain disagreements 1, chain late 1",
+        "strata decode timing: 6 windows, avg T 2.67, 2.50 tokens/window, 38.58 ms/window = verify 38.56 (GPU-reach wait 14.36 + per-layer host 3.43 [plan 0.14 actq 0.10 jobs 0.01 CPU 8.68] + stage 0.87) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 2.22 (2.92 entries), VRAM hits 25.95, PCIe 0.01",
+        "strata decode stage 0: GPU-reach wait 14.36 + per-layer host 3.43 + host staging 0.87 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 13.05 + per-layer host 6.33 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.870 ms/window"
+      ],
+      "request_index": 0,
+      "case": "L01",
+      "phase": "warmup",
+      "arm": "warm",
+      "spec_min_p": 0.5,
+      "tokens": 15,
+      "decode_ms": 231.5,
+      "decode_tps": 64.79481641468684,
+      "prompt_ms": 4967.8,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 16,
+      "drafts": 10,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 2,
+          "2": 1,
+          "3": 0,
+          "4": 3
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 3,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "5",
+        "drafts": "10",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "16",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 0
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2400.3",
+          "330.7"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "d79bdadd8acbdee7475fe98824d88878822a98d8cb3f1ff7edaa11d064472d9c",
+        "request_index": 0,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.9,
+      "ms_per_window": 38.583333333333336,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.0666666666666667
+    },
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 226.0,
+        "ms_per_window_rounded": 37.59,
+        "B_launched": 5,
+        "B_on_path": 2,
+        "B_rolled_back": 3,
+        "below_gate": 0,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 6.52,
+        "forced_count": 2,
+        "fresh_mean_ms": 5.31,
+        "fresh_count": 3,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 1,
+        "loop_thread_ms_rounded": 22.7,
+        "events": [
+          "strata elastic: +89 experts (126 MiB) -> 4611 slots, 6.46 GiB; 977 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 22.67 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 93.4,
+        "hits": 8962,
+        "lookups": 9596,
+        "pcie_or_peer_reads": 4
+      },
+      "kv_stream": {
+        "hit_pct": 80.09,
+        "block_reads": 57512,
+        "ram_mib": 46.1
+      },
+      "ple": {
+        "before": {
+          "rows": 5776.0,
+          "cache_hit_pct": 24.8,
+          "ssd_reads": 4272.0,
+          "ssd_mb": 17.9,
+          "blocked_ms": 217.56,
+          "submit_ms": 8.959
+        },
+        "after": {
+          "rows": 6160.0,
+          "cache_hit_pct": 26.5,
+          "ssd_reads": 4456.0,
+          "ssd_mb": 18.6,
+          "blocked_ms": 220.98,
+          "submit_ms": 9.06
+        },
+        "delta": {
+          "rows": 384.0,
+          "ssd_reads": 184.0,
+          "ssd_mb": 0.7000000000000028,
+          "blocked_ms": 3.4199999999999875,
+          "submit_ms": 0.10100000000000087
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 4 windows 41.31 ms 2.50 tok | speculative 2 windows 29.68 ms 2.50 tok | forced-chain disagreements 0, chain late 2",
+        "strata decode timing: 6 windows, avg T 3.00, 2.50 tokens/window, 37.61 ms/window = verify 37.59 (GPU-reach wait 15.28 + per-layer host 3.21 [plan 0.16 actq 0.09 jobs 0.01 CPU 6.52] + stage 0.64) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 1.81 (2.20 entries), VRAM hits 31.12, PCIe 0.01",
+        "strata decode stage 0: GPU-reach wait 15.28 + per-layer host 3.21 + host staging 0.64 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 15.51 + per-layer host 4.18 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.645 ms/window"
+      ],
+      "request_index": 1,
+      "case": "L02",
+      "phase": "warmup",
+      "arm": "warm",
+      "spec_min_p": 0.5,
+      "tokens": 15,
+      "decode_ms": 225.7,
+      "decode_tps": 66.45990252547631,
+      "prompt_ms": 4434.4,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 3,
+          "4": 2
+        },
+        "initial_T": 1,
+        "last_T": 3,
+        "after_initial_T4": 2,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 1
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2386.3",
+          "208.6"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "7be6461fa8a54d54c578d17194b65aded494c0872f3bd5b24c4083077bf6952e",
+        "request_index": 1,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.75,
+      "ms_per_window": 37.61666666666667,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.2
+    },
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 242.0,
+        "ms_per_window_rounded": 40.33,
+        "B_launched": 3,
+        "B_on_path": 1,
+        "B_rolled_back": 2,
+        "below_gate": 2,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.64,
+        "forced_count": 1,
+        "fresh_mean_ms": 7.59,
+        "fresh_count": 4,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 1,
+        "loop_thread_ms_rounded": 30.0,
+        "events": [
+          "strata elastic: +90 experts (128 MiB) -> 4701 slots, 6.59 GiB; 668 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.04 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 97.6,
+        "hits": 11090,
+        "lookups": 11360,
+        "pcie_or_peer_reads": null
+      },
+      "kv_stream": {
+        "hit_pct": 85.11,
+        "block_reads": 67780,
+        "ram_mib": 40.7
+      },
+      "ple": {
+        "before": {
+          "rows": 8960.0,
+          "cache_hit_pct": 49.5,
+          "ssd_reads": 4456.0,
+          "ssd_mb": 18.6,
+          "blocked_ms": 220.981,
+          "submit_ms": 9.06
+        },
+        "after": {
+          "rows": 9424.0,
+          "cache_hit_pct": 50.6,
+          "ssd_reads": 4584.0,
+          "ssd_mb": 19.2,
+          "blocked_ms": 220.984,
+          "submit_ms": 9.148
+        },
+        "delta": {
+          "rows": 464.0,
+          "ssd_reads": 128.0,
+          "ssd_mb": 0.5999999999999979,
+          "blocked_ms": 0.0030000000000143245,
+          "submit_ms": 0.08799999999999919
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 5 windows 42.85 ms 2.80 tok | speculative 1 windows 27.04 ms 1.00 tok | forced-chain disagreements 1, chain late 1",
+        "strata decode timing: 6 windows, avg T 3.50, 2.50 tokens/window, 40.35 ms/window = verify 40.33 (GPU-reach wait 16.86 + per-layer host 1.08 [plan 0.19 actq 0.08 jobs 0.01 CPU 3.54] + stage 0.05) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.84 (0.94 entries), VRAM hits 38.51, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 16.86 + per-layer host 1.08 + host staging 0.05 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 16.48 + per-layer host 2.77 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.055 ms/window"
+      ],
+      "request_index": 2,
+      "case": "L01",
+      "phase": "minp0-smoke",
+      "arm": "B1",
+      "spec_min_p": 0.0,
+      "tokens": 15,
+      "decode_ms": 242.1,
+      "decode_tps": 61.95786864931846,
+      "prompt_ms": 4559.8,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 2
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2477.0",
+          "248.8"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "2d07a88924a17b718100c574c4823500ff6e76bd4d6a1d9d9bdb778ee7121160",
+        "request_index": 2,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6,
+      "ms_per_window": 40.35,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.4
+    },
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 205.0,
+        "ms_per_window_rounded": 34.25,
+        "B_launched": 3,
+        "B_on_path": 1,
+        "B_rolled_back": 2,
+        "below_gate": 2,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.63,
+        "forced_count": 1,
+        "fresh_mean_ms": 6.23,
+        "fresh_count": 4,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 97.5,
+        "hits": 11077,
+        "lookups": 11360,
+        "pcie_or_peer_reads": null
+      },
+      "kv_stream": {
+        "hit_pct": 81.91,
+        "block_reads": 67780,
+        "ram_mib": 49.4
+      },
+      "ple": {
+        "before": {
+          "rows": 12080.0,
+          "cache_hit_pct": 61.5,
+          "ssd_reads": 4584.0,
+          "ssd_mb": 19.2,
+          "blocked_ms": 220.984,
+          "submit_ms": 9.148
+        },
+        "after": {
+          "rows": 12544.0,
+          "cache_hit_pct": 61.8,
+          "ssd_reads": 4720.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.987,
+          "submit_ms": 9.206
+        },
+        "delta": {
+          "rows": 464.0,
+          "ssd_reads": 136.0,
+          "ssd_mb": 0.6000000000000014,
+          "blocked_ms": 0.002999999999985903,
+          "submit_ms": 0.05799999999999983
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 5 windows 35.66 ms 2.80 tok | speculative 1 windows 26.76 ms 1.00 tok | forced-chain disagreements 1, chain late 1",
+        "strata decode timing: 6 windows, avg T 3.50, 2.50 tokens/window, 34.27 ms/window = verify 34.25 (GPU-reach wait 16.17 + per-layer host 1.00 [plan 0.16 actq 0.07 jobs 0.01 CPU 3.16] + stage 0.04) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.89 (0.98 entries), VRAM hits 38.46, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 16.17 + per-layer host 1.00 + host staging 0.04 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 16.88 + per-layer host 2.43 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.044 ms/window"
+      ],
+      "request_index": 3,
+      "case": "L02",
+      "phase": "minp0-smoke",
+      "arm": "B1",
+      "spec_min_p": 0.0,
+      "tokens": 15,
+      "decode_ms": 205.6,
+      "decode_tps": 72.95719844357977,
+      "prompt_ms": 4288.7,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 3
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2360.6",
+          "214.6"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "26a8498c6a9c1a02a90465c6c718af5475244dfbff05f5cb7de26f65a6ca26bc",
+        "request_index": 3,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6,
+      "ms_per_window": 34.266666666666666,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.4
+    },
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 218.0,
+        "ms_per_window_rounded": 36.34,
+        "B_launched": 4,
+        "B_on_path": 1,
+        "B_rolled_back": 3,
+        "below_gate": 1,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 5.5,
+        "forced_count": 1,
+        "fresh_mean_ms": 6.18,
+        "fresh_count": 4,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 1,
+        "loop_thread_ms_rounded": 22.9,
+        "events": [
+          "strata elastic: +65 experts (91 MiB) -> 4766 slots, 6.68 GiB; 710 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 22.89 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 99.4,
+        "hits": 9062,
+        "lookups": 9120,
+        "pcie_or_peer_reads": null
+      },
+      "kv_stream": {
+        "hit_pct": 82.25,
+        "block_reads": 51352,
+        "ram_mib": 36.7
+      },
+      "ple": {
+        "before": {
+          "rows": 15344.0,
+          "cache_hit_pct": 68.8,
+          "ssd_reads": 4720.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.987,
+          "submit_ms": 9.206
+        },
+        "after": {
+          "rows": 15744.0,
+          "cache_hit_pct": 69.6,
+          "ssd_reads": 4720.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.99,
+          "submit_ms": 9.206
+        },
+        "delta": {
+          "rows": 400.0,
+          "ssd_reads": 0.0,
+          "ssd_mb": 0.0,
+          "blocked_ms": 0.0030000000000143245,
+          "submit_ms": 0.0
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 5 windows 39.67 ms 2.80 tok | speculative 1 windows 18.94 ms 1.00 tok | forced-chain disagreements 1, chain late 1",
+        "strata decode timing: 6 windows, avg T 3.00, 2.50 tokens/window, 36.36 ms/window = verify 36.34 (GPU-reach wait 15.13 + per-layer host 0.24 [plan 0.12 actq 0.02 jobs 0.00 CPU 0.79] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.20 (0.20 entries), VRAM hits 31.47, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 15.13 + per-layer host 0.24 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 16.59 + per-layer host 0.72 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.018 ms/window"
+      ],
+      "request_index": 4,
+      "case": "L01",
+      "phase": "minp0-smoke",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 15,
+      "decode_ms": 218.2,
+      "decode_tps": 68.7442713107241,
+      "prompt_ms": 4389.3,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 1,
+          "3": 1,
+          "4": 3
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 3,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 4
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2391.7",
+          "209.5"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "d79bdadd8acbdee7475fe98824d88878822a98d8cb3f1ff7edaa11d064472d9c",
+        "request_index": 4,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.75,
+      "ms_per_window": 36.36666666666667,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.2
+    },
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 176.0,
+        "ms_per_window_rounded": 29.4,
+        "B_launched": 5,
+        "B_on_path": 2,
+        "B_rolled_back": 3,
+        "below_gate": 0,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 4.63,
+        "forced_count": 2,
+        "fresh_mean_ms": 4.26,
+        "fresh_count": 3,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.9,
+        "hits": 8544,
+        "lookups": 8640,
+        "pcie_or_peer_reads": null
+      },
+      "kv_stream": {
+        "hit_pct": 77.96,
+        "block_reads": 49296,
+        "ram_mib": 43.8
+      },
+      "ple": {
+        "before": {
+          "rows": 18400.0,
+          "cache_hit_pct": 74.0,
+          "ssd_reads": 4720.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.99,
+          "submit_ms": 9.206
+        },
+        "after": {
+          "rows": 18736.0,
+          "cache_hit_pct": 74.4,
+          "ssd_reads": 4720.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.992,
+          "submit_ms": 9.206
+        },
+        "delta": {
+          "rows": 336.0,
+          "ssd_reads": 0.0,
+          "ssd_mb": 0.0,
+          "blocked_ms": 0.001999999999981128,
+          "submit_ms": 0.0
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 4 windows 33.25 ms 2.50 tok | speculative 2 windows 21.36 ms 2.50 tok | forced-chain disagreements 0, chain late 2",
+        "strata decode timing: 6 windows, avg T 2.83, 2.50 tokens/window, 29.42 ms/window = verify 29.40 (GPU-reach wait 14.78 + per-layer host 0.54 [plan 0.13 actq 0.03 jobs 0.01 CPU 1.30] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.33 (0.33 entries), VRAM hits 29.67, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.78 + per-layer host 0.54 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 16.62 + per-layer host 0.94 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.017 ms/window"
+      ],
+      "request_index": 5,
+      "case": "L02",
+      "phase": "minp0-smoke",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 15,
+      "decode_ms": 176.5,
+      "decode_tps": 84.98583569405099,
+      "prompt_ms": 4369.7,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 17,
+      "drafts": 11,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 2,
+          "2": 0,
+          "3": 1,
+          "4": 3
+        },
+        "initial_T": 1,
+        "last_T": 3,
+        "after_initial_T4": 3,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "11",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "17",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 5
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2424.3",
+          "220.0"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "7be6461fa8a54d54c578d17194b65aded494c0872f3bd5b24c4083077bf6952e",
+        "request_index": 5,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.8181818181818182,
+      "ms_per_window": 29.416666666666668,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.1333333333333333
+    },
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 203.0,
+        "ms_per_window_rounded": 33.83,
+        "B_launched": 3,
+        "B_on_path": 1,
+        "B_rolled_back": 2,
+        "below_gate": 2,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.8,
+        "forced_count": 1,
+        "fresh_mean_ms": 6.43,
+        "fresh_count": 4,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 99.0,
+        "hits": 11248,
+        "lookups": 11360,
+        "pcie_or_peer_reads": null
+      },
+      "kv_stream": {
+        "hit_pct": 85.1,
+        "block_reads": 67780,
+        "ram_mib": 40.7
+      },
+      "ple": {
+        "before": {
+          "rows": 21536.0,
+          "cache_hit_pct": 77.7,
+          "ssd_reads": 4720.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.994,
+          "submit_ms": 9.206
+        },
+        "after": {
+          "rows": 22000.0,
+          "cache_hit_pct": 78.1,
+          "ssd_reads": 4736.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.996,
+          "submit_ms": 9.225
+        },
+        "delta": {
+          "rows": 464.0,
+          "ssd_reads": 16.0,
+          "ssd_mb": 0.0,
+          "blocked_ms": 0.0020000000000095497,
+          "submit_ms": 0.019000000000000128
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 5 windows 35.12 ms 2.80 tok | speculative 1 windows 26.70 ms 1.00 tok | forced-chain disagreements 1, chain late 1",
+        "strata decode timing: 6 windows, avg T 3.50, 2.50 tokens/window, 33.85 ms/window = verify 33.83 (GPU-reach wait 16.73 + per-layer host 0.52 [plan 0.17 actq 0.04 jobs 0.01 CPU 1.51] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.38 (0.39 entries), VRAM hits 39.06, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 16.73 + per-layer host 0.52 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 17.80 + per-layer host 1.24 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.025 ms/window"
+      ],
+      "request_index": 6,
+      "case": "L01",
+      "phase": "minp0-smoke",
+      "arm": "B2",
+      "spec_min_p": 0.0,
+      "tokens": 15,
+      "decode_ms": 203.1,
+      "decode_tps": 73.85524372230428,
+      "prompt_ms": 4466.5,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 6
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2426.4",
+          "214.9"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "2d07a88924a17b718100c574c4823500ff6e76bd4d6a1d9d9bdb778ee7121160",
+        "request_index": 6,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6,
+      "ms_per_window": 33.85,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.4
+    },
+    {
+      "pipeline": {
+        "windows": 6,
+        "wall_ms_rounded": 205.0,
+        "ms_per_window_rounded": 34.1,
+        "B_launched": 3,
+        "B_on_path": 1,
+        "B_rolled_back": 2,
+        "below_gate": 2,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.66,
+        "forced_count": 1,
+        "fresh_mean_ms": 6.35,
+        "fresh_count": 4,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.2,
+        "hits": 11160,
+        "lookups": 11360,
+        "pcie_or_peer_reads": null
+      },
+      "kv_stream": {
+        "hit_pct": 81.62,
+        "block_reads": 67780,
+        "ram_mib": 50.2
+      },
+      "ple": {
+        "before": {
+          "rows": 24656.0,
+          "cache_hit_pct": 80.5,
+          "ssd_reads": 4736.0,
+          "ssd_mb": 19.8,
+          "blocked_ms": 220.997,
+          "submit_ms": 9.225
+        },
+        "after": {
+          "rows": 25168.0,
+          "cache_hit_pct": 80.7,
+          "ssd_reads": 4784.0,
+          "ssd_mb": 20.0,
+          "blocked_ms": 220.999,
+          "submit_ms": 9.268
+        },
+        "delta": {
+          "rows": 512.0,
+          "ssd_reads": 48.0,
+          "ssd_mb": 0.1999999999999993,
+          "blocked_ms": 0.001999999999981128,
+          "submit_ms": 0.04300000000000104
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 5 windows 35.47 ms 2.40 tok | speculative 1 windows 26.88 ms 3.00 tok | forced-chain disagreements 1, chain late 1",
+        "strata decode timing: 6 windows, avg T 3.50, 2.50 tokens/window, 34.12 ms/window = verify 34.10 (GPU-reach wait 16.26 + per-layer host 1.16 [plan 0.16 actq 0.06 jobs 0.01 CPU 2.25] + stage 0.03) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.64 (0.69 entries), VRAM hits 38.75, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 16.26 + per-layer host 1.16 + host staging 0.03 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 18.03 + per-layer host 1.34 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.029 ms/window"
+      ],
+      "request_index": 7,
+      "case": "L02",
+      "phase": "minp0-smoke",
+      "arm": "B2",
+      "spec_min_p": 0.0,
+      "tokens": 15,
+      "decode_ms": 204.7,
+      "decode_tps": 73.27796775769419,
+      "prompt_ms": 4334.6,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "2",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 7
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2403.0",
+          "207.6"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "26a8498c6a9c1a02a90465c6c718af5475244dfbff05f5cb7de26f65a6ca26bc",
+        "request_index": 7,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6,
+      "ms_per_window": 34.11666666666667,
+      "tokens_per_window": 2.5,
+      "target_rows_per_output": 1.4
+    },
+    {
+      "pipeline": {
+        "windows": 441,
+        "wall_ms_rounded": 16649.0,
+        "ms_per_window_rounded": 37.75,
+        "B_launched": 198,
+        "B_on_path": 56,
+        "B_rolled_back": 142,
+        "below_gate": 242,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.63,
+        "forced_count": 56,
+        "fresh_mean_ms": 6.63,
+        "fresh_count": 384,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 97.7,
+        "hits": 914229,
+        "lookups": 936092,
+        "pcie_or_peer_reads": 68
+      },
+      "kv_stream": {
+        "hit_pct": 98.0,
+        "block_reads": 4791980,
+        "ram_mib": 386.3
+      },
+      "ple": {
+        "before": {
+          "rows": 27968.0,
+          "cache_hit_pct": 82.6,
+          "ssd_reads": 4784.0,
+          "ssd_mb": 20.0,
+          "blocked_ms": 221.0,
+          "submit_ms": 9.268
+        },
+        "after": {
+          "rows": 65648.0,
+          "cache_hit_pct": 57.9,
+          "ssd_reads": 27552.0,
+          "ssd_mb": 115.2,
+          "blocked_ms": 644.708,
+          "submit_ms": 19.926
+        },
+        "delta": {
+          "rows": 37680.0,
+          "ssd_reads": 22768.0,
+          "ssd_mb": 95.2,
+          "blocked_ms": 423.70799999999997,
+          "submit_ms": 10.657999999999998
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 385 windows 39.34 ms 2.34 tok | speculative 56 windows 26.82 ms 2.18 tok | forced-chain disagreements 35, chain late 56",
+        "strata decode timing: 441 windows, avg T 3.99, 2.32 tokens/window, 37.75 ms/window = verify 37.75 (GPU-reach wait 15.95 + per-layer host 2.35 [plan 0.18 actq 0.08 jobs 0.01 CPU 3.33] + stage 1.04) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.90 (1.03 entries), VRAM hits 43.19, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 15.95 + per-layer host 2.35 + host staging 1.04 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 17.98 + per-layer host 2.23 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 1.040 ms/window"
+      ],
+      "request_index": 8,
+      "case": "L01",
+      "phase": "minp0-long",
+      "arm": "B1",
+      "spec_min_p": 0.0,
+      "tokens": 1024,
+      "decode_ms": 16649.2,
+      "decode_tps": 61.50445667059078,
+      "prompt_ms": 4396.6,
+      "reused": 131072,
+      "windows": 441,
+      "target_rows_verified": 1761,
+      "drafts": 1320,
+      "accepted": 583,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 440
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 440,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "441",
+        "all_accept": "100",
+        "drafts": "1320",
+        "accepted": "583",
+        "chain_launches": "440",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1761",
+        "stage0_launches": "583",
+        "stage1_launches": "441",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 8
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2417.6",
+          "209.7"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "3c1b9d25584d4bc0c2b63e41d3cfa2d8f49152af82339016faa3e919cc3a3471",
+        "request_index": 8,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.44166666666666665,
+      "ms_per_window": 37.753287981859415,
+      "tokens_per_window": 2.3219954648526078,
+      "target_rows_per_output": 1.7197265625
+    },
+    {
+      "pipeline": {
+        "windows": 494,
+        "wall_ms_rounded": 19312.0,
+        "ms_per_window_rounded": 39.09,
+        "B_launched": 131,
+        "B_on_path": 30,
+        "B_rolled_back": 101,
+        "below_gate": 362,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.66,
+        "forced_count": 30,
+        "fresh_mean_ms": 6.59,
+        "fresh_count": 463,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 1,
+        "growths": 0,
+        "loop_thread_ms_rounded": 5.7,
+        "events": [
+          "strata elastic: -51 slots at a gap of stage 0 (51 experts to the CPU) -> 4715 slots, 6.61 GiB; 486 MiB free; 5.71 ms"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.5,
+        "hits": 996588,
+        "lookups": 1011587,
+        "pcie_or_peer_reads": 93
+      },
+      "kv_stream": {
+        "hit_pct": 97.96,
+        "block_reads": 4890572,
+        "ram_mib": 401.8
+      },
+      "ple": {
+        "before": {
+          "rows": 68304.0,
+          "cache_hit_pct": 59.6,
+          "ssd_reads": 27552.0,
+          "ssd_mb": 115.2,
+          "blocked_ms": 644.709,
+          "submit_ms": 19.926
+        },
+        "after": {
+          "rows": 106528.0,
+          "cache_hit_pct": 48.5,
+          "ssd_reads": 54836.0,
+          "ssd_mb": 229.3,
+          "blocked_ms": 1251.7,
+          "submit_ms": 31.945
+        },
+        "delta": {
+          "rows": 38224.0,
+          "ssd_reads": 27284.0,
+          "ssd_mb": 114.10000000000001,
+          "blocked_ms": 606.9910000000001,
+          "submit_ms": 12.019000000000002
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 464 windows 39.86 ms 2.09 tok | speculative 30 windows 27.15 ms 1.83 tok | forced-chain disagreements 22, chain late 30",
+        "strata decode timing: 494 windows, avg T 3.99, 2.07 tokens/window, 39.09 ms/window = verify 39.09 (GPU-reach wait 14.85 + per-layer host 2.30 [plan 0.19 actq 0.05 jobs 0.01 CPU 2.32] + stage 1.31) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.54 (0.63 entries), VRAM hits 42.03, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.85 + per-layer host 2.30 + host staging 1.31 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 18.63 + per-layer host 1.53 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 1.309 ms/window"
+      ],
+      "request_index": 9,
+      "case": "L02",
+      "phase": "minp0-long",
+      "arm": "B1",
+      "spec_min_p": 0.0,
+      "tokens": 1024,
+      "decode_ms": 19312.5,
+      "decode_tps": 53.02265372168285,
+      "prompt_ms": 4496.6,
+      "reused": 131072,
+      "windows": 494,
+      "target_rows_verified": 1973,
+      "drafts": 1479,
+      "accepted": 532,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 493
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 493,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "494",
+        "all_accept": "83",
+        "drafts": "1479",
+        "accepted": "532",
+        "chain_launches": "493",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1973",
+        "stage0_launches": "595",
+        "stage1_launches": "494",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 9
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2434.6",
+          "216.3"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "b45354fe5cb45215e759108169c8de8f45b59c8c35dabdc7155f9a3a9ecc7d37",
+        "request_index": 9,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.3597025016903313,
+      "ms_per_window": 39.09412955465587,
+      "tokens_per_window": 2.0728744939271255,
+      "target_rows_per_output": 1.9267578125
+    },
+    {
+      "pipeline": {
+        "windows": 524,
+        "wall_ms_rounded": 14261.0,
+        "ms_per_window_rounded": 27.22,
+        "B_launched": 461,
+        "B_on_path": 156,
+        "B_rolled_back": 305,
+        "below_gate": 62,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 4.57,
+        "forced_count": 156,
+        "fresh_mean_ms": 4.01,
+        "fresh_count": 367,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.0,
+        "hits": 684387,
+        "lookups": 698363,
+        "pcie_or_peer_reads": 87
+      },
+      "kv_stream": {
+        "hit_pct": 97.7,
+        "block_reads": 3830712,
+        "ram_mib": 354.9
+      },
+      "ple": {
+        "before": {
+          "rows": 109328.0,
+          "cache_hit_pct": 49.8,
+          "ssd_reads": 54836.0,
+          "ssd_mb": 229.3,
+          "blocked_ms": 1251.702,
+          "submit_ms": 31.945
+        },
+        "after": {
+          "rows": 139632.0,
+          "cache_hit_pct": 59.5,
+          "ssd_reads": 56516.0,
+          "ssd_mb": 236.3,
+          "blocked_ms": 1259.738,
+          "submit_ms": 33.69
+        },
+        "delta": {
+          "rows": 30304.0,
+          "ssd_reads": 1680.0,
+          "ssd_mb": 7.0,
+          "blocked_ms": 8.036000000000058,
+          "submit_ms": 1.7449999999999974
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 368 windows 30.07 ms 2.05 tok | speculative 156 windows 20.48 ms 1.72 tok | forced-chain disagreements 38, chain late 156",
+        "strata decode timing: 524 windows, avg T 2.40, 1.95 tokens/window, 27.22 ms/window = verify 27.22 (GPU-reach wait 14.72 + per-layer host 1.01 [plan 0.12 actq 0.04 jobs 0.01 CPU 1.96] + stage 0.04) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.49 (0.56 entries), VRAM hits 27.21, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.72 + per-layer host 1.01 + host staging 0.04 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 15.22 + per-layer host 1.15 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.039 ms/window"
+      ],
+      "request_index": 10,
+      "case": "L01",
+      "phase": "minp0-long",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 1024,
+      "decode_ms": 14261.8,
+      "decode_tps": 71.80019352395911,
+      "prompt_ms": 4469.0,
+      "reused": 131072,
+      "windows": 524,
+      "target_rows_verified": 1255,
+      "drafts": 731,
+      "accepted": 500,
+      "window_policy": {
+        "T_histogram": {
+          "1": 178,
+          "2": 120,
+          "3": 67,
+          "4": 159
+        },
+        "initial_T": 1,
+        "last_T": 1,
+        "after_initial_T4": 159,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "524",
+        "all_accept": "391",
+        "drafts": "731",
+        "accepted": "500",
+        "chain_launches": "523",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1255",
+        "stage0_launches": "829",
+        "stage1_launches": "524",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 10
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2399.6",
+          "214.7"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "be3a54383c20fa53bcf9f69eb7e2baae611a8c31d175e517e620d8127c1dbe78",
+        "request_index": 10,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6839945280437757,
+      "ms_per_window": 27.217175572519082,
+      "tokens_per_window": 1.9541984732824427,
+      "target_rows_per_output": 1.2255859375
+    },
+    {
+      "pipeline": {
+        "windows": 617,
+        "wall_ms_rounded": 15619.0,
+        "ms_per_window_rounded": 25.31,
+        "B_launched": 551,
+        "B_on_path": 187,
+        "B_rolled_back": 364,
+        "below_gate": 65,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 3.68,
+        "forced_count": 187,
+        "fresh_mean_ms": 3.47,
+        "fresh_count": 429,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.4,
+        "hits": 678978,
+        "lookups": 689770,
+        "pcie_or_peer_reads": 50
+      },
+      "kv_stream": {
+        "hit_pct": 97.63,
+        "block_reads": 3808116,
+        "ram_mib": 364.2
+      },
+      "ple": {
+        "before": {
+          "rows": 142288.0,
+          "cache_hit_pct": 60.2,
+          "ssd_reads": 56516.0,
+          "ssd_mb": 236.3,
+          "blocked_ms": 1259.739,
+          "submit_ms": 33.69
+        },
+        "after": {
+          "rows": 172336.0,
+          "cache_hit_pct": 65.9,
+          "ssd_reads": 58772.0,
+          "ssd_mb": 245.8,
+          "blocked_ms": 1268.556,
+          "submit_ms": 35.892
+        },
+        "delta": {
+          "rows": 30048.0,
+          "ssd_reads": 2256.0,
+          "ssd_mb": 9.5,
+          "blocked_ms": 8.817000000000007,
+          "submit_ms": 2.2020000000000053
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 430 windows 28.16 ms 1.73 tok | speculative 187 windows 18.76 ms 1.49 tok | forced-chain disagreements 21, chain late 187",
+        "strata decode timing: 617 windows, avg T 2.00, 1.66 tokens/window, 25.32 ms/window = verify 25.31 (GPU-reach wait 13.98 + per-layer host 0.70 [plan 0.10 actq 0.02 jobs 0.01 CPU 1.32] + stage 0.04) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.33 (0.36 entries), VRAM hits 22.93, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 13.98 + per-layer host 0.70 + host staging 0.04 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 14.49 + per-layer host 0.78 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.036 ms/window"
+      ],
+      "request_index": 11,
+      "case": "L02",
+      "phase": "minp0-long",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 1024,
+      "decode_ms": 15619.4,
+      "decode_tps": 65.55949652355405,
+      "prompt_ms": 4587.1,
+      "reused": 131072,
+      "windows": 617,
+      "target_rows_verified": 1233,
+      "drafts": 616,
+      "accepted": 407,
+      "window_policy": {
+        "T_histogram": {
+          "1": 270,
+          "2": 172,
+          "3": 81,
+          "4": 94
+        },
+        "initial_T": 1,
+        "last_T": 2,
+        "after_initial_T4": 94,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "617",
+        "all_accept": "487",
+        "drafts": "616",
+        "accepted": "407",
+        "chain_launches": "616",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1233",
+        "stage0_launches": "981",
+        "stage1_launches": "617",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 11
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2427.2",
+          "243.0"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "57b1a7484fcc4bf44cd71b2c83e5d377942f9fee3d7984225a0efa6710bdb7e2",
+        "request_index": 11,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6607142857142857,
+      "ms_per_window": 25.31507293354943,
+      "tokens_per_window": 1.659643435980551,
+      "target_rows_per_output": 1.2041015625
+    },
+    {
+      "pipeline": {
+        "windows": 443,
+        "wall_ms_rounded": 16429.0,
+        "ms_per_window_rounded": 37.09,
+        "B_launched": 192,
+        "B_on_path": 53,
+        "B_rolled_back": 139,
+        "below_gate": 250,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.66,
+        "forced_count": 53,
+        "fresh_mean_ms": 6.55,
+        "fresh_count": 389,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 2,
+        "growths": 0,
+        "loop_thread_ms_rounded": 11.5,
+        "events": [
+          "strata elastic: -63 slots at a gap of stage 0 (63 experts to the CPU) -> 4652 slots, 6.52 GiB; 540 MiB free; 5.65 ms",
+          "strata elastic: -98 slots at a gap of stage 0 (98 experts to the CPU) -> 4554 slots, 6.38 GiB; 550 MiB free; 5.82 ms"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.4,
+        "hits": 923404,
+        "lookups": 938015,
+        "pcie_or_peer_reads": 65
+      },
+      "kv_stream": {
+        "hit_pct": 97.99,
+        "block_reads": 4783764,
+        "ram_mib": 386.9
+      },
+      "ple": {
+        "before": {
+          "rows": 175136.0,
+          "cache_hit_pct": 66.4,
+          "ssd_reads": 58772.0,
+          "ssd_mb": 245.8,
+          "blocked_ms": 1268.557,
+          "submit_ms": 35.892
+        },
+        "after": {
+          "rows": 212576.0,
+          "cache_hit_pct": 71.7,
+          "ssd_reads": 60068.0,
+          "ssd_mb": 251.2,
+          "blocked_ms": 1275.337,
+          "submit_ms": 37.312
+        },
+        "delta": {
+          "rows": 37440.0,
+          "ssd_reads": 1296.0,
+          "ssd_mb": 5.399999999999977,
+          "blocked_ms": 6.779999999999973,
+          "submit_ms": 1.4199999999999946
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 390 windows 38.48 ms 2.33 tok | speculative 53 windows 26.80 ms 2.21 tok | forced-chain disagreements 33, chain late 53",
+        "strata decode timing: 443 windows, avg T 3.99, 2.31 tokens/window, 37.09 ms/window = verify 37.09 (GPU-reach wait 16.21 + per-layer host 1.29 [plan 0.18 actq 0.06 jobs 0.01 CPU 2.36] + stage 0.04) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.61 (0.69 entries), VRAM hits 43.43, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 16.21 + per-layer host 1.29 + host staging 0.04 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 18.82 + per-layer host 1.35 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.043 ms/window"
+      ],
+      "request_index": 12,
+      "case": "L01",
+      "phase": "minp0-long",
+      "arm": "B2",
+      "spec_min_p": 0.0,
+      "tokens": 1024,
+      "decode_ms": 16430.0,
+      "decode_tps": 62.32501521606817,
+      "prompt_ms": 4637.9,
+      "reused": 131072,
+      "windows": 443,
+      "target_rows_verified": 1769,
+      "drafts": 1326,
+      "accepted": 581,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 442
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 442,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "443",
+        "all_accept": "97",
+        "drafts": "1326",
+        "accepted": "581",
+        "chain_launches": "442",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1769",
+        "stage0_launches": "582",
+        "stage1_launches": "443",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 12
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2458.9",
+          "270.5"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "3c1b9d25584d4bc0c2b63e41d3cfa2d8f49152af82339016faa3e919cc3a3471",
+        "request_index": 12,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.4381598793363499,
+      "ms_per_window": 37.08803611738149,
+      "tokens_per_window": 2.311512415349887,
+      "target_rows_per_output": 1.7275390625
+    },
+    {
+      "pipeline": {
+        "windows": 499,
+        "wall_ms_rounded": 18969.0,
+        "ms_per_window_rounded": 38.01,
+        "B_launched": 134,
+        "B_on_path": 31,
+        "B_rolled_back": 103,
+        "below_gate": 364,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.74,
+        "forced_count": 31,
+        "fresh_mean_ms": 6.55,
+        "fresh_count": 467,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 2,
+        "loop_thread_ms_rounded": 49.3,
+        "events": [
+          "strata elastic: +89 experts (127 MiB) -> 4643 slots, 6.51 GiB; 762 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.47 ms (published once its fills land)",
+          "strata elastic: +48 experts (68 MiB) -> 4691 slots, 6.57 GiB; 698 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 18.87 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.6,
+        "hits": 1008281,
+        "lookups": 1022467,
+        "pcie_or_peer_reads": 93
+      },
+      "kv_stream": {
+        "hit_pct": 97.97,
+        "block_reads": 4948084,
+        "ram_mib": 403.9
+      },
+      "ple": {
+        "before": {
+          "rows": 215232.0,
+          "cache_hit_pct": 72.1,
+          "ssd_reads": 60068.0,
+          "ssd_mb": 251.2,
+          "blocked_ms": 1275.339,
+          "submit_ms": 37.312
+        },
+        "after": {
+          "rows": 253808.0,
+          "cache_hit_pct": 75.1,
+          "ssd_reads": 63020.0,
+          "ssd_mb": 263.5,
+          "blocked_ms": 1305.998,
+          "submit_ms": 39.801
+        },
+        "delta": {
+          "rows": 38576.0,
+          "ssd_reads": 2952.0,
+          "ssd_mb": 12.300000000000011,
+          "blocked_ms": 30.659000000000106,
+          "submit_ms": 2.4890000000000043
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 468 windows 38.72 ms 2.08 tok | speculative 31 windows 27.30 ms 1.65 tok | forced-chain disagreements 25, chain late 31",
+        "strata decode timing: 499 windows, avg T 3.99, 2.05 tokens/window, 38.02 ms/window = verify 38.01 (GPU-reach wait 14.93 + per-layer host 1.13 [plan 0.18 actq 0.05 jobs 0.01 CPU 2.10] + stage 0.09) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.51 (0.59 entries), VRAM hits 42.10, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.93 + per-layer host 1.13 + host staging 0.09 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 18.81 + per-layer host 1.29 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.092 ms/window"
+      ],
+      "request_index": 13,
+      "case": "L02",
+      "phase": "minp0-long",
+      "arm": "B2",
+      "spec_min_p": 0.0,
+      "tokens": 1024,
+      "decode_ms": 18969.7,
+      "decode_tps": 53.980822047792,
+      "prompt_ms": 4652.2,
+      "reused": 131072,
+      "windows": 499,
+      "target_rows_verified": 1993,
+      "drafts": 1494,
+      "accepted": 527,
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 498
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 498,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "499",
+        "all_accept": "78",
+        "drafts": "1494",
+        "accepted": "527",
+        "chain_launches": "498",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1993",
+        "stage0_launches": "602",
+        "stage1_launches": "499",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 13
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2436.2",
+          "250.0"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "b45354fe5cb45215e759108169c8de8f45b59c8c35dabdc7155f9a3a9ecc7d37",
+        "request_index": 13,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.3527443105756359,
+      "ms_per_window": 38.015430861723445,
+      "tokens_per_window": 2.0521042084168335,
+      "target_rows_per_output": 1.9462890625
+    },
+    {
+      "pipeline": {
+        "windows": 445,
+        "wall_ms_rounded": 15798.0,
+        "ms_per_window_rounded": 35.5,
+        "B_launched": 213,
+        "B_on_path": 57,
+        "B_rolled_back": 156,
+        "below_gate": 231,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.13,
+        "forced_count": 57,
+        "fresh_mean_ms": 6.08,
+        "fresh_count": 387,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.3,
+        "hits": 863159,
+        "lookups": 878433,
+        "pcie_or_peer_reads": 87
+      },
+      "kv_stream": {
+        "hit_pct": 97.95,
+        "block_reads": 4547556,
+        "ram_mib": 375.6
+      },
+      "ple": {
+        "before": {
+          "rows": 256608.0,
+          "cache_hit_pct": 75.4,
+          "ssd_reads": 63020.0,
+          "ssd_mb": 263.5,
+          "blocked_ms": 1305.999,
+          "submit_ms": 39.801
+        },
+        "after": {
+          "rows": 292400.0,
+          "cache_hit_pct": 78.2,
+          "ssd_reads": 63708.0,
+          "ssd_mb": 266.4,
+          "blocked_ms": 1309.096,
+          "submit_ms": 40.484
+        },
+        "delta": {
+          "rows": 35792.0,
+          "ssd_reads": 688.0,
+          "ssd_mb": 2.8999999999999773,
+          "blocked_ms": 3.09699999999998,
+          "submit_ms": 0.6829999999999998
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 388 windows 36.95 ms 2.35 tok | speculative 57 windows 25.62 ms 1.96 tok | forced-chain disagreements 38, chain late 57",
+        "strata decode timing: 445 windows, avg T 3.69, 2.30 tokens/window, 35.50 ms/window = verify 35.50 (GPU-reach wait 15.80 + per-layer host 1.26 [plan 0.17 actq 0.06 jobs 0.01 CPU 2.46] + stage 0.03) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.63 (0.72 entries), VRAM hits 40.41, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 15.80 + per-layer host 1.26 + host staging 0.03 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 18.01 + per-layer host 1.47 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.034 ms/window"
+      ],
+      "request_index": 14,
+      "case": "L01",
+      "phase": "minp0p2-long",
+      "arm": "B1",
+      "spec_min_p": 0.2,
+      "tokens": 1024,
+      "decode_ms": 15798.3,
+      "decode_tps": 64.81710057411242,
+      "prompt_ms": 4536.5,
+      "reused": 131072,
+      "windows": 445,
+      "target_rows_verified": 1641,
+      "drafts": 1196,
+      "accepted": 579,
+      "window_policy": {
+        "T_histogram": {
+          "1": 16,
+          "2": 29,
+          "3": 33,
+          "4": 367
+        },
+        "initial_T": 1,
+        "last_T": 2,
+        "after_initial_T4": 367,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "445",
+        "all_accept": "142",
+        "drafts": "1196",
+        "accepted": "579",
+        "chain_launches": "444",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1641",
+        "stage0_launches": "601",
+        "stage1_launches": "445",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 14
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2471.5",
+          "253.8"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.2",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.2"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "9003d60c095609533ac85c980d4eeb905ec294538bb1f2364b7669b99b56a459",
+        "request_index": 14,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.48411371237458195,
+      "ms_per_window": 35.50179775280899,
+      "tokens_per_window": 2.301123595505618,
+      "target_rows_per_output": 1.6025390625
+    },
+    {
+      "pipeline": {
+        "windows": 506,
+        "wall_ms_rounded": 17887.0,
+        "ms_per_window_rounded": 35.35,
+        "B_launched": 180,
+        "B_on_path": 36,
+        "B_rolled_back": 144,
+        "below_gate": 325,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 6.79,
+        "forced_count": 36,
+        "fresh_mean_ms": 5.59,
+        "fresh_count": 469,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 1,
+        "growths": 0,
+        "loop_thread_ms_rounded": 5.9,
+        "events": [
+          "strata elastic: -95 slots at a gap of stage 0 (95 experts to the CPU) -> 4596 slots, 6.44 GiB; 558 MiB free; 5.86 ms"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.5,
+        "hits": 910260,
+        "lookups": 924211,
+        "pcie_or_peer_reads": 109
+      },
+      "kv_stream": {
+        "hit_pct": 97.91,
+        "block_reads": 4584508,
+        "ram_mib": 386.0
+      },
+      "ple": {
+        "before": {
+          "rows": 295056.0,
+          "cache_hit_pct": 78.4,
+          "ssd_reads": 63708.0,
+          "ssd_mb": 266.4,
+          "blocked_ms": 1309.098,
+          "submit_ms": 40.484
+        },
+        "after": {
+          "rows": 330992.0,
+          "cache_hit_pct": 80.3,
+          "ssd_reads": 64980.0,
+          "ssd_mb": 271.7,
+          "blocked_ms": 1315.755,
+          "submit_ms": 41.574
+        },
+        "delta": {
+          "rows": 35936.0,
+          "ssd_reads": 1272.0,
+          "ssd_mb": 5.300000000000011,
+          "blocked_ms": 6.657000000000153,
+          "submit_ms": 1.0899999999999963
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 470 windows 36.12 ms 2.05 tok | speculative 36 windows 25.31 ms 1.75 tok | forced-chain disagreements 22, chain late 36",
+        "strata decode timing: 506 windows, avg T 3.51, 2.02 tokens/window, 35.35 ms/window = verify 35.35 (GPU-reach wait 14.80 + per-layer host 0.99 [plan 0.16 actq 0.05 jobs 0.01 CPU 1.88] + stage 0.04) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.49 (0.57 entries), VRAM hits 37.48, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.80 + per-layer host 0.99 + host staging 0.04 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 17.67 + per-layer host 1.14 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.038 ms/window"
+      ],
+      "request_index": 15,
+      "case": "L02",
+      "phase": "minp0p2-long",
+      "arm": "B1",
+      "spec_min_p": 0.2,
+      "tokens": 1024,
+      "decode_ms": 17887.1,
+      "decode_tps": 57.24796082092682,
+      "prompt_ms": 4586.0,
+      "reused": 131072,
+      "windows": 506,
+      "target_rows_verified": 1776,
+      "drafts": 1270,
+      "accepted": 520,
+      "window_policy": {
+        "T_histogram": {
+          "1": 32,
+          "2": 52,
+          "3": 48,
+          "4": 374
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 374,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "506",
+        "all_accept": "148",
+        "drafts": "1270",
+        "accepted": "520",
+        "chain_launches": "505",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1776",
+        "stage0_launches": "650",
+        "stage1_launches": "506",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 15
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2413.0",
+          "259.2"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.2",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.2"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "f358cb4eb21afe2b0f9f5bea00c2585135bfb0ee284cab43534ab00ab3fd1bf9",
+        "request_index": 15,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.4094488188976378,
+      "ms_per_window": 35.349999999999994,
+      "tokens_per_window": 2.0237154150197627,
+      "target_rows_per_output": 1.734375
+    },
+    {
+      "pipeline": {
+        "windows": 541,
+        "wall_ms_rounded": 14643.0,
+        "ms_per_window_rounded": 27.07,
+        "B_launched": 484,
+        "B_on_path": 159,
+        "B_rolled_back": 325,
+        "below_gate": 56,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 4.45,
+        "forced_count": 159,
+        "fresh_mean_ms": 4.05,
+        "fresh_count": 381,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 1,
+        "loop_thread_ms_rounded": 19.8,
+        "events": [
+          "strata elastic: +59 experts (83 MiB) -> 4655 slots, 6.52 GiB; 762 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 19.81 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.0,
+        "hits": 697688,
+        "lookups": 711624,
+        "pcie_or_peer_reads": 86
+      },
+      "kv_stream": {
+        "hit_pct": 97.71,
+        "block_reads": 3976536,
+        "ram_mib": 366.5
+      },
+      "ple": {
+        "before": {
+          "rows": 333792.0,
+          "cache_hit_pct": 80.5,
+          "ssd_reads": 64980.0,
+          "ssd_mb": 271.7,
+          "blocked_ms": 1315.756,
+          "submit_ms": 41.574
+        },
+        "after": {
+          "rows": 365296.0,
+          "cache_hit_pct": 82.0,
+          "ssd_reads": 65636.0,
+          "ssd_mb": 274.5,
+          "blocked_ms": 1316.527,
+          "submit_ms": 42.236
+        },
+        "delta": {
+          "rows": 31504.0,
+          "ssd_reads": 656.0,
+          "ssd_mb": 2.8000000000000114,
+          "blocked_ms": 0.7709999999999582,
+          "submit_ms": 0.661999999999999
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 382 windows 29.90 ms 2.01 tok | speculative 159 windows 20.25 ms 1.62 tok | forced-chain disagreements 44, chain late 159",
+        "strata decode timing: 541 windows, avg T 2.33, 1.89 tokens/window, 27.07 ms/window = verify 27.07 (GPU-reach wait 14.85 + per-layer host 0.99 [plan 0.11 actq 0.04 jobs 0.01 CPU 1.83] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.48 (0.54 entries), VRAM hits 26.87, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.85 + per-layer host 0.99 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 15.22 + per-layer host 1.01 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.022 ms/window"
+      ],
+      "request_index": 16,
+      "case": "L01",
+      "phase": "minp0p2-long",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 1024,
+      "decode_ms": 14643.5,
+      "decode_tps": 69.92863727933896,
+      "prompt_ms": 4508.0,
+      "reused": 131072,
+      "windows": 541,
+      "target_rows_verified": 1261,
+      "drafts": 720,
+      "accepted": 483,
+      "window_policy": {
+        "T_histogram": {
+          "1": 196,
+          "2": 125,
+          "3": 65,
+          "4": 155
+        },
+        "initial_T": 1,
+        "last_T": 1,
+        "after_initial_T4": 155,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "541",
+        "all_accept": "405",
+        "drafts": "720",
+        "accepted": "483",
+        "chain_launches": "540",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1261",
+        "stage0_launches": "866",
+        "stage1_launches": "541",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 16
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2453.1",
+          "224.1"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "be3a54383c20fa53bcf9f69eb7e2baae611a8c31d175e517e620d8127c1dbe78",
+        "request_index": 16,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6708333333333333,
+      "ms_per_window": 27.067467652495377,
+      "tokens_per_window": 1.8927911275415896,
+      "target_rows_per_output": 1.2314453125
+    },
+    {
+      "pipeline": {
+        "windows": 627,
+        "wall_ms_rounded": 15810.0,
+        "ms_per_window_rounded": 25.21,
+        "B_launched": 567,
+        "B_on_path": 188,
+        "B_rolled_back": 379,
+        "below_gate": 59,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 3.63,
+        "forced_count": 188,
+        "fresh_mean_ms": 3.41,
+        "fresh_count": 438,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.5,
+        "hits": 680673,
+        "lookups": 691244,
+        "pcie_or_peer_reads": 46
+      },
+      "kv_stream": {
+        "hit_pct": 97.64,
+        "block_reads": 3843020,
+        "ram_mib": 365.0
+      },
+      "ple": {
+        "before": {
+          "rows": 367952.0,
+          "cache_hit_pct": 82.1,
+          "ssd_reads": 65636.0,
+          "ssd_mb": 274.5,
+          "blocked_ms": 1316.528,
+          "submit_ms": 42.236
+        },
+        "after": {
+          "rows": 398128.0,
+          "cache_hit_pct": 83.3,
+          "ssd_reads": 66572.0,
+          "ssd_mb": 278.4,
+          "blocked_ms": 1319.887,
+          "submit_ms": 43.325
+        },
+        "delta": {
+          "rows": 30176.0,
+          "ssd_reads": 936.0,
+          "ssd_mb": 3.8999999999999773,
+          "blocked_ms": 3.3589999999999236,
+          "submit_ms": 1.0890000000000057
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 439 windows 28.05 ms 1.70 tok | speculative 188 windows 18.59 ms 1.47 tok | forced-chain disagreements 23, chain late 188",
+        "strata decode timing: 627 windows, avg T 1.96, 1.63 tokens/window, 25.22 ms/window = verify 25.21 (GPU-reach wait 14.02 + per-layer host 0.72 [plan 0.10 actq 0.02 jobs 0.01 CPU 1.29] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.32 (0.35 entries), VRAM hits 22.62, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.02 + per-layer host 0.72 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 14.50 + per-layer host 0.72 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.024 ms/window"
+      ],
+      "request_index": 17,
+      "case": "L02",
+      "phase": "minp0p2-long",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 1024,
+      "decode_ms": 15810.3,
+      "decode_tps": 64.76790446734091,
+      "prompt_ms": 4735.3,
+      "reused": 131072,
+      "windows": 627,
+      "target_rows_verified": 1230,
+      "drafts": 603,
+      "accepted": 397,
+      "window_policy": {
+        "T_histogram": {
+          "1": 276,
+          "2": 193,
+          "3": 64,
+          "4": 94
+        },
+        "initial_T": 1,
+        "last_T": 2,
+        "after_initial_T4": 94,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "627",
+        "all_accept": "502",
+        "drafts": "603",
+        "accepted": "397",
+        "chain_launches": "626",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1230",
+        "stage0_launches": "1006",
+        "stage1_launches": "627",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 17
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2360.2",
+          "262.3"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "57b1a7484fcc4bf44cd71b2c83e5d377942f9fee3d7984225a0efa6710bdb7e2",
+        "request_index": 17,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6583747927031509,
+      "ms_per_window": 25.21578947368421,
+      "tokens_per_window": 1.6331738437001595,
+      "target_rows_per_output": 1.201171875
+    },
+    {
+      "pipeline": {
+        "windows": 444,
+        "wall_ms_rounded": 15668.0,
+        "ms_per_window_rounded": 35.29,
+        "B_launched": 210,
+        "B_on_path": 59,
+        "B_rolled_back": 151,
+        "below_gate": 233,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 7.36,
+        "forced_count": 59,
+        "fresh_mean_ms": 6.0,
+        "fresh_count": 384,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.4,
+        "hits": 856305,
+        "lookups": 870442,
+        "pcie_or_peer_reads": 78
+      },
+      "kv_stream": {
+        "hit_pct": 97.91,
+        "block_reads": 4475696,
+        "ram_mib": 376.0
+      },
+      "ple": {
+        "before": {
+          "rows": 400928.0,
+          "cache_hit_pct": 83.4,
+          "ssd_reads": 66572.0,
+          "ssd_mb": 278.4,
+          "blocked_ms": 1319.887,
+          "submit_ms": 43.325
+        },
+        "after": {
+          "rows": 436368.0,
+          "cache_hit_pct": 84.6,
+          "ssd_reads": 67100.0,
+          "ssd_mb": 280.6,
+          "blocked_ms": 1322.435,
+          "submit_ms": 43.818
+        },
+        "delta": {
+          "rows": 35440.0,
+          "ssd_reads": 528.0,
+          "ssd_mb": 2.2000000000000455,
+          "blocked_ms": 2.548000000000002,
+          "submit_ms": 0.492999999999995
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 385 windows 36.69 ms 2.35 tok | speculative 59 windows 26.11 ms 2.00 tok | forced-chain disagreements 39, chain late 59",
+        "strata decode timing: 444 windows, avg T 3.68, 2.31 tokens/window, 35.29 ms/window = verify 35.29 (GPU-reach wait 15.56 + per-layer host 1.22 [plan 0.17 actq 0.05 jobs 0.01 CPU 2.25] + stage 0.03) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.59 (0.66 entries), VRAM hits 40.18, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 15.56 + per-layer host 1.22 + host staging 0.03 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 18.16 + per-layer host 1.29 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.030 ms/window"
+      ],
+      "request_index": 18,
+      "case": "L01",
+      "phase": "minp0p2-long",
+      "arm": "B2",
+      "spec_min_p": 0.2,
+      "tokens": 1024,
+      "decode_ms": 15668.5,
+      "decode_tps": 65.3540543127932,
+      "prompt_ms": 4607.8,
+      "reused": 131072,
+      "windows": 444,
+      "target_rows_verified": 1634,
+      "drafts": 1190,
+      "accepted": 580,
+      "window_policy": {
+        "T_histogram": {
+          "1": 17,
+          "2": 28,
+          "3": 35,
+          "4": 364
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 364,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "444",
+        "all_accept": "145",
+        "drafts": "1190",
+        "accepted": "580",
+        "chain_launches": "443",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1634",
+        "stage0_launches": "595",
+        "stage1_launches": "444",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 18
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2420.7",
+          "226.4"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.2",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.2"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "9003d60c095609533ac85c980d4eeb905ec294538bb1f2364b7669b99b56a459",
+        "request_index": 18,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.48739495798319327,
+      "ms_per_window": 35.289414414414416,
+      "tokens_per_window": 2.3063063063063063,
+      "target_rows_per_output": 1.595703125
+    },
+    {
+      "pipeline": {
+        "windows": 517,
+        "wall_ms_rounded": 18163.0,
+        "ms_per_window_rounded": 35.13,
+        "B_launched": 178,
+        "B_on_path": 43,
+        "B_rolled_back": 135,
+        "below_gate": 338,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 6.53,
+        "forced_count": 43,
+        "fresh_mean_ms": 5.59,
+        "fresh_count": 473,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.6,
+        "hits": 919447,
+        "lookups": 932625,
+        "pcie_or_peer_reads": 95
+      },
+      "kv_stream": {
+        "hit_pct": 97.9,
+        "block_reads": 4568080,
+        "ram_mib": 385.7
+      },
+      "ple": {
+        "before": {
+          "rows": 439024.0,
+          "cache_hit_pct": 84.7,
+          "ssd_reads": 67100.0,
+          "ssd_mb": 280.6,
+          "blocked_ms": 1322.436,
+          "submit_ms": 43.818
+        },
+        "after": {
+          "rows": 474672.0,
+          "cache_hit_pct": 85.6,
+          "ssd_reads": 68099.0,
+          "ssd_mb": 284.7,
+          "blocked_ms": 1327.397,
+          "submit_ms": 44.664
+        },
+        "delta": {
+          "rows": 35648.0,
+          "ssd_reads": 999.0,
+          "ssd_mb": 4.099999999999966,
+          "blocked_ms": 4.961000000000013,
+          "submit_ms": 0.8460000000000036
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 474 windows 36.08 ms 2.01 tok | speculative 43 windows 24.65 ms 1.72 tok | forced-chain disagreements 28, chain late 43",
+        "strata decode timing: 517 windows, avg T 3.49, 1.98 tokens/window, 35.13 ms/window = verify 35.13 (GPU-reach wait 14.36 + per-layer host 0.97 [plan 0.15 actq 0.04 jobs 0.01 CPU 1.85] + stage 0.03) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.46 (0.53 entries), VRAM hits 37.05, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.36 + per-layer host 0.97 + host staging 0.03 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 17.72 + per-layer host 1.12 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.032 ms/window"
+      ],
+      "request_index": 19,
+      "case": "L02",
+      "phase": "minp0p2-long",
+      "arm": "B2",
+      "spec_min_p": 0.2,
+      "tokens": 1024,
+      "decode_ms": 18163.4,
+      "decode_tps": 56.3771100124426,
+      "prompt_ms": 4554.1,
+      "reused": 131072,
+      "windows": 517,
+      "target_rows_verified": 1806,
+      "drafts": 1289,
+      "accepted": 509,
+      "window_policy": {
+        "T_histogram": {
+          "1": 29,
+          "2": 60,
+          "3": 55,
+          "4": 373
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 373,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "517",
+        "all_accept": "148",
+        "drafts": "1289",
+        "accepted": "509",
+        "chain_launches": "516",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1806",
+        "stage0_launches": "652",
+        "stage1_launches": "517",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 19
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2438.5",
+          "211.8"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.2",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.2"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "f358cb4eb21afe2b0f9f5bea00c2585135bfb0ee284cab43534ab00ab3fd1bf9",
+        "request_index": 19,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.3948797517455392,
+      "ms_per_window": 35.13230174081238,
+      "tokens_per_window": 1.9806576402321083,
+      "target_rows_per_output": 1.763671875
+    },
+    {
+      "pipeline": {
+        "windows": 650,
+        "wall_ms_rounded": 14617.0,
+        "ms_per_window_rounded": 22.49,
+        "B_launched": 635,
+        "B_on_path": 310,
+        "B_rolled_back": 325,
+        "below_gate": 14,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 3.38,
+        "forced_count": 310,
+        "fresh_mean_ms": 3.02,
+        "fresh_count": 339,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 1,
+        "growths": 0,
+        "loop_thread_ms_rounded": 5.8,
+        "events": [
+          "strata elastic: -90 slots at a gap of stage 0 (90 experts to the CPU) -> 4565 slots, 6.40 GiB; 565 MiB free; 5.78 ms"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 97.9,
+        "hits": 585536,
+        "lookups": 597851,
+        "pcie_or_peer_reads": 79
+      },
+      "kv_stream": {
+        "hit_pct": 97.37,
+        "block_reads": 3243212,
+        "ram_mib": 343.8
+      },
+      "ple": {
+        "before": {
+          "rows": 477472.0,
+          "cache_hit_pct": 85.7,
+          "ssd_reads": 68099.0,
+          "ssd_mb": 284.7,
+          "blocked_ms": 1327.397,
+          "submit_ms": 44.664
+        },
+        "after": {
+          "rows": 503296.0,
+          "cache_hit_pct": 86.3,
+          "ssd_reads": 68755.0,
+          "ssd_mb": 287.5,
+          "blocked_ms": 1331.954,
+          "submit_ms": 45.445
+        },
+        "delta": {
+          "rows": 25824.0,
+          "ssd_reads": 656.0,
+          "ssd_mb": 2.8000000000000114,
+          "blocked_ms": 4.557000000000016,
+          "submit_ms": 0.7809999999999988
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 340 windows 26.34 ms 1.66 tok | speculative 310 windows 18.25 ms 1.48 tok | forced-chain disagreements 14, chain late 309",
+        "strata decode timing: 650 windows, avg T 1.66, 1.58 tokens/window, 22.49 ms/window = verify 22.49 (GPU-reach wait 12.52 + per-layer host 0.75 [plan 0.08 actq 0.02 jobs 0.00 CPU 1.42] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.36 (0.39 entries), VRAM hits 18.77, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 12.52 + per-layer host 0.75 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 14.18 + per-layer host 0.81 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.023 ms/window"
+      ],
+      "request_index": 20,
+      "case": "L01",
+      "phase": "minp0p8-long",
+      "arm": "B1",
+      "spec_min_p": 0.8,
+      "tokens": 1024,
+      "decode_ms": 14617.3,
+      "decode_tps": 70.05397713668052,
+      "prompt_ms": 4639.8,
+      "reused": 131072,
+      "windows": 650,
+      "target_rows_verified": 1082,
+      "drafts": 432,
+      "accepted": 374,
+      "window_policy": {
+        "T_histogram": {
+          "1": 406,
+          "2": 124,
+          "3": 52,
+          "4": 68
+        },
+        "initial_T": 1,
+        "last_T": 1,
+        "after_initial_T4": 68,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "650",
+        "all_accept": "612",
+        "drafts": "432",
+        "accepted": "374",
+        "chain_launches": "649",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1082",
+        "stage0_launches": "975",
+        "stage1_launches": "650",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 20
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2447.7",
+          "215.9"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.8",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.8"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "998ee8fc7a07aa139f4c07e8b9a3ad53571c6b82b21f4d86e9e5105119e44b73",
+        "request_index": 20,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.8657407407407407,
+      "ms_per_window": 22.488153846153846,
+      "tokens_per_window": 1.5753846153846154,
+      "target_rows_per_output": 1.056640625
+    },
+    {
+      "pipeline": {
+        "windows": 770,
+        "wall_ms_rounded": 16493.0,
+        "ms_per_window_rounded": 21.42,
+        "B_launched": 754,
+        "B_on_path": 342,
+        "B_rolled_back": 412,
+        "below_gate": 15,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 2.74,
+        "forced_count": 342,
+        "fresh_mean_ms": 2.58,
+        "fresh_count": 427,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 1,
+        "loop_thread_ms_rounded": 28.5,
+        "events": [
+          "strata elastic: +88 experts (127 MiB) -> 4653 slots, 6.52 GiB; 766 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 28.52 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.4,
+        "hits": 584130,
+        "lookups": 593798,
+        "pcie_or_peer_reads": 32
+      },
+      "kv_stream": {
+        "hit_pct": 97.31,
+        "block_reads": 3239140,
+        "ram_mib": 351.0
+      },
+      "ple": {
+        "before": {
+          "rows": 505952.0,
+          "cache_hit_pct": 86.4,
+          "ssd_reads": 68755.0,
+          "ssd_mb": 287.5,
+          "blocked_ms": 1331.955,
+          "submit_ms": 45.445
+        },
+        "after": {
+          "rows": 531408.0,
+          "cache_hit_pct": 86.9,
+          "ssd_reads": 69771.0,
+          "ssd_mb": 291.8,
+          "blocked_ms": 1334.677,
+          "submit_ms": 46.603
+        },
+        "delta": {
+          "rows": 25456.0,
+          "ssd_reads": 1016.0,
+          "ssd_mb": 4.300000000000011,
+          "blocked_ms": 2.72199999999998,
+          "submit_ms": 1.1580000000000013
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 428 windows 24.82 ms 1.40 tok | speculative 342 windows 17.16 ms 1.25 tok | forced-chain disagreements 8, chain late 341",
+        "strata decode timing: 770 windows, avg T 1.39, 1.33 tokens/window, 21.42 ms/window = verify 21.42 (GPU-reach wait 12.02 + per-layer host 0.59 [plan 0.07 actq 0.01 jobs 0.00 CPU 1.00] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.25 (0.26 entries), VRAM hits 15.80, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 12.02 + per-layer host 0.59 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 13.53 + per-layer host 0.53 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.018 ms/window"
+      ],
+      "request_index": 21,
+      "case": "L02",
+      "phase": "minp0p8-long",
+      "arm": "B1",
+      "spec_min_p": 0.8,
+      "tokens": 1024,
+      "decode_ms": 16493.5,
+      "decode_tps": 62.08506381301725,
+      "prompt_ms": 4424.4,
+      "reused": 131072,
+      "windows": 770,
+      "target_rows_verified": 1070,
+      "drafts": 300,
+      "accepted": 254,
+      "window_policy": {
+        "T_histogram": {
+          "1": 560,
+          "2": 147,
+          "3": 36,
+          "4": 27
+        },
+        "initial_T": 1,
+        "last_T": 2,
+        "after_initial_T4": 27,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "770",
+        "all_accept": "736",
+        "drafts": "300",
+        "accepted": "254",
+        "chain_launches": "769",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1070",
+        "stage0_launches": "1182",
+        "stage1_launches": "770",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 21
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2367.3",
+          "211.1"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.8",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.8"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "6cc63075561773035c13bb2e48745a4b934c2979804e128804c2ad34d8905d17",
+        "request_index": 21,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.8466666666666667,
+      "ms_per_window": 21.42012987012987,
+      "tokens_per_window": 1.3298701298701299,
+      "target_rows_per_output": 1.044921875
+    },
+    {
+      "pipeline": {
+        "windows": 532,
+        "wall_ms_rounded": 14329.0,
+        "ms_per_window_rounded": 26.93,
+        "B_launched": 478,
+        "B_on_path": 164,
+        "B_rolled_back": 314,
+        "below_gate": 53,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 4.46,
+        "forced_count": 164,
+        "fresh_mean_ms": 4.01,
+        "fresh_count": 367,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.2,
+        "hits": 688070,
+        "lookups": 700349,
+        "pcie_or_peer_reads": 71
+      },
+      "kv_stream": {
+        "hit_pct": 97.69,
+        "block_reads": 3871796,
+        "ram_mib": 359.6
+      },
+      "ple": {
+        "before": {
+          "rows": 534208.0,
+          "cache_hit_pct": 86.9,
+          "ssd_reads": 69771.0,
+          "ssd_mb": 291.8,
+          "blocked_ms": 1334.678,
+          "submit_ms": 46.603
+        },
+        "after": {
+          "rows": 564752.0,
+          "cache_hit_pct": 87.6,
+          "ssd_reads": 70091.0,
+          "ssd_mb": 293.1,
+          "blocked_ms": 1335.96,
+          "submit_ms": 46.906
+        },
+        "delta": {
+          "rows": 30544.0,
+          "ssd_reads": 320.0,
+          "ssd_mb": 1.3000000000000114,
+          "blocked_ms": 1.2819999999999254,
+          "submit_ms": 0.30299999999999727
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 368 windows 29.86 ms 2.05 tok | speculative 164 windows 20.37 ms 1.65 tok | forced-chain disagreements 36, chain late 164",
+        "strata decode timing: 532 windows, avg T 2.35, 1.92 tokens/window, 26.94 ms/window = verify 26.93 (GPU-reach wait 14.73 + per-layer host 0.91 [plan 0.11 actq 0.03 jobs 0.01 CPU 1.63] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.44 (0.48 entries), VRAM hits 26.95, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 14.73 + per-layer host 0.91 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 15.47 + per-layer host 0.88 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.020 ms/window"
+      ],
+      "request_index": 22,
+      "case": "L01",
+      "phase": "minp0p8-long",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 1024,
+      "decode_ms": 14329.7,
+      "decode_tps": 71.45997473778236,
+      "prompt_ms": 4449.0,
+      "reused": 131072,
+      "windows": 532,
+      "target_rows_verified": 1251,
+      "drafts": 719,
+      "accepted": 492,
+      "window_policy": {
+        "T_histogram": {
+          "1": 199,
+          "2": 108,
+          "3": 64,
+          "4": 161
+        },
+        "initial_T": 1,
+        "last_T": 1,
+        "after_initial_T4": 161,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "532",
+        "all_accept": "401",
+        "drafts": "719",
+        "accepted": "492",
+        "chain_launches": "531",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1251",
+        "stage0_launches": "846",
+        "stage1_launches": "532",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 22
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2443.8",
+          "209.6"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "be3a54383c20fa53bcf9f69eb7e2baae611a8c31d175e517e620d8127c1dbe78",
+        "request_index": 22,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6842837273991655,
+      "ms_per_window": 26.935526315789474,
+      "tokens_per_window": 1.9248120300751879,
+      "target_rows_per_output": 1.2216796875
+    },
+    {
+      "pipeline": {
+        "windows": 627,
+        "wall_ms_rounded": 15782.0,
+        "ms_per_window_rounded": 25.17,
+        "B_launched": 568,
+        "B_on_path": 201,
+        "B_rolled_back": 367,
+        "below_gate": 58,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 3.55,
+        "forced_count": 201,
+        "fresh_mean_ms": 3.47,
+        "fresh_count": 425,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 1,
+        "growths": 0,
+        "loop_thread_ms_rounded": 5.7,
+        "events": [
+          "strata elastic: -44 slots at a gap of stage 0 (44 experts to the CPU) -> 4609 slots, 6.46 GiB; 563 MiB free; 5.71 ms"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.4,
+        "hits": 678130,
+        "lookups": 689081,
+        "pcie_or_peer_reads": 49
+      },
+      "kv_stream": {
+        "hit_pct": 97.63,
+        "block_reads": 3797824,
+        "ram_mib": 362.7
+      },
+      "ple": {
+        "before": {
+          "rows": 567408.0,
+          "cache_hit_pct": 87.6,
+          "ssd_reads": 70091.0,
+          "ssd_mb": 293.1,
+          "blocked_ms": 1335.961,
+          "submit_ms": 46.906
+        },
+        "after": {
+          "rows": 597360.0,
+          "cache_hit_pct": 88.2,
+          "ssd_reads": 70411.0,
+          "ssd_mb": 294.4,
+          "blocked_ms": 1336.974,
+          "submit_ms": 47.25
+        },
+        "delta": {
+          "rows": 29952.0,
+          "ssd_reads": 320.0,
+          "ssd_mb": 1.2999999999999545,
+          "blocked_ms": 1.01299999999992,
+          "submit_ms": 0.3440000000000012
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 426 windows 28.26 ms 1.71 tok | speculative 201 windows 18.62 ms 1.47 tok | forced-chain disagreements 26, chain late 200",
+        "strata decode timing: 627 windows, avg T 1.97, 1.63 tokens/window, 25.17 ms/window = verify 25.17 (GPU-reach wait 13.93 + per-layer host 0.75 [plan 0.10 actq 0.02 jobs 0.01 CPU 1.33] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.33 (0.36 entries), VRAM hits 22.53, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 13.93 + per-layer host 0.75 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 14.61 + per-layer host 0.73 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.018 ms/window"
+      ],
+      "request_index": 23,
+      "case": "L02",
+      "phase": "minp0p8-long",
+      "arm": "A",
+      "spec_min_p": 0.5,
+      "tokens": 1024,
+      "decode_ms": 15782.7,
+      "decode_tps": 64.88116735412825,
+      "prompt_ms": 4522.7,
+      "reused": 131072,
+      "windows": 627,
+      "target_rows_verified": 1233,
+      "drafts": 606,
+      "accepted": 397,
+      "window_policy": {
+        "T_histogram": {
+          "1": 282,
+          "2": 176,
+          "3": 77,
+          "4": 92
+        },
+        "initial_T": 1,
+        "last_T": 2,
+        "after_initial_T4": 92,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "627",
+        "all_accept": "502",
+        "drafts": "606",
+        "accepted": "397",
+        "chain_launches": "626",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1233",
+        "stage0_launches": "994",
+        "stage1_launches": "627",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 23
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2428.0",
+          "229.5"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "57b1a7484fcc4bf44cd71b2c83e5d377942f9fee3d7984225a0efa6710bdb7e2",
+        "request_index": 23,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.6551155115511551,
+      "ms_per_window": 25.17177033492823,
+      "tokens_per_window": 1.6331738437001595,
+      "target_rows_per_output": 1.2041015625
+    },
+    {
+      "pipeline": {
+        "windows": 659,
+        "wall_ms_rounded": 14654.0,
+        "ms_per_window_rounded": 22.24,
+        "B_launched": 647,
+        "B_on_path": 325,
+        "B_rolled_back": 322,
+        "below_gate": 11,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 3.28,
+        "forced_count": 325,
+        "fresh_mean_ms": 2.93,
+        "fresh_count": 333,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 0,
+        "loop_thread_ms_rounded": 0.0,
+        "events": []
+      },
+      "expert_cache": {
+        "hit_pct": 98.0,
+        "hits": 583714,
+        "lookups": 595329,
+        "pcie_or_peer_reads": 91
+      },
+      "kv_stream": {
+        "hit_pct": 97.35,
+        "block_reads": 3214480,
+        "ram_mib": 342.9
+      },
+      "ple": {
+        "before": {
+          "rows": 600160.0,
+          "cache_hit_pct": 88.3,
+          "ssd_reads": 70411.0,
+          "ssd_mb": 294.4,
+          "blocked_ms": 1336.975,
+          "submit_ms": 47.25
+        },
+        "after": {
+          "rows": 625424.0,
+          "cache_hit_pct": 88.7,
+          "ssd_reads": 70675.0,
+          "ssd_mb": 295.5,
+          "blocked_ms": 1337.565,
+          "submit_ms": 47.594
+        },
+        "delta": {
+          "rows": 25264.0,
+          "ssd_reads": 264.0,
+          "ssd_mb": 1.1000000000000227,
+          "blocked_ms": 0.5900000000001455,
+          "submit_ms": 0.3440000000000012
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 334 windows 26.21 ms 1.66 tok | speculative 325 windows 18.15 ms 1.45 tok | forced-chain disagreements 11, chain late 325",
+        "strata decode timing: 659 windows, avg T 1.64, 1.55 tokens/window, 22.24 ms/window = verify 22.24 (GPU-reach wait 12.22 + per-layer host 0.78 [plan 0.08 actq 0.02 jobs 0.00 CPU 1.37] + stage 0.02) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.34 (0.37 entries), VRAM hits 18.45, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 12.22 + per-layer host 0.78 + host staging 0.02 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 14.28 + per-layer host 0.72 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.016 ms/window"
+      ],
+      "request_index": 24,
+      "case": "L01",
+      "phase": "minp0p8-long",
+      "arm": "B2",
+      "spec_min_p": 0.8,
+      "tokens": 1024,
+      "decode_ms": 14654.4,
+      "decode_tps": 69.87662408559886,
+      "prompt_ms": 4609.7,
+      "reused": 131072,
+      "windows": 659,
+      "target_rows_verified": 1082,
+      "drafts": 423,
+      "accepted": 365,
+      "window_policy": {
+        "T_histogram": {
+          "1": 428,
+          "2": 113,
+          "3": 44,
+          "4": 74
+        },
+        "initial_T": 1,
+        "last_T": 1,
+        "after_initial_T4": 74,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "659",
+        "all_accept": "625",
+        "drafts": "423",
+        "accepted": "365",
+        "chain_launches": "658",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1082",
+        "stage0_launches": "981",
+        "stage1_launches": "659",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 24
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2429.8",
+          "262.9"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.8",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.8"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "998ee8fc7a07aa139f4c07e8b9a3ad53571c6b82b21f4d86e9e5105119e44b73",
+        "request_index": 24,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.8628841607565012,
+      "ms_per_window": 22.23732928679818,
+      "tokens_per_window": 1.5538694992412747,
+      "target_rows_per_output": 1.056640625
+    },
+    {
+      "pipeline": {
+        "windows": 773,
+        "wall_ms_rounded": 16383.0,
+        "ms_per_window_rounded": 21.19,
+        "B_launched": 759,
+        "B_on_path": 355,
+        "B_rolled_back": 404,
+        "below_gate": 13,
+        "theta": 0.1
+      },
+      "chain_to_B": {
+        "forced_mean_ms": 2.75,
+        "forced_count": 355,
+        "fresh_mean_ms": 2.55,
+        "fresh_count": 417,
+        "scope": "Observed existing diagnostic, includes overlap; not exclusive MTP cost."
+      },
+      "elastic": {
+        "shrinks": 0,
+        "growths": 1,
+        "loop_thread_ms_rounded": 22.4,
+        "events": [
+          "strata elastic: +61 experts (88 MiB) -> 4670 slots, 6.54 GiB; 766 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 22.42 ms (published once its fills land)"
+        ]
+      },
+      "expert_cache": {
+        "hit_pct": 98.4,
+        "hits": 584158,
+        "lookups": 593429,
+        "pcie_or_peer_reads": 31
+      },
+      "kv_stream": {
+        "hit_pct": 97.33,
+        "block_reads": 3237064,
+        "ram_mib": 348.5
+      },
+      "ple": {
+        "before": {
+          "rows": 628080.0,
+          "cache_hit_pct": 88.7,
+          "ssd_reads": 70675.0,
+          "ssd_mb": 295.5,
+          "blocked_ms": 1337.566,
+          "submit_ms": 47.594
+        },
+        "after": {
+          "rows": 653728.0,
+          "cache_hit_pct": 89.1,
+          "ssd_reads": 70907.0,
+          "ssd_mb": 296.5,
+          "blocked_ms": 1338.034,
+          "submit_ms": 47.878
+        },
+        "delta": {
+          "rows": 25648.0,
+          "ssd_reads": 232.0,
+          "ssd_mb": 1.0,
+          "blocked_ms": 0.4680000000000746,
+          "submit_ms": 0.2839999999999989
+        },
+        "limits": "Before/after cumulative deltas only; rounded MB. Blocking/staging/submit overlap; do not add or subtract from decode time. Rolling percentiles are not decode-only."
+      },
+      "cost_raw_lines": [
+        "strata pipeline classes: fresh 418 windows 24.59 ms 1.38 tok | speculative 355 windows 17.20 ms 1.26 tok | forced-chain disagreements 7, chain late 355",
+        "strata decode timing: 773 windows, avg T 1.38, 1.32 tokens/window, 21.19 ms/window = verify 21.19 (GPU-reach wait 11.92 + per-layer host 0.54 [plan 0.07 actq 0.01 jobs 0.00 CPU 0.94] + stage 0.01) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.24 (0.25 entries), VRAM hits 15.74, PCIe 0.00",
+        "strata decode stage 0: GPU-reach wait 11.92 + per-layer host 0.54 + host staging 0.01 + graph launch 0.00 ms/window",
+        "strata decode stage 1: GPU-reach wait 13.58 + per-layer host 0.50 + host staging 0.00 + graph launch 0.00 ms/window",
+        "strata decode PLE primary: gather 0.000 ms total (0.000 ms/window), other staging 0.013 ms/window"
+      ],
+      "request_index": 25,
+      "case": "L02",
+      "phase": "minp0p8-long",
+      "arm": "B2",
+      "spec_min_p": 0.8,
+      "tokens": 1024,
+      "decode_ms": 16383.5,
+      "decode_tps": 62.50190740684225,
+      "prompt_ms": 4519.9,
+      "reused": 131072,
+      "windows": 773,
+      "target_rows_verified": 1069,
+      "drafts": 296,
+      "accepted": 251,
+      "window_policy": {
+        "T_histogram": {
+          "1": 566,
+          "2": 143,
+          "3": 39,
+          "4": 25
+        },
+        "initial_T": 1,
+        "last_T": 2,
+        "after_initial_T4": 25,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "773",
+        "all_accept": "738",
+        "drafts": "296",
+        "accepted": "251",
+        "chain_launches": "772",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1069",
+        "stage0_launches": "1177",
+        "stage1_launches": "773",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 25
+      },
+      "disk_restore": [
+        [
+          "131072",
+          "2372.3",
+          "223.8"
+        ]
+      ],
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.8",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.8"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "6cc63075561773035c13bb2e48745a4b934c2979804e128804c2ad34d8905d17",
+        "request_index": 25,
+        "write_complete": true,
+        "flushed": true
+      },
+      "output_ids_validated": true,
+      "acceptance_rate": 0.847972972972973,
+      "ms_per_window": 21.19469598965071,
+      "tokens_per_window": 1.3247089262613196,
+      "target_rows_per_output": 1.0439453125
+    }
+  ],
+  "window_cost_summary": [
+    {
+      "spec_min_p": 0.0,
+      "requests": 4,
+      "windows": 1877,
+      "T_histogram": {
+        "1": 4,
+        "2": 0,
+        "3": 0,
+        "4": 1873
+      },
+      "avg_T": 3.9936068193926477,
+      "descriptive_pooled_ms_per_window": 38.01885988279169,
+      "tokens_per_window": 2.1822056473095364,
+      "accepted": 2223,
+      "drafts": 5619,
+      "scope": "Descriptive aggregation of long requests in fixed order; not a paired causal estimate."
+    },
+    {
+      "spec_min_p": 0.2,
+      "requests": 4,
+      "windows": 1912,
+      "T_histogram": {
+        "1": 94,
+        "2": 169,
+        "3": 171,
+        "4": 1478
+      },
+      "avg_T": 3.586297071129707,
+      "descriptive_pooled_ms_per_window": 35.31239539748954,
+      "tokens_per_window": 2.1422594142259412,
+      "accepted": 2188,
+      "drafts": 4945,
+      "scope": "Descriptive aggregation of long requests in fixed order; not a paired causal estimate."
+    },
+    {
+      "spec_min_p": 0.5,
+      "requests": 6,
+      "windows": 3468,
+      "T_histogram": {
+        "1": 1401,
+        "2": 894,
+        "3": 418,
+        "4": 755
+      },
+      "avg_T": 2.1519607843137254,
+      "descriptive_pooled_ms_per_window": 26.080565167243368,
+      "tokens_per_window": 1.7716262975778547,
+      "accepted": 2676,
+      "drafts": 3995,
+      "scope": "Descriptive aggregation of long requests in fixed order; not a paired causal estimate."
+    },
+    {
+      "spec_min_p": 0.8,
+      "requests": 4,
+      "windows": 2852,
+      "T_histogram": {
+        "1": 1960,
+        "2": 527,
+        "3": 171,
+        "4": 194
+      },
+      "avg_T": 1.508765778401122,
+      "descriptive_pooled_ms_per_window": 21.79126928471248,
+      "tokens_per_window": 1.4361851332398317,
+      "accepted": 1244,
+      "drafts": 1451,
+      "scope": "Descriptive aggregation of long requests in fixed order; not a paired causal estimate."
+    }
+  ],
+  "elastic_summary": {
+    "shrinks": 6,
+    "growths": 9,
+    "loop_thread_ms_rounded": 255.0,
+    "requests_with_events": [
+      0,
+      1,
+      2,
+      4,
+      9,
+      12,
+      13,
+      15,
+      16,
+      20,
+      21,
+      23,
+      25
+    ]
+  },
+  "prior_failed_run": {
+    "name": "DET-hot-minp-01",
+    "status": "failed",
+    "completed_warmups": 2,
+    "treatment_requests_started": 0,
+    "error": "ValueError('L01: oracle-off treatment contains synthetic drafts')",
+    "root_cause": "Validator incorrectly required synthetic=0, but engine hardcodes synthetic=1 for the forced-target diagnostic even in oracle-off mode. Raw mode=off, chain_launches>0, bypasses=0 and delivered=0 prove real MTP. v2 fixes only the validator; the runner is byte-identical.",
+    "trace_contamination": false,
+    "original_artifacts_preserved": true,
+    "retrospective_relabel_to_pass": false
+  },
+  "limits": [
+    "Forced target IDs test timing and pipeline behavior, not free-generation quality or model accuracy.",
+    "One ordered B/A/B triplet per case and threshold; no confidence intervals or global-optimum claim.",
+    "SSD restore resets model/session state, not expert/PLE caches or elastic capacity. Timing remains subject to those observed confounders.",
+    "Decode timing categories overlap. PLE blocked/submit/staging and pipeline stages are not additive; no adjusted/normalized TPS is reported.",
+    "The .8 effect is small and overlaps capacity drift; evidence does not justify promoting it. No adaptive-policy result is claimed.",
+    "Warmup and 15-token smoke measurements are functional diagnostics only. Desktop telemetry spans the whole run; no decode-only attribution."
+  ]
+}

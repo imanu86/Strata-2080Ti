@@ -1,3 +1,32 @@
+# Hot MTP probability thresholds, 7 October 2026
+
+The same immutable oracle-capable executable runs with the oracle OFF, real MTP
+drafts and only target IDs forced. All26 requests restore the original131072-token
+prefix from SSD, including warmups; each GEN wire write and flush proves the
+requested threshold. One process, split16, pipeline2, S4, seed73, greedy sampling,
+INT8 KV/resident32768, auto expert cache and elasticity; no forced windows.
+
+| Threshold B / control A / repeat B | L01 decode t/s | L02 decode t/s |
+|---|---:|---:|
+| 0 /0.5 /0 | 61.50 /71.80 /62.33 | 53.02 /65.56 /53.98 |
+| 0.2 /0.5 /0.2 | 64.82 /69.93 /65.35 | 57.25 /64.77 /56.38 |
+| 0.8 /0.5 /0.8 | 70.05 /71.46 /69.88 | 62.09 /64.88 /62.50 |
+
+Every long B arm is slower than its interposed control. Retain0.5 for this setup;
+this does not establish a global optimum or rule out asymmetric/adaptive policies.
+All1024-output comparisons keep the same allocation and SSD contents. Fourteen
+CPU checker tests pass, including actual Daily serialization and mutations.
+Nine cache growths/six shrinks and PLE warming remain observed confounders; no
+timers are subtracted. The small0.8 gap is particularly exposed to that drift.
+Forced continuation equality controls workload and does not establish answer quality.
+Daily unchanged; no compiler interference or remaining owned process.
+
+The first attempt stopped after two warmups because the checker misread the
+legacy `synthetic=1` marker as oracle draft delivery. It remains failed; raw
+mode=off, real chains, zero bypasses and zero delivered oracle IDs prove the
+checker defect. A regression covers the repaired condition in the new frozen suite.
+See [complete protocol, histograms, wire proof, events and hashes](hot-minp-20261007.json).
+
 # Selective MTP history, 7 October 2026
 
 A default-off prototype combines the last8192 MTP cells with positions selected
