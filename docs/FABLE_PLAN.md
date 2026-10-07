@@ -215,6 +215,44 @@ compilatore può smentirla; una variante `DIFFERENT` non si usa.
   Turing: 2 blocchi stanno); (5) `STRATA_FP_EXPERT_PERSIST_K` legge il conteggio SM del device corrente al primo lancio
   (cache per device): nei grafi catturati il valore è cotto.
 
+#### Esito del bench (owner, build a173807, `fp_expert_bench 300 -1 20`) e selezione per T e coppia
+
+- **Bitwise**: V=4 `identical` su tutte le 10 coppie e T 1..4 su entrambe le schede. `DIFFERENT` solo le vecchie V=2/3
+  su 21/20 a T=3-4 (non si usano).
+- **Tempi** (V4/default, < 1 = V4 più veloce). 2080 Ti, T=1: 16/20 1,05 · 17/20 0,88 · 18/20 0,46 · 21/20 0,81 ·
+  22/20 0,85 · 16/42 1,07 · 17/42 1,12 · 18/42 0,90 · 21/42 0,48 · 22/42 0,41; T=2-4: 1,00-1,17. 3060, T=1: 18/20 0,51 ·
+  17/42 0,55 · 18/42 0,67, il resto 1,01-1,16; T=2-4: 1,04-1,32. Lettura: a T=1 il default è molto inefficiente (2080 Ti
+  21/42: 198 µs, 15% del picco; 22/42: 245 µs, 10%): 800-1600 blocchi brevi per strato, una passata di riga e via; la
+  V4 con pochi blocchi persistenti sulle stesse righe fa lo stesso lavoro in metà tempo. Da T=2 il default, con più
+  blocchi residenti e più byte in volo per SM, vince. Nel decode il 42% delle finestre è a T=1.
+- **Selezione (commit `FABLE-KERNEL-Scegli la variante persistente per T e per coppia…`)**: `native_expert_grouped`
+  riceve `tokens` (T della finestra dietro i gruppi: `verify.cpp` passa `n`, peer/remote `n_tok`, il bench T; 0 = ignoto).
+  - `STRATA_FP_EXPERT_V4_TMAX=N` — leva a caldo `lab=EXPERT_V4_TMAX:N` (`fp_lab.hpp`, setter
+    `native_expert_set_fp_v4_tmax`, ricattura dei grafi come `EXPERT_V`): con N > 0 la V4 gira solo nelle chiamate con
+    T ≤ N (T ignoto → solo con N = 0); default 0 = comportamento precedente. Candidato di produzione: `EXPERT_V:4` +
+    `EXPERT_V4_TMAX:1`.
+  - `STRATA_FP_EXPERT_V4_PAIRS` — tabella (device, coppia gu/d) che prende la V4: `"gu/d,gu/d"` per tutti i device o
+    `"dev:gu/d,…;dev:…"` per ordinale CUDA (un device senza voci proprie prende quelle senza device; vuota = tutte).
+    Letta all'avvio (setter `native_expert_set_fp_v4_pairs`, non leva a caldo). Dai numeri sopra, con la 2080 Ti = 0 e
+    la 3060 = 1: `STRATA_FP_EXPERT_V4_PAIRS="0:17/20,18/20,21/20,22/20,18/42,21/42,22/42;1:18/20,17/42,18/42"` (gli
+    ordinali vanno verificati con la riga `# device N:` del bench).
+- **Default a T=1 (punto 2)**: una «griglia più grande» non esiste a parità di albero — una riga è già un sub-warp di 16
+  o 8 lane, l'unica forma libera è quante righe per blocco — e l'evidenza (V4 con 136 blocchi vince 2×) indica il
+  contrario: troppi blocchi brevi. Knob opt-in bitwise-neutro `STRATA_FP_DEF_TILES_T1=k` (default 1 = lancio attuale;
+  setter `native_expert_set_fp_def_tiles_t1`): nelle chiamate con T == 1 i kernel di default (stesso codice di riga,
+  `fp_gu_tiles_kernel` / `fp_down_tiles_kernel`) partono con `grid.x = ceil(tile / k)` blocchi che percorrono k tile
+  ciascuno (tile = le righe di un blocco di default: 16 gate/up, 32 down IQ4_NL, 16 down Q2_0), codebook una volta per
+  blocco, chunk hq una volta per (gruppo, chunk). Se `0t4`/`0t8` al bench raggiunge la V4 a T=1 è il guadagno più pulito
+  (niente registri né prefetch); altrimenti resta la V4 con TMAX=1.
+- **Bench** (`fp_expert_bench [reps] [device] [groups] [coppie]`): per ogni coppia e T le scelte `0`, (`1 2 3` su 21/20),
+  `4`, a T=1 `0t2 0t4 0t8`, e `auto` = la selezione dell'engine (V4 per T ≤ `STRATA_FP_EXPERT_V4_TMAX`, 1 se non
+  impostata, sulle coppie di `STRATA_FP_EXPERT_V4_PAIRS`, `STRATA_FP_DEF_TILES_T1` dall'ambiente), riga
+  `dev T gu/d v us GB/s %peak identical|DIFFERENT`. Comando: `fp_expert_bench 300 -1 20`; con la tabella:
+  `set STRATA_FP_EXPERT_V4_PAIRS=…` prima del lancio, e `auto` deve dare il minimo di riga.
+- **Stato**: compilato sì (`iq_kernels.cu` sm_75 + sm_86, `fp_expert_bench.cpp`, `fp_lab.hpp` con nvcc 12.6 / MSVC;
+  `verify.cpp`, `generate.cpp`, `peer_experts.cpp`, `remote_experts.cpp` solo riletti: un parametro in coda e una leva),
+  provato no.
+
 ### 6b. Lettura hc BF16 — `STRATA_FP_HC_FUSE_NORM`
 
 - Commit: `12188f2e FABLE-KERNEL-Fondi la norm nella proiezione down della lettura hc con micro-bench bitwise`,
