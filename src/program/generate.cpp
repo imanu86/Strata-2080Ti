@@ -16,6 +16,7 @@
 // (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
 
 #include "strata/core/arch_defaults.hpp"
+#include "strata/core/batch_plan.hpp"
 #include "strata/core/dma_batch.hpp"
 #include "strata/core/device.hpp"
 #include "strata/core/remote_expert_opt.hpp"
@@ -3786,6 +3787,22 @@ int main(int argc, char** argv) {
             batch_mtp = false;
         }
     }
+    // STRATA_BATCH_MTP_DRAFTS=D (opt-in, lab/multichat-mtp; unset = one draft per slot, 0.1.40): each slot's drafter
+    // proposes up to D drafts and every window picks how many of them each slot verifies (core/batch_plan.hpp), from
+    // the drafts' probabilities and a window cost of base + STRATA_BATCH_ROW_MS per row, in at most
+    // STRATA_BATCH_MTP_ROWS rows.  D <= --spec - 1 (a slot drafter holds --spec rows).
+    int batch_mtp_drafts = 0;
+    if (const char* v = std::getenv("STRATA_BATCH_MTP_DRAFTS"); batch_mtp && v != nullptr && std::atoi(v) > 0) {
+        batch_mtp_drafts = std::min({std::atoi(v), o.spec - 1, strata::kernels::kVerifyMaxT - 1});
+        std::fprintf(stderr, "strata generate: --batch-mtp: up to %d drafts per slot, the window's rows planned per slot "
+                             "(STRATA_BATCH_MTP_DRAFTS)\n", batch_mtp_drafts);
+    }
+    // --batch-mtp: the captured batch window graphs kept per stage (LRU; one per row layout).  Per-slot draft lengths
+    // make more layouts than one draft per slot: STRATA_BATCH_GRAPHS=N keeps more (default 64, as 0.1.40).
+    const size_t batch_graph_cap = [] {
+        const char* v = std::getenv("STRATA_BATCH_GRAPHS");
+        return v != nullptr && std::atoi(v) > 0 ? (size_t) std::atoi(v) : (size_t) 64;
+    }();
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
@@ -3894,7 +3911,8 @@ int main(int argc, char** argv) {
                                  vram_free_note().c_str());
                     return 1;
                 }
-                d->set_max_drafts(1);   // the first candidate verifies one proposal per slot
+                // the first candidate verifies one proposal per slot; STRATA_BATCH_MTP_DRAFTS up to D
+                d->set_max_drafts(std::max(1, batch_mtp_drafts));
                 d->set_ple_session(bslot_ss[0][(size_t) b].get());
                 slot_mtp.push_back(std::move(d));
             }
@@ -6478,7 +6496,7 @@ int main(int argc, char** argv) {
                     vs.slot_off = gs.cache.slot_offsets();
                     vs.n_slots = gs.cache.slots();
                     gs.ver.set_remote_expert_opt(remote_opt.get());
-                    if (batch_mtp) gs.ver.set_batch_graph_limit(64);   // STRATA_BATCH_MTP_SPLIT: as the first stage's
+                    if (batch_mtp) gs.ver.set_batch_graph_limit(batch_graph_cap);   // STRATA_BATCH_MTP_SPLIT: as the first stage's
                     ok_s = gs.ver.init(gs.wt, g, gs.ss, vs, gs.head.loaded() ? &gs.head : nullptr,
                                        batch_mtp ? strata::kernels::kVerifyMaxT : std::max(o.spec, o.batch), err);
                     split_drive.cache_base[st] = gs.cache.device_slot(0);
@@ -6543,7 +6561,7 @@ int main(int argc, char** argv) {
         }
         ver.set_remote_expert_opt(remote_opt.get());
         if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
-        if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
+        if (batch_mtp) ver.set_batch_graph_limit(batch_graph_cap);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr,
                       batch_mtp ? strata::kernels::kVerifyMaxT : std::max(o.spec, o.batch), err) ||
             (use_mtp && !mtp.bind(last_st ? last_st->wt : wt, last_st ? &last_st->head : &native_head,
@@ -8359,7 +8377,10 @@ int main(int argc, char** argv) {
             bool active = false, stop = false;
             int32_t x = 0;                 ///< the token the next window feeds (not yet in the slot's state)
             std::array<int32_t, strata::kernels::kVerifyMaxT> draft{}; ///< the slot's next MTP proposal
+            std::array<float, strata::kernels::kVerifyMaxT> dprob{};   ///< each draft's probability (the drafter's)
+            int n_draft = 0;               ///< drafts in `draft` (STRATA_BATCH_MTP_DRAFTS plans from them)
             bool draft_ready = false;
+            bool mtp_off = false;          ///< its drafter failed: this request decodes without drafts (no restart)
             int64_t p = 0;                 ///< its position
             int64_t produced = 0, max_new = 0;
             Clock::time_point t0;
@@ -8385,6 +8406,7 @@ int main(int argc, char** argv) {
         double bt_wait0 = 0, bt_pool0 = 0;
         int64_t bt_miss0 = 0, bt_hits0 = 0, bt_pcie0 = 0;
         int64_t bt_windows = 0, bt_rows = 0, bt_tokens = 0;
+        int64_t bt_wrows = 0, bt_draft_rows = 0, bt_draft_ok = 0;   // --batch-mtp: the windows' rows, drafts verified/kept
         Clock::time_point bt_start = Clock::now();
         int admit_slot = -1;               ///< the slot the request being read will continue in (BGEN)
         long long admit_max_new = 0;
@@ -8481,37 +8503,72 @@ int main(int argc, char** argv) {
         // one batch window over the active slots only (row t is the t-th active slot): an idle slot is not touched,
         // so it keeps the conversation it holds
         auto batch_step = [&]() -> bool {
+            constexpr int MT = strata::kernels::kVerifyMaxT;
             int S = 0;
-            int rows[strata::kernels::kVerifyMaxT] = {};
-            int32_t tok[strata::kernels::kVerifyMaxT] = {}, outb[strata::kernels::kVerifyMaxT] = {};
-            int64_t pos[strata::kernels::kVerifyMaxT] = {};
-            int first[strata::kernels::kVerifyMaxT] = {}, active[strata::kernels::kVerifyMaxT] = {};
+            int rows[MT] = {};
+            int32_t tok[MT] = {}, outb[MT] = {};
+            int64_t pos[MT] = {};
+            int first[MT] = {}, active[MT] = {}, nrow[MT] = {}, d[MT] = {};
             static size_t next_slot = 0;
-            // Each MTP slot uses two rows; rotate slots when more than four are active.
-            int A = 0;
-            for (size_t offset = 0; offset < bs.size() && S + (batch_mtp ? 2 : 1) <= strata::kernels::kVerifyMaxT; ++offset) {
-                const int b = (int) ((next_slot + offset) % bs.size());
-                if (bs[(size_t) b].active) {
-                    first[A] = S;
-                    active[A++] = b;
-                    rows[S] = b;
-                    tok[S] = bs[(size_t) b].x;
-                    pos[S] = bs[(size_t) b].p;
+            // STRATA_BATCH_MTP_DRAFTS (see batch_mtp_drafts): the window's row bound and cost model, read once.  The
+            // base cost follows the windows measured (an average of their ms less STRATA_BATCH_ROW_MS per row), so it
+            // tracks the context's length; STRATA_BATCH_BASE_MS only seeds it.
+            auto env_d = [](const char* name, double def) {
+                const char* v = std::getenv(name);
+                return v != nullptr && *v != '\0' ? std::atof(v) : def;
+            };
+            static const int rows_max = std::clamp((int) env_d("STRATA_BATCH_MTP_ROWS", MT), 2, MT);
+            static const double row_ms = std::max(0.0, env_d("STRATA_BATCH_ROW_MS", 5.5));
+            static const double min_gain = env_d("STRATA_BATCH_MTP_MIN_GAIN", 0.0);
+            static const double pscale = std::max(0.0, env_d("STRATA_BATCH_MTP_PSCALE", 1.0));
+            static const double base_seed = std::max(1.0, env_d("STRATA_BATCH_BASE_MS", 30.0));
+            static const bool parallel = env_d("STRATA_BATCH_MTP_PARALLEL", 0.0) == 1.0;
+            static double ema_ms = -1.0, ema_rows = 0.0;
+            const bool planned = batch_mtp && batch_mtp_drafts > 0;
+            auto is_eos = [&](int32_t y) {
+                return std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
+            };
+            auto has_draft = [&](const BSlot& sl) { return batch_mtp && sl.draft_ready && !sl.mtp_off; };
+            // the window's slots.  One draft per slot (0.1.40): two rows each, rotating when more than four are live (a
+            // slot whose drafter failed takes one).  Planned: a row each first, rotating only when they do not all fit
+            // (a stable order keeps the row layouts, and their captured graphs, few), then the rows left go to the
+            // drafts most likely accepted.
+            int A = 0, live = 0;
+            for (const BSlot& sl : bs) live += sl.active ? 1 : 0;
+            const int per_slot = batch_mtp && !planned ? 2 : 1;
+            const int cap_rows = planned ? rows_max : MT;
+            for (size_t offset = 0; offset < bs.size() && (A + 1) * per_slot <= cap_rows; ++offset) {
+                const size_t b = (next_slot + offset) % bs.size();
+                if (bs[b].active) active[A++] = (int) b;
+            }
+            if (A == 0) return true;
+            if (batch_mtp && !planned) next_slot = ((size_t) active[A - 1] + 1) % bs.size();
+            else if (planned) next_slot = A < live ? ((size_t) active[A - 1] + 1) % bs.size() : 0;
+            if (planned) {
+                int cap[MT] = {};
+                const float* pr[MT] = {};
+                for (int a = 0; a < A; ++a) {
+                    const BSlot& sl = bs[(size_t) active[a]];
+                    cap[a] = has_draft(sl) ? strata::core::batch_slot_draft_cap(sl.n_draft, sl.produced, sl.max_new, sl.p,
+                                                                                o.max_context) : 0;
+                    pr[a] = sl.dprob.data();
+                }
+                const double base = ema_ms < 0.0 ? base_seed : std::max(1.0, ema_ms - row_ms * ema_rows);
+                strata::core::batch_plan_drafts(A, cap, pr, cap_rows, base, row_ms, min_gain, pscale, d);
+            } else if (batch_mtp) {
+                for (int a = 0; a < A; ++a) d[a] = has_draft(bs[(size_t) active[a]]) ? 1 : 0;
+            }
+            for (int a = 0; a < A; ++a) {
+                const BSlot& sl = bs[(size_t) active[a]];
+                first[a] = S;
+                nrow[a] = 1 + d[a];
+                for (int j = 0; j < nrow[a]; ++j) {   // the current token, then the drafts at the next positions
+                    rows[S] = active[a];
+                    tok[S] = j == 0 ? sl.x : sl.draft[(size_t) j - 1];
+                    pos[S] = sl.p + j;
                     ++S;
-                    if (batch_mtp) {
-                        rows[S] = b;
-                        if (!bs[(size_t) b].draft_ready) {
-                            err = "batch MTP: a live slot has no draft";
-                            return false;
-                        }
-                        tok[S] = bs[(size_t) b].draft[0];
-                        pos[S] = bs[(size_t) b].p + 1;
-                        ++S;
-                    }
                 }
             }
-            if (batch_mtp && A > 0) next_slot = ((size_t) active[A - 1] + 1) % bs.size();
-            if (S == 0) return true;
             const bool was_busy = strata::core::progress().busy.load();
             strata::core::progress().busy.store(true);
             drive.d.layers = 0;
@@ -8529,21 +8586,34 @@ int main(int argc, char** argv) {
                 return false;
             }
             const Clock::time_point w1 = Clock::now();
-            // Accept the proposal only when the target picked it and there is room to emit both tokens.
+            auto msd = [](Clock::time_point a0, Clock::time_point b0) { return std::chrono::duration<double, std::milli>(b0 - a0).count(); };
+            if (planned) {   // the cost model's measure
+                const double ms = msd(w0, w1);
+                if (ema_ms < 0.0) {
+                    ema_ms = ms;
+                    ema_rows = S;
+                } else {
+                    ema_ms = 0.9 * ema_ms + 0.1 * ms;
+                    ema_rows = 0.9 * ema_rows + 0.1 * S;
+                }
+            }
+            // each slot keeps its current row and the drafts the target agreed with, up to where it ends
+            // (core/batch_plan.hpp; with one draft exactly 0.1.40's rule)
             std::vector<int> keep(bs.size(), 0);
             for (int a = 0; a < A; ++a) {
                 const int b = active[a], i = first[a];
                 const BSlot& sl = bs[(size_t) b];
-                const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outb[i]) != o.eos_ids.end();
-                keep[b] = batch_mtp && outb[i] == tok[i + 1] && !eos && !sl.stop &&
-                          sl.produced + 2 <= sl.max_new && sl.p + 3 <= o.max_context ? 2 : 1;
+                keep[b] = strata::core::batch_slot_keep(outb + i, tok + i, nrow[a], is_eos, sl.stop, sl.produced,
+                                                        sl.max_new, sl.p, o.max_context);
+                bt_draft_rows += nrow[a] - 1;
+                bt_draft_ok += keep[b] - 1;
             }
+            bt_wrows += S;
             if (!(batch_mtp ? ver.commit_slot_prefixes(keep.data(), err) : ver.commit_slots(err))) {
                 std::printf("ERR %s\n", err.c_str());
                 return false;
             }
             const Clock::time_point w2 = Clock::now();
-            auto msd = [](Clock::time_point a0, Clock::time_point b0) { return std::chrono::duration<double, std::milli>(b0 - a0).count(); };
             bt_run += msd(w0, w1);
             bt_commit += msd(w1, w2);
             ++bt_windows;
@@ -8556,7 +8626,7 @@ int main(int argc, char** argv) {
                     sl.ids.push_back(tok[first[t] + j]);
                     std::printf("BT %d %d\n", b, (int) y);
                     ++sl.produced;
-                    const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
+                    const bool eos = is_eos(y);
                     const char* fin = eos ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
                                     : sl.p + 2 > o.max_context ? "length" : nullptr;
                     if (fin != nullptr) {
@@ -8569,24 +8639,64 @@ int main(int argc, char** argv) {
                     sl.x = y;
                     sl.p += 1;
                 }
-                if (batch_mtp && sl.active) {
-                    // the last stage's final residual rows (ver.final_R_all() follows the chain), queued on the slot
-                    // drafter's own stream after the window's host sync, so its draft graph reads them (noon-at-cgn)
-                    const strata::core::OnDevice on_mtp(slot_mtp_dev);
-                    const size_t stride = (size_t) g.hc * (size_t) g.n_embd;
-                    if (cudaMemcpyAsync(slot_mtp_rows[(size_t) b].get(),
-                                        ver.final_R_all() + (size_t) first[t] * stride,
-                                        2 * stride * sizeof(float), cudaMemcpyDeviceToDevice,
-                                        slot_mtp[(size_t) b]->stream()) != cudaSuccess ||
-                        !slot_mtp[(size_t) b]->draft(2, outb + first[t], pos[first[t]], keep[b] - 1,
-                                                    sl.draft.data(), err)) {
-                        std::printf("ERR batch MTP slot %d: %s\n", b, err.c_str());
-                        return false;
+            }
+            std::fflush(stdout);   // the tokens out before the drafts (they reach the clients a draft round earlier)
+            if (batch_mtp) {
+                // the next drafts of every slot still live: the last stage's final residual rows of its group
+                // (ver.final_R_all() follows the chain), queued on the slot drafter's own stream after the window's
+                // host sync, so its draft graph reads them (noon-at-cgn).  A drafter that fails leaves its slot
+                // decoding without drafts until its next admission - never the engine down.
+                const strata::core::OnDevice on_mtp(slot_mtp_dev);
+                const size_t stride = (size_t) g.hc * (size_t) g.n_embd;
+                bool launched[MT] = {};
+                auto drop = [&](int b, const char* what) {
+                    BSlot& sl = bs[(size_t) b];
+                    sl.mtp_off = true;
+                    sl.draft_ready = false;
+                    sl.n_draft = 0;
+                    std::fprintf(stderr, "strata batch: slot %d decodes without MTP drafts from here (%s: %s)\n", b, what,
+                                 err.c_str());
+                    err.clear();
+                    (void) cudaGetLastError();
+                };
+                for (int t = 0; t < A; ++t) {
+                    const int b = active[t];
+                    BSlot& sl = bs[(size_t) b];
+                    if (!sl.active || sl.mtp_off) continue;
+                    sl.draft_ready = false;
+                    const int T = nrow[t];
+                    if (cudaMemcpyAsync(slot_mtp_rows[(size_t) b].get(), ver.final_R_all() + (size_t) first[t] * stride,
+                                        (size_t) T * stride * sizeof(float), cudaMemcpyDeviceToDevice,
+                                        slot_mtp[(size_t) b]->stream()) != cudaSuccess) {
+                        err = "the residual rows' copy failed";
+                        drop(b, "MTP");
+                        continue;
+                    }
+                    if (parallel) {   // STRATA_BATCH_MTP_PARALLEL: every slot's drafter at once, then the waits
+                        if (!slot_mtp[(size_t) b]->draft_launch(T, outb + first[t], pos[first[t]], keep[b] - 1, err)) {
+                            drop(b, "draft launch");
+                            continue;
+                        }
+                        launched[t] = true;
+                    } else if (!slot_mtp[(size_t) b]->draft(T, outb + first[t], pos[first[t]], keep[b] - 1,
+                                                            sl.draft.data(), err, sl.dprob.data(), 0.0f, &sl.n_draft)) {
+                        drop(b, "draft");
+                        continue;
+                    } else {
+                        sl.draft_ready = true;
+                    }
+                }
+                for (int t = 0; t < A && parallel; ++t) {
+                    if (!launched[t]) continue;
+                    const int b = active[t];
+                    BSlot& sl = bs[(size_t) b];
+                    if (!slot_mtp[(size_t) b]->draft_wait(sl.draft.data(), sl.dprob.data(), &sl.n_draft, err)) {
+                        drop(b, "draft");
+                        continue;
                     }
                     sl.draft_ready = true;
                 }
             }
-            std::fflush(stdout);
             bt_emit += msd(w2, Clock::now());
             strata::core::progress().busy.store(was_busy);
             if (!batch_on() && bt_windows > 0) {
@@ -8600,6 +8710,13 @@ int main(int argc, char** argv) {
                              (ver.ms_wait - bt_wait0) / w, (ver.ms_pool - bt_pool0) / w, bt_commit / w, bt_emit / w,
                              (drive.d.multi_misses - bt_miss0) / (w * L), (drive.d.cache_hits - bt_hits0) / (w * L),
                              (drive.d.pcie_experts - bt_pcie0) / (w * L), 1000.0 * bt_rows / std::max(wall, 1e-9), wall);
+                // ("avg rows" above: the rows KEPT, every slot's tokens; here the rows the windows carried)
+                if (batch_mtp)
+                    std::fprintf(stderr, "strata batch MTP: %.2f rows/window carried, %.2f drafts verified, %.2f accepted "
+                                         "(%.0f%%)%s\n", bt_wrows / w, bt_draft_rows / w, bt_draft_ok / w,
+                                 bt_draft_rows > 0 ? 100.0 * (double) bt_draft_ok / (double) bt_draft_rows : 0.0,
+                                 batch_mtp_drafts > 0 ? " (rows planned per slot, STRATA_BATCH_MTP_DRAFTS)" : "");
+                bt_wrows = bt_draft_rows = bt_draft_ok = 0;
                 for (size_t k = 0; k <= stages.size(); ++k) {
                     const std::string pr = (k == 0 ? ver : stages[k - 1]->ver).profile_report();
                     if (!pr.empty()) std::fprintf(stderr, "strata batch GPU stages, stage %zu (ms/window):%s\n", k + 1, pr.c_str());
@@ -11738,13 +11855,20 @@ int main(int argc, char** argv) {
                     sl.ids = live;
                     if (batch_mtp) {
                         const strata::core::OnDevice on_mtp(slot_mtp_dev);
-                        if (!slot_mtp[(size_t) admit_slot]->draft_first(1, ver.final_R_all(), sl.x,
-                                                                        sl.p - 1, sl.draft.data(), err)) {
-                            std::fprintf(stderr, "strata batch: MTP admission for slot %d failed: %s\n",
-                                         admit_slot, err.c_str());
-                            return 1;
+                        // (the drafts' probabilities too: STRATA_BATCH_MTP_DRAFTS plans the first window from them)
+                        if (!slot_mtp[(size_t) admit_slot]->draft_first(1, ver.final_R_all(), sl.x, sl.p - 1,
+                                                                        sl.draft.data(), err, sl.dprob.data(), 0.0f,
+                                                                        &sl.n_draft)) {
+                            // a fallback, not the engine down: this request decodes in its slot without drafts
+                            std::fprintf(stderr, "strata batch: MTP admission for slot %d failed (%s); it decodes "
+                                                 "without drafts\n", admit_slot, err.c_str());
+                            err.clear();
+                            (void) cudaGetLastError();
+                            sl.mtp_off = true;
+                            sl.n_draft = 0;
+                        } else {
+                            sl.draft_ready = true;
                         }
-                        sl.draft_ready = true;
                     }
                     sl.cvec = cvec_cached;
                     sl.img = !live_imgs.empty();   // pictures: not matched again by tokens alone, so not cached
