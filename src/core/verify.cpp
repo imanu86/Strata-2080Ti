@@ -3156,7 +3156,7 @@ bool Verifier::prestage(int T, const int32_t* tokens, int64_t pos0, const int32_
     return true;
 }
 
-bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string& err) {
+bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string& err, cudaEvent_t wait_on) {
     const OnDevice on_device(device_);
     if (fl_active_) { err = "verify: a window is already in flight on this verifier"; return false; }
     if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
@@ -3184,7 +3184,15 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
     std::atomic_thread_fence(std::memory_order_seq_cst);
     trace_ev("WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
     ms_host += ms_since(t0);
+    // FABLE: the host cost of the graph launch (1397 nodes on stage 1: ~1.2 ms on the critical path of a fresh window)
+    // is measured as the serial path's ms_launch; `wait_on` queues the graph behind the earlier stage's hand-off
+    const Clock::time_point t_launch = Clock::now();
+    if (wait_on != nullptr && cudaStreamWaitEvent(cs_, wait_on, 0) != cudaSuccess) {
+        err = "verify: the wait on the earlier stage's event failed";
+        return false;
+    }
     const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
+    ms_launch += ms_since(t_launch);
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
@@ -3390,8 +3398,9 @@ bool Verifier::pl_commit_async(int n_keep, std::string& err) {
 
 void Verifier::absorb_stats(Verifier& o) {
     ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
+    ms_launch += o.ms_launch;
     windows += o.windows;
-    o.ms_wait = o.ms_pool = o.ms_host = o.ms_commit = 0;
+    o.ms_wait = o.ms_pool = o.ms_host = o.ms_commit = o.ms_launch = 0;
     o.windows = 0;
     for (int k = 0; k < 2; ++k)
         for (int i = 0; i < kProfPer; ++i) { prof_sum_[k][i] += o.prof_sum_[k][i]; o.prof_sum_[k][i] = 0; }

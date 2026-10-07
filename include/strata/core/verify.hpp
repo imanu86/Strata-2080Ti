@@ -215,7 +215,13 @@ public:
     int device() const { return device_; }
     /// Capture every window size and the commit graph now (a capture syncs the stream: never with a window in flight).
     bool capture_all(std::string& err);
-    bool pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string& err);
+    /// `wait_on` (FABLE, STRATA_FP_EARLY_L1): an event the stage's stream waits for before the window's graph - the
+    /// earlier stage's `done_event()`, so a later stage's graph is launched (its host cost paid) while the earlier
+    /// stage still runs.  The host launch time goes to `ms_launch`.
+    bool pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string& err, cudaEvent_t wait_on = nullptr);
+    /// The event `pl_launch` records on the stage's stream right after the window's graph (and its profile copy):
+    /// the hand-off of the window in flight is written once it has passed.  Re-recorded by every pl_launch.
+    cudaEvent_t done_event() const { return ev_done_; }
     /// Stage a window ahead of its launch (positions, and the PLE rows from `ple_prev` = the two tokens before the
     /// window as they WILL be, their pages prefetched).  A later `pl_launch` of the same window (T, pos0, tokens, and
     /// `ss.ple_prev` equal to `ple_prev` by then) skips the staging; anything else stages again.
