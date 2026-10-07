@@ -1,11 +1,14 @@
-// src/kernels/fp_expert_bench.cpp - what the VRAM experts of a decode verify window cost, per kernel variant, per card.
+// src/kernels/fp_expert_bench.cpp - what the VRAM experts of a decode verify window cost, per kernel variant, per card,
+// per expert format pair.
 //
-//     build/fp_expert_bench [reps = 300] [device, -1 = all] [groups = 20]
+//     build/fp_expert_bench [reps = 300] [device, -1 = all] [groups = 20] [pairs = all]
 //
-// The model's own expert format (IQ3_S gate/up, IQ4_NL down, n_embd 2560, n_ff 640: a 2.33 MB blob per expert) through
-// `native_expert_grouped` (gate/up + SwiGLU + down) with the opt-in kernel variants STRATA_FP_EXPERT_V / native_expert_
-// set_fp_variant: 0 = the default kernels, 1 = IQ3_S codebook in shared memory, 2 = two rows per sub-warp, 3 = 1 + 2,
-// 4 = persistent gate/up and down (STRATA_FP_EXPERT_PERSIST_K blocks per SM, default 2).
+// The model's routed expert formats at its geometry (n_embd 2560, n_ff 640): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS
+// (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type pairs (e.g.
+// "21/20,16/42"); the default runs every one of the 5 x 2 pairs.  Each pair goes through `native_expert_grouped` (gate/up
+// + SwiGLU + down) with the opt-in kernel variants STRATA_FP_EXPERT_V / native_expert_set_fp_variant: 0 = the default
+// kernels, 4 = persistent gate/up and down (STRATA_FP_EXPERT_PERSIST_K blocks per SM, default 2); the IQ3_S / IQ4_NL pair
+// also 1 = IQ3_S codebook in shared memory, 2 = two rows per sub-warp, 3 = 1 + 2.
 //
 // For T = 1..4 tokens a verify window is built: every token picks 10 experts out of `groups` distinct ones (at most
 // 10 T; every expert picked by at least one token, a group holds the tokens that picked it, 1..T entries).  Per variant:
@@ -13,11 +16,11 @@
 // (median of 5 rounds).  The experts rotate over a pool of >= 96 MB of distinct synthetic blobs (random bytes, sane fp16
 // block scales, as b6_mmvq_bench), so every call reads its weights cold from DRAM as the decode does each layer.
 //
-// One line per (device, T, variant):  dev T v us GB/s pct identical|DIFFERENT   (GB/s = groups x blob bytes / call time;
-// pct = GB/s over the peak DRAM bandwidth 2 x memory clock x bus width / 8 of the device attributes, the DDR factor 2
-// of GDDR6).
+// One line per (device, T, pair, variant):  dev T gu/d v us GB/s pct identical|DIFFERENT   (GB/s = groups x blob bytes
+// / call time; pct = GB/s over the peak DRAM bandwidth 2 x memory clock x bus width / 8 of the device attributes, the
+// DDR factor 2 of GDDR6).
 // Lines starting with '#' are context.  Exit code 1 if any variant differs or a CUDA error occurred.  GPU time only.
-// STRATA_NO_SUB16_GU and STRATA_EXPERT_V2 route around the variants (all four rows would then be the default kernels).
+// STRATA_NO_SUB16_GU and STRATA_EXPERT_V2 route around the variants (every row would then be the default kernels).
 #include "strata/kernels/iq_kernels.hpp"
 
 #include <cuda_runtime.h>
@@ -29,15 +32,33 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <string>
 #include <vector>
 
 namespace K = strata::kernels;
 
 namespace {
 
-constexpr int kEmbd = 2560, kFf = 640, kTop = 10, kMaxT = 4, kGuType = 21, kDType = 20;
-constexpr int kIq3sBlock = 110, kIq4nlBlock = 18;   // block_iq3_s {d, qs[64], qh[8], signs[32], scales[4]}, block_iq4_nl {d, qs[16]}
+constexpr int kEmbd = 2560, kFf = 640, kTop = 10, kMaxT = 4;
 constexpr int kMaxEntries = kMaxT * kTop;           // every token picks exactly kTop experts
+
+struct Pair { int gu, d; };
+const Pair kModelPairs[] = { {16, 20}, {17, 20}, {18, 20}, {21, 20}, {22, 20}, {16, 42}, {17, 42}, {18, 42}, {21, 42}, {22, 42} };
+
+const char* type_name(int t) {
+    switch (t) {
+        case 16: return "IQ2_XXS"; case 17: return "IQ2_XS"; case 18: return "IQ3_XXS"; case 21: return "IQ3_S";
+        case 22: return "IQ2_S"; case 20: return "IQ4_NL"; case 42: return "Q2_0"; default: return "?";
+    }
+}
+// values per block (the i-quants' super-block, IQ4_NL's 32, Q2_0's 64); every block starts with its fp16 scale d
+int qk_of(int t) { return t == 20 ? 32 : t == 42 ? 64 : 256; }
+
+// the variants to run for a pair: 0 and 4 everywhere, 1-3 for the IQ3_S / IQ4_NL pair they were written for
+std::vector<int> variants_of(const Pair& p) {
+    if (p.gu == 21 && p.d == 20) return {0, 1, 2, 3, 4};
+    return {0, 4};
+}
 
 bool g_cuda_error = false;
 
@@ -53,22 +74,23 @@ uint16_t sane_half(std::mt19937& rng) {   // a finite fp16 of magnitude ~2^-10 .
     return (uint16_t) (((r >> 31) << 15) | ((5u + (r >> 10) % 5u) << 10) | (r & 0x3ffu));
 }
 
-// One expert blob [gate rows | up rows | down rows]: random bytes (any qs / qh / signs / scales nibble / IQ4_NL nibble
-// is a valid code) with a sane fp16 `d` in every block.
+// One expert blob [gate rows | up rows | down rows]: random bytes (any qs / qh / signs / scales nibble / grid index /
+// IQ4_NL nibble / Q2_0 pair is a valid code) with a sane fp16 `d` in every block (offset 0 of every format's block).
 void fill_blob(uint8_t* b, const K::NativeExpertLayout& L, std::mt19937& rng) {
     for (size_t i = 0; i + 4 <= L.bytes; i += 4) {
         const uint32_t r = rng();
         std::memcpy(b + i, &r, 4);
     }
-    const size_t gu_blocks = (size_t) 2 * (size_t) L.n_ff * (size_t) (L.n_embd / 256);   // gate, then up: contiguous
+    const size_t gu_block = K::iq_row_bytes(L.gu_type, qk_of(L.gu_type)), d_block = K::iq_row_bytes(L.d_type, qk_of(L.d_type));
+    const size_t gu_blocks = (size_t) 2 * (size_t) L.n_ff * (size_t) (L.n_embd / qk_of(L.gu_type));   // gate, then up: contiguous
     for (size_t k = 0; k < gu_blocks; ++k) {
         const uint16_t h = sane_half(rng);
-        std::memcpy(b + k * kIq3sBlock, &h, 2);
+        std::memcpy(b + k * gu_block, &h, 2);
     }
-    const size_t d_blocks = (size_t) L.n_embd * (size_t) (L.n_ff / 32);
+    const size_t d_blocks = (size_t) L.n_embd * (size_t) (L.n_ff / qk_of(L.d_type));
     for (size_t k = 0; k < d_blocks; ++k) {
         const uint16_t h = sane_half(rng);
-        std::memcpy(b + L.down_off + k * kIq4nlBlock, &h, 2);
+        std::memcpy(b + L.down_off + k * d_block, &h, 2);
     }
 }
 
@@ -130,7 +152,8 @@ struct StreamEvents {
 };
 
 bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& pool, size_t P, size_t stride,
-                const std::vector<float>& xh, const K::NativeExpertLayout& L, long long& bad) {
+                const std::vector<float>& xh, const K::NativeExpertLayout& L, const std::vector<int>& variants,
+                long long& bad) {
     if (!ck(cudaSetDevice(dev), "set device")) return false;
     cudaDeviceProp pr{};
     cudaGetDeviceProperties(&pr, dev);
@@ -187,7 +210,8 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
             K::native_expert_grouped(L, dptr + (i % P) * (size_t) G, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, stream);
         };
         std::vector<float> ref, res((size_t) NE * kEmbd);
-        for (int v = 0; v <= 4 && ok; ++v) {
+        for (size_t vi = 0; vi < variants.size() && ok; ++vi) {
+            const int v = variants[vi];
             K::native_expert_set_fp_variant(v);
             ok = ck(cudaMemset(dout, 0, (size_t) NE * kEmbd * sizeof(float)), "memset out");
             call(0);
@@ -195,7 +219,7 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
                  ck(cudaMemcpy(res.data(), dout, res.size() * sizeof(float), cudaMemcpyDeviceToHost), "copy out");
             if (!ok) break;
             bool same = true;
-            if (v == 0) {
+            if (vi == 0) {   // variant 0: the reference
                 ref = res;
                 long long nonfinite = 0;
                 for (float f : ref) nonfinite += std::isfinite(f) ? 0 : 1;
@@ -217,13 +241,33 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
             std::sort(rounds, rounds + 5);
             const double us = rounds[2];
             const double gbps = (double) G * (double) L.bytes / (us * 1e-6) / 1e9;
-            std::printf("%d %d %d %.1f %.1f %.1f%% %s\n", dev, T, v, us, gbps, peak > 0.0 ? 100.0 * gbps * 1e9 / peak : 0.0,
-                        same ? "identical" : "DIFFERENT");
+            std::printf("%d %d %d/%d %d %.1f %.1f %.1f%% %s\n", dev, T, L.gu_type, L.d_type, v, us, gbps,
+                        peak > 0.0 ? 100.0 * gbps * 1e9 / peak : 0.0, same ? "identical" : "DIFFERENT");
             if (!same) ++bad;
         }
     }
     K::native_expert_set_fp_variant(variant_before);
     return ok;
+}
+
+// "gu/d,gu/d,..." -> pairs; false on a malformed item
+bool parse_pairs(const std::string& spec, std::vector<Pair>& out) {
+    size_t i = 0;
+    while (i < spec.size()) {
+        size_t j = spec.find(',', i);
+        if (j == std::string::npos) j = spec.size();
+        const std::string item = spec.substr(i, j - i);
+        i = j + 1;
+        if (item.empty()) continue;
+        const size_t s = item.find('/');
+        if (s == std::string::npos || s == 0 || s + 1 >= item.size()) return false;
+        Pair p;
+        p.gu = std::atoi(item.substr(0, s).c_str());
+        p.d = std::atoi(item.substr(s + 1).c_str());
+        if (p.gu <= 0 || p.d <= 0) return false;
+        out.push_back(p);
+    }
+    return !out.empty();
 }
 
 }  // namespace
@@ -233,6 +277,15 @@ int main(int argc, char** argv) {
     const int reps = argc > 1 ? std::max(20, std::atoi(argv[1])) : 300;
     const int only = argc > 2 ? std::atoi(argv[2]) : -1;
     const int groups_req = argc > 3 ? std::min(64, std::max(kTop, std::atoi(argv[3]))) : 20;
+    std::vector<Pair> pairs;
+    if (argc > 4 && std::string(argv[4]) != "all") {
+        if (!parse_pairs(argv[4], pairs)) {
+            std::printf("fp_expert_bench: pairs '%s' is not a comma list of gu/down ggml type ids\n", argv[4]);
+            return 1;
+        }
+    } else {
+        pairs.assign(std::begin(kModelPairs), std::end(kModelPairs));
+    }
     int n_dev = 0;
     if (!ck(cudaGetDeviceCount(&n_dev), "device count") || n_dev == 0) {
         std::printf("fp_expert_bench: no CUDA device\n");
@@ -242,33 +295,40 @@ int main(int argc, char** argv) {
         std::printf("fp_expert_bench: device %d, only %d present\n", only, n_dev);
         return 1;
     }
-    if (!K::native_expert_supported(kGuType, kDType, kEmbd, kFf)) {
-        std::printf("fp_expert_bench: native_expert_supported(%d, %d, %d, %d) is false\n", kGuType, kDType, kEmbd, kFf);
-        return 1;
+    for (const Pair& p : pairs) {
+        if (!K::native_expert_supported(p.gu, p.d, kEmbd, kFf)) {
+            std::printf("fp_expert_bench: native_expert_supported(%d, %d, %d, %d) is false\n", p.gu, p.d, kEmbd, kFf);
+            return 1;
+        }
     }
     for (const char* name : {"STRATA_NO_SUB16_GU", "STRATA_EXPERT_V2"}) {
         const char* v = std::getenv(name);
         if (v != nullptr && v[0] != '\0' && v[0] != '0') std::printf("# warning: %s is set, the variants are bypassed\n", name);
     }
     K::iq_set_old_kernels(false);
-    const K::NativeExpertLayout L = K::native_expert_layout(kGuType, kDType, kEmbd, kFf);
-    const size_t stride = (L.bytes + 255) / 256 * 256;
-    const size_t P = std::max<size_t>((size_t) (96u << 20) / stride + 1, (size_t) 2 * (size_t) groups_req);
-    std::printf("# gate/up type %d, down type %d, n_embd %d, n_ff %d: blob %.2f MB (gu_row %d, d_row %d), pool %.0f MB\n",
-                kGuType, kDType, kEmbd, kFf, (double) L.bytes / 1e6, (int) L.gu_row, (int) L.d_row,
-                (double) (P * stride) / 1e6);
-    std::printf("# dev T v us GB/s pct identical|DIFFERENT\n");
-    std::mt19937 rng(77u);
-    std::vector<uint8_t> pool(P * stride, 0);
-    for (size_t i = 0; i < P; ++i) fill_blob(pool.data() + i * stride, L, rng);
-    std::vector<float> xh((size_t) kMaxT * kEmbd);
-    std::normal_distribution<float> nd(0.0f, 1.0f);
-    for (float& v : xh) v = nd(rng);
+    std::printf("# n_embd %d, n_ff %d, %d pair(s); variants 0 and 4 per pair, 1-3 for 21/20\n", kEmbd, kFf, (int) pairs.size());
+    std::printf("# dev T gu/d v us GB/s pct identical|DIFFERENT\n");
     long long bad = 0;
     bool ok = true;
-    for (int dev = 0; dev < n_dev; ++dev) {
-        if (only >= 0 && dev != only) continue;
-        ok = run_device(dev, reps, groups_req, pool, P, stride, xh, L, bad) && ok;
+    for (const Pair& p : pairs) {
+        if (!ok) break;
+        const K::NativeExpertLayout L = K::native_expert_layout(p.gu, p.d, kEmbd, kFf);
+        const size_t stride = (L.bytes + 255) / 256 * 256;
+        const size_t P = std::max<size_t>((size_t) (96u << 20) / stride + 1, (size_t) 2 * (size_t) groups_req);
+        std::printf("# pair %d/%d: gate/up %s, down %s: blob %.2f MB (gu_row %d, d_row %d), pool %.0f MB\n", p.gu, p.d,
+                    type_name(p.gu), type_name(p.d), (double) L.bytes / 1e6, (int) L.gu_row, (int) L.d_row,
+                    (double) (P * stride) / 1e6);
+        std::mt19937 rng(77u + (unsigned) (p.gu * 131 + p.d));
+        std::vector<uint8_t> pool(P * stride, 0);
+        for (size_t i = 0; i < P; ++i) fill_blob(pool.data() + i * stride, L, rng);
+        std::vector<float> xh((size_t) kMaxT * kEmbd);
+        std::normal_distribution<float> nd(0.0f, 1.0f);
+        for (float& v : xh) v = nd(rng);
+        const std::vector<int> variants = variants_of(p);
+        for (int dev = 0; dev < n_dev; ++dev) {
+            if (only >= 0 && dev != only) continue;
+            ok = run_device(dev, reps, groups_req, pool, P, stride, xh, L, variants, bad) && ok;
+        }
     }
     std::printf("\nfp_expert_bench: %s (%lld variant comparisons differ%s)\n", (bad || !ok || g_cuda_error) ? "FAILED" : "ok",
                 bad, (!ok || g_cuda_error) ? ", CUDA error" : "");
