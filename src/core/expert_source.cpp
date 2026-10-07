@@ -3510,6 +3510,9 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     arena_ = a;
     base_ = a->data();
     pinned_bytes_ = a->registered_bytes;
+    arena_capacity_ = a->capacity;
+    large_pages_ = a->backing == PageBacking::LargePages;
+    experts_bin_ = from_gguf ? std::string() : path;   // STRATA_RAM_DEDUP: where a dropped expert is re-read from
     // plan v0.3 P6: device aliases of the mapped registration, for the PCIe share of the misses
     dev_slice_.clear();
     slice_bytes_ = a->slice_bytes;
@@ -3544,6 +3547,7 @@ void ArenaExpertSource::close() {
     map_ = nullptr;
     map_bytes_ = 0;
     inputs_.clear();
+    dedup_.reset();   // before the arena: its streams and events go first, the pages after
     if (arena_ != nullptr) {
         delete (PinnedArena*) arena_;
         arena_ = nullptr;
@@ -3551,6 +3555,22 @@ void ArenaExpertSource::close() {
     base_ = nullptr;
     blobs_ = 0;
     n_expert_ = 0;
+    arena_capacity_ = 0;
+    large_pages_ = false;
+    experts_bin_.clear();
+}
+
+bool ArenaExpertSource::dedup_arm(uint64_t bounce_bytes, std::string& err) {
+    if (dedup_ && dedup_->armed()) return true;
+    if (arena_ == nullptr || base_ == nullptr) { err = "the arena is not loaded"; return false; }
+    if (map_ != nullptr) { err = "the arena is a read-only file mapping (STRATA_ARENA_MMAP)"; return false; }
+    auto d = std::make_unique<RamDedup>();
+    const int64_t n_layers = n_expert_ > 0 ? blobs_ / n_expert_ : 0;
+    if (!d->arm((uint8_t*) base_, arena_capacity_, pinned_bytes_, large_pages_, n_layers, n_expert_, experts_bin_, gguf_,
+                bounce_bytes, err))
+        return false;
+    dedup_ = std::move(d);
+    return true;
 }
 
 void ArenaExpertSource::prefetch(int64_t layer, int64_t expert) {
@@ -3607,6 +3627,9 @@ const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
     const int64_t idx = layer * n_expert_ + expert;
     if (idx < 0 || idx >= blobs_) return nullptr;
     ++reads_;
+    // STRATA_RAM_DEDUP: a dropped expert (its slot held it) comes back first - its copy in flight lands, or the
+    // file is read - so the pointer below holds the same bytes it always did.  One atomic load when it is present.
+    if (dedup_ && !dedup_->present(layer, expert) && !dedup_->ensure(layer, expert)) return nullptr;
     // Pointer arithmetic into resident memory.  No fault, no copy, no mapping - which is the entire point of
     // this class over `FileExpertSource`.
     return base_ + strata::kernels::cpu::expert_layout().blob_offset(layer, expert);

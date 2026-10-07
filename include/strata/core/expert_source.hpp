@@ -24,6 +24,7 @@
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/exchange_storage.hpp"
 #include "strata/core/hit_hook.hpp"
+#include "strata/core/ram_dedup.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 
 #include <algorithm>
@@ -868,8 +869,22 @@ public:
     double load_read_seconds() const { return load_read_s_; }
     double load_copy_seconds() const { return load_copy_s_; }
 
+    /// STRATA_RAM_DEDUP=1 (ram_dedup.hpp): arms the de-duplication of the arena against the VRAM tiers - the driver
+    /// then `drop`s the RAM pages of the experts its caches hold and `evict`s before a slot is overwritten.  `blob`
+    /// brings a dropped expert back (its copy in flight, else the model file) before handing out its pointer.
+    /// False with `err` when it cannot run here (a large-page arena, a mapped arena, no bounce memory).
+    bool dedup_arm(uint64_t bounce_bytes, std::string& err);
+    RamDedup* dedup() { return dedup_.get(); }
+    /// The CUDA-registered prefix of the arena (bytes from its start): never decommitted.
+    uint64_t registered_bytes() const { return pinned_bytes_; }
+    uint64_t arena_bytes() const { return arena_capacity_; }
+
 private:
     void* arena_ = nullptr;          ///< the PinnedArena, owned
+    std::unique_ptr<RamDedup> dedup_;
+    uint64_t arena_capacity_ = 0;
+    bool large_pages_ = false;
+    std::string experts_bin_;        ///< the pack's experts.bin when the arena was loaded from it (else empty)
     void* map_ = nullptr;            ///< STRATA_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
     uint64_t map_bytes_ = 0;
     std::vector<const uint8_t*> dev_slice_;   ///< device alias of each registered slice (or of the whole range)
