@@ -155,17 +155,65 @@ compilatore può smentirla; una variante `DIFFERENT` non si usa.
 
 - Commit: `f33473da FABLE-KERNEL-Varianti opt-in dei kernel gate/up e down degli esperti VRAM con micro-bench bitwise`,
   `cf84a08f FABLE-KERNEL-Aggiungi la variante persistente dei kernel esperti con prefetch in registri …`.
-- Variabile: `STRATA_FP_EXPERT_V=0..4` (setter `native_expert_set_fp_variant`), solo per la coppia IQ3_S/IQ4_NL a
-  2560/640: 1 = codebook IQ3_S in shared memory (gate/up); 2 = due righe per sub-warp con i load di entrambe prima dei
-  dp4a (gate/up e down); 3 = 1+2; 4 = kernel persistente (griglia = k×SM, `STRATA_FP_EXPERT_PERSIST_K`, codebook
-  caricato una volta per blocco, doppio buffer in registri; cp.async solo su sm_86).
-- Bench: `fp_expert_bench [reps] [device] [groups]` — T 1..4, ~20 gruppi, pool di blob > L2, righe
-  `dev T v us GB/s %peak identical|DIFFERENT`. Esiste anche `native_expert_bench` su righe GGUF reali.
+- Variabile: `STRATA_FP_EXPERT_V=0..4` (setter `native_expert_set_fp_variant`, leva a caldo `lab=EXPERT_V:n`).
+  1 = codebook IQ3_S in shared memory (gate/up); 2 = due righe per sub-warp con i load di entrambe prima dei dp4a
+  (gate/up e down); 3 = 1+2 — queste tre solo per la coppia IQ3_S/IQ4_NL a 2560/640. 4 = kernel persistente (griglia =
+  k×SM, `STRATA_FP_EXPERT_PERSIST_K`, default 2; codebook caricato una volta per blocco; doppio buffer in registri
+  dell'item successivo), vedi 6a-bis per la copertura.
+- Bench: `fp_expert_bench [reps] [device] [groups] [coppie]` — T 1..4, ~20 gruppi, pool di blob > L2, righe
+  `dev T gu/d v us GB/s %peak identical|DIFFERENT`. Esiste anche `native_expert_bench` su righe GGUF reali.
 - Cosa misurare: la variante bitwise più veloce su ciascuna scheda (obiettivo ≥ 65% del picco contro 41-43%), poi
   nel decode `STRATA_FP_EXPERT_V=<n>` sui ms/window e sul profilo GPU (`VRAM hits`).
 - Attesa: fino a ~3 ms per finestra a 70% del picco; realisticamente 1-2 ms se una variante regge.
 - Non verificato: compilazione (template con `if constexpr` su array di dimensione dipendente, `S26IQ3S::load<STG>`),
   pressione dei registri delle varianti a due righe (`__launch_bounds__(256)`), bitwise.
+
+### 6a-bis. Variante persistente su tutti i formati del modello — `STRATA_FP_EXPERT_V=4` (branch `lab/expert-persist`)
+
+- Branch `lab/expert-persist` su `lab/fable-plan` (93be6e0); commit `FABLE-KERNEL-…` (vedi `git log`). Scritto senza GPU:
+  **compilato sì** (`iq_kernels.cu` con nvcc 12.6 per sm_75 + sm_86, host MSVC; `fp_expert_bench.cpp`), **provato no**.
+- Perché: la variante 4 di cf84a08f copriva la sola coppia IQ3_S/IQ4_NL, cioè 13 strati su 48 per gate/up e 18 su 48
+  per la down. Il profilo nsys dà gli esperti routed in VRAM al 43% del picco sulla 3060 e al 47% sulla 2080 Ti; a 70%
+  valgono ~2,5 ms per finestra. La causa: ogni blocco gate/up (16 righe, 10-13 KB di pesi) copia prima il codebook in
+  shared (2/4/8 KB, due `__syncthreads`), ogni thread fa 5 elementi con load da 16 bit; la down ha righe da 180-360 B e
+  copia hq in shared con due sync per chunk.
+- Copertura (`kFpPersistGu` / `kFpPersistDown` in `iq_kernels.cu`): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18),
+  IQ3_S (21), IQ2_S (22) a n_embd 2560 (`FpGu<TG>`); down IQ4_NL (20) e Q2_0 (42) a n_ff 640 (`FpDown<TD>`). Ogni ruolo
+  decide da sé: uno strato IQ2_XS/Q2_0 ha entrambi i kernel persistenti, un ruolo con formato non coperto tiene il
+  kernel di default. Le forme sono quelle del GGUF del modello (`layout.hpp`: n_ff 640; `native_expert_bench`: H 2560).
+- Meccanica: griglia k×SM (`fp_persist_blocks`), item = (gruppo, tile di righe) in ordine fisso; tile = le righe di un
+  blocco del kernel di default (16 gate/up; 32 down IQ4_NL, 16 down Q2_0) sullo stesso layout di sub-warp (16/8/16 lane).
+  `FpGu<TG>::Raw` = le parole che `Split<TG>::load` legge per uno step k di una lane (3-4 registri), caricate con `__ldg`
+  a 16/8 bit (`ld.global.nc`: i blocchi ggml sono allineati a 2 byte, un load più largo non è legale; valido su sm_75 e
+  sm_86, niente cp.async né altro da sm_80+); `decode()` è l'aritmetica di `Split<TG>::load` sulle stesse parole col
+  codebook dalla shared (copiato una volta per blocco: 1-8 KB). I 5 step della lane sono sommati nell'ordine di
+  `row_dot_80_sub16` (t, t+32, t+64 → s; t+16, t+48 → s16; `__fadd_rn`; xor 8-4-2-1). Down IQ4_NL: ordine di
+  `row_dot_40_sub8`; Q2_0: `row_dot_20_sub16` (2 step, il secondo solo per t < 4). Mentre un item lavora, i raw word del
+  successivo sono già in volo.
+- Registri: `__launch_bounds__(256, 2)` = 128 registri (knob di build `STRATA_FP_PERSIST_MINB`, default 2; 1 = fino a
+  255 registri a 8 warp/SM). Il gate/up di cf84a08f (doppio buffer pieno: `cur` + `nxt`, 40 registri vivi per tutto
+  l'item) spillava 360 B per thread con STL/LDL nei percorsi dei chunk (ptxas `-v`, e così la prima stesura di questo
+  branch su tutti i formati: 80-360 B). Due rimedi, entrambi bitwise-neutri: (a) i chunk da 3-4 entry girano come due
+  passate da ≤ 2 colonne (stessa catena di somme per colonna; si ripete solo la decodifica dai raw word, ALU); (b)
+  *refill rotante* invece del secondo buffer — nell'ultima passata dell'item, appena lo step j è consumato il suo slot
+  carica lo stesso step dell'item successivo (`fp_pchunk80<…, REFILL>`): stesso anticipo di un item intero, metà dei
+  registri raw. La down tiene il doppio buffer (IQ4_NL 117/113 registri, Q2_0 93/97, zero spill). Esito ptxas `-v`
+  (nvcc 12.6, sm_75 / sm_86, spill stores/loads in byte per thread): IQ2_XXS 0/0 · IQ3_XXS 0/0 (126 registri) · IQ2_S
+  24/8 · 0/0 · IQ2_XS 52/24 · 68/32 · **IQ3_S 340/424 · 364/468** (i 4 registri raw per step e la decodifica con qh
+  restano sopra il tetto: stesso ordine di cf84a08f). Per IQ3_S (13 strati) provare `-DSTRATA_FP_PERSIST_MINB=1` al
+  bench; se vince, il knob può diventare per formato.
+- Misura: `fp_expert_bench [reps=300] [device=-1] [groups=20] [coppie=all]`; `all` = le 10 coppie gate/up × down del
+  modello (5 × 2), oppure `21/20,16/42`. Per ogni coppia, T 1..4, varianti 0 e 4 (0-4 per 21/20), riga
+  `dev T gu/d v us GB/s %peak identical|DIFFERENT`, exit 1 se una riga è `DIFFERENT`. Comando: `fp_expert_bench 300 -1
+  20` (entrambe le schede, tutte le coppie; ~1-2 min). Poi nel decode `STRATA_FP_EXPERT_V=4` (o `lab=EXPERT_V:4` per
+  richiesta, ricattura dei grafi alla finestra seguente) B A B sui ms/window, testo identico.
+- Rischi: (1) bitwise — l'argomento è sul codice (stesse parole, stesse operazioni intere, stesse somme float nello stesso
+  ordine), ma la contrazione FMA o un riordino del compilatore lo possono smentire: fa fede il bench (`identical` su
+  ogni riga); (2) pressione dei registri: se ptxas spilla ancora, provare `STRATA_FP_EXPERT_PERSIST_K=1` o alzare a
+  `(256, 1)` (meno warp per SM); (3) la down Q2_0 ha solo 20 chiamate per riga: metà delle lane carica un solo step, il
+  guadagno atteso è minore; (4) la codebook IQ2_S da 8 KB per blocco limita i blocchi per SM solo via shared (64 KB su
+  Turing: 2 blocchi stanno); (5) `STRATA_FP_EXPERT_PERSIST_K` legge il conteggio SM del device corrente al primo lancio
+  (cache per device): nei grafi catturati il valore è cotto.
 
 ### 6b. Lettura hc BF16 — `STRATA_FP_HC_FUSE_NORM`
 
