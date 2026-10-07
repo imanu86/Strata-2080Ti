@@ -441,13 +441,17 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         cudaMemcpy(ident_, id.data(), id.size() * 4, cudaMemcpyHostToDevice);
     }
     // --pipeline-windows 2 (the forcing graphs): the chain shares its card with stage 1's windows and the next launch
-    // on stage 0 waits for it, so its stream gets the highest priority there (STRATA_MTP_PRIORITY=0: the default)
+    // on stage 0 waits for it, so its stream gets the highest priority there (STRATA_MTP_PRIORITY=0: the default
+    // priority).  FABLE: on the owner's two-card split the chain's steps inflate stage 1's windows (0.73-0.84 ms per
+    // step at the highest priority), so STRATA_MTP_PRIORITY=-1 puts the chain stream at the LOWEST priority: the
+    // windows go first and the chain fills the gaps.  1 (default): highest; 0: the device default; -1: lowest.
     bool prio = false;
 #if !defined(STRATA_USE_HIP)   // (HIP: the default priority)
-    static const bool hi_prio = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr || std::atoi(v) != 0; }();
+    static const int prio_mode = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr ? 1 : std::atoi(v); }();
     int prio_lo = 0, prio_hi = 0;
-    if (force_on_ && hi_prio && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
-        prio = cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_hi) == cudaSuccess;
+    if (force_on_ && prio_mode != 0 && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
+        prio = cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_mode > 0 ? prio_hi : prio_lo) == cudaSuccess;
+    if (prio && prio_mode < 0) std::fprintf(stderr, "strata mtp: STRATA_MTP_PRIORITY=-1: the chain stream at the lowest priority\n");
     cudaGetLastError();
 #endif
     if (!prio && cudaStreamCreateWithFlags(&cs_, cudaStreamNonBlocking) != cudaSuccess) { err = "mtp: stream"; return false; }

@@ -117,7 +117,8 @@ public:
     // wait), its first `n_force` steps fed the given tokens instead of their own picks (teacher forcing: the drafts of
     // a window already in flight), each output read once the event after its step has completed.
     /// Before `load`: the round/step graphs get the forcing kernel (a no-op while its token is -1), and the drafter's
-    /// stream the highest priority (STRATA_MTP_PRIORITY=0: the default priority).
+    /// stream the highest priority (STRATA_MTP_PRIORITY=0: the default priority; -1: the lowest, so stage 1's windows
+    /// go first on a shared card).
     void set_force_capture(bool on) { force_on_ = on; }
     /// The rows the next round reads (null: the bound `window_R`), copied into the bound buffer before the round.
     void set_source_R(const float* rows) { src_R_ = rows; }
