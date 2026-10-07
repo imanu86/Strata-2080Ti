@@ -9250,9 +9250,27 @@ int main(int argc, char** argv) {
             int64_t slot_tokens = 0;
             bool resumed_from0 = false;   // a prompt read parked in a slot (BYIELD) that had started at token 0
             const ConvCheckpoint* slot_ck = nullptr;   // the slot's checkpoint the prompt continues from (else its end)
+            // STRATA_BATCH_SHARE_ACTIVE=1 (opt-in, lab/multichat): a slot still decoding is a source too, through the
+            // checkpoint its admission kept (the turn boundary: e.g. a long shared system prompt).  Its K/V below that
+            // checkpoint is never written again while it decodes (cells only append past it), the copy runs between
+            // its windows on this thread, and not with --batch-groups (groups in flight on the stages).
+            static const bool share_active = [] {
+                const char* e = std::getenv("STRATA_BATCH_SHARE_ACTIVE");
+                return e != nullptr && e[0] == '1';
+            }();
             if (o.prompt_cache > 0 && req_imgs.empty())
                 for (int b = 0; b < (int) bs.size(); ++b) {
                     const BSlot& sl = bs[(size_t) b];
+                    const bool live_src = share_active && !piped && sl.active && !sl.partial && !sl.img;
+                    if (live_src && sl.cvec == want_cvec) {
+                        for (const ConvCheckpoint& c : sl.checks)
+                            if ((int64_t) c.ids.size() > std::max(resume, slot_tokens) && starts_with(c.ids, c.imgs)) {
+                                slot_source = b;
+                                slot_tokens = (int64_t) c.ids.size();
+                                slot_ck = &c;
+                            }
+                        continue;
+                    }
                     if (sl.active || !sl.cached || sl.cvec != want_cvec) continue;
                     if ((int64_t) sl.ids.size() > std::max(resume, slot_tokens) && starts_with(sl.ids, {})) {
                         slot_source = b;
