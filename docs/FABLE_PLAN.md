@@ -253,6 +253,42 @@ compilatore può smentirla; una variante `DIFFERENT` non si usa.
   `verify.cpp`, `generate.cpp`, `peer_experts.cpp`, `remote_experts.cpp` solo riletti: un parametro in coda e una leva),
   provato no.
 
+#### `0t2` vince al bench ma non nel decode: audit dei percorsi, contatore, leva a caldo
+
+Bench su 0ec2b08 (owner): a T=1 `0t2` = 1,32-1,43× sulla 2080 Ti su tutte le 10 coppie (1,04-1,15× sulla 3060),
+bitwise; V4 `auto` peggio di `0t2`. Nel decode (B A B, `STRATA_FP_DEF_TILES_T1=2`, layer split, pipeline 2 finestre,
+grafi) l'attesa GPU per finestra non scende (L02: A 14,51 ms, B 14,64/14,48).
+
+- **Percorsi che lanciano gli esperti routed nel decode** (grep di `native_expert_grouped`): uno solo per le finestre di
+  verifica, `Verifier::record_window` → lambda `post` → `grouped` → `native_expert_grouped(…, gy, n)`, con `n = te - tb` del
+  gruppo di finestra; usato dalla cattura `capture(T)` per ogni T in 1..max_t (`capture_all`), da `run(T)` (seriale) e da
+  `pl_launch(T)` (pipeline) che lanciano `exec_[T]` con T = righe reali. A T=1 `G = 1` (lo split vale da T ≥ 2),
+  `tb=0, te=1`, quindi **tokens = 1 nel grafo T=1, senza padding**: `cap = n·K` cresce con n, `capx = max_t·K` è solo la
+  taglia dei buffer del piano. Il drafter MTP (`mtp.cpp`) usa `moe_grouped_s2` (formato S2, non native): non passa di
+  qui e non è toccato dalla leva; `layer.cpp` è il prompt (`native_moe`). `peer_experts`/`remote_experts` passano
+  `n_tok` (modalità peer/remote, non il layer split). `STRATA_EXPERT_V2=1` (S26, bypassa `launch_gu` per 21/20) è un
+  default solo gfx1151 (`arch_defaults.cpp`): su CUDA è spento se non impostato a mano.
+- **Il sospetto più concreto**: `STRATA_FP_DEF_TILES_T1` era solo una variabile d'ambiente letta all'avvio
+  (`g_fp_def_tiles_t1`), non una leva `lab=`: in un B A B fatto con `lab=` nello stesso processo i tre bracci hanno lo
+  stesso valore; e con la variabile impostata in tutti e tre i processi idem. Ora è anche leva a caldo
+  `lab=DEF_TILES_T1:k` (`fp_lab.hpp`, setter `native_expert_set_fp_def_tiles_t1`, ricattura dei grafi come
+  `EXPERT_V`): B = `lab=DEF_TILES_T1:2`, A = senza chiave, stesso processo. Seconda ipotesi: la quota VRAM a T=1 nel
+  layer split è piccola rispetto alla finestra (hit VRAM vs PCIe e il resto dello stadio): il guadagno atteso è
+  (tempo esperti VRAM a T=1) × (1 − 1/1,35), cioè ~0,3 ms per ms di esperti VRAM; con 42% di finestre a T=1 può restare
+  sotto il rumore del B A B. Il contatore sotto distingue i due casi.
+- **Contatore (commit `FABLE-KERNEL-Conta sul device i lanci…`)**: con la leva accesa ogni `native_expert_grouped` lancia
+  anche `fp_tiles_count_kernel` (un blocco, dentro il grafo: conta i **replay**, un contatore host conterebbe le catture,
+  una per stadio e T) con lo slot di ciò che la chiamata ha avuto: T=1 tiled · T=1 ma V4 · T=1 ma S26/S27 · T=1 ma
+  forma/switch · T ignoto (chiamante senza `tokens`) · T>1. A fine richiesta (`generate.cpp`, prima delle righe
+  `strata pipeline:`), sempre con la leva accesa: `strata expert tiles T1 (STRATA_FP_DEF_TILES_T1=k): N launches at T=1
+  tiled, M launches at T=1 not tiled (a persistent V4, b S26/S27 path, c shape or switch), U launches with T unknown, K
+  launches at T>1 [per device: …]`, azzerato dopo la stampa. Atteso con 600 finestre di cui 254 a T=1 e 32 strati sullo
+  stadio 1: `tiled` ≈ 254 × (16 + 32) chiamate (una per strato e gruppo, PCIe comprese), `T>1` ≈ 346 × 2 gruppi × 48;
+  se `tiled` è 0 la leva non scatta (leggere il motivo); se è giusto, il collo è altrove e si misura con
+  `STRATA_VERIFY_PROFILE=1` lo stadio degli esperti VRAM a T=1 contro T=2.
+- **Costo del contatore**: un kernel da un blocco per chiamata (~1-2 µs nel grafo, ~48-96 per finestra): acceso solo
+  con la leva, da spegnere (`DEF_TILES_T1:1`) per la misura finale.
+
 ### 6b. Lettura hc BF16 — `STRATA_FP_HC_FUSE_NORM`
 
 - Commit: `12188f2e FABLE-KERNEL-Fondi la norm nella proiezione down della lettura hc con micro-bench bitwise`,
