@@ -1244,7 +1244,8 @@ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
             cc_major[dev] = w && (!std::strcmp(w, "1") || !std::strcmp(w, "select")) ? 7 : strata::cc_major_of(major);
         }
         if (cc_major[dev] < 8) {
-            // no TF32 tensor cores: the FP32 tiled kernel (STRATA_SELECT_SIMT=0: false, the caller's warp kernel)
+            // no TF32 tensor cores: keep the fork's established FP32 tiled-kernel default. Upstream opts in because
+            // the sum order differs from the warp kernel; STRATA_SELECT_SIMT=0 keeps the caller's warp kernel here.
             static const bool simt = [] {
                 const char* v = std::getenv("STRATA_SELECT_SIMT");
                 return v == nullptr || v[0] != '0';
