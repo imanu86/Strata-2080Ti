@@ -74,13 +74,16 @@ void fused_gr_set_fast(int on);
 void fused_gr_check();
 int fused_gr_variant();
 
-/// STRATA_FP_HC_FUSE_NORM=1 (opt-in, CUDA only, default off; read once; this setter overrides it, -1 = the environment):
-/// on a card whose read runs staged, the norm launch disappears - every block of the down projection recomputes rs and
-/// the xn tiles it needs with the norm kernels' own arithmetic and order (the xn scratch, rs and every other output are
-/// still written, by one block each), so the result is bitwise the staged read's.  `fused_gr_check` verifies it on the
-/// card first (when the flag is on at that moment - set it before the check) and falls back loudly; until then, or on a
-/// card running plain/split, the flag changes nothing.  `fused_gr_fp_fuse_norm_active` is true when the multi read on the
-/// current card runs it (flag on, check passed, staged).  Decide before a decode graph is captured.
+/// STRATA_FP_HC_FUSE_NORM=1 or 2 (opt-in, CUDA only, default off; read once; the setter overrides it with 0 / 1 / 2,
+/// -1 = the environment): on a card whose read runs staged, the norm launch disappears - every block of the down
+/// projection recomputes rs and the xn tiles it needs with the norm kernels' own arithmetic and order (the xn scratch,
+/// rs and every other output are still written, by one block each), so the result is bitwise the staged read's.  Level
+/// 1 keeps the 40 + 1 blocks of 8 row warps; level 2 runs 80 + 1 blocks of the same 256 threads with only warps 0-3
+/// owning dot rows (the W4 row layout).  `fused_gr_check` verifies the wanted level on the card first (when the flag
+/// is set at that moment - set it before the check; a changed level is checked on the next call) and falls back loudly;
+/// until then, or on a card running plain/split, the flag changes nothing.  `fused_gr_fp_fuse_norm_active` is true when
+/// the multi read on the current card runs the wanted level (flag on, that level checked, staged).  Decide before a
+/// decode graph is captured.
 void fused_gr_set_fp_fuse_norm(int on);
 bool fused_gr_fp_fuse_norm_active();
 

@@ -566,8 +566,8 @@ __global__ void __launch_bounds__(THREADS) gr_up_v3_kernel(GrMulti m, const floa
 //    accumulates its chunks lane + 32 q in ascending order, as in the plain read with either tile.  Before sm_80
 //    (and on HIP) the staging is a plain copy: the same bits, only not asynchronous.
 // kHcFused (STRATA_FP_HC_FUSE_NORM, CUDA only, never stored as a card's variant): staged, with the norm folded into
-// the down projection's kernel.
-constexpr int kHcPlain = 1, kHcSplit = 2, kHcStaged = 3, kHcFused = 4;
+// the down projection's kernel; kHcFusedW4 (STRATA_FP_HC_FUSE_NORM=2): the same on 80 + 1 blocks, 4 row-owning warps each.
+constexpr int kHcPlain = 1, kHcSplit = 2, kHcStaged = 3, kHcFused = 4, kHcFusedW4 = 5;
 constexpr int H_TILE = 1280;                          // staged tile: half a stream = 160 chunks of 8, 5 per lane
 constexpr int HQ = H_TILE / 8 / 32;
 constexpr int N_HTILES = D / H_TILE;                  // 8
@@ -811,19 +811,25 @@ __device__ __forceinline__ void fused_store_tile(const GrMulti& m, int T, int h,
 }
 
 // Dynamic shared memory: as gr_down_staged_kernel's (2 buffers x [T][2][160] float4).  256 threads (the norm's
-// THREADS: its reduction tree depends on them), 41 blocks; the staged kernel's W4 variant is not folded.
-template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false>
+// THREADS: its reduction tree depends on them), 41 blocks of 8 row-owning warps; W4 (STRATA_FP_HC_FUSE_NORM=2): 80 + 1
+// blocks of the same 256 threads where all 8 warps still run the norm and the tile staging, but only warps 0-3 own dot
+// rows (block b: rows 4b..4b+3, the inject block its 4 rows) and warps 4-7 idle in the dot phase - every row is still
+// one warp in the same lane/chunk order, so the same bits, on twice as many SMs.
+template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false, bool W4 = false>
 __global__ void __launch_bounds__(THREADS) gr_down_fused_norm_kernel(GrMulti m) {
     constexpr int NS = (MAX_T * (H_TILE / 4) + THREADS - 1) / THREADS;   // staging items per thread per tile
+    constexpr int RW = W4 ? 4 : WARPS;                  // warps that own dot rows
+    constexpr int DB = LR / RW;                         // row blocks; one more for the inject rows
+    static_assert(LR % RW == 0 && RW >= HC, "whole row groups; the inject block's 4 rows in one block");
     __shared__ float part[MAX_T][WARPS][HC];
     __shared__ float s_rs[MAX_T][HC];
     __shared__ float s_gw[MAX_T][HC];
     extern __shared__ __align__(16) float4 fbuf[];      // 2 buffers x [T][2][160] float4
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
     const int T = EXACT_T ? MAX_T : m.T;
-    const bool inject_block = blockIdx.x == DOWN_BLOCKS;
-    const int row = inject_block ? warp : blockIdx.x * WARPS + warp;
-    const bool active = !(inject_block && (m.a[0].w_inject == nullptr || warp >= HC));
+    const bool inject_block = (int) blockIdx.x == DB;
+    const int row = inject_block ? warp : (int) blockIdx.x * RW + warp;
+    const bool active = warp < RW && !(inject_block && (m.a[0].w_inject == nullptr || warp >= HC));
     const uint16_t* wrow = (inject_block ? m.a[0].w_inject : m.a[0].w_down) + (size_t) (active ? row : 0) * D;
     const uint4* w4 = reinterpret_cast<const uint4*>(wrow);
     const size_t buf_f4 = (size_t) T * (H_TILE / 4);    // float4 per buffer (the second one follows the first)
@@ -894,6 +900,9 @@ __global__ void __launch_bounds__(THREADS) gr_down_fused_norm_kernel(GrMulti m) 
         __syncthreads();                                // tile h is in fbuf[h & 1]; nobody still reads the other one
         const float4* cur = fbuf + (h & 1) * buf_f4;
         if (active) {
+            // Next steps, NOT bitwise (they change the summation order or the weights, so they are not built here):
+            // split-K (a row's chunks shared over several warps / blocks and added in a fixed order), and the Q8_0 hc
+            // path (STRATA_HC_Q8, the GGUF's own projections, 0.65 GiB instead of 1.20).
 #pragma unroll
             for (int q = 0; q < HQ; ++q) {
                 const int j = lane + 32 * q;
@@ -1019,6 +1028,13 @@ int down_chunk(bool staged, int* tile_out) {
         set_fused_attr(gr_down_fused_norm_kernel<5, true>, 5);
         set_fused_attr(gr_down_fused_norm_kernel<6, true>, 6);
         set_fused_attr(gr_down_fused_norm_kernel<kFusedGrMaxT, false>, kFusedGrMaxT);
+        set_fused_attr(gr_down_fused_norm_kernel<1, true, true>, 1);   // the W4 row layout (STRATA_FP_HC_FUSE_NORM=2)
+        set_fused_attr(gr_down_fused_norm_kernel<2, true, true>, 2);
+        set_fused_attr(gr_down_fused_norm_kernel<3, true, true>, 3);
+        set_fused_attr(gr_down_fused_norm_kernel<4, true, true>, 4);
+        set_fused_attr(gr_down_fused_norm_kernel<5, true, true>, 5);
+        set_fused_attr(gr_down_fused_norm_kernel<6, true, true>, 6);
+        set_fused_attr(gr_down_fused_norm_kernel<kFusedGrMaxT, false, true>, kFusedGrMaxT);
 #endif
         cudaGetLastError();      // drop any error the attempt left behind
         // The opt-in is a promise a pre-Volta card does not keep: an sm_60 answers 65536 and accepts the
@@ -1072,15 +1088,20 @@ bool hc_env(const char* name) {
     return v != nullptr && v[0] != '\0' && v[0] != '0';
 }
 bool hc_down_w4() { static const bool on = hc_env("STRATA_HC_DOWN_W4"); return on; }
-// STRATA_FP_HC_FUSE_NORM=1 (opt-in, CUDA only): the norm folded into the down projection's kernel (gr_down_fused_norm_kernel).
+// STRATA_FP_HC_FUSE_NORM (opt-in, CUDA only): the norm folded into the down projection's kernel
+// (gr_down_fused_norm_kernel).  1 = 40 + 1 blocks of 8 row warps, 2 = 80 + 1 blocks of 4 row warps (W4); 0 / unset = off.
 // fused_gr_set_fp_fuse_norm overrides the environment (the bench); -1 = the environment.
 int g_fp_fuse = -1;
-bool fp_fuse_wanted() {
+int fp_fuse_level() {
 #if defined(__HIPCC__)
-    return false;
+    return 0;
 #else
-    static const bool env = hc_env("STRATA_FP_HC_FUSE_NORM");
-    return g_fp_fuse >= 0 ? g_fp_fuse != 0 : env;
+    static const int env = [] {
+        const char* v = std::getenv("STRATA_FP_HC_FUSE_NORM");
+        return v == nullptr || v[0] == '\0' || v[0] == '0' ? 0 : (v[0] == '2' ? 2 : 1);
+    }();
+    const int g = g_fp_fuse;
+    return g < 0 ? env : (g == 0 ? 0 : (g >= 2 ? 2 : 1));
 #endif
 }
 #if !defined(__HIPCC__)
@@ -1203,6 +1224,16 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         // (decided once per device: this runs per layer when decode is not captured)
         const bool max4 = ct <= 4 && gr_down_max4();
 #if !defined(__HIPCC__)
+        if (variant == kHcFusedW4) {    // STRATA_FP_HC_FUSE_NORM=2: the same on 80 + 1 blocks (4 row warps each)
+            constexpr unsigned GB = LR / 4 + 1;
+            if (exact_t && ct == 1) gr_down_fused_norm_kernel<1, true, true><<<GB, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 2) gr_down_fused_norm_kernel<2, true, true><<<GB, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 3) gr_down_fused_norm_kernel<3, true, true><<<GB, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 4) gr_down_fused_norm_kernel<4, true, true><<<GB, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 5) gr_down_fused_norm_kernel<5, true, true><<<GB, THREADS, smem, st>>>(c);
+            else if (exact_t && ct == 6) gr_down_fused_norm_kernel<6, true, true><<<GB, THREADS, smem, st>>>(c);
+            else gr_down_fused_norm_kernel<kFusedGrMaxT, false, true><<<GB, THREADS, smem, st>>>(c);
+        } else
         if (variant >= kHcFused) {      // STRATA_FP_HC_FUSE_NORM: the staged read with the norm folded in, the same bits
             if (exact_t && ct == 1) gr_down_fused_norm_kernel<1, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
             else if (exact_t && ct == 2) gr_down_fused_norm_kernel<2, true><<<DOWN_BLOCKS + 1, THREADS, smem, st>>>(c);
@@ -1272,17 +1303,19 @@ int env_variant() {
 
 // per device: the variant `fused_gr_check` chose (0 = not checked yet)
 std::atomic<int> g_variant[64];
-// per device: the fused-norm read (STRATA_FP_HC_FUSE_NORM) after `fused_gr_check`: 1 = it agreed with the plain read bit
-// for bit, -1 = it did not (or cannot run here), 0 = not checked (then it is not used)
-std::atomic<int> g_fuse_ok[64];
+// per level (STRATA_FP_HC_FUSE_NORM 1, 2) and device: the fused-norm read after `fused_gr_check`: 1 = it agreed with the
+// plain read bit for bit, -1 = it did not (or cannot run here), 0 = not checked (then it is not used)
+std::atomic<int> g_fuse_ok[2][64];
 
 #if !defined(__HIPCC__)
-// true when the multi read on the current card runs the fused norm: asked for, checked, and the card runs staged
-bool fp_fuse_active() {
-    if (!fp_fuse_wanted()) return false;
+// the level (1, 2) of the fused norm the multi read on the current card runs: asked for, that level checked, and the
+// card runs staged; 0 = none
+int fp_fuse_active_level() {
+    const int lv = fp_fuse_level();
+    if (lv == 0) return 0;
     int dev = 0;
     cudaGetDevice(&dev);
-    return dev >= 0 && dev < 64 && g_fuse_ok[dev].load() == 1 && fused_gr_variant() >= kHcStaged;
+    return dev >= 0 && dev < 64 && g_fuse_ok[lv - 1][dev].load() == 1 && fused_gr_variant() >= kHcStaged ? lv : 0;
 }
 #endif
 
@@ -1978,7 +2011,7 @@ bool fused_gr_fp_fuse_norm_active() {
 #if defined(__HIPCC__)
     return false;
 #else
-    return fp_fuse_active();
+    return fp_fuse_active_level() != 0;
 #endif
 }
 
@@ -2110,7 +2143,10 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     // the default read (STRATA_GR_V3 unset): v1, or the bitwise-equal v2 / v3 this card's check accepted
     int variant = fused_gr_variant();
 #if !defined(__HIPCC__)
-    if (variant >= kHcStaged && fp_fuse_active()) variant = kHcFused;   // STRATA_FP_HC_FUSE_NORM, checked on this card
+    if (variant >= kHcStaged) {   // STRATA_FP_HC_FUSE_NORM, the level checked on this card
+        const int lv = fp_fuse_active_level();
+        if (lv != 0) variant = lv == 2 ? kHcFusedW4 : kHcFused;
+    }
 #endif
     launch_multi(m, variant, st, stamp_buf, stamp_i0);
     const cudaError_t e = cudaGetLastError();
@@ -2148,9 +2184,11 @@ namespace {
 /// The plain read, split, staged and (for one token) the single-token read on random bf16 weights and random inputs,
 /// 1..8 tokens, with and without the pending write; every output of split and staged compared with the plain read's
 /// bit for bit (and the plain read's with the single-token read's).  `why[v]` gets the first difference of variant
-/// v; false if the check itself could not run.  `with_fused` (STRATA_FP_HC_FUSE_NORM, CUDA): also the staged read with
-/// the norm folded in (kHcFused, entry 4: its xn scratch compared too, as the PLE reads it after the read).
-bool fused_gr_selftest(bool ok_variant[5], std::string why[5], bool with_fused) {
+/// v; false if the check itself could not run.  `fuse_level` (STRATA_FP_HC_FUSE_NORM 1 or 2, CUDA): also the staged read with
+/// the norm folded in at that level (kHcFused / kHcFusedW4, entry 4: its xn scratch compared too, as the PLE reads it
+/// after the read).
+bool fused_gr_selftest(bool ok_variant[5], std::string why[5], int fuse_level) {
+    const bool with_fused = fuse_level > 0;
     constexpr int TM = kFusedGrMaxT;
     constexpr int NV = 5;                             // sets: 0 = plain, 1 = split, 2 = staged, 3 = single-token, 4 = fused
     const int nv = with_fused ? NV : NV - 1;
@@ -2265,7 +2303,7 @@ bool fused_gr_selftest(bool ok_variant[5], std::string why[5], bool with_fused) 
                 for (int k = 0; k < T; ++k) m.a[k] = a[4][k];
                 m.xn = set[4].xn;
                 m.T = T;
-                launch_multi(m, kHcFused, st, nullptr, 0);
+                launch_multi(m, fuse_level == 2 ? kHcFusedW4 : kHcFused, st, nullptr, 0);
             }
             if (T == 1) fused_gr_read(a[3][0], st);
             if (cudaGetLastError() != cudaSuccess || cudaStreamSynchronize(st) != cudaSuccess) {
@@ -2312,9 +2350,10 @@ void fused_gr_check() {
     int dev = 0;
     cudaGetDevice(&dev);
     if (dev < 0 || dev >= 64) return;
-    // STRATA_FP_HC_FUSE_NORM: the fused-norm read is checked once per card too - also on a card whose variant an earlier
-    // check decided (the flag may be set after it), without touching that variant
-    const bool fuse_todo = fp_fuse_wanted() && g_fuse_ok[dev].load() == 0;
+    // STRATA_FP_HC_FUSE_NORM: the fused-norm read of the wanted level is checked once per card too - also on a card whose
+    // variant an earlier check decided (the flag may be set or changed after it), without touching that variant
+    const int fuse_lv = fp_fuse_level();
+    const bool fuse_todo = fuse_lv > 0 && g_fuse_ok[fuse_lv - 1][dev].load() == 0;
     int use = g_variant[dev].load();
     if (use > 0 && !fuse_todo) return;
     const bool decided = use > 0;
@@ -2326,7 +2365,7 @@ void fused_gr_check() {
     } else if (!decided || use >= kHcStaged) {
         bool okv[5];
         std::string why[5];
-        const bool ran = fused_gr_selftest(okv, why, fuse_todo);
+        const bool ran = fused_gr_selftest(okv, why, fuse_todo ? fuse_lv : 0);
         if (!decided) {
             use = kHcPlain;
             if (want >= kHcStaged && okv[kHcStaged]) use = kHcStaged;
@@ -2350,21 +2389,21 @@ void fused_gr_check() {
         }
         if (fuse_todo && use >= kHcStaged) {
             const bool fused_ok = ran && okv[kHcFused];
-            g_fuse_ok[dev].store(fused_ok ? 1 : -1);
+            g_fuse_ok[fuse_lv - 1][dev].store(fused_ok ? 1 : -1);
             if (fused_ok)
                 std::fprintf(stderr, "strata hc: CUDA%d: the norm is folded into the down projection "
-                                     "(STRATA_FP_HC_FUSE_NORM=1); checked bit for bit against the plain read on this "
-                                     "card\n", dev);
+                                     "(STRATA_FP_HC_FUSE_NORM=%d); checked bit for bit against the plain read on this "
+                                     "card\n", dev, fuse_lv);
             else
-                std::fprintf(stderr, "strata hc: CUDA%d: the fused-norm read %s - not used: %s\n", dev,
+                std::fprintf(stderr, "strata hc: CUDA%d: the fused-norm read (level %d) %s - not used: %s\n", dev, fuse_lv,
                              ran ? "differs from the plain read on this card" : "could not be checked",
                              why[ran ? kHcFused : 0].c_str());
         }
     }
-    if (fuse_todo && g_fuse_ok[dev].load() == 0) {      // the card runs plain or split: the fused norm is staged's
-        g_fuse_ok[dev].store(-1);
-        std::fprintf(stderr, "strata hc: CUDA%d: STRATA_FP_HC_FUSE_NORM=1 needs the staged read, which does not run on "
-                             "this card - not used\n", dev);
+    if (fuse_todo && g_fuse_ok[fuse_lv - 1][dev].load() == 0) {   // plain or split here: the fused norm is staged's
+        g_fuse_ok[fuse_lv - 1][dev].store(-1);
+        std::fprintf(stderr, "strata hc: CUDA%d: STRATA_FP_HC_FUSE_NORM=%d needs the staged read, which does not run on "
+                             "this card - not used\n", dev, fuse_lv);
     }
 }
 

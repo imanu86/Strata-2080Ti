@@ -1,10 +1,15 @@
 // src/kernels/fp_hc_bench.cpp - fused_gr_read_multi with the norm folded into the down projection
-// (STRATA_FP_HC_FUSE_NORM, CUDA) against the default read: bit for bit on every output (lo, rs, inject, mixed, the
-// in-place R, the xn scratch) and each one's time, per card, token count, pending write and inject rows.
+// (STRATA_FP_HC_FUSE_NORM, CUDA; level 1 = fused, level 2 = fused-w4: 80 + 1 blocks, 4 row warps) against the default
+// read: bit for bit on every output (lo, rs, inject, mixed, the in-place R, the xn scratch), each one's time and its
+// share of the card's peak DRAM bandwidth, per card, token count, pending write and inject rows.
 //
 //     build/fp_hc_bench [iters=500] [T min=1] [T max=6] [device=-1: every card]
 //
-// Exit code 1 on any difference, any CUDA error, or a card where the fused-norm read does not run (its check failed).
+// Bandwidth: the BF16 weights read once (w_down + w_up + the inject rows when present) over the whole read's time, in
+// GB/s as the other benches print it (bytes / us / 1e3); peak = 2 * memory clock * bus width / 8 from the device
+// attributes (the DDR factor of GDDR6/GDDR6X).
+//
+// Exit code 1 on any difference, any CUDA error, or a card where a fused-norm level does not run (its check failed).
 #include "strata/kernels/fused_gr.hpp"
 
 #include <cuda_runtime.h>
@@ -36,21 +41,30 @@ static uint16_t bf16(float x) {
     return (uint16_t) ((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
-// Returns the number of failures on this card (differences, a fused-norm read that does not run).
+// Returns the number of failures on this card (differences, a fused-norm level that does not run).
 static int run_device(int dev, int iters, int t_lo, int t_hi) {
     if (!CK(cudaSetDevice(dev))) return 1;
     cudaDeviceProp prop;
     if (!CK(cudaGetDeviceProperties(&prop, dev))) return 1;
-    std::printf("device %d: %s (sm_%d%d)\n", dev, prop.name, prop.major, prop.minor);
+    int mem_khz = 0, bus_bits = 0;
+    CK(cudaDeviceGetAttribute(&mem_khz, cudaDevAttrMemoryClockRate, dev));
+    CK(cudaDeviceGetAttribute(&bus_bits, cudaDevAttrGlobalMemoryBusWidth, dev));
+    const double peak_gbs = 2.0 * (double) mem_khz * 1e3 * ((double) bus_bits / 8.0) / 1e9;
+    std::printf("device %d: %s (sm_%d%d), peak DRAM %.0f GB/s\n", dev, prop.name, prop.major, prop.minor, peak_gbs);
 
-    // The check runs the fused-norm read against the plain one on this card (and picks the default read's variant);
-    // the flag has to be on when it runs.  Then the flag is flipped per run.
-    K::fused_gr_set_fp_fuse_norm(1);
-    K::fused_gr_check();
-    if (!K::fused_gr_fp_fuse_norm_active()) {
-        std::printf("dev %d: the fused-norm read does not run here (its check failed, the card does not run the staged "
-                    "read - see STRATA_HC_SPLIT - or this is not a CUDA build)\n", dev);
-        return 1;
+    // Each level's check runs its read against the plain one on this card (the first also picks the default read's
+    // variant); the flag has to be set when it runs.  Then the flag is flipped per run.
+    bool use[3] = {true, false, false};     // level 0 = the default read, 1 = fused, 2 = fused-w4
+    int failures = 0;
+    for (int lv = 1; lv <= 2; ++lv) {
+        K::fused_gr_set_fp_fuse_norm(lv);
+        K::fused_gr_check();
+        use[lv] = K::fused_gr_fp_fuse_norm_active();
+        if (!use[lv]) {
+            std::printf("dev %d: the fused-norm read of level %d does not run here (its check failed, the card does not "
+                        "run the staged read - see STRATA_HC_SPLIT - or this is not a CUDA build)\n", dev, lv);
+            ++failures;
+        }
     }
 
     const int N = 2560, HC = 4, D = N * HC, LR = 320, TM = K::kFusedGrMaxT;
@@ -84,8 +98,7 @@ static int run_device(int dev, int iters, int t_lo, int t_hi) {
     cudaStream_t s = nullptr;
     cudaEvent_t e0 = nullptr, e1 = nullptr;
     if (ok) ok = CK(cudaStreamCreate(&s)) && CK(cudaEventCreate(&e0)) && CK(cudaEventCreate(&e1));
-    int failures = 0;
-    if (!ok) failures = 1;
+    if (!ok) ++failures;
 
     for (int T = t_lo; ok && T <= t_hi; ++T)
         for (int apply = 0; ok && apply < 2; ++apply)
@@ -98,8 +111,9 @@ static int run_device(int dev, int iters, int t_lo, int t_hi) {
                     a[t].lo = dlo + (size_t) t * LR; a[t].rs = drs + (size_t) t * HC;
                     a[t].inject_out = dio + (size_t) t * HC; a[t].mixed = dmix + (size_t) t * N;   // != inj_prev
                 }
-                std::vector<float> out[2];
-                for (int f = 0; f < 2; ++f) {       // f = 0: the default read, 1: the fused-norm read
+                std::vector<float> out[3];
+                for (int f = 0; f < 3 && ok; ++f) {       // f = 0: the default read, 1: fused, 2: fused-w4
+                    if (!use[f]) continue;
                     ok = CK(cudaMemcpy(dR, R.data(), R.size() * 4, cudaMemcpyHostToDevice)) &&
                          CK(cudaMemset(dlo, 0xff, (size_t) TM * LR * 4)) && CK(cudaMemset(drs, 0xff, (size_t) TM * HC * 4)) &&
                          CK(cudaMemset(dio, 0xff, (size_t) TM * HC * 4)) && CK(cudaMemset(dmix, 0xff, (size_t) TM * N * 4)) &&
@@ -123,14 +137,16 @@ static int run_device(int dev, int iters, int t_lo, int t_hi) {
                     ok = ok && CK(cudaMemcpy(p, dmix, (size_t) TM * N * 4, cudaMemcpyDeviceToHost));
                     p += (size_t) TM * N;
                     ok = ok && CK(cudaMemcpy(p, dxn, (size_t) TM * D * 4, cudaMemcpyDeviceToHost));
-                    if (!ok) break;
                 }
                 if (!ok) { ++failures; break; }
-                const bool same = out[0].size() == out[1].size() &&
-                                  std::memcmp(out[0].data(), out[1].data(), out[0].size() * 4) == 0;
-                double us[2][3];
+                bool same[3] = {true, false, false};
+                for (int f = 1; f < 3; ++f)
+                    same[f] = use[f] && out[f].size() == out[0].size() &&
+                              std::memcmp(out[0].data(), out[f].data(), out[0].size() * 4) == 0;
+                double us[3][3] = {};
                 for (int round = 0; ok && round < 3; ++round)
-                    for (int f = 0; ok && f < 2; ++f) {
+                    for (int f = 0; ok && f < 3; ++f) {
+                        if (!use[f]) continue;
                         K::fused_gr_set_fp_fuse_norm(f);
                         for (int i = 0; i < 20; ++i) K::fused_gr_read_multi(a, T, dxn, s);
                         ok = CK(cudaEventRecord(e0, s));
@@ -141,14 +157,27 @@ static int run_device(int dev, int iters, int t_lo, int t_hi) {
                         us[f][round] = 1e3 * (double) ms / iters;
                     }
                 if (!ok) { ++failures; break; }
-                double med[2];
-                for (int f = 0; f < 2; ++f) {
-                    std::sort(us[f], us[f] + 3);
-                    med[f] = us[f][1];
+                // the weights read once: w_down + w_up (+ the inject rows)
+                const double bytes = (double) LR * D * 2 + (double) D * LR * 2 + (inject ? (double) HC * D * 2 : 0.0);
+                double med[3] = {0, 0, 0};
+                for (int f = 0; f < 3; ++f)
+                    if (use[f]) {
+                        std::sort(us[f], us[f] + 3);
+                        med[f] = us[f][1];
+                    }
+                std::printf("dev %d T %d apply %d inject %d", dev, T, apply, inject);
+                static const char* const name[3] = {"default", "fused", "fused-w4"};
+                for (int f = 0; f < 3; ++f) {
+                    if (!use[f]) {
+                        std::printf(" | %s n/a", name[f]);
+                        continue;
+                    }
+                    const double gbs = bytes / med[f] / 1e3;
+                    std::printf(" | %s %7.1f us %5.1f%% peak", name[f], med[f], peak_gbs > 0 ? 100.0 * gbs / peak_gbs : 0.0);
+                    if (f > 0) std::printf(" %s", same[f] ? "bitwise equal" : "DIFFERS");
+                    if (f > 0 && !same[f]) ++failures;
                 }
-                std::printf("dev %d T %d apply %d inject %d | default %7.1f us | fused %7.1f us | %s\n", dev, T, apply,
-                            inject, med[0], med[1], same ? "bitwise equal" : "DIFFERS");
-                if (!same) ++failures;
+                std::printf("\n");
             }
     K::fused_gr_set_fp_fuse_norm(-1);
     if (s != nullptr) cudaStreamSynchronize(s);
