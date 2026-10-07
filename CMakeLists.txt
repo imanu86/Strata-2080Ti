@@ -1105,6 +1105,10 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
   add_executable(batch_rows_test tests/core/batch_rows_test.cpp)
   target_include_directories(batch_rows_test PRIVATE include)
   add_test(NAME batch_rows_test COMMAND batch_rows_test)
+  # a batch window's MTP rows: a slot's kept prefix and the per-slot draft lengths (STRATA_BATCH_MTP_DRAFTS; header-only, CPU)
+  add_executable(batch_plan_test tests/core/batch_plan_test.cpp)
+  target_include_directories(batch_plan_test PRIVATE include)
+  add_test(NAME batch_plan_test COMMAND batch_plan_test)
 endif()
 
 add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
