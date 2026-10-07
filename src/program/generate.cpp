@@ -6709,6 +6709,10 @@ int main(int argc, char** argv) {
                 strata::kernels::native_expert_set_fp_v4_tmax(want.expert_v4_tmax);
                 changed += " EXPERT_V4_TMAX";
             }
+            if (want.def_tiles_t1 != cur.def_tiles_t1) {   // the T = 1 windows' default expert launch: in the graphs
+                strata::kernels::native_expert_set_fp_def_tiles_t1(want.def_tiles_t1);
+                changed += " DEF_TILES_T1";
+            }
             if (want.shexp_fuse != cur.shexp_fuse) {
                 strata::kernels::shared_expert_set_fp_fuse(want.shexp_fuse);
                 changed += " SHEXP_FUSE";
@@ -11438,6 +11442,10 @@ int main(int argc, char** argv) {
                 mtp.set_source_R(ver.final_R_all());   // the serial loop's rows again
                 const double pl_ms = std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count();
                 dt_run += pl_ms;
+                // FABLE lab: with STRATA_FP_DEF_TILES_T1 > 1 the expert launches of this request by what they got (device
+                // counters inside the captured graphs: launches, not captures), reset for the next request
+                if (strata::kernels::native_expert_fp_def_tiles_t1() > 1)
+                    std::fprintf(stderr, "%s\n", strata::kernels::native_expert_tiles_report(true).c_str());
                 if (dec_timing) {
                     auto avg = [](double s_, double n_) { return n_ > 0 ? s_ / n_ : 0.0; };
                     std::fprintf(stderr, "strata pipeline: %lld windows in %.0f ms (%.2f ms/window): %lld speculative, %lld on "

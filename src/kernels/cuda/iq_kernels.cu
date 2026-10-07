@@ -3711,6 +3711,18 @@ bool fp_def_tiles_now(const NativeExpertLayout& L, int tokens) {
     return g_fp_def_tiles_t1 > 1 && tokens == 1 && !g_old_kernels && !g_no_sub16_gu && L.n_embd == 2560 && L.n_ff == 640;
 }
 
+// The launch counter of STRATA_FP_DEF_TILES_T1 (native_expert_tiles_report): on the device, because the decode replays
+// captured graphs - a host counter would count captures, one per (stage, T), not launches.  With the lever on every
+// native_expert_grouped call launches fp_tiles_count_kernel (one block, ~1-2 us inside a graph) with the slot of what
+// the call got: 0 = T 1 tiled, 1 = T 1 but the persistent kernels (V=4), 2 = T 1 but the S26 / S27 path (STRATA_EXPERT_V2 /
+// V2K), 3 = T 1 but a shape or switch the tiles kernels do not take (old kernels, STRATA_NO_SUB16_GU, n_embd / n_ff),
+// 4 = tokens unknown (0: a caller that does not pass T), 5 = T > 1.
+__device__ unsigned long long g_fp_tiles_ctr[8];
+__global__ void fp_tiles_count_kernel(int slot) {
+    if (threadIdx.x == 0) atomicAdd(&g_fp_tiles_ctr[slot], 1ull);
+}
+
+
 template<int TG>
 void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
@@ -3806,6 +3818,42 @@ bool native_expert_set_fp_v4_pairs(const char* spec) {
 }
 void native_expert_set_fp_def_tiles_t1(int k) { g_fp_def_tiles_t1 = k >= 1 && k <= 64 ? k : 1; }
 int native_expert_fp_def_tiles_t1() { return g_fp_def_tiles_t1; }
+
+std::string native_expert_tiles_report(bool reset) {
+    char line[512];
+    std::snprintf(line, sizeof line, "strata expert tiles T1 (STRATA_FP_DEF_TILES_T1=%d):", g_fp_def_tiles_t1);
+    std::string out = line;
+#if defined(__HIPCC__)
+    out += " n/a on HIP";
+    (void) reset;
+#else
+    int n_dev = 0, cur = 0;
+    if (cudaGetDeviceCount(&n_dev) != cudaSuccess || n_dev <= 0) return out + " no device";
+    cudaGetDevice(&cur);
+    unsigned long long tot[8] = {};
+    std::string per;
+    for (int d = 0; d < n_dev; ++d) {
+        if (cudaSetDevice(d) != cudaSuccess) continue;
+        unsigned long long c[8] = {};
+        if (cudaMemcpyFromSymbol(c, g_fp_tiles_ctr, sizeof c) != cudaSuccess) continue;   // a device the lib never ran on
+        if (reset) {
+            const unsigned long long z[8] = {};
+            cudaMemcpyToSymbol(g_fp_tiles_ctr, z, sizeof z);
+        }
+        for (int i = 0; i < 6; ++i) tot[i] += c[i];
+        std::snprintf(line, sizeof line, " dev %d: %llu tiled, %llu V4, %llu S26, %llu shape, %llu unknown, %llu T>1;", d, c[0], c[1],
+                      c[2], c[3], c[4], c[5]);
+        per += line;
+    }
+    cudaSetDevice(cur);
+    std::snprintf(line, sizeof line,
+                  " %llu launches at T=1 tiled, %llu launches at T=1 not tiled (%llu persistent V4, %llu S26/S27 path, %llu shape or "
+                  "switch), %llu launches with T unknown, %llu launches at T>1 [per device:%s]",
+                  tot[0], tot[1] + tot[2] + tot[3], tot[1], tot[2], tot[3], tot[4], tot[5], per.empty() ? " none" : per.c_str());
+    out += line;
+#endif
+    return out;
+}
 
 bool iq_supported(int t) noexcept { return is_iq(t); }
 bool embed_type_supported(int t) noexcept { return is_iq(t) || t == 30; }
@@ -4495,7 +4543,21 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     block_q8_1* hq = (block_q8_1*) ((uint8_t*) scratch + 3 * fa);
     const auto* X = (const block_q8_1*) x_q8_1;
     static const bool v2 = [] { const char* v = std::getenv("STRATA_EXPERT_V2"); return v && v[0] == '1'; }();
-    if (v2 && L.gu_type == 21 && L.d_type == 20 && L.n_embd == 2560 && L.n_ff == 640) {   // S26: see s26_gu_l_kernel
+    static const bool v2k = [] { const char* v = std::getenv("STRATA_EXPERT_V2K"); return v && v[0] == '1'; }();
+    const bool s26 = v2 && L.gu_type == 21 && L.d_type == 20 && L.n_embd == 2560 && L.n_ff == 640;
+    const bool s27 = v2k && (L.gu_type == 12 || L.gu_type == 13) && (L.d_type == 7 || L.d_type == 8) && L.n_embd == 2560 &&
+                     L.n_ff == 640;
+    if (g_fp_def_tiles_t1 > 1) {   // STRATA_FP_DEF_TILES_T1 on: count what this call gets (fp_tiles_count_kernel)
+        int slot;
+        if (tokens <= 0) slot = 4;
+        else if (tokens > 1) slot = 5;
+        else if (s26 || s27) slot = 2;
+        else if (fp_v4_now(L, tokens) && (fp_persist_gu_ok(L) || fp_persist_down_ok(L))) slot = 1;
+        else if (fp_def_tiles_now(L, tokens)) slot = 0;
+        else slot = 3;
+        fp_tiles_count_kernel<<<1, 32, 0, s>>>(slot);
+    }
+    if (s26) {   // S26: see s26_gu_l_kernel
         // S26 STRATA_TSUM=1: the sums as one transposed butterfly per warp (s26_tsum.cuh; bitwise the same values)
         static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
         // (+ down rows' items spread evenly over the lanes, one load group: bitwise, harness 1.09-1.12x vs 1.03-1.06x;
@@ -4508,9 +4570,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         return;
     }
     // stream B: UD-Q4_K_XL's Q4_K / Q5_K gate/up and Q5_1 / Q8_0 down (see S27 above)
-    static const bool v2k = [] { const char* v = std::getenv("STRATA_EXPERT_V2K"); return v && v[0] == '1'; }();
-    if (v2k && (L.gu_type == 12 || L.gu_type == 13) && (L.d_type == 7 || L.d_type == 8) && L.n_embd == 2560 &&
-        L.n_ff == 640) {
+    if (s27) {
         static const bool ts = [] { const char* v = std::getenv("STRATA_TSUM"); return v && v[0] == '1'; }();
         const long long nh = (long long) cap_entries * L.n_ff;
 #define STRATA_V2K(G, D) s27_launch_ts<G, D>(ts, L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h, hq, out, nh)

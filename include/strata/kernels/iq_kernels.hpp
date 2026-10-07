@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace strata::kernels {
 
@@ -102,5 +103,10 @@ bool native_expert_set_fp_v4_pairs(const char* spec);
 /// k row tiles in turn (1 = the default launch, the default).  Bitwise the default's results (fp_expert_bench "0t<k>").
 void native_expert_set_fp_def_tiles_t1(int k);
 int native_expert_fp_def_tiles_t1();
+/// With STRATA_FP_DEF_TILES_T1 > 1 every `native_expert_grouped` call also launches a one-block counting kernel (so a
+/// captured graph counts at every replay): the line "strata expert tiles T1: N launches at T=1 tiled, M launches at
+/// T=1 not tiled (why), ..., K launches at T>1" over every device (`reset` zeroes the counters).  Synchronous
+/// (cudaMemcpyFromSymbol): call it between requests.  Hot lever DEF_TILES_T1 (graphs recaptured).
+std::string native_expert_tiles_report(bool reset);
 
 }  // namespace strata::kernels

@@ -27,6 +27,7 @@ struct FpLab {
     int chain_trim_ahead = 2;  ///< STRATA_FP_CHAIN_TRIM_AHEAD: steps queued beyond the landed outputs
     int expert_v = 0;          ///< STRATA_FP_EXPERT_V: the VRAM experts' kernel variant 0..4 (graphs)
     int expert_v4_tmax = 0;    ///< STRATA_FP_EXPERT_V4_TMAX: variant 4 only for windows of T <= N tokens, 0 = all (graphs)
+    int def_tiles_t1 = 1;      ///< STRATA_FP_DEF_TILES_T1: T = 1 windows' default expert kernels in blocks of k row tiles (graphs)
     int hc_fuse_norm = 0;      ///< STRATA_FP_HC_FUSE_NORM: the hc read with the norm folded in, 0/1/2 (graphs)
     int shexp_fuse = 0;        ///< STRATA_FP_SHEXP_FUSE: the shared expert's fused launches, 0/1/2 (graphs)
     int mtp_priority = 1;      ///< STRATA_MTP_PRIORITY: the chain stream, 1 highest, 0 default, -1 lowest
@@ -50,6 +51,8 @@ inline FpLab fp_lab_from_env() {
     if (l.expert_v < 0 || l.expert_v > 4) l.expert_v = 0;
     l.expert_v4_tmax = fp_lab_env_int("STRATA_FP_EXPERT_V4_TMAX", 0);
     if (l.expert_v4_tmax < 0) l.expert_v4_tmax = 0;
+    l.def_tiles_t1 = fp_lab_env_int("STRATA_FP_DEF_TILES_T1", 1);
+    if (l.def_tiles_t1 < 1 || l.def_tiles_t1 > 64) l.def_tiles_t1 = 1;
     l.hc_fuse_norm = fp_lab_env_int("STRATA_FP_HC_FUSE_NORM", 0);
     if (l.hc_fuse_norm < 0 || l.hc_fuse_norm > 2) l.hc_fuse_norm = l.hc_fuse_norm > 2 ? 2 : 0;
     l.shexp_fuse = fp_lab_env_int("STRATA_FP_SHEXP_FUSE", 0);
@@ -74,7 +77,8 @@ inline FpLab& fp_lab() {
 inline bool fp_lab_same(const FpLab& a, const FpLab& b) {
     return a.early_l1 == b.early_l1 && a.devplan == b.devplan && a.probe_waita == b.probe_waita &&
            a.el_async == b.el_async && a.chain_trim == b.chain_trim && a.chain_trim_ahead == b.chain_trim_ahead &&
-           a.expert_v == b.expert_v && a.expert_v4_tmax == b.expert_v4_tmax && a.hc_fuse_norm == b.hc_fuse_norm &&
+           a.expert_v == b.expert_v && a.expert_v4_tmax == b.expert_v4_tmax && a.def_tiles_t1 == b.def_tiles_t1 &&
+           a.hc_fuse_norm == b.hc_fuse_norm &&
            a.shexp_fuse == b.shexp_fuse &&
            a.mtp_priority == b.mtp_priority;
 }
@@ -108,6 +112,7 @@ inline bool fp_lab_parse(const std::string& spec, FpLab& out, std::string& err) 
         else if (name == "CHAIN_TRIM_AHEAD") out.chain_trim_ahead = x < 1 ? 1 : x;
         else if (name == "EXPERT_V") out.expert_v = x < 0 || x > 4 ? 0 : x;
         else if (name == "EXPERT_V4_TMAX") out.expert_v4_tmax = x < 0 ? 0 : x;
+        else if (name == "DEF_TILES_T1") out.def_tiles_t1 = x < 1 || x > 64 ? 1 : x;
         else if (name == "HC_FUSE_NORM") out.hc_fuse_norm = x <= 0 ? 0 : x >= 2 ? 2 : 1;
         else if (name == "SHEXP_FUSE") out.shexp_fuse = x <= 0 ? 0 : x >= 2 ? 2 : 1;
         else if (name == "MTP_PRIORITY") out.mtp_priority = x > 0 ? 1 : x < 0 ? -1 : 0;
@@ -121,6 +126,7 @@ inline std::string fp_lab_describe(const FpLab& l) {
            " PROBE_WAITA=" + std::to_string(l.probe_waita) + " EL_ASYNC=" + std::to_string(l.el_async) +
            " CHAIN_TRIM=" + std::to_string(l.chain_trim) + " CHAIN_TRIM_AHEAD=" + std::to_string(l.chain_trim_ahead) +
            " EXPERT_V=" + std::to_string(l.expert_v) + " EXPERT_V4_TMAX=" + std::to_string(l.expert_v4_tmax) +
+           " DEF_TILES_T1=" + std::to_string(l.def_tiles_t1) +
            " HC_FUSE_NORM=" + std::to_string(l.hc_fuse_norm) +
            " SHEXP_FUSE=" + std::to_string(l.shexp_fuse) + " MTP_PRIORITY=" + std::to_string(l.mtp_priority);
 }
