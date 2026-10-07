@@ -264,6 +264,12 @@ bool refill_blocking() {
     return v;
 }
 
+// STRATA_RAM_LOG=1: the private-RAM breakdown line at every request even without STRATA_RAM_DEDUP (the "before" figure)
+bool ram_log_requested() {
+    static const bool v = std::getenv("STRATA_RAM_LOG") != nullptr && std::getenv("STRATA_RAM_LOG")[0] == '1';
+    return v;
+}
+
 using Clock = std::chrono::steady_clock;
 
 // --pipeline-windows: every STRATA_PIPELINE_* test and tuning variable (THETA, FORCE_MISS, SWITCH, LOG, TRACE, DOOM_SKIP,
@@ -5591,6 +5597,17 @@ int main(int argc, char** argv) {
     // request hands them back and the slots are refilled with the profile's hottest experts.  Neither side's
     // addresses move, so every captured graph stays valid.  The context is never smaller: --max-context cells always
     // fit, the cache simply holds fewer experts while a long one is live.
+    // STRATA_RAM_DEDUP=1 (ram_dedup.hpp, docs/RAM_DEDUP.md): the arena without the RAM copies of the experts the caches
+    // hold.  `dd` is armed by the serve path once the caches' lend regions and the elastic tail are known (dd_arm,
+    // below); until then, and without the opt-in, every call here is a no-op.  `dd_evict`: the expert of residency
+    // index `i` is about to leave `cache`'s slot `slot` by work queued on `stream` (device `dev`, -1 = CUDA0) AFTER
+    // this call - when the arena lacks its bytes they come back first: a copy on the dedup's own stream, and `stream`
+    // waits for it (events, no host wait).  Every site that overwrites or unmaps a slot calls it before.
+    strata::core::RamDedup* dd = nullptr;
+    auto dd_evict = [&](int64_t i, strata::core::ExpertCache& cache, int32_t slot, cudaStream_t stream, int dev) {
+        if (dd == nullptr || slot < 0) return;
+        dd->evict(i / g.n_expert, i % g.n_expert, cache.device_slot(slot), stream, dev);
+    };
     struct KvGrow {
         bool on = false;
         int64_t top = 0, lo = 0;          // slots [lo, top) hold no expert; their whole chunks may be with the K/V
@@ -5666,18 +5683,24 @@ int main(int argc, char** argv) {
                 if (!cold.empty() && cold.back().first < heat(oi)) {
                     vi = cold.back().second;
                     const int32_t vs = host_res[(size_t) vi];
-                    if (xcache.slot_offset(vs + 1) - xcache.slot_offset(vs) < lay.blob_bytes(layer) ||
-                        cudaMemcpy(xcache.device_slot(vs), xcache.device_slot((int32_t) kvg.lo),
-                                   (size_t) lay.blob_bytes(layer), cudaMemcpyDeviceToDevice) != cudaSuccess)
-                        vi = -1;
+                    if (xcache.slot_offset(vs + 1) - xcache.slot_offset(vs) < lay.blob_bytes(layer)) vi = -1;
                     else {
+                        dd_evict(vi, xcache, vs, nullptr, -1);   // the victim's bytes back to RAM before its slot is written
+                        if (cudaMemcpy(xcache.device_slot(vs), xcache.device_slot((int32_t) kvg.lo),
+                                       (size_t) lay.blob_bytes(layer), cudaMemcpyDeviceToDevice) != cudaSuccess)
+                            vi = -1;
+                    }
+                    if (vi >= 0) {
                         cold.pop_back();
                         host_res[(size_t) oi] = vs;
                         host_res[(size_t) vi] = strata::core::kNotResident;
                         ++moved;
                     }
                 }
-                if (vi < 0) host_res[(size_t) oi] = strata::core::kNotResident;
+                if (vi < 0) {
+                    dd_evict(oi, xcache, (int32_t) kvg.lo, nullptr, -1);   // its slot goes to the K/V: the bytes back first
+                    host_res[(size_t) oi] = strata::core::kNotResident;
+                }
                 ++kvg.evicted;
             }
         }
@@ -7180,6 +7203,140 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata serve: cannot create the refill stream\n");
             return 1;
         }
+        // ---- STRATA_RAM_DEDUP=1: the RAM copies of the experts the caches hold are given back (docs/RAM_DEDUP.md).
+        // WHAT KEEPS ITS COPY: an expert in a slot the prompt path may lend (from the participant's `first` on) or the
+        // elastic tail may shrink (from el_core on) - a loan streams it from RAM, a shrink hands it to the CPU - and an
+        // expert inside the arena's CUDA-registered prefix (RamDedup::drop refuses those).  STRATA_RAM_DEDUP_KEEP_GIB
+        // above that structural minimum keeps the hottest slots (the lowest numbers: the profile fills them first) of
+        // every cache too, the quota split by the caches' sizes.  Everything else is dropped after it lands (the sites
+        // that release) and at the end of every request (dd_sweep: what the K/V, a shrink or a closed refill moved).
+        const bool dd_el = o.elastic && xcache.elastic() && d_res != nullptr &&
+                           (!multi_gpu || o.pipeline_windows == 0 || pipe_elastic_env()) && !host_res.empty();
+        std::vector<int64_t> dd_keep_below;   // per cache (CUDA0, then the stages): slots below this keep their copy
+        auto dd_cache_of = [&](int64_t l) -> std::pair<strata::core::ExpertCache*, size_t> {
+            const int stn = multi_gpu ? stage_of(l) : 0;
+            return stn > 0 ? std::make_pair(&stages[(size_t) stn - 1]->cache, (size_t) stn) : std::make_pair(&xcache, (size_t) 0);
+        };
+        auto dd_keep_from = [&](strata::core::ExpertCache* cache, size_t ci) -> int64_t {   // the protected tail starts here
+            int64_t from = cache->slots();
+            for (const PfPart& p : pf_parts)
+                if (p.cache == cache && p.first >= 0) from = std::min<int64_t>(from, p.first);
+            if (ci == 0 && dd_el) from = std::min<int64_t>(from, el_core);
+            return from;
+        };
+        auto dd_keep = [&](int64_t i) -> bool {   // whether the expert of residency index i keeps its RAM copy
+            const int32_t s = host_res[(size_t) i];
+            if (s < 0) return true;
+            const auto [cache, ci] = dd_cache_of(i / g.n_expert);
+            return s >= dd_keep_from(cache, ci) || (ci < dd_keep_below.size() && s < dd_keep_below[ci]);
+        };
+        auto dd_drop = [&](int64_t i) { if (dd != nullptr && !dd_keep(i)) dd->drop(i / g.n_expert, i % g.n_expert); };
+        auto dd_sweep = [&]() {
+            if (dd == nullptr) return;
+            dd->drain(false);
+            for (size_t i = 0; i < host_res.size(); ++i)
+                if (host_res[i] >= 0) dd_drop((int64_t) i);
+        };
+        int64_t dd_d2h0 = 0, dd_reread0 = 0;
+        double dd_ms0 = 0.0;
+        auto dd_log = [&](const char* when) {
+            if (dd == nullptr) return;
+            std::fprintf(stderr, "strata ram dedup: %s: arena %.2f GiB (era %.2f), %lld esperti senza copia RAM, D2H %lld esperti "
+                                 "in %.1f ms, riletti da file %lld (totali: D2H %lld, riletti %lld, attese ring %lld)\n",
+                         when, (double) (dd->arena_bytes() - dd->decommitted_bytes()) / 1073741824.0,
+                         (double) dd->arena_bytes() / 1073741824.0, (long long) dd->absent(),
+                         (long long) (dd->d2h_experts() - dd_d2h0), dd->d2h_ms() - dd_ms0, (long long) (dd->reread() - dd_reread0),
+                         (long long) dd->d2h_experts(), (long long) dd->reread(), (long long) dd->bounce_waits());
+            std::fflush(stderr);
+        };
+        // the engine's private RAM by item (what the owner asked for: where the non-arena GB are).  Private bytes
+        // (the commit charge) and the working set differ by what is committed but not resident - under WDDM the
+        // driver charges the VRAM allocations' paging reserve to the process, which is where a private figure far
+        // above the working set comes from.  "altro" is the rest: driver, CUDA contexts, heap, stacks.
+        auto dd_ram_log = [&](const char* when) {
+            if (dd == nullptr && !ram_log_requested()) return;
+            const double G = 1073741824.0;
+            uint64_t priv = 0, ws = 0;
+#if defined(_WIN32)
+            PROCESS_MEMORY_COUNTERS_EX pmc{};
+            if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*) &pmc, sizeof pmc)) {
+                priv = (uint64_t) pmc.PrivateUsage;
+                ws = (uint64_t) pmc.WorkingSetSize;
+            }
+#else
+            const MemSample ms = mem_sample();
+            ws = ms.rss_mib << 20;
+            priv = ws + (ms.commit_mib << 20);
+#endif
+            const uint64_t arena = arena_src.mapped() ? arena_src.arena_bytes() - (dd ? dd->decommitted_bytes() : 0) : 0;
+            const uint64_t bounce = dd ? dd->bounce_bytes() : 0;
+            uint64_t ckpt = 0;
+            for (const ConvCheckpoint& c : checks) ckpt += (uint64_t) c.bytes();
+            const uint64_t conv = (uint64_t) conversations.bytes();
+            const uint64_t kv = strata::core::qsa_kv_host_bytes();
+            const uint64_t dense = native_embed.bytes();
+            const std::string pf = ple_table.is_open() && ple_table.format() ? ple_table.format() : std::string();
+            const uint64_t ple_row = pf.find("IQ4") != std::string::npos || pf.find("iq4") != std::string::npos ? 90 : 160;
+            const uint64_t ple = o.ple_row_cache > 0 ? (uint64_t) o.ple_row_cache * (ple_row + 4) + (uint64_t) o.ple_row_cache / 8 : 0;
+            const uint64_t xch = (uint64_t) src.exchange_capacity() * strata::kernels::cpu::expert_layout().max_blob + src.resident_bytes();
+            const uint64_t known = arena + bounce + ckpt + conv + kv + dense + ple + xch;
+            std::fprintf(stderr, "strata ram: %s: privata %.2f GiB (working set %.2f, non residente %.2f): arena esperti %.2f, "
+                                 "ring dedup %.2f, cache righe PLE %.2f (stima), checkpoint/prompt cache %.2f, parcheggio "
+                                 "conversazioni %.2f, K/V pinned %.2f, pesi densi/embedding pinned %.2f, scambi file tier %.2f, "
+                                 "altro %.2f\n",
+                         when, (double) priv / G, (double) ws / G, priv > ws ? (double) (priv - ws) / G : 0.0,
+                         (double) arena / G, (double) bounce / G, (double) ple / G, (double) ckpt / G, (double) conv / G,
+                         (double) kv / G, (double) dense / G, (double) xch / G, priv > known ? (double) (priv - known) / G : 0.0);
+            std::fflush(stderr);
+        };
+        // arms the dedup once everything is laid out (called just before the first request): refuses, with the reason,
+        // when a tier this object does not follow is on (a peer GPU's expert tier, remote experts) or the arena cannot do it
+        auto dd_arm = [&]() {
+            if (!strata::core::RamDedup::requested() || srcp != &arena_src) return;
+            std::string why;
+            if (peer.valid()) why = "a peer GPU's expert tier (--peer-device) is on";
+            else if (drive.d.remote_count > 0 || remote_opt) why = "remote experts are on";
+            else if (host_res.empty() || d_res == nullptr) why = "no residency table (a fillable --expert-cache with --expert-profile is needed)";
+            else if (!arena_src.dedup_arm(strata::core::RamDedup::bounce_bytes_env(), why)) {}
+            if (!why.empty()) {
+                std::fprintf(stderr, "strata ram dedup: NOT armed: %s\n", why.c_str());
+                return;
+            }
+            dd = arena_src.dedup();
+            // the structural minimum: the protected tails' bytes; STRATA_RAM_DEDUP_KEEP_GIB above it keeps the hottest slots
+            std::vector<strata::core::ExpertCache*> caches{&xcache};
+            for (auto& st : stages) caches.push_back(&st->cache);
+            uint64_t protected_bytes = 0, cache_bytes = 0;
+            for (size_t ci = 0; ci < caches.size(); ++ci) {
+                const int64_t from = dd_keep_from(caches[ci], ci), S = caches[ci]->slots();
+                protected_bytes += caches[ci]->slot_offset(S) - caches[ci]->slot_offset(std::min(from, S));
+                cache_bytes += caches[ci]->slot_offset(S);
+            }
+            const uint64_t quota = strata::core::RamDedup::keep_quota_env();
+            const uint64_t extra = quota == ~0ull || quota <= protected_bytes ? 0 : quota - protected_bytes;
+            dd_keep_below.assign(caches.size(), 0);
+            for (size_t ci = 0; ci < caches.size() && extra > 0 && cache_bytes > 0; ++ci) {
+                const uint64_t share = (uint64_t) ((double) extra * (double) caches[ci]->slot_offset(caches[ci]->slots()) / (double) cache_bytes);
+                int64_t k = 0;
+                while (k < dd_keep_from(caches[ci], ci) && caches[ci]->slot_offset(k + 1) <= share) ++k;
+                dd_keep_below[ci] = k;
+            }
+            std::fprintf(stderr, "strata ram dedup: armed: arena %.2f GiB, prefisso registrato %.2f GiB mai liberato, quota "
+                                 "ridondante %.2f GiB (prestito + coda elastica %.2f GiB%s), ring D2H %lld MiB\n",
+                         (double) dd->arena_bytes() / 1073741824.0, (double) arena_src.registered_bytes() / 1073741824.0,
+                         (double) (protected_bytes + extra) / 1073741824.0, (double) protected_bytes / 1073741824.0,
+                         quota == ~0ull ? "; STRATA_RAM_DEDUP_KEEP_GIB non impostata" :
+                         quota <= protected_bytes ? "; STRATA_RAM_DEDUP_KEEP_GIB sotto il minimo strutturale, vale il minimo" : "",
+                         (long long) (dd->bounce_bytes() >> 20));
+            for (size_t ci = 0; ci < caches.size(); ++ci)
+                std::fprintf(stderr, "strata ram dedup:   cache %zu: %lld slot, copia RAM tenuta per gli slot < %lld e >= %lld\n", ci,
+                             (long long) caches[ci]->slots(), (long long) dd_keep_below[ci], (long long) dd_keep_from(caches[ci], ci));
+            const auto t0 = Clock::now();
+            dd_sweep();
+            std::fprintf(stderr, "strata ram dedup: prima passata in %.0f ms: %lld esperti nel prefisso registrato tenuti\n",
+                         std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), (long long) dd->kept_registered());
+            dd_log("avvio");
+        };
         // plan v0.3 P6: swaps in flight - (residency index, slot) admitted when adapt_ev has completed
         std::vector<std::pair<int32_t, int32_t>> pending;
         int pending_age = 0;   // the windows the pending swaps have waited (adapt_lag)
@@ -7229,6 +7386,7 @@ int main(int argc, char** argv) {
                 if(!resident_stage_swaps(src,host_res,g.n_expert,batch,[&](int64_t)->SwapHome{return {&xcache,adapt_stream,-1};}) || batch.size()!=expected)return false;
                 for(const auto& s:batch) {
                     int slot=host_res[s.layer*512+s.out];
+                    dd_evict((int64_t) s.layer*g.n_expert+s.out, xcache, slot, adapt_stream, -1);   // out's bytes back first
                     const uint8_t* b=srcp->blob(s.layer,s.in);
                     const size_t nb=strata::kernels::cpu::expert_layout().blob_bytes(s.layer);
                     if(!b || slot<0 || cudaMemcpyAsync(xcache.device_slot(slot),b,nb,cudaMemcpyHostToDevice,adapt_stream)!=cudaSuccess)return false;
@@ -7264,6 +7422,7 @@ int main(int argc, char** argv) {
             for (const auto& [i, slot] : pending) {
                 host_res[(size_t) i] = slot;
                 srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);   // in VRAM now: RAM not needed
+                dd_drop(i);
             }
             pending.clear();
             pending_age = 0;
@@ -7357,6 +7516,8 @@ int main(int argc, char** argv) {
                 const int stn = multi_gpu ? stage_of(s.layer) : 0;   // the swap stays in the layer's own cache
                 GpuStage* gs = stn > 0 ? stages[(size_t) stn - 1].get() : nullptr;
                 const strata::core::OnDevice on(gs ? gs->dev : -1);
+                // STRATA_RAM_DEDUP: out's bytes back to RAM before its slot is overwritten (the copy in waits for it)
+                dd_evict((int64_t) out, gs ? gs->cache : xcache, slot, gs ? gs->adapt_stream : adapt_stream, gs ? gs->dev : -1);
                 if (dma_mode != 0 && slot >= 0 && b != nullptr) {
                     cp_dst.push_back(xcache.device_slot(slot));
                     cp_src.push_back(b);
@@ -7489,6 +7650,7 @@ int main(int argc, char** argv) {
                     if (have_usage && ci < kp.size() && u > kp[ci].first + 1.0f) {
                         const size_t to = (size_t) (l * g.n_expert + kp[ci].second);
                         const int32_t to_slot = host_res[to];
+                        dd_evict((int64_t) to, xcache, to_slot, adapt_stream, -1);   // the displaced expert's bytes back first
                         if (cudaMemcpyAsync(xcache.device_slot(to_slot), xcache.device_slot(host_res[from]),
                                             (size_t) lay.blob_bytes(l), cudaMemcpyDeviceToDevice, adapt_stream) != cudaSuccess) {
                             e = "elastic cache: a device copy failed";
@@ -7499,6 +7661,7 @@ int main(int argc, char** argv) {
                         ++ci;
                         ++moved;
                     } else {
+                        dd_evict((int64_t) from, xcache, host_res[from], adapt_stream, -1);   // its slot is unmapped below
                         host_res[from] = strata::core::kNotResident;
                         ++dropped;
                     }
@@ -8100,6 +8263,8 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata trace: %s %lld %lld\n", what, a, b);
             std::fflush(stderr);
         };
+        dd_arm();   // STRATA_RAM_DEDUP: everything is laid out - the duplicate RAM copies go now
+        dd_ram_log("avvio");
         {
             // what is left once everything is allocated: under WDDM a GPU filled to the brim does not fail, it pages -
             // and a page-in while the verify graph spins on a host flag stalls the request for good
@@ -8996,6 +9161,12 @@ int main(int argc, char** argv) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
                 continue;
             }
+            if (dd != nullptr) {   // STRATA_RAM_DEDUP: the request's own D2H / re-read counts start here
+                dd_d2h0 = dd->d2h_experts();
+                dd_reread0 = dd->reread();
+                dd_ms0 = dd->d2h_ms();
+                dd_log("inizio richiesta");
+            }
             char* endp = nullptr;
             long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);   // (STRATA_FORCE_IDS may lower it)
             // optional sampling keys between max_new and the ids: temperature=F, top_p=F, top_k=N, min_p=F,
@@ -9733,6 +9904,7 @@ int main(int argc, char** argv) {
                 for (const auto& [i, slot] : p.lent)
                     srcp->release(i / g.n_expert, i % g.n_expert);
 #endif
+                for (const auto& [i, slot] : p.lent) dd_drop(i);   // (the lend region keeps its copies: refused there)
                 p.lent.clear();
                 p.lent_chunk = 0;
                 return true;
@@ -9797,6 +9969,21 @@ int main(int argc, char** argv) {
                     }
                     const strata::core::OnDevice on(p.dev);
                     const int32_t first = std::max<int32_t>(p.first, (int32_t) (p.cache->slots() - part_slots(p, want)));
+                    // STRATA_RAM_DEDUP: a lent slot's expert is streamed from RAM during the prompt - the lend region
+                    // keeps its copies, but the region moves with the elastic tail (el_replan_lend): whatever lacks
+                    // one comes back now, before the buffers are laid out over it (a host wait: nothing is in flight)
+                    if (dd != nullptr) {
+                        bool any_back = false;
+                        for (int64_t l = p.lb; l < p.le; ++l)
+                            for (int64_t ex = 0; ex < g.n_expert; ++ex) {
+                                const size_t i = (size_t) (l * g.n_expert + ex);
+                                if (host_res[i] >= first && !dd->present(l, ex)) {
+                                    dd_evict((int64_t) i, *p.cache, host_res[i], nullptr, p.dev);
+                                    any_back = true;
+                                }
+                            }
+                        if (any_back) { dd->sync(p.dev); dd->drain(true); }
+                    }
                     if (want != p.sp->chunk() || first != p.first_now) {
                         if (!p.sp->relayout(want, p.cache->device_slot(first), part_bytes(p, first), e)) return false;
                         p.first_now = first;
@@ -10534,7 +10721,10 @@ int main(int argc, char** argv) {
                 auto pl_release = [&]() {
                     unpin_blobs(pin_live);
                     src.commit_exchanges();
-                    for (const int32_t i : pl_landed) srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
+                    for (const int32_t i : pl_landed) {
+                        srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
+                        dd_drop(i);   // STRATA_RAM_DEDUP: every window that may have read it over PCIe has completed
+                    }
                     pl_landed.clear();
                     exch_wait = false;
                 };
@@ -10582,6 +10772,7 @@ int main(int argc, char** argv) {
                         for (const auto& [i, slot] : el_fill) {
                             host_res[(size_t) i] = slot;
                             srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
+                            dd_drop(i);
                         }
                         el_fill.clear();
                         el_hold_tier = false;
@@ -10604,12 +10795,14 @@ int main(int argc, char** argv) {
                         int dropped = 0;
                         for (size_t i = 0; i < host_res.size(); ++i)
                             if (host_res[i] >= n && el_layer((int64_t) i / g.n_expert)) {
+                                dd_evict((int64_t) i, xcache, host_res[i], adapt_stream, dev0);   // the bytes back before the unmap
                                 host_res[i] = strata::core::kNotResident;
                                 ++dropped;
                             }
                         std::atomic_thread_fence(std::memory_order_seq_cst);
                         el_res_dirty = true;
                         if (res_put(d_res) != cudaSuccess) { err = "elastic cache: the residency table upload failed"; return false; }
+                        if (dd != nullptr) dd->sync(dev0);   // the copies back have landed before the chunks are unmapped
                         if (!xcache.elastic_shrink(n, err)) return false;
                         el_replan_lend();
                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -11131,6 +11324,7 @@ int main(int argc, char** argv) {
                     for (const auto& [i, slot] : el_fill) {
                         host_res[(size_t) i] = slot;
                         srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
+                        dd_drop(i);
                     }
                     el_fill.clear();
                     el_hold_tier = false;
@@ -11664,6 +11858,10 @@ int main(int argc, char** argv) {
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                         (long long) req_offload, chain_txt);
             std::fflush(stdout);
+            // STRATA_RAM_DEDUP: nothing is in flight - what the K/V, a shrink or a closed refill moved is dropped now
+            dd_sweep();
+            dd_log("fine richiesta");
+            dd_ram_log("fine richiesta");
             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
                             (int64_t) live.size() == p;
