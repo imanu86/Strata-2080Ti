@@ -35,6 +35,7 @@ int main() {
     cfg.enabled = true;
     cfg.swaps = 0;
     cfg.gain = 1.5f;
+    cfg.gain_share = 1.0f;   // the whole admissible gain: the budget tests below count exact swaps
     PrefillSeedPlan p = prefill_seed_plan(mass.data(), res.data(), L, E, cfg, evict_all, enter_all);
     // layer 0: 3 (4) takes 1's slot (0): gain 4; 4 (0.5) vs 2 (1): not above -> stop.  layer 2: 2 -> 0 (gain 3),
     // 3 -> 1 (gain 2); 4 has no victim left.
@@ -45,6 +46,22 @@ int main() {
     check(p.experts_seen == 10);
     check(p.candidates == 6);
     check(p.mass_total == 24.5 && p.mass_resident == 12.0 && p.mass_after == 21.0);
+    check(p.gain_possible == 9.0 && p.swaps_possible == 3);
+
+    // the budget follows the gain: half of the whole gain (4.5) needs the first two swaps (4, then 3), 40% (3.6)
+    // the first alone; the share never cuts a layer's floor
+    cfg.gain_share = 0.5f;
+    p = prefill_seed_plan(mass.data(), res.data(), L, E, cfg, evict_all, enter_all);
+    check(p.swaps.size() == 2 && p.swaps[0].gain == 4.0f && p.swaps[1].gain == 3.0f && p.swaps_possible == 3);
+    cfg.gain_share = 0.4f;
+    p = prefill_seed_plan(mass.data(), res.data(), L, E, cfg, evict_all, enter_all);
+    check(p.swaps.size() == 1 && p.swaps[0].gain == 4.0f && p.mass_after == 16.0);
+    cfg.gain_share = 0.0f;
+    cfg.floor = 1;
+    p = prefill_seed_plan(mass.data(), res.data(), L, E, cfg, evict_all, enter_all);
+    check(p.swaps.size() == 2);   // one per layer that has a swap (layers 0 and 2), nothing from the share
+    cfg.floor = 0;
+    cfg.gain_share = 1.0f;
 
     // the gain threshold: a candidate must be >= gain x victim - layer 0's 4 vs 0 passes any gain, layer 2's 3 vs 0
     // too; with gain 10 and a victim of mass 1 the candidate 4 (0.5) was already out
@@ -105,9 +122,11 @@ int main() {
         check(prefill_seed_lab_apply("PREFILL_SEED:1", c, err) == false && !err.empty());   // not armed
         c.armed = true;
         err.clear();
-        check(prefill_seed_lab_apply("early_l1:1,prefill_seed:1,STRATA_PREFILL_SEED_SWAPS:64,Prefill_Seed_Gain:2.5,,PREFILL_SEED_MIN_TOKENS:0",
+        check(prefill_seed_lab_apply("early_l1:1,prefill_seed:1,STRATA_PREFILL_SEED_SWAPS:64,Prefill_Seed_Gain:2.5,,PREFILL_SEED_MIN_TOKENS:0,"
+                                     "PREFILL_SEED_GAIN_SHARE:1.5,PREFILL_SEED_MIN_GAIN:0.5",
                                      c, err));
-        check(c.enabled && c.swaps == 64 && c.gain == 2.5f && c.min_tokens == 0 && c.floor == 0);
+        check(c.enabled && c.swaps == 64 && c.gain == 2.5f && c.min_tokens == 0 && c.floor == 0 && c.gain_share == 1.0f &&
+              c.min_gain == 0.5f);
         check(!prefill_seed_lab_apply("PREFILL_SEED_BOGUS:1", c, err));
         check(!prefill_seed_lab_apply("PREFILL_SEED:x", c, err));
         check(!prefill_seed_lab_apply("PREFILL_SEED", c, err));

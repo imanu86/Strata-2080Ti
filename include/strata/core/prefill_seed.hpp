@@ -22,10 +22,14 @@ namespace strata::core {
 struct PrefillSeedCfg {
     bool armed = false;         ///< STRATA_PREFILL_SEED is set at all: the buffers exist, a request may switch the seed
     bool enabled = false;       ///< STRATA_PREFILL_SEED=1 (lab=PREFILL_SEED:1): the seed runs after the prompt
-    int swaps = 512;            ///< STRATA_PREFILL_SEED_SWAPS: swaps per request over all layers (0 = no cap)
+    int swaps = 1024;           ///< STRATA_PREFILL_SEED_SWAPS: the hard cap of swaps per request over all layers (0 = none)
+    float gain_share = 0.9f;    ///< STRATA_PREFILL_SEED_GAIN_SHARE: swaps, best first, until this share of the plan's whole
+                                ///< gain is reached (1 = every swap the cap allows): the budget follows the gain
     int floor = 0;              ///< STRATA_PREFILL_SEED_FLOOR: swaps every layer is granted before the global cap
     float gain = 1.5f;          ///< STRATA_PREFILL_SEED_GAIN: a candidate enters when its mass >= the victim's x gain
-    int64_t min_tokens = 256;   ///< STRATA_PREFILL_SEED_MIN_TOKENS: the seed runs only past this many NEW prompt tokens
+    int64_t min_tokens = 1;     ///< STRATA_PREFILL_SEED_MIN_TOKENS: the seed runs only past this many NEW prompt tokens
+    float min_gain = 0.0f;      ///< STRATA_PREFILL_SEED_MIN_GAIN: ... and only when the plan raises the resident share of
+                                ///< the mass by at least this many percentage points (0 = always)
     float prior = 32.0f;        ///< STRATA_PREFILL_SEED_PRIOR: the usage prior's horizon in tokens (0 = leave usage)
     bool carry = true;          ///< STRATA_PREFILL_SEED_CARRY: add the live conversation's earlier prompts' mass
 };
@@ -46,6 +50,9 @@ inline PrefillSeedCfg prefill_seed_from_env() {
     if (const char* v = prefill_seed_env("STRATA_PREFILL_SEED_FLOOR")) c.floor = std::max(0, std::atoi(v));
     if (const char* v = prefill_seed_env("STRATA_PREFILL_SEED_GAIN")) c.gain = std::max(1.0f, (float) std::atof(v));
     if (const char* v = prefill_seed_env("STRATA_PREFILL_SEED_MIN_TOKENS")) c.min_tokens = std::max(0ll, (long long) std::atoll(v));
+    if (const char* v = prefill_seed_env("STRATA_PREFILL_SEED_MIN_GAIN")) c.min_gain = std::max(0.0f, (float) std::atof(v));
+    if (const char* v = prefill_seed_env("STRATA_PREFILL_SEED_GAIN_SHARE"))
+        c.gain_share = std::min(1.0f, std::max(0.0f, (float) std::atof(v)));
     if (const char* v = prefill_seed_env("STRATA_PREFILL_SEED_PRIOR")) c.prior = std::max(0.0f, (float) std::atof(v));
     if (const char* v = prefill_seed_env("STRATA_PREFILL_SEED_CARRY")) c.carry = std::atoi(v) != 0;
     return c;
@@ -78,6 +85,8 @@ inline bool prefill_seed_lab_apply(const std::string& spec, PrefillSeedCfg& out,
         else if (name == "PREFILL_SEED_FLOOR") out.floor = std::max(0, (int) v);
         else if (name == "PREFILL_SEED_GAIN") out.gain = std::max(1.0f, (float) v);
         else if (name == "PREFILL_SEED_MIN_TOKENS") out.min_tokens = std::max<int64_t>(0, (int64_t) v);
+        else if (name == "PREFILL_SEED_MIN_GAIN") out.min_gain = std::max(0.0f, (float) v);
+        else if (name == "PREFILL_SEED_GAIN_SHARE") out.gain_share = std::min(1.0f, std::max(0.0f, (float) v));
         else if (name == "PREFILL_SEED_PRIOR") out.prior = std::max(0.0f, (float) v);
         else if (name == "PREFILL_SEED_CARRY") out.carry = v != 0.0;
         else { err = "lab: unknown lever '" + name + "'"; return false; }
@@ -88,7 +97,8 @@ inline bool prefill_seed_lab_apply(const std::string& spec, PrefillSeedCfg& out,
 inline std::string prefill_seed_describe(const PrefillSeedCfg& c) {
     return std::string("PREFILL_SEED=") + (c.enabled ? "1" : "0") + " SWAPS=" + std::to_string(c.swaps) +
            " FLOOR=" + std::to_string(c.floor) + " GAIN=" + std::to_string(c.gain) +
-           " MIN_TOKENS=" + std::to_string(c.min_tokens) + " PRIOR=" + std::to_string(c.prior) +
+           " GAIN_SHARE=" + std::to_string(c.gain_share) + " MIN_TOKENS=" + std::to_string(c.min_tokens) +
+           " MIN_GAIN=" + std::to_string(c.min_gain) + " PRIOR=" + std::to_string(c.prior) +
            " CARRY=" + (c.carry ? "1" : "0");
 }
 
@@ -103,6 +113,8 @@ struct PrefillSeedPlan {
     double mass_total = 0.0;              ///< the prompt's whole mass
     double mass_resident = 0.0;           ///< the mass of the experts resident before the plan
     double mass_after = 0.0;              ///< ... and after every swap of the plan
+    double gain_possible = 0.0;           ///< the gain of every admissible swap, before the budget
+    size_t swaps_possible = 0;            ///< how many swaps were admissible before the budget
     int64_t experts_seen = 0;             ///< (layer, expert) pairs the prompt routed to at all
     int64_t candidates = 0;               ///< pairs that could have entered (not resident, admitted, mass > 0)
 };
@@ -114,8 +126,9 @@ struct PrefillSeedPlan {
 /// Per layer the non-resident experts are ranked by mass (ties: lower id first) and the eligible residents by mass
 /// (lowest first; ties: lower id first); the i-th candidate takes the i-th victim's slot while its mass is at least
 /// `gain` times the victim's and strictly above it, so a candidate the prompt never picked never enters.  Then the
-/// budget: every layer keeps its best `floor` swaps; the rest compete globally by gain until `swaps` are chosen
-/// (0 = all).  Swaps stay inside their layer: the layer's own cache, on the card that owns it.
+/// budget: every layer keeps its best `floor` swaps; the rest compete globally by gain until `gain_share` of the
+/// whole admissible gain is reached (the gains are heavy-tailed: most of it sits in the first swaps) and never past
+/// `swaps` (0 = no cap).  Swaps stay inside their layer: the layer's own cache, on the card that owns it.
 template <class MayEvict, class MayEnter>
 PrefillSeedPlan prefill_seed_plan(const float* mass, const int32_t* host_res, int64_t n_layers, int64_t n_expert,
                                   const PrefillSeedCfg& cfg, MayEvict may_evict, MayEnter may_enter) {
@@ -163,10 +176,19 @@ PrefillSeedPlan prefill_seed_plan(const float* mass, const int32_t* host_res, in
         return a.layer != b.layer ? a.layer < b.layer : a.in < b.in;
     };
     std::sort(rest.begin(), rest.end(), by_gain);
-    const size_t cap = cfg.swaps > 0 ? (size_t) cfg.swaps : plan.swaps.size() + rest.size();
+    plan.swaps_possible = plan.swaps.size() + rest.size();
+    for (const PrefillSeedSwap& s : plan.swaps) plan.gain_possible += (double) s.gain;
+    for (const PrefillSeedSwap& s : rest) plan.gain_possible += (double) s.gain;
+    const size_t cap = cfg.swaps > 0 ? (size_t) cfg.swaps : plan.swaps_possible;
     if (plan.swaps.size() > cap) plan.swaps.resize(cap);   // floors past the cap: the best of them, in layer order
-    const size_t room = cap - plan.swaps.size();
-    plan.swaps.insert(plan.swaps.end(), rest.begin(), rest.begin() + (ptrdiff_t) std::min(room, rest.size()));
+    double taken = 0.0;
+    for (const PrefillSeedSwap& s : plan.swaps) taken += (double) s.gain;
+    const double want = plan.gain_possible * (double) std::min(1.0f, std::max(0.0f, cfg.gain_share));
+    for (const PrefillSeedSwap& s : rest) {   // best first, until the share of the gain or the cap
+        if (plan.swaps.size() >= cap || taken >= want) break;
+        plan.swaps.push_back(s);
+        taken += (double) s.gain;
+    }
     std::sort(plan.swaps.begin(), plan.swaps.end(), by_gain);
     plan.mass_after = plan.mass_resident;
     for (const PrefillSeedSwap& s : plan.swaps) plan.mass_after += (double) s.gain;
