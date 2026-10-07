@@ -3185,6 +3185,14 @@ int main(int argc, char** argv) {
     // --pipeline-windows (opt-in): one conversation's windows with the two stages of a layer split overlapped.  Decided
     // here, before any stage sizes its expert cache (the second verifier per stage and the snapshots are allocated
     // after the caches, so their room is kept out of them).  What it does not support turns it off, said once.
+    // STRATA_BATCH_PIPELINE=1 (opt-in, lab/multichat-mtp; docs/BATCH_PIPELINE.md): --pipeline-windows stays on beside
+    // --batch.  The pipeline runs the single conversation's decode (the server's solo path, a chat alone); the batch
+    // windows stay serial on the even verifiers, which the pipeline leaves idle between its requests (its invariant),
+    // and an admission's first window (BGEN) decodes serially, so its residual row is the even verifier's.
+    const bool batch_pipeline = [] {
+        const char* v = std::getenv("STRATA_BATCH_PIPELINE");
+        return v != nullptr && v[0] == '1';
+    }();
     if (o.pipeline_windows > 0) {
         const bool helpers = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
         const char* off = !o.serve ? "it needs --serve"
@@ -3192,7 +3200,10 @@ int main(int argc, char** argv) {
                         : !multi_gpu ? "it needs a layer split on two GPUs"
                         : split_devs.size() != 1 ? "it needs a layer split into exactly two stages"
                         : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
-                        : o.batch != 0 ? "not with --batch slots"
+                        : o.batch != 0 && !batch_pipeline ? "not with --batch slots (STRATA_BATCH_PIPELINE=1 keeps it for "
+                                                            "a conversation alone)"
+                        : o.batch != 0 && o.batch_groups > 1 ? "not with --batch-groups (the slot groups are a pipeline "
+                                                               "of their own)"
                         : o.peer_device >= 1 ? "not with --peer-device"
                         : helpers ? "not with the helper caches (--expert-cache-device1..3, --remote-expert-opt)"
                         : nullptr;
@@ -10507,7 +10518,9 @@ int main(int argc, char** argv) {
             // and a window row computes what it would in any other window, so every emitted token is the serial loop's
             // (with STRATA_IQ_MT_MIN=1 bit for bit; sampled requests with the same Philox draw per position).
             bool pl_ran = false;
-            const bool pl_want = pipe && pl_pw >= 2 && pl_snap2[0] != nullptr;
+            // STRATA_BATCH_PIPELINE: an admission (BGEN) decodes its one token serially - the slot drafter starts from
+            // the even verifier's residual row (ver.final_R_all()), and the window is one row anyway
+            const bool pl_want = pipe && pl_pw >= 2 && pl_snap2[0] != nullptr && admit_slot < 0;
             const char* pl_serial = !pl_want ? nullptr
                                   : hist_n > 0 ? "repetition penalties (penalty_last_n)"
                                   : mtp.coupled() ? "coupled draft sampling" : nullptr;
