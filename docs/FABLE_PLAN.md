@@ -9,6 +9,29 @@ Profilo di partenza (macchina dell'owner, 131k di contesto, 3060 = stadio 0 stra
 alla taglia di A 2,2; `cudaGraphLaunch` stadio 0 0,35; stadio 0 10,4; F0→L1 1,2; stadio 1 18,1); finestra SPECULATIVA
 on-path 24,2 ms (V→L1 1,6 + stadio 1 22,4, gonfiato di 0,73-0,84 ms per passo della catena ad alta priorità).
 
+## Leve a caldo: `lab=` per richiesta (A/B senza riavvio)
+
+Le leve `STRATA_FP_*` e `STRATA_MTP_PRIORITY` vivono in un'unica struct runtime (`include/strata/core/fp_lab.hpp`:
+`fp_lab()` i valori vivi, `fp_lab_env()` i default letti una volta dall'ambiente). Il serve protocol accetta la chiave
+`lab=NOME:VALORE[,NOME:VALORE…]` sulla riga della richiesta (accanto a `spec_min_p=`, `pcie_frac=`…), applicata
+all'inizio della richiesta con nulla in volo; una richiesta senza `lab=` torna ai default dell'ambiente. Nomi (maiuscole
+o minuscole, con o senza prefisso `STRATA_FP_`): `EARLY_L1`, `DEVPLAN`, `PROBE_WAITA`, `EL_ASYNC`, `CHAIN_TRIM`,
+`CHAIN_TRIM_AHEAD`, `EXPERT_V` (0-4), `HC_FUSE_NORM` (0-2), `SHEXP_FUSE` (0-2), `MTP_PRIORITY` (1/0/-1).
+
+- **Grafi**: `EXPERT_V`, `HC_FUSE_NORM`, `SHEXP_FUSE` e `DEVPLAN` sono cotti nei grafi catturati: quando cambiano il
+  loop distrugge tutti i grafi delle finestre, dei commit e del drafter (`Verifier::drop_graphs`,
+  `MtpDrafter::drop_graphs`, `pl_prepared=false`) e logga `strata lab: graphs recaptured (<leva> changed)`; la
+  ricattura avviene alla finestra successiva (~1-2 s una tantum, da escludere dalla misura: scaldare con una richiesta
+  corta). `HC_FUSE_NORM` rilancia `fused_gr_check()` su ogni scheda per il nuovo livello (verifica bitwise una volta per
+  livello e scheda). `DEVPLAN` passa da `Verifier::set_fp_devplan` (alloca `skip_` alla prima accensione).
+- **Stream**: `MTP_PRIORITY` sceglie fra tre stream della catena creati al load (default/massima/minima,
+  `MtpDrafter::set_chain_priority`), scambiati a drafter fermo.
+- **Per richiesta / per strato** senza ricattura: `EARLY_L1`, `EL_ASYNC`, `CHAIN_TRIM(_AHEAD)`, `PROBE_WAITA`.
+- **Python** (`serve/server.py`): il campo extra `"strata_lab": "EARLY_L1:1,CHAIN_TRIM:1"` nel body OpenAI diventa
+  `lab=…` (solo lettere, cifre e `_ : , . -`; test `test_lab_key`). Esempio A/B: due client alternati, uno senza
+  `strata_lab` (braccio A) e uno con la leva (braccio B), sullo stesso prefisso in cache.
+- Commit: vedi `git log` (`FABLE-SPLIT-Leve a caldo…`).
+
 ## Convenzioni di misura
 
 - Bench deterministico dell'owner, decode a 131k, `STRATA_DECODE_TIMING=1` e `STRATA_PIPELINE_TRACE=<file>` accesi in
