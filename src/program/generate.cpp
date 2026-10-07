@@ -7186,6 +7186,56 @@ int main(int argc, char** argv) {
         std::vector<void*> pin_live;   // the swaps' locked arena pages (pin_blob), unlocked once they have landed
         cudaEvent_t adapt_ev = nullptr;
         cudaEventCreateWithFlags(&adapt_ev, cudaEventDisableTiming);
+        // FABLE STRATA_FP_DEVPLAN=1 (opt-in, --pipeline-windows 2): the pipelined verifiers plan their all-resident
+        // groups on the device (Verifier::init), which is only right while each card's residency table agrees with
+        // host_res about every slot a window may read.  `fp_res_sync(card)` compares the card's rows of host_res with
+        // the rows it last uploaded (fp_res_shadow) and uploads them when they differ; it runs before every pipelined
+        // launch on that card (a launch happens at the card's gap: the window before it has completed) and when the
+        // adaptive tier's fence asks for it (fp_fence_*: the tier marks the evicted experts, waits for this thread to
+        // upload the marks, THEN records the fence events - so a window launched after the marks either planned from
+        // the new table or is covered by the fence).  card 0 = CUDA0's table (d_res), k = stages[k - 1]'s.
+        static const bool fp_devplan = [] {
+            const char* v = std::getenv("STRATA_FP_DEVPLAN");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        std::vector<int32_t> fp_res_shadow;   // [card][layer * n_expert], the rows as last uploaded (empty: unknown)
+        int64_t fp_res_uploads = 0;
+        std::atomic<bool> fp_fence_req{false}, fp_fence_ack{false};
+        auto fp_res_sync = [&](int card) -> bool {
+            if (!fp_devplan || host_res.empty()) return true;
+            const size_t n = host_res.size(), ncards = 1 + stages.size();
+            if (card < 0 || (size_t) card >= ncards) return true;
+            int32_t* dst = card == 0 ? d_res : stages[(size_t) card - 1]->d_res;
+            if (dst == nullptr) return true;
+            if (fp_res_shadow.size() != n * ncards) fp_res_shadow.assign(n * ncards, (int32_t) -2);   // -2: never uploaded
+            int32_t* shadow = fp_res_shadow.data() + (size_t) card * n;
+            int64_t lb = -1, le = -1;   // the card's layers (contiguous)
+            for (int64_t l = 0; l < g.n_layers; ++l)
+                if ((multi_gpu ? stage_of(l) : 0) == card) { if (lb < 0) lb = l; le = l + 1; }
+            if (lb < 0) return true;
+            const size_t i0 = (size_t) lb * g.n_expert, i1 = (size_t) le * g.n_expert;
+            bool same = true;
+            for (size_t i = i0; i < i1 && same; ++i) same = shadow[i] == host_res[i];
+            if (same) return true;
+            // the shadow first, the device from the shadow: the device holds exactly what the shadow says even if
+            // another thread (the blocking tier) writes host_res meanwhile - the next sync catches that
+            std::memcpy(shadow + i0, host_res.data() + i0, (i1 - i0) * sizeof(int32_t));
+            const strata::core::OnDevice on(card == 0 ? -1 : stages[(size_t) card - 1]->dev);
+            if (cudaMemcpy(dst + i0, shadow + i0, (i1 - i0) * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess ||
+                cudaStreamSynchronize(nullptr) != cudaSuccess)
+                return false;
+            ++fp_res_uploads;
+            return true;
+        };
+        // the tier's fence request (see above): the marks of every card uploaded, then the ack
+        auto fp_fence_serve = [&]() -> bool {
+            if (!fp_devplan || !fp_fence_req.load()) return true;
+            fp_fence_req.store(false);
+            bool ok = true;
+            for (size_t c = 0; c <= stages.size(); ++c) ok = fp_res_sync((int) c) && ok;
+            fp_fence_ack.store(true);
+            return ok;
+        };
         // a layer split's later stages keep a copy of the residency table on their devices, and swap on their own
         auto res_upload = [&]() {
             if (d_res != nullptr)
@@ -7194,6 +7244,9 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(st->dev);
                 res_put(st->d_res);
             }
+            if (fp_devplan && !fp_res_shadow.empty() && fp_res_shadow.size() == host_res.size() * (1 + stages.size()))
+                for (size_t c = 0; c <= stages.size(); ++c)   // every card holds host_res now
+                    std::memcpy(fp_res_shadow.data() + c * host_res.size(), host_res.data(), host_res.size() * sizeof(int32_t));
         };
         // Lab refresh is synchronous and measured. It cannot race the verifier or drafter.
         int64_t closed_refreshes = 0, closed_refill_bytes = 0;
@@ -9602,6 +9655,7 @@ int main(int argc, char** argv) {
                         const Win& w = wins[l0];
                         for (int t = 0; t < w.T; ++t) w0[(size_t) t] = (int32_t) cur[(size_t) (w.q + t)];
                         strata::core::Verifier& v = *PV[0][l0 & 1];
+                        if (!fp_res_sync(0)) return fail("STRATA_FP_DEVPLAN: the residency table upload failed");
                         if (!v.pl_launch(w.T, w0.data(), w.q, e) || !v.pl_commit_async(w.T, e)) return fail(e);
                         ++l0;
                     }
@@ -9621,6 +9675,7 @@ int main(int argc, char** argv) {
                             const strata::core::OnDevice on(mtp.device());
                             cudaStreamWaitEvent(v.stream(), pl_mtp_ev[l1 & 1], 0);
                         }
+                        if (!fp_res_sync(1)) return fail("STRATA_FP_DEVPLAN: the residency table upload failed");
                         if (!v.pl_launch(w.T, w1.data(), w.q, e) || !v.pl_commit_async(w.T, e)) return fail(e);
                         ++l1;
                     }
@@ -10430,6 +10485,10 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: pipelined decode: %s\n", m.c_str());
                     strata::core::diag_pipeline_fn().store(nullptr);
                     strata::core::release_gpu_waits(stderr);
+                    while (pl_adapt_thr.joinable() && !pl_adapt_done.load()) {   // FABLE: the tier may wait for a fence ack
+                        (void) fp_fence_serve();
+                        std::this_thread::yield();
+                    }
                     if (pl_adapt_thr.joinable()) pl_adapt_thr.join();
                     if (ajob) {
                         ajob->wait();
@@ -10521,6 +10580,11 @@ int main(int argc, char** argv) {
                 // adapt()'s fence, on the tier's thread: it waits on the HOST.  A device-side wait (the refill streams
                 // waiting for the stages' events) would queue copies behind windows that need this loop, beside it.
                 adapt_fence = [&]() {
+                    if (fp_devplan) {   // FABLE: the evicted experts' marks reach the cards first (fp_fence_serve)
+                        fp_fence_ack.store(false);
+                        fp_fence_req.store(true);
+                        while (!fp_fence_ack.load()) std::this_thread::yield();
+                    }
                     stage_record(fence_ev);
                     while (!stage_passed(fence_ev)) std::this_thread::yield();
                 };
@@ -10820,6 +10884,7 @@ int main(int argc, char** argv) {
                     }
                     if (pl_yield && ((doomed && !pump0(D)) || !pump0(B, A.s1 && !A.s1_done ? 1 : 0))) return die(err);
                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
+                    if (!fp_fence_serve()) return die("STRATA_FP_DEVPLAN: the residency table upload failed");
                     if (!el_gap()) return die(err);   // lab P3: the elastic tail at a gap of stage 0
                     // ---- a wrong speculative window has finished: stage 0 back to the verified window's real commit
                     if (doomed && D.finished) {
@@ -10932,6 +10997,7 @@ int main(int argc, char** argv) {
                         if (ajob) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
                         if (!el_gap()) return die(err);
                         if (!snap_take(A.seq)) return die("the GDN snapshot failed");
+                        if (!fp_res_sync(0)) return die("STRATA_FP_DEVPLAN: the residency table upload failed");
                         if (!V0(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.launched = true;
                         tre("L0", A.seq, A.T, 0);
@@ -10939,6 +11005,7 @@ int main(int argc, char** argv) {
                         // previous A's verdict is in, and only commits may still run on its stream)
                         if (fp_early_l1 && !A.s1 && !PV[1][0]->in_flight() && !PV[1][1]->in_flight()) {
                             if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
+                            if (!fp_res_sync(1)) return die("STRATA_FP_DEVPLAN: the residency table upload failed");
                             if (!V1(A).pl_launch(A.T, A.tok, A.p, err, V0(A).done_event())) return die(err);
                             A.s1 = true;
                             ++pl_early_l1;
@@ -10960,6 +11027,7 @@ int main(int argc, char** argv) {
                             }
                             undo_ple[0] = ss.ple_prev[0];
                             undo_ple[1] = ss.ple_prev[1];
+                            if (!fp_res_sync(0)) return die("STRATA_FP_DEVPLAN: the residency table upload failed");
                             if (!V0(A).pl_commit_async(A.T, err) || !snap_take(B.seq) ||
                                 !V0(B).pl_launch(B.T, B.tok, B.p, err))
                                 return die(err.empty() ? std::string("the GDN snapshot failed") : err);
@@ -10977,6 +11045,7 @@ int main(int argc, char** argv) {
                     if (A.finished && !A.s1) {
                         if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
                         if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
+                        if (!fp_res_sync(1)) return die("STRATA_FP_DEVPLAN: the residency table upload failed");
                         if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.s1 = true;
                         tre("L1", A.seq, A.T);
@@ -11137,6 +11206,10 @@ int main(int argc, char** argv) {
                 }
                 pl_drain();   // nothing in flight: both stages' commits and the drafter have landed
                 strata::core::diag_pipeline_fn().store(nullptr);
+                while (pl_adapt_thr.joinable() && !pl_adapt_done.load()) {   // FABLE: the tier may wait for a fence ack
+                    (void) fp_fence_serve();
+                    std::this_thread::yield();
+                }
                 if (pl_adapt_thr.joinable()) pl_adapt_thr.join();   // its copies waited only for finished work
                 adapt_fence = nullptr;
                 if (exch_wait) pl_release();   // every window has completed (drained)
@@ -11192,6 +11265,9 @@ int main(int argc, char** argv) {
                     if (fp_early_l1)
                         std::fprintf(stderr, "strata pipeline: STRATA_FP_EARLY_L1: %lld stage-1 windows launched behind stage 0's "
                                              "event (of %lld)\n", (long long) pl_early_l1, (long long) dec_windows);
+                    if (fp_devplan)
+                        std::fprintf(stderr, "strata pipeline: STRATA_FP_DEVPLAN: %lld residency table uploads so far (all requests)\n",
+                                     (long long) fp_res_uploads);
                     if (el_on)
                         std::fprintf(stderr, "strata pipeline: elastic tail beside the windows: %lld shrinks, %lld growths at "
                                              "gaps of stage 0, %.1f ms on the loop's thread; the %lld windows after them "

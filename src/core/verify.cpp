@@ -118,6 +118,12 @@ inline bool g_lfuse_pair() { static const bool on = [] { const char* v = std::ge
 inline bool g_qdedup() { static const bool on = [] { const char* v = std::getenv("STRATA_VERIFY_QDEDUP"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
 // S26 STRATA_QFUSE=1: activation q8_1 images written by their producers (the GDN output norm) - the same bytes
 inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
+// FABLE (lab, two-card pipeline): STRATA_FP_DEVPLAN=1 - the pipelined stages plan all-resident groups on the device
+// (see init); STRATA_FP_PROBE_WAITA=1 - the upper bound of removing waitA: service() raises flag A with an
+// "all resident" plan before the CPU jobs (the GPU never waits for the host's plan; the outputs are WRONG for any
+// non-resident expert: a timing probe only, never for text)
+inline bool fp_devplan_env() { static const bool on = [] { const char* v = std::getenv("STRATA_FP_DEVPLAN"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
+inline bool fp_probe_waita_env() { static const bool on = [] { const char* v = std::getenv("STRATA_FP_PROBE_WAITA"); if (v != nullptr && std::atoi(v) != 0) { std::fprintf(stderr, "strata verify: STRATA_FP_PROBE_WAITA: flag A raised with an all-resident plan before the CPU jobs - the text is WRONG (timing probe)\n"); return true; } return false; }(); return on; }
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 struct Bump {
@@ -763,6 +769,15 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         const char* v = std::getenv("STRATA_VERIFY_DEVICE_PLAN");
         // (not with set_always_publish: the device table may lag the host's while windows are in flight)
         device_plan_ = !all_resident_ && !always_publish_ && (closed_available_ || (v != nullptr && std::atoi(v) != 0));
+        // FABLE STRATA_FP_DEVPLAN=1 (opt-in): the pipelined stages plan their all-resident groups on the device too
+        // (waitA -> 0 for them), the rows still published for the host's CPU share.  Sound only because the serve
+        // loop then keeps each card's residency table in step with host_res at that stage's gaps (fp_res_sync, before
+        // every pipelined launch) and the adaptive tier's fence waits for that upload before any slot is overwritten.
+        if (always_publish_ && !all_resident_ && hits.d_res != nullptr && fp_devplan_env()) {
+            device_plan_ = true;
+            std::fprintf(stderr, "strata verify: STRATA_FP_DEVPLAN: device-planned groups in the pipelined windows (layers %lld-%lld)\n",
+                         (long long) lb_, (long long) (le_ - 1));
+        }
     }
     // (halo's STRATA_VERIFY_RESIDENT=1 is this window's all_resident_ graph above, which 0.1.39 has on by default)
     if (g_qfuse()) {   // S26: the HC read's q8_1 group counters, zeroed once (each launch leaves them zero)
@@ -3270,6 +3285,49 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
         progress_at("verify window (pipelined): the CPU experts of layer", l);
         if (expert_usage_on())   // lab STRATA_EXPERT_USAGE (pipelined windows)
             expert_usage_add(l, h_ids_ + (size_t) tb * ss.k, h_w_ + (size_t) tb * ss.k, (int64_t) n * ss.k, h_res_, g.n_expert);
+        // FABLE STRATA_FP_PROBE_WAITA (lab): flag A (and B) up with an "all resident" plan BEFORE the CPU jobs, so the
+        // GPU never waits for the host's plan - the upper bound of what removing waitA can give.  Every entry is a VRAM
+        // hit from the host table; a non-resident expert reads slot 0 (wrong text, a timing probe).  The pool then runs
+        // as usual, its own plan written to a scratch block the GPU never reads (its publish re-raises flag A to `want`).
+        const bool probe = pool != nullptr && fp_probe_waita_env();
+        if (probe) {
+            const volatile int32_t* ids = h_ids_ + (size_t) tb * ss.k;
+            const int64_t K = ss.k, ne = (int64_t) n * K;
+            int32_t groups = 0, entries = 0;
+            for (int64_t i0 = 0; i0 < ne; ++i0) {
+                const int32_t e = ids[i0];
+                bool first = true;
+                for (int64_t j = 0; j < i0 && first; ++j) first = ids[j] != e;
+                if (!first) continue;
+                int32_t slot = (e >= 0 && e < g.n_expert && h_res_ != nullptr) ? h_res_[l * g.n_expert + e] : -1;
+                if (slot < 0) slot = 0;
+                sink_.ptr[groups] = (unsigned long long) (hits_.cache_base + (hits_.slot_off ? (size_t) hits_.slot_off[slot]
+                                                                                            : (size_t) slot * (size_t) hits_.blob));
+                sink_.start[groups] = entries;
+                for (int64_t i = i0; i < ne; ++i)
+                    if (ids[i] == e) { sink_.dst[entries] = (int32_t) i; sink_.tok[entries] = (int32_t) (i / K); ++entries; }
+                ++groups;
+            }
+            sink_.start[groups] = entries;
+            sink_.start2[0] = entries;
+            sink_.counts[0] = groups;
+            sink_.counts[1] = entries;
+            sink_.counts[2] = 0;
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            _mm_sfence();
+            *(volatile uint32_t*) h_flagA_ = want;
+            raise_flag(h_flagB_, want);
+            static std::vector<int32_t> scratch;   // one host thread serves every verifier: shared is fine
+            if ((int64_t) scratch.size() < plan_i32_ + 16) scratch.assign((size_t) (plan_i32_ + 16), 0);
+            const int64_t cap = sink_.cap, i32 = 4 + (cap + 1) + cap + cap, ptr_off = (i32 + 1) & ~1ll;
+            sink_.counts = scratch.data();
+            sink_.start = scratch.data() + 4;
+            sink_.dst = sink_.start + cap + 1;
+            sink_.tok = sink_.dst + cap;
+            sink_.ptr = (unsigned long long*) (scratch.data() + ptr_off);
+            sink_.ptr2 = sink_.ptr + cap;
+            sink_.start2 = scratch.data() + ptr_off + 4 * cap;
+        }
         if (pool != nullptr) {
             // lab probes, as in run(): STRATA_ROUTED_KEEP_SKIP and STRATA_ROUTED_MISS_W apply to pipelined windows too
             if (routed_keep_skip_) {
@@ -3297,6 +3355,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
             pool(user, h_x_ + (size_t) tb * g.n_embd, h_ids_ + (size_t) tb * ss.k, n, ss.k,
                  h_ymiss_ + (size_t) tb * ss.k * g.n_embd, l);
         }
+        if (probe) set_plan_slot(grp);   // the sink back onto the mapped block
         if (g_trace) trace_ev(*(volatile uint32_t*) h_flagA_ == want ? "SERVED" : "SERVED-NO-PLAN-YET", fl_k_, l,
                               (int64_t) ms_since(b));
         progress_tick();
