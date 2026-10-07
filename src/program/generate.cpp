@@ -27,6 +27,7 @@
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/expert_source.hpp"
 #include "strata/core/pinned.hpp"
+#include "strata/core/prefill_seed.hpp"
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/peer_experts.hpp"
@@ -6582,6 +6583,49 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,"closed routing: exchange reservation: %s\n",err.c_str()); return 1;
         }
         if (closed_env) sp.closed_usage = ver.closed_usage_buffer();
+        // docs/PREFILL_SEED.md: the prompt's routing mass and count per (layer, expert), one [n_layers x n_expert] pair
+        // of buffers on every card that reads prompt layers (a stage writes only its own layers' rows; the driver sums
+        // them).  STRATA_PREFILL_SEED set at all = armed (the buffers exist, the accumulation runs); =1 = the seed runs
+        // after every prompt; a request's `lab=PREFILL_SEED:0|1` switches it.  Unset: nothing here exists.
+        const strata::core::PrefillSeedCfg seed_env = strata::core::prefill_seed_from_env();
+        struct SeedBuf { float* mass = nullptr; float* count = nullptr; int dev = -1; cudaStream_t stream = nullptr; };
+        std::vector<SeedBuf> seed_bufs;
+        if (seed_env.armed) {
+            if (host_res.empty() || srcp == nullptr) {
+                std::fprintf(stderr, "strata prefill seed: needs --expert-profile (a residency table) and an expert "
+                                     "source: off\n");
+            } else {
+                const size_t seed_bytes = (size_t) (g.n_layers * g.n_expert) * sizeof(float);
+                auto seed_make = [&](int dev, cudaStream_t s, strata::prefill::Prefill& p) -> bool {
+                    const strata::core::OnDevice on(dev);
+                    SeedBuf b;
+                    b.dev = dev;
+                    b.stream = s;
+                    if (cudaMalloc((void**) &b.mass, seed_bytes) != cudaSuccess ||
+                        cudaMalloc((void**) &b.count, seed_bytes) != cudaSuccess ||
+                        cudaMemset(b.mass, 0, seed_bytes) != cudaSuccess || cudaMemset(b.count, 0, seed_bytes) != cudaSuccess)
+                        return false;
+                    p.seed_mass = b.mass;
+                    p.seed_count = b.count;
+                    seed_bufs.push_back(b);
+                    return true;
+                };
+                bool seed_ok = seed_make(-1, main_stream, sp);
+                for (auto& st : stages) seed_ok = seed_ok && seed_make(st->dev, st->stream, st->sp);
+                if (!seed_ok) {
+                    std::fprintf(stderr, "strata prefill seed: cannot allocate the mass buffers\n");
+                    return 1;
+                }
+                // the resident RAM mode: a swap exchanges blobs with the compact copy, through the exchange buffers
+                // (idempotent: the adaptive tier's own reservation, when larger, stands)
+                if (src.complement_ready() && !src.reserve_exchanges(96, err)) {
+                    std::fprintf(stderr, "strata prefill seed: exchange reservation: %s\n", err.c_str());
+                    return 1;
+                }
+                std::fprintf(stderr, "strata prefill seed: armed on %zu card(s): %s\n", seed_bufs.size(),
+                             strata::core::prefill_seed_describe(seed_env).c_str());
+            }
+        }
         if (pipe) {   // the odd windows' pool routing: the same as the even ones', with their plans
             split_drive_b = split_drive;
             split_drive_b.plan[0] = ver_b.plan_sink();
@@ -7409,6 +7453,162 @@ int main(int argc, char** argv) {
                 }
             }
             for (float& v : drive.d.usage) v *= o.adapt_decay;
+            return true;
+        };
+        // ---- docs/PREFILL_SEED.md: THE PREFILL SEED.  After the prompt (slots refilled, nothing in flight: the caller
+        // drains the adaptive tier first) the prompt's routing mass per (layer, expert) is read from every card, the
+        // experts the prompt leaned on are swapped into their layer's own cache - on the card that owns the layer, in
+        // place of the residents the prompt barely used - and the adaptive tier's counts get a prior, so its first
+        // rounds do not undo the seed.  Synchronous and measured, like closed_refill; the swaps go through the same
+        // paths as the adaptive tier's (resident_stage_swaps for the RAM copy, the home card's refill stream, the
+        // batched DMA of CUDA0) so the elastic core, a split's later stages and the resident RAM mode keep their
+        // rules.  The routing never changes: the output is the default's bit for bit, only the placement moves.
+        // The prompt cache hands the prefill the suffix only: with CARRY the live conversation's earlier prompts'
+        // mass is carried over, so the ranking sees the whole conversation, not the last message.
+        std::vector<float> seed_carry_mass, seed_carry_count;
+        int64_t seed_carry_tokens = 0;
+        auto seed_home_of = [&](int64_t layer) -> SwapHome {   // as adapt's home_of: the layer's own cache
+            const int stn = multi_gpu ? stage_of(layer) : 0;
+            if (stn > 0) {
+                GpuStage* gs = stages[(size_t) stn - 1].get();
+                return {&gs->cache, gs->adapt_stream, gs->dev};
+            }
+            return {&xcache, adapt_stream, -1};
+        };
+        auto prefill_seed = [&](const strata::core::PrefillSeedCfg& cfg, int64_t new_tokens, int64_t resume,
+                                bool from_live) -> bool {
+            if (seed_bufs.empty()) return true;
+            const auto began = Clock::now();
+            const size_t cells = (size_t) (g.n_layers * g.n_expert);
+            const size_t bytes = cells * sizeof(float);
+            // 1. the prompt's statistics: every card's rows summed (each wrote its own layers'), the buffers cleared
+            std::vector<float> mass(cells, 0.0f), count(cells, 0.0f), part(cells);
+            for (const SeedBuf& b : seed_bufs) {
+                const strata::core::OnDevice on(b.dev);
+                for (int which = 0; which < 2; ++which) {
+                    float* d = which == 0 ? b.mass : b.count;
+                    std::vector<float>& acc = which == 0 ? mass : count;
+                    if (cudaMemcpyAsync(part.data(), d, bytes, cudaMemcpyDeviceToHost, b.stream) != cudaSuccess ||
+                        cudaStreamSynchronize(b.stream) != cudaSuccess ||
+                        cudaMemsetAsync(d, 0, bytes, b.stream) != cudaSuccess) {
+                        err = "prefill seed: the mass readback failed";
+                        return false;
+                    }
+                    for (size_t i = 0; i < cells; ++i) acc[i] += part[i];
+                }
+            }
+            // 2. the live conversation's earlier prompts (the prompt cache gives the prefill the suffix only); a
+            // prompt that resumes from elsewhere, or starts over, starts the carry over
+            int64_t tokens = new_tokens;
+            if (cfg.carry && resume > 0 && from_live && seed_carry_mass.size() == cells) {
+                for (size_t i = 0; i < cells; ++i) { mass[i] += seed_carry_mass[i]; count[i] += seed_carry_count[i]; }
+                tokens += seed_carry_tokens;
+            }
+            if (cfg.carry) { seed_carry_mass = mass; seed_carry_count = count; seed_carry_tokens = tokens; }
+            else { seed_carry_mass.clear(); seed_carry_count.clear(); seed_carry_tokens = 0; }
+            if (!cfg.enabled) return true;
+            if (new_tokens < cfg.min_tokens) {
+                std::fprintf(stderr, "strata prefill seed: saltato, %lld token nuovi sotto MIN_TOKENS %lld\n",
+                             (long long) new_tokens, (long long) cfg.min_tokens);
+                return true;
+            }
+            // 3. the plan: the adaptive tier's own eviction and admission rules
+            auto may_evict = [&](int64_t l, int32_t e) -> bool {
+                const int32_t r = host_res[(size_t) (l * g.n_expert + e)];
+                return r >= el_core || core_adapt || (pipe_elastic_env() && multi_gpu && stage_of(l) != 0);
+            };
+            auto may_enter = [&](int64_t l, int32_t e) -> bool {
+                return !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e);
+            };
+            strata::core::PrefillSeedPlan plan =
+                strata::core::prefill_seed_plan(mass.data(), host_res.data(), g.n_layers, g.n_expert, cfg, may_evict, may_enter);
+            // 4. the swaps, synchronous, in batches the exchange buffers hold (the RAM copy mode; else 96 at a time)
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            const size_t batch_max = (size_t) std::max<int64_t>(1, src.complement_ready() ? src.exchange_capacity() : 96);
+            const int dma_mode = multi_gpu ? 0 : strata::core::dma_batch_mode();
+            int64_t done = 0, copied = 0;
+            double mass_now = plan.mass_resident;
+            for (size_t at = 0; at < plan.swaps.size(); at += batch_max) {
+                std::vector<strata::core::PrefillSeedSwap> batch(
+                    plan.swaps.begin() + (ptrdiff_t) at,
+                    plan.swaps.begin() + (ptrdiff_t) std::min(plan.swaps.size(), at + batch_max));
+                // the evicted blobs go back to the RAM copy first (drops what the exchange buffers cannot hold)
+                if (!resident_stage_swaps(src, host_res, g.n_expert, batch, seed_home_of)) {
+                    err = "prefill seed: the copies back to the RAM copy failed";
+                    return false;
+                }
+                std::vector<void*> pins;
+                if (pin_blobs_on()) {
+                    std::vector<std::pair<uintptr_t, uintptr_t>> spans;
+                    for (const auto& s : batch)
+                        if (const uint8_t* b = srcp->blob(s.layer, s.in))
+                            spans.emplace_back((uintptr_t) b, (uintptr_t) b + lay.blob_bytes(s.layer));
+                    pin_blobs(std::move(spans), pins);
+                }
+                std::vector<SwapHome> used;
+                std::vector<void*> cp_dst;
+                std::vector<const void*> cp_src;
+                std::vector<size_t> cp_bytes;
+                for (const auto& s : batch) {
+                    const int32_t slot = host_res[(size_t) (s.layer * g.n_expert + s.out)];
+                    const uint8_t* b = srcp->blob(s.layer, s.in);
+                    const size_t nb = (size_t) lay.blob_bytes(s.layer);
+                    const SwapHome home = seed_home_of(s.layer);
+                    if (slot < 0 || b == nullptr) {
+                        err = "prefill seed: layer " + std::to_string(s.layer) + " expert " + std::to_string(s.in) +
+                              " has no blob or no slot";
+                        return false;
+                    }
+                    const strata::core::OnDevice on(home.dev);
+                    if (dma_mode != 0 && home.dev < 0) {   // CUDA0's copies as one submission (STRATA_DMA_BATCH)
+                        cp_dst.push_back(home.cache->device_slot(slot));
+                        cp_src.push_back(b);
+                        cp_bytes.push_back(nb);
+                    } else if (adapt_copy_h2d(home.cache->device_slot(slot), b, nb, home.stream) != cudaSuccess) {
+                        err = std::string("prefill seed: a swap copy failed: ") + cudaGetErrorString(cudaGetLastError());
+                        return false;
+                    }
+                    bool seen = false;
+                    for (const SwapHome& u : used) seen = seen || u.stream == home.stream;
+                    if (!seen) used.push_back(home);
+                    copied += (int64_t) nb;
+                }
+                if (!cp_dst.empty() && strata::core::copy_blobs(cp_dst.data(), cp_src.data(), cp_bytes.data(), cp_dst.size(),
+                                                                adapt_stream, dma_mode) != cudaSuccess) {
+                    err = std::string("prefill seed: the batched copy failed: ") + cudaGetErrorString(cudaGetLastError());
+                    return false;
+                }
+                for (const SwapHome& u : used) {
+                    const strata::core::OnDevice on(u.dev);
+                    if (cudaStreamSynchronize(u.stream) != cudaSuccess) {
+                        err = "prefill seed: a copy stream failed";
+                        return false;
+                    }
+                }
+                unpin_blobs(pins);
+                src.commit_exchanges();   // the RAM copy holds exactly what the GPUs do not, again
+                for (const auto& s : batch) {
+                    const size_t in = (size_t) (s.layer * g.n_expert + s.in), out = (size_t) (s.layer * g.n_expert + s.out);
+                    host_res[in] = host_res[out];
+                    host_res[out] = strata::core::kNotResident;
+                    srcp->release(s.layer, s.in);     // in VRAM now: RAM not needed
+                    srcp->prefetch(s.layer, s.out);   // evicted: the CPU computes it from here on
+                    mass_now += (double) s.gain;
+                }
+                done += (int64_t) batch.size();
+            }
+            if (done > 0) res_upload();
+            // 5. the adaptive tier's counts: the prompt as one horizon of synthetic choices, never lowered
+            int64_t raised = 0;
+            if (cfg.prior > 0.0f && !drive.d.usage.empty())
+                raised = strata::core::prefill_seed_prior(drive.d.usage, mass.data(), count.data(), cells, tokens, cfg.prior);
+            const double ms = std::chrono::duration<double, std::milli>(Clock::now() - began).count();
+            const double pct = plan.mass_total > 0.0 ? 100.0 / plan.mass_total : 0.0;
+            std::fprintf(stderr, "strata prefill seed: %lld scambi, %lld esperti, copertura massa %.1f%% -> %.1f%%, %.1f ms "
+                                 "(pianificati %zu, candidati %lld, %lld token%s, %.1f MiB copiati, prior su %lld celle)\n",
+                         (long long) done, (long long) plan.experts_seen, plan.mass_resident * pct, mass_now * pct, ms,
+                         plan.swaps.size(), (long long) plan.candidates, (long long) tokens,
+                         tokens != new_tokens ? " con riporto" : "", (double) copied / 1048576.0, (long long) raised);
             return true;
         };
         // ---- fork «Strata adattivo»: THE ELASTIC EXPERT CACHE.  The arena is a reserved address range backed by
@@ -9016,6 +9216,9 @@ int main(int argc, char** argv) {
             // the missed experts and the draft-probability floor, for this request only
             double req_pcie_frac = o.pcie_frac, req_spec_min_p = o.spec_min_p;
             bool req_pcie_set = false;   // the request names its own share (the measured one holds meanwhile)
+            // docs/PREFILL_SEED.md: `lab=PREFILL_SEED:1,PREFILL_SEED_SWAPS:256,...` switches the seed for this request
+            // (the key is shared with other lab levers: names that are not the seed's are left alone here)
+            strata::core::PrefillSeedCfg req_pseed = seed_env;
             if (endp != nullptr) {   // GENI takes the same keys (#75: image requests were always greedy); its
                                      // embedding file path is the first token without an =
                 for (;;) {
@@ -9041,6 +9244,11 @@ int main(int argc, char** argv) {
                     else if (key == "seed") req_seed = std::strtoull(tok.c_str() + eq + 1, nullptr, 10);
                     else if (key == "pcie_frac") { req_pcie_frac = std::clamp((double) fv, 0.0, 1.0); req_pcie_set = true; }
                     else if (key == "spec_min_p") req_spec_min_p = std::clamp((double) fv, 0.0, 1.0);
+                    else if (key == "lab") {
+                        std::string lab_err;
+                        if (!strata::core::prefill_seed_lab_apply(tok.substr(eq + 1), req_pseed, lab_err))
+                            std::fprintf(stderr, "strata serve: %s (the request keeps the defaults)\n", lab_err.c_str());
+                    }
                     // unknown keys are skipped: the ids start at the first token without '='
                 }
             }
@@ -9916,6 +10124,16 @@ int main(int argc, char** argv) {
                 return true;
             };
             apply_pending(true);
+            // docs/PREFILL_SEED.md: the prompt's routing mass starts from zero on every card (on the prompt streams, so
+            // it is ordered before the first chunk's accumulation)
+            for (const SeedBuf& b : seed_bufs) {
+                const strata::core::OnDevice on(b.dev);
+                const size_t sb = (size_t) (g.n_layers * g.n_expert) * sizeof(float);
+                if (cudaMemsetAsync(b.mass, 0, sb, b.stream) != cudaSuccess || cudaMemsetAsync(b.count, 0, sb, b.stream) != cudaSuccess) {
+                    std::printf("ERR prefill seed: cannot clear the mass buffers\n");
+                    return 1;
+                }
+            }
             // fork: the elastic cache follows the VRAM before the prompt borrows its tail (nothing is lent yet)
             {
                 std::string ee;
@@ -10127,6 +10345,18 @@ int main(int argc, char** argv) {
             }
             if (closed_mode && !closed_refill("prefill")) {
                 std::printf("ERR closed prefill selection: %s\n",err.c_str()); return 1;
+            }
+            if (!seed_bufs.empty()) {   // docs/PREFILL_SEED.md: the prompt's routing mass seeds the VRAM tier first
+                apply_pending(true);    // nothing of the adaptive tier in flight: the seed owns the residency table
+                if (!adapt_tick(true)) {
+                    std::printf("ERR an adaptive refill failed\n");
+                    return 1;
+                }
+                if (!prefill_seed(req_pseed, n - resume, resume, from_live)) {
+                    std::printf("ERR prefill seed: %s\n", err.c_str());
+                    return 1;
+                }
+                tr("prompt seed applied");
             }
             tr("prompt done (slots refilled)");
             if (il_parts > 0)
