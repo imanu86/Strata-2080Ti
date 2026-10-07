@@ -2710,10 +2710,11 @@ void s27_launch_ts(bool ts, const NativeExpertLayout& L, int64_t cap_groups, cud
 //      weight loads of a k step before the dp4a work: ~2x the bytes in flight per lane and one activation read for two
 //      rows, at ~1.5-2x the registers (down to 2 blocks / SM at 256 threads on Turing; 40 instead of 80 blocks in x).
 //   3: gate/up with 1 and 2 together, down as 2.
+//   4: persistent gate/up and down (fp_gu_persist_kernel / fp_down_persist_kernel, further below).
 int g_fp_variant = [] {
     const char* v = std::getenv("STRATA_FP_EXPERT_V");
     const int x = v != nullptr ? std::atoi(v) : 0;
-    return x >= 0 && x <= 3 ? x : 0;
+    return x >= 0 && x <= 4 ? x : 0;
 }();
 
 bool fp_pair_ok(const NativeExpertLayout& L) {
@@ -2930,6 +2931,306 @@ __global__ void __launch_bounds__(256) fp_down_x2_kernel(const unsigned long lon
     }
 }
 
+// ---------------------------------------------------------------- STRATA_FP_EXPERT_V=4: persistent gate/up and down
+// Grid = k x SM count blocks of 256 threads (k = STRATA_FP_EXPERT_PERSIST_K, default 2) instead of 80 x cap_groups blocks
+// that mostly exit at once.  A block takes the work items w = blockIdx.x, + gridDim.x, ... in that fixed order, item w =
+// (group w / ntiles, tile w % ntiles) with a tile the rows one block of the default kernels owns (16 gate/up rows, 32
+// down rows), each row on the same sub-warp layout (16 / 8 lanes, t = lane in it) with the same per-lane calls, the same
+// accumulators and the same __fadd_rn / xor tree as row_dot_80_sub16 / row_dot_40_sub8: an output does not depend on
+// which block computed it, and equals the default kernels' bit for bit.
+// Register double buffering: the next item's weight words (raw: 5 k steps x 3-4 registers) are loaded, through the
+// read-only path (ld.global.nc, plain loads: valid on sm_75 and sm_86), before the current item's decode and dp4a work;
+// the decode from the raw words is Split<21>::load / Split<20>::load on the same words.  Per row the addition order is
+// untouched; only the order in which the loads and the independent rows are issued changes.
+int g_fp_persist_k = [] {
+    const char* v = std::getenv("STRATA_FP_EXPERT_PERSIST_K");
+    const int x = v != nullptr ? std::atoi(v) : 2;
+    return x >= 1 && x <= 16 ? x : 2;
+}();
+
+int fp_persist_blocks() {   // k x SMs of the current device, the SM count read once per device
+    int dev = 0;
+    cudaGetDevice(&dev);
+    static int sms[64] = {};
+    const bool cacheable = dev >= 0 && dev < 64;
+    int sm = cacheable ? sms[dev] : 0;
+    if (sm <= 0) {
+        sm = 0;
+        cudaDeviceGetAttribute(&sm, cudaDevAttrMultiProcessorCount, dev);
+        if (sm <= 0) sm = 1;
+        if (cacheable) sms[dev] = sm;
+    }
+    return g_fp_persist_k * sm;
+}
+
+// get_int_b2 through the read-only path
+__device__ __forceinline__ int fp_ld32b2(const uint8_t* p, int i32) {
+    const unsigned short* p16 = (const unsigned short*) p;
+    return (int) ((unsigned int) __ldg(p16 + 2 * i32) | ((unsigned int) __ldg(p16 + 2 * i32 + 1) << 16));
+}
+
+// IQ3_S, one k step of one lane: everything Split<21>::load reads (qs words iqs, iqs + 1; the signs word; qh byte;
+// the scales byte; d), unmodified: m = qh | scales[iqs / 4] << 8 | d bits << 16.
+struct FpRaw3 { int q0, q1, sg; unsigned int m; };
+
+__device__ __forceinline__ FpRaw3 fp_raw3_load(const uint8_t* row, int kbx, int iqs) {
+    const block_iq3_s* bq3 = (const block_iq3_s*) row + kbx;
+    FpRaw3 a;
+    a.q0 = fp_ld32b2(bq3->qs, iqs + 0);
+    a.q1 = fp_ld32b2(bq3->qs, iqs + 1);
+    a.sg = fp_ld32b2(bq3->signs, iqs / 2);
+    a.m = (unsigned int) __ldg(bq3->qh + iqs / 2) | ((unsigned int) __ldg(bq3->scales + iqs / 4) << 8) |
+          ((unsigned int) __ldg((const unsigned short*) &bq3->d) << 16);
+    return a;
+}
+
+// the lane's 5 k steps of a row, in the order row_dot_80_sub16 sums them: t, t+32, t+64 (s), t+16, t+48 (s16);
+// with kb = t / 8 the blocks are kb, kb + 4, kb + 8, kb + 2, kb + 6 (all 5 steps have the same iqs = 2 (t % 8))
+__device__ __forceinline__ void fp_raw3_load5(FpRaw3 (&raw)[5], const uint8_t* row, int kb, int iqs) {
+    raw[0] = fp_raw3_load(row, kb, iqs);
+    raw[1] = fp_raw3_load(row, kb + 4, iqs);
+    raw[2] = fp_raw3_load(row, kb + 8, iqs);
+    raw[3] = fp_raw3_load(row, kb + 2, iqs);
+    raw[4] = fp_raw3_load(row, kb + 6, iqs);
+}
+
+// Split<21>::load from the raw words (the grid from `grid`: the shared copy of iq3s_grid)
+__device__ __forceinline__ Split<21>::W fp_raw3_decode(const FpRaw3& a, int iqs, const uint32_t* grid) {
+    const int2 qs_packed = make_int2(a.q0, a.q1);
+    const uint8_t* qs = (const uint8_t*) &qs_packed;
+    const int qh = (int) (a.m & 0xFFu);
+    const int signs_packed_32 = a.sg;
+    const uint8_t* signs_packed_8 = (const uint8_t*) &signs_packed_32;
+    Split<21>::W r;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const int2 grid_pos = make_int2(grid[qs[l0 + 0] | ((qh << (8 - l0)) & 0x100)],
+                                        grid[qs[l0 + 1] | ((qh << (7 - l0)) & 0x100)]);
+        const int signs0 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x03) << 7) | ((signs_packed_8[l0 / 2] & 0x0C) << 21), 0x00000000);
+        const int signs1 = __vcmpne4(((signs_packed_8[l0 / 2] & 0x30) << 3) | ((signs_packed_8[l0 / 2] & 0xC0) << 17), 0x00000000);
+        r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
+        r.g[l0 + 1] = __vsub4(grid_pos.y ^ signs1, signs1);
+    }
+    const int sc = (int) ((a.m >> 8) & 0xFFu);
+    r.ls = 1 + 2 * ((sc >> ((iqs << 1) & 0x04)) & 0x0F);
+    r.dw = __half2float(__ushort_as_half((unsigned short) (a.m >> 16)));
+    return r;
+}
+
+template<int NC>
+__device__ __forceinline__ void fp_pstep80(const FpRaw3& a, int kbx, int iqs, const uint32_t* grid, const block_q8_1* x,
+                                           const int (&off)[NC], float (&acc)[NC]) {
+    const Split<21>::W w = fp_raw3_decode(a, iqs, grid);
+#pragma unroll
+    for (int c = 0; c < NC; ++c) acc[c] += Split<21>::apply(w, x + off[c] + kbx * 8, iqs);
+}
+
+// One chunk of NC entries for one row from the lane's raw words: fp_row_dot_80<1, NC, true>'s tree, lane t == c stores.
+template<int NC>
+__device__ __forceinline__ void fp_pchunk80(const FpRaw3 (&raw)[5], int kb, int iqs, const block_q8_1* xq,
+                                            const int32_t* ent_tok, int e, int t, int r, size_t n_ff, float* dst,
+                                            const uint32_t* grid) {
+    int off[NC];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) off[c] = ent_tok[e + c] * 80;
+    float s[NC], s16[NC];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) { s[c] = 0.0f; s16[c] = 0.0f; }
+    fp_pstep80<NC>(raw[0], kb, iqs, grid, xq, off, s);
+    fp_pstep80<NC>(raw[1], kb + 4, iqs, grid, xq, off, s);
+    fp_pstep80<NC>(raw[2], kb + 8, iqs, grid, xq, off, s);
+    fp_pstep80<NC>(raw[3], kb + 2, iqs, grid, xq, off, s16);
+    fp_pstep80<NC>(raw[4], kb + 6, iqs, grid, xq, off, s16);
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        s[c] = __fadd_rn(s[c], s16[c]);
+#pragma unroll
+        for (int o = 8; o > 0; o >>= 1) s[c] += __shfl_xor_sync(0xffffffffu, s[c], o);
+        if (t == c) dst[(size_t) (e + c) * n_ff + (size_t) r] = s[c];
+    }
+}
+
+// work item w -> its row's weights: group w / ntiles, row (w % ntiles) * 16 + subwarp of the 2 n_ff gate/up rows (as the
+// default kernel; clamped to row 0 if past the end, such a sub-warp does not compute)
+__device__ __forceinline__ const uint8_t* fp_gu_item(const unsigned long long* grp_ptr, const NativeExpertLayout& L, int w,
+                                                     int ntiles, int subwarp, int& g, int& row) {
+    g = w / ntiles;
+    row = (w - g * ntiles) * 16 + subwarp;
+    const int rc = row < 2 * (int) L.n_ff ? row : 0;
+    const bool is_up = rc >= (int) L.n_ff;
+    const int r = is_up ? rc - (int) L.n_ff : rc;
+    return (const uint8_t*) grp_ptr[g] + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
+}
+
+__global__ void __launch_bounds__(256, 2) fp_gu_persist_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                               const int32_t* __restrict__ grp_start,
+                                                               const int32_t* __restrict__ n_groups,
+                                                               const int32_t* __restrict__ ent_tok,
+                                                               const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                               float* __restrict__ gate, float* __restrict__ up) {
+    __shared__ uint32_t s_grid[512];
+    for (int i = threadIdx.x; i < 512; i += 256) s_grid[i] = iq3s_grid[i];
+    __syncthreads();   // the only barrier: the loop below is barrier-free
+    const uint32_t* grid = s_grid;
+    const int nff = (int) L.n_ff;
+    const int ng = *n_groups;
+    const int ntiles = (2 * nff + 15) / 16;
+    const int total = ng * ntiles;
+    const int subwarp = threadIdx.x >> 4, t = threadIdx.x & 15;
+    const int kb = t >> 3, iqs = 2 * (t & 7);
+    FpRaw3 cur[5] = {}, nxt[5] = {};
+    int w = blockIdx.x, g = 0, row = 0;
+    if (w < total) {
+        const uint8_t* wr = fp_gu_item(grp_ptr, L, w, ntiles, subwarp, g, row);
+        fp_raw3_load5(cur, wr, kb, iqs);
+    }
+    for (; w < total; w += gridDim.x) {
+        const int wn = w + (int) gridDim.x;
+        int gn = 0, rown = 0;
+        if (wn < total) {   // the next item's weights in flight during this item's work
+            const uint8_t* wrn = fp_gu_item(grp_ptr, L, wn, ntiles, subwarp, gn, rown);
+            fp_raw3_load5(nxt, wrn, kb, iqs);
+        }
+        if (row < 2 * nff) {   // whole sub-warp pairs (n_ff % 32 == 0)
+            const bool is_up = row >= nff;
+            const int r = is_up ? row - nff : row;
+            float* dst = is_up ? up : gate;
+            const int e0 = grp_start[g], e1 = grp_start[g + 1];
+            for (int e = e0; e < e1; e += GRP_NC) {
+                const int n = min(GRP_NC, e1 - e);
+                if (n == 1) fp_pchunk80<1>(cur, kb, iqs, xq, ent_tok, e, t, r, (size_t) nff, dst, grid);
+                else if (n == 2) fp_pchunk80<2>(cur, kb, iqs, xq, ent_tok, e, t, r, (size_t) nff, dst, grid);
+                else if (n == 3) fp_pchunk80<3>(cur, kb, iqs, xq, ent_tok, e, t, r, (size_t) nff, dst, grid);
+                else fp_pchunk80<4>(cur, kb, iqs, xq, ent_tok, e, t, r, (size_t) nff, dst, grid);
+            }
+        }
+        if (wn < total) {
+#pragma unroll
+            for (int j = 0; j < 5; ++j) cur[j] = nxt[j];
+            g = gn;
+            row = rown;
+        }
+    }
+}
+
+// IQ4_NL, one k step of one lane: the two qs words (iqs, iqs + 1) and d
+struct FpRaw4 { int a, b; unsigned int d; };
+
+__device__ __forceinline__ FpRaw4 fp_raw4_load(const uint8_t* row, int kbx, int iqs) {
+    const block_iq4_nl* bq4 = (const block_iq4_nl*) row + kbx;
+    FpRaw4 r;
+    r.a = fp_ld32b2(bq4->qs, iqs + 0);
+    r.b = fp_ld32b2(bq4->qs, iqs + 1);
+    r.d = (unsigned int) __ldg((const unsigned short*) &bq4->d);
+    return r;
+}
+
+// the lane's 5 k steps in row_dot_40_sub8's order: t, t+32 (s), t+16 (s16), t+8 (s8), t+24 (s24); with kb = t / 2 the
+// blocks are kb, kb + 16, kb + 8, kb + 4, kb + 12 (all with iqs = 2 (t % 2))
+__device__ __forceinline__ void fp_raw4_load5(FpRaw4 (&raw)[5], const uint8_t* row, int kb, int iqs) {
+    raw[0] = fp_raw4_load(row, kb, iqs);
+    raw[1] = fp_raw4_load(row, kb + 16, iqs);
+    raw[2] = fp_raw4_load(row, kb + 8, iqs);
+    raw[3] = fp_raw4_load(row, kb + 4, iqs);
+    raw[4] = fp_raw4_load(row, kb + 12, iqs);
+}
+
+template<int NC>
+__device__ __forceinline__ void fp_pstep40(const FpRaw4& a, int kbx, int iqs, const block_q8_1* x, float (&acc)[NC]) {
+    Split<20>::W w;   // Split<20>::load from the raw words
+    w.v[0] = get_int_from_table_16(a.a, kvalues_iq4nl);
+    w.v[1] = get_int_from_table_16(a.b, kvalues_iq4nl);
+    w.dw = __half2float(__ushort_as_half((unsigned short) a.d));
+#pragma unroll
+    for (int c = 0; c < NC; ++c) acc[c] += Split<20>::apply(w, x + c * 20 + kbx, iqs);
+}
+
+// One chunk of NC entries for one row: row_dot_40_sub8's tree, lane t == c stores.
+template<int NC>
+__device__ __forceinline__ void fp_pchunk40(const FpRaw4 (&raw)[5], int kb, int iqs, const block_q8_1* s_hq,
+                                            const int32_t* ent_dst, int e, int t, int r, size_t n_embd, float* out) {
+    float s[NC], s16[NC], s8[NC], s24[NC];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) { s[c] = 0.0f; s16[c] = 0.0f; s8[c] = 0.0f; s24[c] = 0.0f; }
+    fp_pstep40<NC>(raw[0], kb, iqs, s_hq, s);
+    fp_pstep40<NC>(raw[1], kb + 16, iqs, s_hq, s);
+    fp_pstep40<NC>(raw[2], kb + 8, iqs, s_hq, s16);
+    fp_pstep40<NC>(raw[3], kb + 4, iqs, s_hq, s8);
+    fp_pstep40<NC>(raw[4], kb + 12, iqs, s_hq, s24);
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        s[c] = __fadd_rn(s[c], s16[c]);
+        s[c] = __fadd_rn(s[c], __fadd_rn(s8[c], s24[c]));
+#pragma unroll
+        for (int o = 4; o > 0; o >>= 1) s[c] += __shfl_xor_sync(0xffffffffu, s[c], o);
+        if (t == c) out[(size_t) ent_dst[e + c] * n_embd + (size_t) r] = s[c];
+    }
+}
+
+// work item w -> its row: group w / ntiles, row (w % ntiles) * 32 + sub of the n_embd down rows (clamped to row 0 if
+// past the end, as the default kernel; such a row does not compute)
+__device__ __forceinline__ const uint8_t* fp_down_item(const unsigned long long* grp_ptr, const NativeExpertLayout& L,
+                                                       int w, int ntiles, int sub, int& g, int& r) {
+    g = w / ntiles;
+    r = (w - g * ntiles) * 32 + sub;
+    return (const uint8_t*) grp_ptr[g] + L.down_off + (size_t) (r < (int) L.n_embd ? r : 0) * L.d_row;
+}
+
+__global__ void __launch_bounds__(256, 2) fp_down_persist_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                                 const int32_t* __restrict__ grp_start,
+                                                                 const int32_t* __restrict__ n_groups,
+                                                                 const int32_t* __restrict__ ent_dst,
+                                                                 const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                                 float* __restrict__ out) {
+    __shared__ uint32_t s_hq_buf[GRP_NC * 20 * 9];
+    const int nemb = (int) L.n_embd;
+    const int ng = *n_groups;
+    const int ntiles = (nemb + 31) / 32;
+    const int total = ng * ntiles;   // block-uniform: every barrier below is reached by all 256 threads
+    const int sub = threadIdx.x >> 3, t = threadIdx.x & 7;
+    const int kb = t >> 1, iqs = 2 * (t & 1);
+    const block_q8_1* s_hq = reinterpret_cast<const block_q8_1*>(s_hq_buf);
+    FpRaw4 cur[5] = {}, nxt[5] = {};
+    int w = blockIdx.x, g = 0, r = 0;
+    if (w < total) {
+        const uint8_t* wr = fp_down_item(grp_ptr, L, w, ntiles, sub, g, r);
+        fp_raw4_load5(cur, wr, kb, iqs);
+    }
+    int staged = -1;   // the chunk (its first entry) s_hq_buf holds; chunk starts are unique over all groups
+    for (; w < total; w += gridDim.x) {
+        const int wn = w + (int) gridDim.x;
+        int gn = 0, rn = 0;
+        if (wn < total) {   // the next item's weights in flight during this item's staging and work
+            const uint8_t* wrn = fp_down_item(grp_ptr, L, wn, ntiles, sub, gn, rn);
+            fp_raw4_load5(nxt, wrn, kb, iqs);
+        }
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += GRP_NC) {
+            const int n = min(GRP_NC, e1 - e);
+            if (e != staged) {
+                const uint32_t* src = reinterpret_cast<const uint32_t*>(hq + (size_t) e * 20);
+                const int words = n * (20 * 9);
+                __syncthreads();   // the previous chunk's readers are done
+                for (int i = threadIdx.x; i < words; i += 256) s_hq_buf[i] = src[i];
+                __syncthreads();
+                staged = e;
+            }
+            if (r < nemb) {
+                if (n == 1) fp_pchunk40<1>(cur, kb, iqs, s_hq, ent_dst, e, t, r, (size_t) nemb, out);
+                else if (n == 2) fp_pchunk40<2>(cur, kb, iqs, s_hq, ent_dst, e, t, r, (size_t) nemb, out);
+                else if (n == 3) fp_pchunk40<3>(cur, kb, iqs, s_hq, ent_dst, e, t, r, (size_t) nemb, out);
+                else fp_pchunk40<4>(cur, kb, iqs, s_hq, ent_dst, e, t, r, (size_t) nemb, out);
+            }
+        }
+        if (wn < total) {
+#pragma unroll
+            for (int j = 0; j < 5; ++j) cur[j] = nxt[j];
+            g = gn;
+            r = rn;
+        }
+    }
+}
+
 template<int TG>
 void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
@@ -2937,6 +3238,10 @@ void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, con
     if constexpr (TG == 21) {   // STRATA_FP_EXPERT_V: see fp_gu_kernel
         const int v = g_fp_variant;
         if (v != 0 && fp_pair_ok(L)) {
+            if (v == 4) {   // persistent: fp_gu_persist_kernel
+                fp_gu_persist_kernel<<<dim3((unsigned) fp_persist_blocks()), 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+                return;
+            }
             const dim3 g2((unsigned) (((v >= 2 ? L.n_ff : 2 * L.n_ff) + 15) / 16), grid.y);
             if (v == 1) fp_gu_kernel<true, false><<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
             else if (v == 2) fp_gu_kernel<false, true><<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
@@ -2966,6 +3271,10 @@ void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, c
                  float* out) {
     if constexpr (TD == 20) {   // STRATA_FP_EXPERT_V >= 2: see fp_down_x2_kernel
         if (g_fp_variant >= 2 && fp_pair_ok(L)) {
+            if (g_fp_variant == 4) {   // persistent: fp_down_persist_kernel
+                fp_down_persist_kernel<<<dim3((unsigned) fp_persist_blocks()), 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+                return;
+            }
             const dim3 g2((unsigned) ((L.n_embd / 2 + 31) / 32), grid.y);
             fp_down_x2_kernel<<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
             return;
@@ -2981,7 +3290,7 @@ void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, c
 
 void iq_set_old_kernels(bool old) { g_old_kernels = old; }
 bool iq_old_kernels() { return g_old_kernels; }
-void native_expert_set_fp_variant(int v) { g_fp_variant = v >= 0 && v <= 3 ? v : 0; }
+void native_expert_set_fp_variant(int v) { g_fp_variant = v >= 0 && v <= 4 ? v : 0; }
 int native_expert_fp_variant() { return g_fp_variant; }
 
 bool iq_supported(int t) noexcept { return is_iq(t); }

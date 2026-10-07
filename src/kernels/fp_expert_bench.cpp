@@ -4,7 +4,8 @@
 //
 // The model's own expert format (IQ3_S gate/up, IQ4_NL down, n_embd 2560, n_ff 640: a 2.33 MB blob per expert) through
 // `native_expert_grouped` (gate/up + SwiGLU + down) with the opt-in kernel variants STRATA_FP_EXPERT_V / native_expert_
-// set_fp_variant: 0 = the default kernels, 1 = IQ3_S codebook in shared memory, 2 = two rows per sub-warp, 3 = 1 + 2.
+// set_fp_variant: 0 = the default kernels, 1 = IQ3_S codebook in shared memory, 2 = two rows per sub-warp, 3 = 1 + 2,
+// 4 = persistent gate/up and down (STRATA_FP_EXPERT_PERSIST_K blocks per SM, default 2).
 //
 // For T = 1..4 tokens a verify window is built: every token picks 10 experts out of `groups` distinct ones (at most
 // 10 T; every expert picked by at least one token, a group holds the tokens that picked it, 1..T entries).  Per variant:
@@ -12,7 +13,9 @@
 // (median of 5 rounds).  The experts rotate over a pool of >= 96 MB of distinct synthetic blobs (random bytes, sane fp16
 // block scales, as b6_mmvq_bench), so every call reads its weights cold from DRAM as the decode does each layer.
 //
-// One line per (device, T, variant):  dev T v us GB/s identical|DIFFERENT   (GB/s = groups x blob bytes / call time).
+// One line per (device, T, variant):  dev T v us GB/s pct identical|DIFFERENT   (GB/s = groups x blob bytes / call time;
+// pct = GB/s over the peak DRAM bandwidth 2 x memory clock x bus width / 8 of the device attributes, the DDR factor 2
+// of GDDR6).
 // Lines starting with '#' are context.  Exit code 1 if any variant differs or a CUDA error occurred.  GPU time only.
 // STRATA_NO_SUB16_GU and STRATA_EXPERT_V2 route around the variants (all four rows would then be the default kernels).
 #include "strata/kernels/iq_kernels.hpp"
@@ -133,6 +136,11 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
     cudaGetDeviceProperties(&pr, dev);
     std::printf("# device %d: %s (sm_%d%d, L2 %d KB), %d reps x 5 rounds, <= %d groups, pool %d blobs x %.2f MB\n", dev,
                 pr.name, pr.major, pr.minor, pr.l2CacheSize / 1024, reps, groups_req, (int) P, (double) L.bytes / 1e6);
+    int mclk_khz = 0, bus_bits = 0;
+    cudaDeviceGetAttribute(&mclk_khz, cudaDevAttrMemoryClockRate, dev);
+    cudaDeviceGetAttribute(&bus_bits, cudaDevAttrGlobalMemoryBusWidth, dev);
+    const double peak = 2.0 * (double) mclk_khz * 1e3 * (double) bus_bits / 8.0;   // bytes / s
+    std::printf("# device %d peak DRAM bandwidth %.1f GB/s (memory clock %d kHz, bus %d bit)\n", dev, peak / 1e9, mclk_khz, bus_bits);
     const int gmax = std::min(groups_req, kMaxEntries);
     DevMem mem;
     auto* dpool = (uint8_t*) mem.alloc(pool.size());
@@ -179,7 +187,7 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
             K::native_expert_grouped(L, dptr + (i % P) * (size_t) G, dstart, dn, ddst, dtok, G, NE, dxq, dscr, dout, stream);
         };
         std::vector<float> ref, res((size_t) NE * kEmbd);
-        for (int v = 0; v <= 3 && ok; ++v) {
+        for (int v = 0; v <= 4 && ok; ++v) {
             K::native_expert_set_fp_variant(v);
             ok = ck(cudaMemset(dout, 0, (size_t) NE * kEmbd * sizeof(float)), "memset out");
             call(0);
@@ -209,7 +217,8 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
             std::sort(rounds, rounds + 5);
             const double us = rounds[2];
             const double gbps = (double) G * (double) L.bytes / (us * 1e-6) / 1e9;
-            std::printf("%d %d %d %.1f %.1f %s\n", dev, T, v, us, gbps, same ? "identical" : "DIFFERENT");
+            std::printf("%d %d %d %.1f %.1f %.1f%% %s\n", dev, T, v, us, gbps, peak > 0.0 ? 100.0 * gbps * 1e9 / peak : 0.0,
+                        same ? "identical" : "DIFFERENT");
             if (!same) ++bad;
         }
     }
@@ -248,7 +257,7 @@ int main(int argc, char** argv) {
     std::printf("# gate/up type %d, down type %d, n_embd %d, n_ff %d: blob %.2f MB (gu_row %d, d_row %d), pool %.0f MB\n",
                 kGuType, kDType, kEmbd, kFf, (double) L.bytes / 1e6, (int) L.gu_row, (int) L.d_row,
                 (double) (P * stride) / 1e6);
-    std::printf("# dev T v us GB/s identical|DIFFERENT\n");
+    std::printf("# dev T v us GB/s pct identical|DIFFERENT\n");
     std::mt19937 rng(77u);
     std::vector<uint8_t> pool(P * stride, 0);
     for (size_t i = 0; i < P; ++i) fill_blob(pool.data() + i * stride, L, rng);
