@@ -1501,10 +1501,13 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     h_row_[1] = 0;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
-    chain_early_ = std::max(0, std::min(n_early, n_out));
+    // FABLE STRATA_FP_CHAIN_TRIM (chain_ahead_ > 0): the round, the forced steps and `ahead` steps now; the rest as the
+    // outputs land (chain_extend), none past chain_close.  An event after every launched output then.
+    const int n_first = chain_ahead_ > 0 ? std::min(n_out, std::max(n_force + 1, 1 + chain_ahead_)) : n_out;
+    chain_early_ = chain_ahead_ > 0 ? n_first : std::max(0, std::min(n_early, n_out));
     bool ok = cudaGraphLaunch(round_exec_[T], cs_) == cudaSuccess;
     if (ok && chain_early_ >= 1) ok = cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
-    for (int j = 1; ok && j < n_out; ++j) {
+    for (int j = 1; ok && j < n_first; ++j) {
         ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
         if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
     }
@@ -1515,10 +1518,39 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     (void) cudaStreamQuery(cs_);   // WDDM: submit now
     steps_seen_ = 0;
     chain_live_ = true;
-    chain_n_ = n_out;
+    chain_n_ = n_first;
+    chain_launched_ = n_first;
+    chain_want_ = n_out;
+    chain_open_ = n_first < n_out;
     ms_draft += ms_since(t0);
     ++rounds;
     return true;
+}
+
+bool MtpDrafter::chain_extend(std::string& err) {
+    if (!chain_live_ || !chain_open_) return true;
+    const OnDevice on_device(device_);
+    const int j = chain_launched_;   // step j writes output j
+    if (j < 1 || j >= chain_want_ || j >= 8 || step_exec_[j] == nullptr) { chain_open_ = false; return true; }
+    const Clock::time_point t0 = Clock::now();
+    if (cudaGraphLaunch(step_exec_[j], cs_) != cudaSuccess || cudaEventRecord(ev_step_[j], cs_) != cudaSuccess ||
+        cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {
+        err = std::string("mtp chain (extend): ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
+    (void) cudaStreamQuery(cs_);   // WDDM: submit now
+    ++chain_launched_;
+    chain_n_ = chain_launched_;
+    chain_early_ = chain_launched_;
+    if (chain_launched_ >= chain_want_) chain_open_ = false;
+    ms_draft += ms_since(t0);
+    return true;
+}
+
+void MtpDrafter::chain_close() {
+    if (!chain_live_ || !chain_open_) return;
+    chain_trimmed += chain_want_ - chain_launched_;
+    chain_open_ = false;
 }
 
 int MtpDrafter::chain_outputs_ready(std::string& err) {
@@ -1537,6 +1569,7 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
 
 int MtpDrafter::chain_poll(std::string& err) {
     if (!chain_live_) return 1;
+    if (chain_open_) return 0;   // FABLE trim: steps may still be added; chain_close ends the chain
     const OnDevice on_device(device_);
     const cudaError_t q = cudaEventQuery(ev_chain_);
     if (q == cudaErrorNotReady) return 0;

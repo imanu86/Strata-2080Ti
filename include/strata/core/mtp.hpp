@@ -138,6 +138,23 @@ public:
     bool chain_live() const { return chain_live_; }
     const int32_t* chain_tok() const { return chain_tok_; }
     const float* chain_prob() const { return chain_prob_; }
+    // FABLE STRATA_FP_CHAIN_TRIM (opt-in): the chain's tail steps launched lazily.  `ahead` > 0: chain_launch queues the
+    // round, the forced steps and at most `ahead` steps beyond the outputs that have landed; the serve loop then calls
+    // chain_extend as outputs land (chain_outputs_ready) while the next window's size is undecided, and chain_close
+    // once it is (or when the chain's outputs are no longer wanted): the steps never launched cost stage 1 nothing
+    // (0.73-0.84 ms each on the owner's shared card).  While the chain is open chain_poll reports it running even if
+    // every launched step has landed, so a slow host never truncates B; chain_close must precede any wait for the
+    // chain's end.  0 (default): every step queued at once, as before.
+    void set_chain_ahead(int ahead) { chain_ahead_ = ahead < 0 ? 0 : ahead; }
+    int chain_ahead() const { return chain_ahead_; }
+    /// outputs launched so far (the round's and the steps'); == the launch's n_out when not trimming
+    int chain_launched() const { return chain_launched_; }
+    bool chain_open() const { return chain_live_ && chain_open_; }
+    /// Launch the next step (its event too).  False with `err` on a CUDA error; a no-op when the chain is closed.
+    bool chain_extend(std::string& err);
+    /// No more steps: the chain ends after the steps launched so far (chain_poll then reports its end).
+    void chain_close();
+    int64_t chain_trimmed = 0;   ///< steps never launched because of chain_close (statistics)
 
     double ms_draft = 0, ms_prefill = 0;
     int64_t rounds = 0;
@@ -220,6 +237,8 @@ private:
     cudaEvent_t ev_chain_ = nullptr;
     cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs
     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
+    int chain_ahead_ = 0, chain_launched_ = 0, chain_want_ = 0;   ///< FABLE trim: see set_chain_ahead
+    bool chain_open_ = false;
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
     int64_t n_vocab_ = 0;

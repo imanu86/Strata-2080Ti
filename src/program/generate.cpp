@@ -10846,6 +10846,22 @@ int main(int argc, char** argv) {
                     return on;
                 }();
                 int64_t pl_early_l1 = 0;
+                // FABLE STRATA_FP_CHAIN_TRIM=1 (opt-in): the chain's tail steps are launched as its outputs land, at most
+                // STRATA_FP_CHAIN_TRIM_AHEAD (2) beyond them, and none once B's size is decided (MtpDrafter::set_chain_ahead):
+                // a forced chain of B.T + S - 1 outputs whose B stops at a low-probability draft skips its remaining steps
+                // (0.73-0.84 ms each on stage 1's card).  Only with a spec_min_p rule: without one B always takes S - 1
+                // drafts and every step is needed, so the chain is launched whole as before.
+                static const int fp_chain_ahead = [] {
+                    const char* v = std::getenv("STRATA_FP_CHAIN_TRIM");
+                    if (v == nullptr || std::atoi(v) == 0) return 0;
+                    const char* a = std::getenv("STRATA_FP_CHAIN_TRIM_AHEAD");
+                    const int n = a != nullptr ? std::max(1, std::atoi(a)) : 2;
+                    std::fprintf(stderr, "strata pipeline: STRATA_FP_CHAIN_TRIM: the chain's steps launched as outputs land, %d ahead\n", n);
+                    return n;
+                }();
+                const bool fp_chain_trim = fp_chain_ahead > 0 && req_spec_min_p > 0.0;
+                mtp.set_chain_ahead(fp_chain_trim ? fp_chain_ahead : 0);
+                const int64_t fp_trim0 = mtp.chain_trimmed;
                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
                 while (true) {
                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
@@ -10988,6 +11004,18 @@ int main(int argc, char** argv) {
                                                          "outputs)\n", chain_kind, (long long) A.p, A.T, B.T, B.p_on, k);
                             }
                         }
+                        // FABLE STRATA_FP_CHAIN_TRIM: B decided (or taken from a lookup) - no more steps; else keep
+                        // `ahead` steps queued beyond the outputs that have landed
+                        if (fp_chain_trim && mtp.chain_open()) {
+                            if (b_done) {
+                                const int before = mtp.chain_launched();
+                                mtp.chain_close();
+                                tre("CT", A.seq, before, chain_n);
+                            } else {
+                                while (mtp.chain_open() && mtp.chain_launched() - k_ready < fp_chain_ahead)
+                                    if (!mtp.chain_extend(err)) return die(err);
+                            }
+                        }
                         if (r == 1) chain_kind = 0;
                     }
                     // ---- stage 0: A (never while a wrong window still holds stage 0's state)
@@ -11055,6 +11083,7 @@ int main(int argc, char** argv) {
                     // the drafter must be idle before the next chain.  The chain needs nothing from the host, so this
                     // wait is bounded even with B (made from its first outputs) in flight on stage 0; in practice the
                     // chain ended long before a verdict that needs a whole stage-1 window.
+                    mtp.chain_close();   // FABLE trim: whatever was not launched by now is not wanted
                     while (chain_kind != 0 && mtp.chain_live())
                         if (mtp.chain_poll(err) < 0) return die(err);
                     if (chain_kind != 0 && !B.launched && !B.made) B = PW{};
@@ -11247,7 +11276,9 @@ int main(int argc, char** argv) {
                     std::printf("ERR an adaptive refill failed\n");
                     return 1;
                 }
+                mtp.chain_close();   // FABLE trim
                 while (mtp.chain_live() && mtp.chain_poll(err) == 0) {}
+                mtp.set_chain_ahead(0);
                 mtp.set_source_R(ver.final_R_all());   // the serial loop's rows again
                 const double pl_ms = std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count();
                 dt_run += pl_ms;
@@ -11268,6 +11299,10 @@ int main(int argc, char** argv) {
                     if (fp_devplan)
                         std::fprintf(stderr, "strata pipeline: STRATA_FP_DEVPLAN: %lld residency table uploads so far (all requests)\n",
                                      (long long) fp_res_uploads);
+                    if (fp_chain_ahead > 0)
+                        std::fprintf(stderr, "strata pipeline: STRATA_FP_CHAIN_TRIM: %lld chain steps never launched this request%s\n",
+                                     (long long) (mtp.chain_trimmed - fp_trim0),
+                                     fp_chain_trim ? "" : " (off: the request has no spec_min_p rule)");
                     if (el_on)
                         std::fprintf(stderr, "strata pipeline: elastic tail beside the windows: %lld shrinks, %lld growths at "
                                              "gaps of stage 0, %.1f ms on the loop's thread; the %lld windows after them "
