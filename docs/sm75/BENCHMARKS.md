@@ -19,6 +19,8 @@ These rates are diagnostic, with all arms instrumented; they do not measure
 instrumentation overhead. The workload remains forced and is not a free-greedy
 quality test. The telemetry supplies observations for future policy decisions.
 
+See [the frozen protocol, source/build and complete validation record](policy-trace-20261007.json).
+
 # Hot MTP probability thresholds, 7 October 2026
 
 The same immutable oracle-capable executable runs with the oracle OFF, real MTP

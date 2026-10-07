@@ -1,0 +1,1678 @@
+{
+  "schema": "strata.policy-telemetry.record.v1",
+  "run": "DET-policy-trace-01",
+  "evidence_pass": true,
+  "completed_requests": 14,
+  "isolation_pass": true,
+  "performance_result": false,
+  "conclusion": "Completed and cross-validated host-observed MTP telemetry for 14 requests. This is diagnostic evidence, not a new performance win or a free-generation quality result.",
+  "scope": "Single process, two historical long prompts, fixed target continuation, oracle off, real MTP drafts. Two warmups then smoke and long B/A/B at spec_min_p 0/0.5/0.",
+  "provenance": {
+    "main_export": "0341b742+policy-trace",
+    "build_source_base": "0341b74263d5c0e9a96ce1c40c577f1b3ad36111+policy-telemetry-working-tree",
+    "source_base_note": "The source patch base was copied while selective changes were uncommitted. The build later records selective commit 0341b742 plus telemetry changes; exact source/base/binary hashes identify the artifact.",
+    "executable_sha256": "6d033548e5a917f3f42795dce4016909ce4d2281d410cc055c79b5a098fd8aaa",
+    "generate_cpp_sha256": "e1f508b0003d0c784aeda7817228e44cbbbaaa9f21a911be19e608f73c6849fe",
+    "source_patch": {
+      "base_sha256": "f1feae25b23f325f583fd86a7df22c5ef2091582c4b3fb8c7e265e9a950e81b0",
+      "target_sha256": "e1f508b0003d0c784aeda7817228e44cbbbaaa9f21a911be19e608f73c6849fe",
+      "patch_sha256": "876c0761c783d83b9246d482df4f3021d2dfde16b290bddf3e07b93ed3c005c7",
+      "additions": 233,
+      "removals": 7,
+      "reconstructs_frozen_source": true,
+      "comparison": "Exact lines after newline normalization; byte hashes retained separately."
+    },
+    "protocol_sha256": "2aeef38c95a52eabfadbae298f4872e92c4eac432b953220e76b9ee0b06950da",
+    "config_sha256": "cce07938b5f8acf36434e4c2b86cb8ecd959529c66f37a42845c12860f60fe2b",
+    "bench_sha256": {
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\hot_validation.py": "a56e28a93e33d0fc2979004f20103ce40063edbb5a310a1038e0b3956bb08057",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\minp_contract.py": "bd303b45df4407ad40cdb97a78bb216019b74e3ed1d091abf3dd6f512c01bd50",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\policy_trace.py": "54b68f42465a2903c2effa811d8d21eeaf31344ec38d6c5efc5ffac8fff785dc",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\run_policy.py": "a476b30866a3155f27653bd9d17069bbd19928a1bdb05b2a90d257ced3f7d55c",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\telemetry_contract.py": "bdb9ced7bfd10f1902c3ea807be0ba2804599d5863e1158a7a9e40527fd4e4d3",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\test_minp.py": "5bde5d1aa17dc32bdf06d6584851258c71fc3173cca0161c234c43604ed81f46",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\test_telemetry.py": "464ac8b1923aefd475d73dd29f61cf65fd1cdec4112f5a4a02c5a9aba2a41451"
+    },
+    "binary_verification": "Matching frozen build, protocol and run hashes; the executable was not rehashed or packaged by this report."
+  },
+  "runtime": {
+    "startup_s": 56.312000000005355,
+    "gpu_mapping": {
+      "engine_stage_0": "NVIDIA GeForce RTX 3060",
+      "engine_stage_1_and_MTP": "NVIDIA GeForce RTX 2080 Ti"
+    },
+    "gpu_mapping_basis": "Engine stage0 identity plus recorded two-stage assignment and MTP-last configuration; raw nvidia-smi indices are not used as CUDA ordinals.",
+    "startup_lines": [
+      "strata generate: layer split across 2 GPUs: CUDA0, then CUDA1 (split 16)",
+      "strata generate: PCIe probe: 6.7 GB/s host->device (best of 6.7 6.7 6.7 6.7) -> pcie_frac 0.18 (default 0.55)",
+      "strata generate: layer split: CUDA1 PCIe probe 13.1 GB/s (best of 13.1 13.1 13.1 13.1) -> pcie_frac 0.36",
+      "strata mtp: draft layer loaded, 837 MiB of VRAM (experts 675, dense 111), files read in 0.26 s (2975 MiB/s)",
+      "strata generate: GPU 0: NVIDIA GeForce RTX 3060, compute capability 8.6",
+      "strata generate: expert cache auto: 9.46 GiB free, 1393 MiB reserved (+0 MiB for the draft head) -> 3627 slots",
+      "strata mtp: draft head over 48542 tokens (81.5 MiB)"
+    ],
+    "private_runtime": {
+      "owner": "spec-policy",
+      "exclusive_lock": "D:\\ds4_work\\strata\\lab_locks\\bench.lock",
+      "cwd": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\runtime",
+      "switch_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\runtime\\oracle-switch.txt",
+      "append_trace_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\runtime\\force_trace.txt",
+      "append_policy_trace_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\runtime\\policy-trace.jsonl",
+      "fresh_at_prepare": true,
+      "original_protocol": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-oracle\\bench\\protocol.json",
+      "original_protocol_sha256": "3ba708f582e0ba3d043caeba5d4d97ca4a38027078d6e9fd013b23293d58854d",
+      "original_config": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\hot-oracle\\bench\\frozen_config.json",
+      "original_config_sha256": "f64dc2c5ab4c71197aea86e0e3badedcf8c84198fa819595d11c451e4d37c762"
+    },
+    "started_utc": "2026-10-07T21:29:20.347697+00:00",
+    "ended_utc": "2026-10-07T21:34:49.920226+00:00"
+  },
+  "validation": {
+    "cpu_tests": {
+      "cpu-instrumentation-tests.log": {
+        "tests": 18,
+        "passed": true,
+        "sha256": "6253663e87e8780bdf68ae0852fa0851b6618147c79e7f7e8e7a32be9833c500"
+      },
+      "cpu-runner-tests.log": {
+        "tests": 17,
+        "passed": true,
+        "sha256": "84e503fc80a4e454a51c681877aa3e8b4099092e024b272c08d3a713e5f1ae9f"
+      }
+    },
+    "cpu_tests_total": 35,
+    "raw_reaudit_exact_match": true,
+    "policy_trace_correlated_to_force_trace": true,
+    "actual_stdin_write_flush_verified": true,
+    "oracle_mode": "off",
+    "synthetic_draft_deliveries": 0,
+    "chain_bypasses": 0,
+    "forced_window_override": false,
+    "mtp_vram_bytes": [
+      962957512
+    ],
+    "isolation": {
+      "daily_unchanged": true,
+      "owned_processes": {
+        "11184": 1791408504.0625353
+      },
+      "remaining_owned": [],
+      "compiler_observations": [],
+      "compiler_guard_clean": true,
+      "threads_stopped": true,
+      "protocol_sha256": "2aeef38c95a52eabfadbae298f4872e92c4eac432b953220e76b9ee0b06950da",
+      "bench_sha256": {
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\hot_validation.py": "a56e28a93e33d0fc2979004f20103ce40063edbb5a310a1038e0b3956bb08057",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\minp_contract.py": "bd303b45df4407ad40cdb97a78bb216019b74e3ed1d091abf3dd6f512c01bd50",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\policy_trace.py": "54b68f42465a2903c2effa811d8d21eeaf31344ec38d6c5efc5ffac8fff785dc",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\run_policy.py": "a476b30866a3155f27653bd9d17069bbd19928a1bdb05b2a90d257ced3f7d55c",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\telemetry_contract.py": "bdb9ced7bfd10f1902c3ea807be0ba2804599d5863e1158a7a9e40527fd4e4d3",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\test_minp.py": "5bde5d1aa17dc32bdf06d6584851258c71fc3173cca0161c234c43604ed81f46",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\spec-policy\\bench\\test_telemetry.py": "464ac8b1923aefd475d73dd29f61cf65fd1cdec4112f5a4a02c5a9aba2a41451"
+      }
+    }
+  },
+  "prefix": {
+    "tokens": 131072,
+    "measured_requests": 12,
+    "all_measured_restore_validated": true,
+    "after_warmup_sha256": {
+      "L01": "2601deb47e2298b68e07e6f059658bd5d7b1229729148952eaaa1c62c9244f4f",
+      "L02": "2601deb47e2298b68e07e6f059658bd5d7b1229729148952eaaa1c62c9244f4f"
+    },
+    "final_sha256": {
+      "L01": "2601deb47e2298b68e07e6f059658bd5d7b1229729148952eaaa1c62c9244f4f",
+      "L02": "2601deb47e2298b68e07e6f059658bd5d7b1229729148952eaaa1c62c9244f4f"
+    },
+    "unchanged": true,
+    "verification": "Previously recorded hashes compared. No prefix cache file was opened or rehashed for this report."
+  },
+  "requests": [
+    {
+      "case": "L01",
+      "tokens": 15,
+      "decode_ms": 234.0,
+      "decode_tps": 64.1025641025641,
+      "prompt_ms": 86584.8,
+      "reused": 0,
+      "windows": 6,
+      "target_rows_verified": 16,
+      "drafts": 10,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "5",
+        "drafts": "10",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "16",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 0
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 0,
+      "phase": "warmup",
+      "arm": "warm",
+      "mode": "0",
+      "spec_min_p": 0.5,
+      "disk_restore": [],
+      "window_policy": {
+        "T_histogram": {
+          "1": 2,
+          "2": 1,
+          "3": 0,
+          "4": 3
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 3,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "d79bdadd8acbdee7475fe98824d88878822a98d8cb3f1ff7edaa11d064472d9c",
+        "request_index": 0,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 0,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 5,
+          "B_root_correct": 1,
+          "A_rejected": 1,
+          "B_root_wrong": 3
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0.5,
+        "history_source": "other",
+        "telemetry_decode_ms": 234.0422,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 131248,
+      "request_wall_s": 88.4543206691742,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L02",
+      "tokens": 15,
+      "decode_ms": 234.2,
+      "decode_tps": 64.04782237403928,
+      "prompt_ms": 80486.4,
+      "reused": 0,
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 1
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 1,
+      "phase": "warmup",
+      "arm": "warm",
+      "mode": "0",
+      "spec_min_p": 0.5,
+      "disk_restore": [],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 3,
+          "4": 2
+        },
+        "initial_T": 1,
+        "last_T": 3,
+        "after_initial_T4": 2,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "7be6461fa8a54d54c578d17194b65aded494c0872f3bd5b24c4083077bf6952e",
+        "request_index": 1,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 1,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 3,
+          "B_root_correct": 2,
+          "A_rejected": 3
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0.5,
+        "history_source": "other",
+        "telemetry_decode_ms": 234.1628,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 131239,
+      "request_wall_s": 82.25543355941772,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L01",
+      "tokens": 15,
+      "decode_ms": 242.4,
+      "decode_tps": 61.88118811881188,
+      "prompt_ms": 4622.4,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 2
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 2,
+      "phase": "minp0-smoke",
+      "arm": "B1",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2406.3",
+          "252.7"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "2d07a88924a17b718100c574c4823500ff6e76bd4d6a1d9d9bdb778ee7121160",
+        "request_index": 2,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 2,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 4,
+          "B_root_correct": 1,
+          "A_rejected": 2,
+          "B_root_wrong": 2
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 242.4082,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 176,
+      "request_wall_s": 5.0196754932403564,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L02",
+      "tokens": 15,
+      "decode_ms": 209.7,
+      "decode_tps": 71.53075822603721,
+      "prompt_ms": 4500.9,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 3
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 3,
+      "phase": "minp0-smoke",
+      "arm": "B1",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2468.5",
+          "217.0"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "26a8498c6a9c1a02a90465c6c718af5475244dfbff05f5cb7de26f65a6ca26bc",
+        "request_index": 3,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 3,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 3,
+          "B_root_correct": 1,
+          "A_rejected": 3,
+          "B_root_wrong": 1
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 209.7368,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 167,
+      "request_wall_s": 4.868553638458252,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L01",
+      "tokens": 15,
+      "decode_ms": 200.3,
+      "decode_tps": 74.88766849725411,
+      "prompt_ms": 4460.4,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 19,
+      "drafts": 13,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "13",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "19",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 4
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 4,
+      "phase": "minp0-smoke",
+      "arm": "A",
+      "mode": "0",
+      "spec_min_p": 0.5,
+      "disk_restore": [
+        [
+          "131072",
+          "2412.1",
+          "211.4"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 2,
+          "4": 3
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 3,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "d79bdadd8acbdee7475fe98824d88878822a98d8cb3f1ff7edaa11d064472d9c",
+        "request_index": 4,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 4,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 4,
+          "B_root_correct": 1,
+          "A_rejected": 2,
+          "B_root_wrong": 2
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0.5,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 200.3318,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 176,
+      "request_wall_s": 4.798952579498291,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L02",
+      "tokens": 15,
+      "decode_ms": 190.8,
+      "decode_tps": 78.61635220125785,
+      "prompt_ms": 4357.0,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 5
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 5,
+      "phase": "minp0-smoke",
+      "arm": "A",
+      "mode": "0",
+      "spec_min_p": 0.5,
+      "disk_restore": [
+        [
+          "131072",
+          "2409.7",
+          "209.4"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 1,
+          "3": 1,
+          "4": 3
+        },
+        "initial_T": 1,
+        "last_T": 3,
+        "after_initial_T4": 3,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "7be6461fa8a54d54c578d17194b65aded494c0872f3bd5b24c4083077bf6952e",
+        "request_index": 5,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 5,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 3,
+          "B_root_correct": 1,
+          "A_rejected": 3,
+          "B_root_wrong": 1
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0.5,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 190.8231,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 167,
+      "request_wall_s": 4.695012331008911,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L01",
+      "tokens": 15,
+      "decode_ms": 200.1,
+      "decode_tps": 74.96251874062969,
+      "prompt_ms": 4393.1,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 6
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 6,
+      "phase": "minp0-smoke",
+      "arm": "B2",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2432.6",
+          "207.8"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "2d07a88924a17b718100c574c4823500ff6e76bd4d6a1d9d9bdb778ee7121160",
+        "request_index": 6,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 6,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 4,
+          "B_root_correct": 1,
+          "A_rejected": 2,
+          "B_root_wrong": 2
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 200.1467,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 176,
+      "request_wall_s": 4.7370445728302,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L02",
+      "tokens": 15,
+      "decode_ms": 206.2,
+      "decode_tps": 72.74490785645004,
+      "prompt_ms": 4469.3,
+      "reused": 131072,
+      "windows": 6,
+      "target_rows_verified": 21,
+      "drafts": 15,
+      "accepted": 9,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "15",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "21",
+        "stage0_launches": "8",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 7
+      },
+      "trace_emissions": 15,
+      "control_last_window_capped": false,
+      "request_index": 7,
+      "phase": "minp0-smoke",
+      "arm": "B2",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2443.4",
+          "210.9"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 5
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 5,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 15,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 15 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 15,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "26a8498c6a9c1a02a90465c6c718af5475244dfbff05f5cb7de26f65a6ca26bc",
+        "request_index": 7,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 7,
+        "windows": 6,
+        "chains": 5,
+        "partition": {
+          "A_all": 3,
+          "B_root_correct": 1,
+          "A_rejected": 3,
+          "B_root_wrong": 1
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 206.2184,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 167,
+      "request_wall_s": 4.819440841674805,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L01",
+      "tokens": 1024,
+      "decode_ms": 16458.9,
+      "decode_tps": 62.21557941296198,
+      "prompt_ms": 4475.5,
+      "reused": 131072,
+      "windows": 433,
+      "target_rows_verified": 1729,
+      "drafts": 1296,
+      "accepted": 591,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "433",
+        "all_accept": "108",
+        "drafts": "1296",
+        "accepted": "591",
+        "chain_launches": "432",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1729",
+        "stage0_launches": "563",
+        "stage1_launches": "433",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 8
+      },
+      "trace_emissions": 1024,
+      "control_last_window_capped": false,
+      "request_index": 8,
+      "phase": "minp0-long",
+      "arm": "B1",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2471.5",
+          "216.3"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 432
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 432,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "3c1b9d25584d4bc0c2b63e41d3cfa2d8f49152af82339016faa3e919cc3a3471",
+        "request_index": 8,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 8,
+        "windows": 433,
+        "chains": 432,
+        "partition": {
+          "A_all": 108,
+          "B_root_correct": 61,
+          "A_rejected": 325,
+          "B_root_wrong": 46
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 16458.8964,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 176,
+      "request_wall_s": 21.08826732635498,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L02",
+      "tokens": 1024,
+      "decode_ms": 19152.0,
+      "decode_tps": 53.467000835421885,
+      "prompt_ms": 4478.8,
+      "reused": 131072,
+      "windows": 494,
+      "target_rows_verified": 1973,
+      "drafts": 1479,
+      "accepted": 532,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "494",
+        "all_accept": "83",
+        "drafts": "1479",
+        "accepted": "532",
+        "chain_launches": "493",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1973",
+        "stage0_launches": "593",
+        "stage1_launches": "494",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 9
+      },
+      "trace_emissions": 1024,
+      "control_last_window_capped": true,
+      "request_index": 9,
+      "phase": "minp0-long",
+      "arm": "B1",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2388.5",
+          "210.2"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 493
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 493,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "b45354fe5cb45215e759108169c8de8f45b59c8c35dabdc7155f9a3a9ecc7d37",
+        "request_index": 9,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 9,
+        "windows": 494,
+        "chains": 493,
+        "partition": {
+          "A_all": 83,
+          "B_root_correct": 37,
+          "A_rejected": 411,
+          "B_root_wrong": 44
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 19151.9709,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 167,
+      "request_wall_s": 23.77823543548584,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L01",
+      "tokens": 1024,
+      "decode_ms": 14343.3,
+      "decode_tps": 71.39221796936549,
+      "prompt_ms": 4490.6,
+      "reused": 131072,
+      "windows": 529,
+      "target_rows_verified": 1247,
+      "drafts": 718,
+      "accepted": 495,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "529",
+        "all_accept": "400",
+        "drafts": "718",
+        "accepted": "495",
+        "chain_launches": "528",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1247",
+        "stage0_launches": "846",
+        "stage1_launches": "529",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 10
+      },
+      "trace_emissions": 1024,
+      "control_last_window_capped": false,
+      "request_index": 10,
+      "phase": "minp0-long",
+      "arm": "A",
+      "mode": "0",
+      "spec_min_p": 0.5,
+      "disk_restore": [
+        [
+          "131072",
+          "2390.4",
+          "226.4"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 189,
+          "2": 118,
+          "3": 66,
+          "4": 156
+        },
+        "initial_T": 1,
+        "last_T": 1,
+        "after_initial_T4": 156,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "be3a54383c20fa53bcf9f69eb7e2baae611a8c31d175e517e620d8127c1dbe78",
+        "request_index": 10,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 10,
+        "windows": 529,
+        "chains": 528,
+        "partition": {
+          "A_all": 400,
+          "B_root_correct": 160,
+          "A_rejected": 129,
+          "B_root_wrong": 239
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0.5,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 14343.2792,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 176,
+      "request_wall_s": 18.9749174118042,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L02",
+      "tokens": 1024,
+      "decode_ms": 15900.2,
+      "decode_tps": 64.40170563892278,
+      "prompt_ms": 4562.0,
+      "reused": 131072,
+      "windows": 618,
+      "target_rows_verified": 1232,
+      "drafts": 614,
+      "accepted": 408,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "618",
+        "all_accept": "491",
+        "drafts": "614",
+        "accepted": "408",
+        "chain_launches": "617",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1232",
+        "stage0_launches": "1011",
+        "stage1_launches": "618",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 11
+      },
+      "trace_emissions": 1024,
+      "control_last_window_capped": true,
+      "request_index": 11,
+      "phase": "minp0-long",
+      "arm": "A",
+      "mode": "0",
+      "spec_min_p": 0.5,
+      "disk_restore": [
+        [
+          "131072",
+          "2488.9",
+          "218.8"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 277,
+          "2": 164,
+          "3": 81,
+          "4": 96
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 96,
+        "zero_threshold_T4_checked": false,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.5",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.5"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "57b1a7484fcc4bf44cd71b2c83e5d377942f9fee3d7984225a0efa6710bdb7e2",
+        "request_index": 11,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 11,
+        "windows": 618,
+        "chains": 617,
+        "partition": {
+          "A_all": 491,
+          "B_root_correct": 173,
+          "A_rejected": 127,
+          "B_root_wrong": 316
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0.5,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 15900.2062,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 167,
+      "request_wall_s": 20.61383366584778,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L01",
+      "tokens": 1024,
+      "decode_ms": 16375.9,
+      "decode_tps": 62.53091433142606,
+      "prompt_ms": 4541.0,
+      "reused": 131072,
+      "windows": 437,
+      "target_rows_verified": 1745,
+      "drafts": 1308,
+      "accepted": 587,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "437",
+        "all_accept": "103",
+        "drafts": "1308",
+        "accepted": "587",
+        "chain_launches": "436",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1745",
+        "stage0_launches": "580",
+        "stage1_launches": "437",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 12
+      },
+      "trace_emissions": 1024,
+      "control_last_window_capped": false,
+      "request_index": 12,
+      "phase": "minp0-long",
+      "arm": "B2",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2449.5",
+          "211.7"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 436
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 436,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131248,
+        "prompt_csv_sha256": "203bd6e367fbea95e7702ef1b6b0a307a479daae6e4f7366097c061c1bc6cc4d",
+        "line_sha256": "3c1b9d25584d4bc0c2b63e41d3cfa2d8f49152af82339016faa3e919cc3a3471",
+        "request_index": 12,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 12,
+        "windows": 437,
+        "chains": 436,
+        "partition": {
+          "A_all": 103,
+          "B_root_correct": 56,
+          "A_rejected": 334,
+          "B_root_wrong": 46
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 16375.8793,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 176,
+      "request_wall_s": 21.05578589439392,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    },
+    {
+      "case": "L02",
+      "tokens": 1024,
+      "decode_ms": 18963.4,
+      "decode_tps": 53.99875549743189,
+      "prompt_ms": 4558.6,
+      "reused": 131072,
+      "windows": 496,
+      "target_rows_verified": 1981,
+      "drafts": 1485,
+      "accepted": 530,
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "496",
+        "all_accept": "84",
+        "drafts": "1485",
+        "accepted": "530",
+        "chain_launches": "495",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1981",
+        "stage0_launches": "593",
+        "stage1_launches": "496",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 13
+      },
+      "trace_emissions": 1024,
+      "control_last_window_capped": true,
+      "request_index": 13,
+      "phase": "minp0-long",
+      "arm": "B2",
+      "mode": "0",
+      "spec_min_p": 0.0,
+      "disk_restore": [
+        [
+          "131072",
+          "2454.9",
+          "209.9"
+        ]
+      ],
+      "window_policy": {
+        "T_histogram": {
+          "1": 1,
+          "2": 0,
+          "3": 0,
+          "4": 495
+        },
+        "initial_T": 1,
+        "last_T": 4,
+        "after_initial_T4": 495,
+        "zero_threshold_T4_checked": true,
+        "output_cap": 1024,
+        "final_verifier_window_may_exceed_output_cap": true
+      },
+      "wire": {
+        "header": "GEN 1024 seed=73 spec_min_p=0.0",
+        "keys": {
+          "seed": "73",
+          "spec_min_p": "0.0"
+        },
+        "tokens": 1024,
+        "prompt_count": 131239,
+        "prompt_csv_sha256": "de2ec1e8b9172bbdec759e670af7d51411c8c58e925caba673dd5674a95849ef",
+        "line_sha256": "b45354fe5cb45215e759108169c8de8f45b59c8c35dabdc7155f9a3a9ecc7d37",
+        "request_index": 13,
+        "write_complete": true,
+        "flushed": true
+      },
+      "policy": {
+        "request": 13,
+        "windows": 496,
+        "chains": 495,
+        "partition": {
+          "A_all": 84,
+          "B_root_correct": 39,
+          "A_rejected": 412,
+          "B_root_wrong": 43
+        },
+        "caveat": "Host-observed diagnostic timing; fixture-forced targets; no policy fit or performance claim.",
+        "spec_min_p": 0,
+        "history_source": "validated_ssd",
+        "telemetry_decode_ms": 18963.4303,
+        "instrumented_diagnostic": true,
+        "performance_result": false,
+        "correlated_forced_trace": true
+      },
+      "prompt_read": 167,
+      "request_wall_s": 23.667803049087524,
+      "performance_result": false,
+      "instrumented_diagnostic": true
+    }
+  ],
+  "triplets": [
+    {
+      "phase": "minp0-smoke",
+      "case": "L01",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        61.88118811881188,
+        74.88766849725411,
+        74.96251874062969
+      ],
+      "B_time_reduction_pct": [
+        -21.01847229156265,
+        0.099850224663014
+      ],
+      "B_tps_gain_pct": [
+        -17.36798679867987,
+        0.09995002498752736
+      ],
+      "B_tps_spread_pct": 19.118644067796623
+    },
+    {
+      "phase": "minp0-smoke",
+      "case": "L02",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        71.53075822603721,
+        78.61635220125785,
+        72.74490785645004
+      ],
+      "B_time_reduction_pct": [
+        -9.905660377358478,
+        -8.071278825995794
+      ],
+      "B_tps_gain_pct": [
+        -9.012875536480669,
+        -7.468477206595536
+      ],
+      "B_tps_spread_pct": 1.683096898292833
+    },
+    {
+      "phase": "minp0-long",
+      "case": "L01",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        62.21557941296198,
+        71.39221796936549,
+        62.53091433142606
+      ],
+      "B_time_reduction_pct": [
+        -14.749743782811503,
+        -14.17107639106761
+      ],
+      "B_tps_gain_pct": [
+        -12.853835918560785,
+        -12.412142233403966
+      ],
+      "B_tps_spread_pct": 0.505561172901932
+    },
+    {
+      "phase": "minp0-long",
+      "case": "L02",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.0,
+        0.5,
+        0.0
+      ],
+      "tps": [
+        53.467000835421885,
+        64.40170563892278,
+        53.99875549743189
+      ],
+      "B_time_reduction_pct": [
+        -20.45131507779776,
+        -19.265166475893388
+      ],
+      "B_tps_gain_pct": [
+        -16.978905597326655,
+        -16.153221468723967
+      ],
+      "B_tps_spread_pct": 0.989626240312305
+    }
+  ],
+  "long_diagnostic_summary": [
+    {
+      "spec_min_p": 0,
+      "requests": 4,
+      "windows": 1860,
+      "chains": 1856,
+      "partition": {
+        "A_all": 378,
+        "B_root_correct": 193,
+        "A_rejected": 1482,
+        "B_root_wrong": 179
+      },
+      "B_root_correct_among_scored": 0.5188172043010753,
+      "scored_denominator": 372,
+      "note": "Conditional B-root labels only where B exists, A fully accepts and the output window is not budget-censored. Not unconditional success or independent probabilities."
+    },
+    {
+      "spec_min_p": 0.5,
+      "requests": 2,
+      "windows": 1147,
+      "chains": 1145,
+      "partition": {
+        "A_all": 891,
+        "B_root_correct": 333,
+        "A_rejected": 256,
+        "B_root_wrong": 555
+      },
+      "B_root_correct_among_scored": 0.375,
+      "scored_denominator": 888,
+      "note": "Conditional B-root labels only where B exists, A fully accepts and the output window is not budget-censored. Not unconditional success or independent probabilities."
+    }
+  ],
+  "limits": [
+    "Instrumentation is enabled for every arm; no traceless matched control exists, so overhead is not measured.",
+    "Host-observed readiness and stage timestamps are not GPU completion timestamps or independent kernel costs. Overlapping timers are not summed.",
+    "Forced continuation is not the raw greedy continuation. Raw target rows after a rejected position are censored; these labels do not measure free-generation model quality.",
+    "B-root correctness is conditional on A all-accept and a scoreable non-censored B. Multiplying marginal probabilities would not establish joint success.",
+    "Expert cache, PLE and elastic capacity persist across SSD restores. Their drift remains a confounder; no normalized or adjusted TPS is reported.",
+    "Warmup and 15-token smoke are functional diagnostics; the six long timings are instrumented diagnostics, not promotion of a performance lever.",
+    "No adaptive scheduling policy is implemented or evaluated by this record."
+  ]
+}
