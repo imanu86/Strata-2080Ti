@@ -8670,10 +8670,14 @@ int main(int argc, char** argv) {
                     err.clear();
                     (void) cudaGetLastError();
                 };
+                // a slot that just ended and stays a conversation cache also gets this round (its drafts unused): it
+                // catches its drafter's K/V up over the rows it kept, so a next turn that continues from the slot
+                // (copy_from_slot) does not draft over stale cells at the tail.  Lab paths only (split or planned).
+                const bool tail_catchup = batch_mtp_split || planned;
                 for (int t = 0; t < A; ++t) {
                     const int b = active[t];
                     BSlot& sl = bs[(size_t) b];
-                    if (!sl.active || sl.mtp_off) continue;
+                    if (sl.mtp_off || (!sl.active && !(tail_catchup && sl.cached))) continue;
                     sl.draft_ready = false;
                     const int T = nrow[t];
                     if (cudaMemcpyAsync(slot_mtp_rows[(size_t) b].get(), ver.final_R_all() + (size_t) first[t] * stride,
@@ -8694,7 +8698,7 @@ int main(int argc, char** argv) {
                         drop(b, "draft");
                         continue;
                     } else {
-                        sl.draft_ready = true;
+                        sl.draft_ready = sl.active;
                     }
                 }
                 for (int t = 0; t < A && parallel; ++t) {
@@ -8705,7 +8709,7 @@ int main(int argc, char** argv) {
                         drop(b, "draft");
                         continue;
                     }
-                    sl.draft_ready = true;
+                    sl.draft_ready = sl.active;
                 }
             }
             bt_emit += msd(w2, Clock::now());
