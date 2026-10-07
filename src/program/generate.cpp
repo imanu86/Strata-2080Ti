@@ -2196,6 +2196,18 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+    const char* lab_selective_switch = std::getenv("STRATA_LAB_MTP_SELECTIVE_SWITCH");
+    const bool lab_selective = lab_selective_switch != nullptr && lab_selective_switch[0] != 0;
+    if (lab_selective && (!o.serve || o.batch != 0 || o.pipeline_windows != 2 || o.spec != 4 || o.mtp.empty() ||
+        (o.mtp_max_t != 0 && o.mtp_max_t != 4) || o.mtp_window != 32768 || o.suffix_draft != 0 || o.lookup_chain != 0 ||
+        o.coupled_draft || !o.spec_oracle.empty() || !o.spec_follow.empty() || o.spec_corrupt != 0 ||
+        lab_oracle_on || !lab_oracle_hot || o.prompt_cache_file.empty() || lab_prefix_tokens <= 0 ||
+        std::getenv("STRATA_FORCE_WINDOWS") != nullptr || std::getenv("STRATA_NEURON_PROBE_CONTROL") != nullptr ||
+        std::getenv("STRATA_CLOSED_ROUTING") != nullptr || std::getenv("STRATA_CKPT_REREAD") != nullptr)) {
+        std::fprintf(stderr, "strata lab selective: requires single-chat CUDA pipeline2/spec4/MTP-last window32768, "
+                             "lookup/suffix0, oracle off hot-prefix SSD and no other probe/window forcing\n");
+        return 2;
+    }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                                      [](int slots) { return slots > 0; }))) {
@@ -4226,7 +4238,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (lab_oracle_on || lab_oracle_hot) {
+    if (lab_oracle_on || lab_oracle_hot || lab_selective) {
 #if defined(STRATA_USE_HIP)
         std::fprintf(stderr, "strata lab oracle: this experiment requires CUDA\n");
         return 2;
@@ -4262,6 +4274,7 @@ int main(int argc, char** argv) {
         // the next window's drafts), and the round/step graphs carry the forcing kernel
         const int mtp_t = o.pipeline_windows >= 2 ? strata::kernels::kVerifyMaxT : o.spec;
         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
+        mtp.set_selective_capture(lab_selective);
         if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st && !mtp_cross_device ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
         mtp.set_ple_session(&ss);
         if (batch_mtp) {
@@ -9706,6 +9719,26 @@ int main(int argc, char** argv) {
             if (lab_oracle_hot)
                 std::fprintf(stderr, "strata lab oracle: selected mode=%s before GEN; switch=%s\n",
                              lab_oracle_name, lab_oracle_switch);
+            bool selective_request_on = false, selective_request_check = false;
+            if (lab_selective) {
+                std::ifstream control(lab_selective_switch);
+                std::string mode, check, extra;
+                if (!(control >> mode) || (mode != "0" && mode != "off" && mode != "8192")) {
+                    std::printf("ERR lab selective: switch requires 0, off or 8192\n"); return 1;
+                }
+                selective_request_on = mode == "8192";
+                if (control >> check) {
+                    if ((check != "check=0" && check != "check=1") || (control >> extra)) {
+                        std::printf("ERR lab selective: optional switch token must be check=0 or check=1\n"); return 1;
+                    }
+                    selective_request_check = check == "check=1";
+                }
+                if (geni || lab_oracle_on || oracle_prefix_file.empty() || (selective_request_check && !selective_request_on)) {
+                    std::printf("ERR lab selective: text GEN, oracle mode0 and explicit SSD path required; check needs8192\n"); return 1;
+                }
+                std::fprintf(stderr, "strata lab selective: selected mode=%d check=%d before GEN\n",
+                             selective_request_on ? 8192 : 0, selective_request_check ? 1 : 0);
+            }
             char* endp = nullptr;
             long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);   // (STRATA_FORCE_IDS may lower it)
             // optional sampling keys between max_new and the ids: temperature=F, top_p=F, top_k=N, min_p=F,
@@ -11012,6 +11045,24 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            if (lab_selective) {
+                if (!req_sp.greedy || hist_n != 0 || mtp.coupled() || !pipe || pl_pw != 2 || S_mtp != 4 ||
+                    cancelled || pl_force_miss != 0 || !req_imgs.empty()) {
+                    std::printf("ERR lab selective: unsupported request runtime\n"); return 1;
+                }
+                // Only provenance proved by a completed SSD restore+suffix, or a real full-prefix read from0.
+                // Other RAM/live resumes take an explicit dense fallback; they do not inherit stale coverage.
+                const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && read_from > 0) ||
+                                                  (read_from == 0 && mtp.first_needed() <= 0));
+                if (!mtp.selective_begin_request((uint64_t) force_k + 1, full ? n - 1 : -1, selective_request_on, err)) {
+                    std::printf("ERR %s\n", err.c_str()); return 1;
+                }
+                std::fprintf(stderr, "strata lab selective: history request=%lld source=%s full_until=%lld\n",
+                             (long long) force_k, full ? (incoming_disk ? "validated_ssd" : "full_prefill") : "unproven",
+                             (long long) (full ? n - 1 : -1));
+            }
+            int64_t sel_a_reject = 0, sel_a_all = 0, sel_b_missing = 0, sel_b_wrong = 0, sel_b_unused = 0, sel_b_useful = 0;
+            int64_t sel_b_scored = 0, sel_b_match = 0, sel_b_gate = 0, sel_b_notready = 0, sel_opportunities = 0;
             int64_t oracle_real_chains = 0, oracle_bypassed_chains = 0, oracle_delivered = 0, oracle_padded = 0;
             int64_t oracle_output_ok = 0, oracle_all_accept = 0, oracle_target_rows = 0;
             int64_t oracle_stage0_launches = 0, oracle_stage1_launches = 0;
@@ -11162,7 +11213,7 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: --pipeline-windows: a request with %s decodes serially\n",
                                  pl_serial);
             }
-            if ((lab_oracle_on || lab_oracle_hot) && (!pl_want || pl_serial != nullptr)) {
+            if ((lab_oracle_on || lab_oracle_hot || lab_selective) && (!pl_want || pl_serial != nullptr)) {
                 std::printf("ERR lab oracle: request cannot enter the qualified two-stage decode pipeline\n");
                 return 1;
             }
@@ -11184,6 +11235,7 @@ int main(int argc, char** argv) {
                     bool sfx = false;      // a lookup window (the suffix drafter's drafts)
                     bool lookup = false;   // a B taken from the lookup's continuation (pick_lookup, lookup_next)
                     int sfx_match = 0;
+                    bool selective_stage0_seen = false;
                 };
                 auto V0 = [&](const PW& w) -> strata::core::Verifier& { return *PV[0][w.seq & 1]; };
                 auto V1 = [&](const PW& w) -> strata::core::Verifier& { return *PV[1][w.seq & 1]; };
@@ -11210,6 +11262,7 @@ int main(int argc, char** argv) {
                         if (valid) ++oracle_delivered; else ++oracle_padded;
                     }
                 };
+                strata::core::Verifier* selective_verifier = nullptr;
                 auto chain_launch = [&](int T, const int32_t* tokens, int64_t pos, int accepted,
                                         const int32_t* force, int n_force, int n_out, int n_early,
                                         std::string& e) -> bool {
@@ -11222,6 +11275,13 @@ int main(int argc, char** argv) {
                         std::fill(std::begin(oracle_chain_prob), std::end(oracle_chain_prob), 0.0f);
                     }
                     if (lab_oracle_instant) { ++oracle_bypassed_chains; return true; }
+                    if (lab_selective) {
+                        int width = 0;
+                        const int32_t* selected = selective_verifier
+                            ? selective_verifier->final_selection(accepted, pos + accepted, width) : nullptr;
+                        if (!mtp.selective_source(selected, width, pos + accepted,
+                                selective_verifier ? selective_verifier->device() : -1, (uint64_t) force_k + 1, e)) return false;
+                    }
                     const bool ok = mtp.chain_launch(T, tokens, pos, accepted, force, n_force, n_out, n_early, e);
                     if (ok && lab_oracle_log) ++oracle_real_chains;
                     return ok;
@@ -11680,6 +11740,10 @@ int main(int argc, char** argv) {
                         } else if (!err.empty()) return die(err);
                     }
                     if (pl_yield && ((doomed && !pump0(D)) || !pump0(B, A.s1 && !A.s1_done ? 1 : 0))) return die(err);
+                    if (lab_selective && A.finished && !A.selective_stage0_seen) {
+                        A.selective_stage0_seen = true; ++sel_opportunities;
+                        if (!B.ready && !B.launched) ++sel_b_notready;
+                    }
                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
                     if (!el_gap()) return die(err);   // lab P3: the elastic tail at a gap of stage 0
                     // ---- a wrong speculative window has finished: stage 0 back to the verified window's real commit
@@ -11858,6 +11922,23 @@ int main(int argc, char** argv) {
                     if (lab_oracle_log) {
                         oracle_all_accept += a == A.T - 1 ? 1 : 0;
                         oracle_target_rows += A.T;
+                    }
+                    if (lab_selective) {
+                        selective_verifier = &V1(A); // copied by the next chain before this parity can be reused
+                        if (B.made && B.p_on < theta) ++sel_b_gate;
+                        if (a != A.T - 1) ++sel_a_reject;
+                        else {
+                            ++sel_a_all;
+                            if (!B.made) ++sel_b_missing;
+                            else {
+                                ++sel_b_scored;
+                                if (B.tok[0] != outp[(size_t) A.T - 1]) ++sel_b_wrong;
+                                else {
+                                    ++sel_b_match;
+                                    if (B.launched) ++sel_b_useful; else ++sel_b_unused;
+                                }
+                            }
+                        }
                     }
                     force_note(A.p, A.T, a, A.tok);
                     if (!V1(A).pl_commit_async(a + 1, err)) return die(err);
@@ -12317,6 +12398,23 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            if (lab_selective) {
+                // Both pipeline and request decode timers are frozen. This opt-in gate is deliberately untimed.
+                if (selective_request_check && !mtp.selective_check(err)) {
+                    std::printf("ERR %s\n", err.c_str()); return 1;
+                }
+                if (!mtp.selective_report(stderr, force_k, err)) {
+                    std::printf("ERR %s\n", err.c_str()); return 1;
+                }
+                std::fprintf(stderr, "strata lab selective partition: request %lld windows=%lld A_rejected=%lld A_allaccept=%lld "
+                                     "B_missing=%lld B_wrong_root=%lld B_correct_nonlaunched=%lld B_useful=%lld "
+                                     "B_scored_after_Aall=%lld B_rootmatch=%lld B_belowgate=%lld B_notready_at_stage0=%lld "
+                                     "stage0_opportunities=%lld\n", (long long) force_k, (long long) dec_windows,
+                             (long long) sel_a_reject, (long long) sel_a_all, (long long) sel_b_missing,
+                             (long long) sel_b_wrong, (long long) sel_b_unused, (long long) sel_b_useful,
+                             (long long) sel_b_scored, (long long) sel_b_match, (long long) sel_b_gate,
+                             (long long) sel_b_notready, (long long) sel_opportunities);
+            }
             if (lab_oracle_on && (!pl_ran || produced_n != oracle_requested || oracle_output_ok != produced_n ||
                 oracle_target_rows != produced_n || oracle_all_accept != dec_windows ||
                 consumed.size() != (size_t) (n + produced_n - 1))) {

@@ -1,3 +1,32 @@
+# Selective MTP history, 7 October 2026
+
+A default-off prototype combines the last8192 MTP cells with positions selected
+by the target's final QSA. It retrieves **the drafter's own K/V**, using a private
+13,341,184-byte pool and precaptured graphs. Target K/V values are never reused.
+The original32k dense path and the selective path keep identical allocations
+throughout one16-request engine run. Every measured request restores131072
+tokens from SSD; actual prompts131248/131239, long outputs1024, split16/S4,
+pipeline2, KVint8/resident32768, suffix/lookup0 and forced target IDs only.
+
+| Treatment B / control A / repeat B | L01 decode t/s | L02 decode t/s |
+|---|---:|---:|
+| Selective8192 / dense32768 / selective8192 | 70.61 / 71.84 / 71.39 | 64.45 / 64.27 / 64.76 |
+
+There is no convincing gain to promote. All selective chains actually used the
+new path: no dense fallback, one private-map reset per request and no overflow.
+Six GPU gate/smoke requests compare all final-query selected cells with their
+own host codes/scales, including remote history and resident cells overwritten
+by catch-up; every check passes. Long timing disables that postdecode diagnostic.
+Thirteen CPU contract-model tests and six evidence-checker tests pass; those
+CPU models do not substitute for CUDA validation. Daily and its files are unchanged.
+
+The method both adds remote history and shortens the recent window; this result
+does not isolate the value of remote retrieval alone. Cache/elastic events are
+retained, and forced output equality is workload control, not answer quality.
+No free-generation or multi-chat claim. New counters separate A rejection,
+wrong B bonus, B not ready at stage0 completion and useful B work.
+See [source/build hashes, all measurements and limits](selective-mtp-20261007.json).
+
 # Synthetic draft oracle, 7 October 2026
 
 An opt-in laboratory oracle separates the value of perfect draft proposals

@@ -25,6 +25,7 @@
 
 #include "strata/core/expert_source.hpp"
 #include "strata/core/layer.hpp"
+#include "strata/core/layout.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
 
@@ -262,6 +263,18 @@ public:
     /// Token t's residual after the last layer, (hc, n_embd) on the device, valid until the next `run`.
     const float* final_R(int t) const;
     const float* final_R_all() const { return next_ ? next_->final_R_all() : R_; }
+    /// Lab selective MTP: logical IDs from this window's LAST QSA, never target K/V. Copy before this verifier
+    /// is prestaged/reused. Caller has observed done() and pl_finish(); commit does not overwrite sel_.
+    const int32_t* final_selection(int row, int64_t expected_pos, int& width) const {
+        width = 0;
+        if (!last_stage() || fl_active_ || last_batch_ || !sel_ || !h_step_ || row < 0 || row >= last_t_ ||
+            expected_pos != last_pos0_ + row || g_ == nullptr || g_->n_layers < 1 ||
+            !is_qsa_layer(*g_, g_->n_layers - 1)) return nullptr;
+        const int count = h_step_[row * strata::kernels::kStepCount + strata::kernels::kStepWidth];
+        if (count < 1 || count > cap_) return nullptr;
+        width = count;
+        return sel_ + (size_t) row * cap_;
+    }
 
     // Default-off approximation probe, enabled only by STRATA_CLOSED_ROUTING.
     float* closed_usage_buffer() { return closed_usage_; }

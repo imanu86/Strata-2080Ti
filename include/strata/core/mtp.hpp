@@ -22,10 +22,13 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/kernels/kv_stream.hpp"
+#include "strata/kernels/qsa_decode_attn.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -64,6 +67,17 @@ public:
     int32_t top2(int j) const { return j >= 0 && j < (int) top2_.size() ? top2_[(size_t) j] : -1; }
     int max_t() const { return max_t_; }
     uint64_t vram_bytes() const { return vram_; }
+    /// Lab v1: optional private int8 KV pool and a second pre-captured chain graph family. Before load.
+    void set_selective_capture(bool on) { selective_config_ = on; }
+    /// After an idle, completed prefill/validated SSD restore. `full_until` is exclusive and -1 means unproven.
+    bool selective_begin_request(uint64_t epoch, int64_t full_until, bool on, std::string& err);
+    /// Once per verdict, while the old MTP chain is idle and the verifier's selection is still stable.
+    /// Bad metadata selects the exact original dense graphs; CUDA failures return false.
+    bool selective_source(const int32_t* ids, int width, int64_t pos, int source_device, uint64_t epoch,
+                           std::string& err);
+    /// Untimed diagnostic AFTER decode: compare private codes/scales with the authoritative MTP host copy.
+    bool selective_check(std::string& err);
+    bool selective_report(std::FILE* out, int64_t request, std::string& err) const;
     /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
     const QsaState& kv_state() const { return st_; }
     /// KV streaming: refill the ring of the drafter's window from its host copy for a sequence that continues at
@@ -166,6 +180,30 @@ public:
     bool idle(std::string& err);
 
 private:
+    static constexpr int kSelectiveRecent = 8192, kSelectiveProxy = 2051, kSelectiveCap = 10304;
+    static constexpr int kSelectiveSlots = 3072;
+    bool selective_allocate(std::string& err);
+    bool selective_stage(int T, int64_t p, int a, int n_out, std::string& err);
+    void selective_fallback(int reason);
+    bool selective_config_ = false, selective_on_ = false, selective_record_ = false;
+    bool selective_active_ = false, selective_source_ok_ = false, selective_reset_ = true;
+    bool selective_supported_ = false, selective_last_valid_ = false;
+    uint64_t selective_epoch_ = 0, selective_bytes_ = 0;
+    int64_t selective_full_until_ = -1, selective_source_pos_ = -1;
+    int selective_proxy_width_ = 0, selective_last_n_ = 0, selective_source_reason_ = 3;
+    int64_t selective_last_pos_ = -1;
+    void* selective_arena_ = nullptr;
+    strata::kernels::QsaAttnPools selective_pools_;
+    strata::kernels::KvStreamMap selective_map_;
+    int32_t *selective_h_ids_ = nullptr, *selective_m_ids_ = nullptr, *selective_d_ids_ = nullptr;
+    int32_t *selective_h_proxy_ = nullptr, *selective_m_proxy_ = nullptr;
+    int32_t selective_widths_[8] = {};
+    cudaGraphExec_t selective_round_[9] = {}, selective_step_[9] = {};
+    int64_t selective_chains_ = 0, selective_dense_ = 0, selective_resets_ = 0, selective_ids_ = 0;
+    int64_t selective_far8192_ = 0, selective_far32768_ = 0, selective_max_union_ = 0;
+    int64_t selective_mirror_cells_ = 0, selective_check_cells_ = 0, selective_check_distant_ = 0;
+    int64_t selective_fallbacks_[8] = {};
+    double selective_source_ms_ = 0;
     bool prefill_impl(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
                       std::string& err, bool sync, cudaMemcpyKind residual_kind);
     bool cross_device() const { return source_device_ >= 0 && source_device_ != device_; }

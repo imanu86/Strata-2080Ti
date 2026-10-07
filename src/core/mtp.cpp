@@ -152,6 +152,11 @@ MtpDrafter::~MtpDrafter() {
     if (prefill_host_R_) cudaFreeHost(prefill_host_R_);
     if (local_window_R_) cudaFree(local_window_R_);
     if (private_gr_arena_) cudaFree(private_gr_arena_);
+    for (auto& e : selective_round_) if (e) cudaGraphExecDestroy(e);
+    for (auto& e : selective_step_) if (e) cudaGraphExecDestroy(e);
+    if (selective_arena_) cudaFree(selective_arena_);
+    if (selective_h_ids_) cudaFreeHost(selective_h_ids_);
+    if (selective_h_proxy_) cudaFreeHost(selective_h_proxy_);
     for (auto& e : prefill_exec_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : prefill_dev_exec_) if (e) cudaGraphExecDestroy(e);
     if (pf_dev_) cudaFree(pf_dev_);
@@ -182,6 +187,239 @@ MtpDrafter::~MtpDrafter() {
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
     for (void* h : hosts) if (h) cudaFreeHost(h);
+}
+
+// Lab selective MTP uses only its OWN authoritative K/V. The target provides logical positions, never values.
+bool MtpDrafter::selective_allocate(std::string& err) {
+    using namespace strata::kernels;
+#if defined(STRATA_USE_HIP)
+    err = "mtp selective: CUDA only"; return false;
+#endif
+    const QsaShapes shape = shapes_of(*g_);
+    selective_supported_ = st_.kv_mode == 2 && st_.kv_int8 && !st_.kv_q4 && !st_.kv_hybrid &&
+        st_.host.k_q && st_.host.v_q && st_.host.k_scale && st_.host.v_scale && window_ == 32768 &&
+        shape.page_size == 4 && shape.head_dim == 256 && shape.n_head_kv == 2 && max_t_ <= 8;
+    if (!selective_supported_) {
+        std::fprintf(stderr, "strata lab selective: unsupported storage; dense fallback (requires int8 ring32768)\n");
+        return true;
+    }
+    const int64_t blocks = (st_.max_cells + shape.page_size - 1) / shape.page_size;
+    const uint64_t rows = (uint64_t) kSelectiveSlots * shape.n_head_kv * shape.page_size;
+    auto carve = [&](Bump& b) {
+        selective_pools_.k_q = b.take<int8_t>(rows * shape.head_dim);
+        selective_pools_.v_q = b.take<int8_t>(rows * shape.head_dim);
+        selective_pools_.k_scale = b.take<uint16_t>(rows * (shape.head_dim / KV_Q8_GROUP));
+        selective_pools_.v_scale = b.take<uint16_t>(rows * (shape.head_dim / KV_Q8_GROUP));
+        selective_map_.page_table = b.take<int32_t>(blocks);
+        selective_map_.slot_block = b.take<int32_t>(kSelectiveSlots);
+        selective_map_.slot_stamp = b.take<int32_t>(kSelectiveSlots);
+        selective_map_.slot_ref = b.take<int32_t>(kSelectiveSlots);
+        selective_map_.ctl = b.take<int32_t>(kKvCtlInts);
+        selective_map_.miss_block = b.take<int32_t>(kSelectiveSlots);
+        selective_map_.miss_slot = b.take<int32_t>(kSelectiveSlots);
+        selective_d_ids_ = b.take<int32_t>(kSelectiveCap);
+    };
+    Bump count; carve(count);
+    if (cudaMalloc(&selective_arena_, count.used) != cudaSuccess) { err = "mtp selective: private pool allocation"; return false; }
+    Bump real; real.base = (uint8_t*) selective_arena_; carve(real);
+    selective_map_.n_blocks = blocks; selective_map_.n_slots = kSelectiveSlots;
+    selective_pools_.page_table = selective_map_.page_table;
+    if (!mapped((size_t) 8 * kSelectiveCap * sizeof(int32_t), (void**) &selective_h_ids_, (void**) &selective_m_ids_) ||
+        !mapped((size_t) kSelectiveProxy * sizeof(int32_t), (void**) &selective_h_proxy_, (void**) &selective_m_proxy_)) {
+        err = "mtp selective: fixed host buffers"; return false;
+    }
+    kv_stream_reset(selective_map_, cs_);
+    if (cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp selective: initial map reset"; return false; }
+    vram_ += count.used; selective_bytes_ = count.used;
+    std::fprintf(stderr, "strata lab selective: allocation=retained variants=dense,8192 pool_slots=%d pool_bytes=%llu "
+                         "selection_cap=%d attention_chunks=161 original_chunks=%lld\n", kSelectiveSlots,
+                 (unsigned long long) count.used, kSelectiveCap, (long long) ((cap_ + 63) / 64));
+    return true;
+}
+
+bool MtpDrafter::selective_begin_request(uint64_t epoch, int64_t full_until, bool on, std::string& err) {
+    if (!selective_config_) { err = "mtp selective: not configured before load"; return false; }
+    if (chain_live_) { err = "mtp selective: request changed with a live chain"; return false; }
+    if (!idle(err)) return false;
+    selective_on_ = on; selective_epoch_ = epoch;
+    selective_full_until_ = full_until >= 0 && full_until <= st_.max_cells ? full_until : -1;
+    selective_source_ok_ = false; selective_active_ = false; selective_reset_ = true; selective_last_valid_ = false;
+    selective_source_reason_ = 3; selective_proxy_width_ = selective_last_n_ = 0;
+    selective_chains_ = selective_dense_ = selective_resets_ = selective_ids_ = selective_mirror_cells_ = 0;
+    selective_check_cells_ = selective_check_distant_ = 0; selective_source_ms_ = 0;
+    selective_far8192_ = selective_far32768_ = selective_max_union_ = 0;
+    std::fill(std::begin(selective_fallbacks_), std::end(selective_fallbacks_), 0);
+    return true;
+}
+
+bool MtpDrafter::selective_source(const int32_t* ids, int width, int64_t pos, int source_device, uint64_t epoch,
+                                  std::string& err) {
+    selective_source_ok_ = false; selective_source_reason_ = 3;
+    if (!selective_config_ || !selective_on_ || !selective_supported_ || selective_full_until_ < 0) return true;
+    if (chain_live_) { err = "mtp selective: replacing a live chain's fixed inputs"; return false; }
+    if (!ids || width < 1 || width > kSelectiveProxy || pos < 0 || pos >= st_.max_cells ||
+        width != std::min<int64_t>(pos + 1, kSelectiveProxy) || source_device != device_ || epoch != selective_epoch_)
+        return true;
+    const OnDevice on_device(device_);
+    const auto t0 = Clock::now();
+    if (cudaMemcpyAsync(selective_h_proxy_, ids, (size_t) width * sizeof(int32_t), cudaMemcpyDeviceToHost, cs_) != cudaSuccess ||
+        cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp selective: copying target selection"; return false; }
+    selective_source_ms_ += ms_since(t0);
+    // The verifier's block top-k emits ascending, unique, causal IDs. Reject unexpected metadata before GPU resolve.
+    for (int i = 0; i < width; ++i)
+        if (selective_h_proxy_[i] < 0 || selective_h_proxy_[i] > pos ||
+            (i > 0 && selective_h_proxy_[i] <= selective_h_proxy_[i - 1])) {
+            selective_source_reason_ = 4; return true;
+        }
+    selective_source_pos_ = pos; selective_proxy_width_ = width; selective_source_ok_ = true;
+    return true;
+}
+
+void MtpDrafter::selective_fallback(int reason) {
+    selective_active_ = false; selective_source_ok_ = false; selective_reset_ = true; selective_last_valid_ = false;
+    ++selective_dense_; ++selective_fallbacks_[std::max(0, std::min(reason, 7))];
+}
+
+bool MtpDrafter::selective_stage(int T, int64_t p, int a, int n_out, std::string& err) {
+    using namespace strata::kernels;
+    selective_active_ = false;
+    const bool full_history = selective_full_until_ >= 0 && p >= 0 && p <= selective_full_until_;
+    // Only the accepted catch-up becomes authoritative. Future recursive outputs remain private branch state.
+    selective_full_until_ = full_history ? p + a + 1 : -1;
+    if (!selective_on_) { selective_fallback(0); return true; }
+    if (!selective_supported_) { selective_fallback(1); return true; }
+    if (!full_history) { selective_fallback(2); return true; }
+    if (!selective_source_ok_ || selective_source_pos_ != p + a) { selective_fallback(selective_source_reason_); return true; }
+    if (p + T > st_.max_cells || p + a + n_out > st_.max_cells || n_out > 7) { selective_fallback(4); return true; }
+    if (!selective_round_[T]) { selective_fallback(7); return true; }
+    for (int j = 1; j < n_out; ++j) if (!selective_step_[j]) { selective_fallback(7); return true; }
+    // A cell named by the last query of the previous chain is certainly resident until the next resolve.
+    // Count catch-up overwrites for the diagnostic, before replacing the immutable host selection rows.
+    if (selective_last_valid_ && !selective_reset_) {
+        const int32_t* prev = selective_h_ids_ + (size_t) (selective_last_n_ - 1) * kSelectiveCap;
+        const int width = selective_widths_[selective_last_n_ - 1];
+        for (int t = 0; t < T; ++t)
+            if (std::binary_search(prev, prev + width, (int32_t) (p + t))) ++selective_mirror_cells_;
+    }
+    int64_t total_ids = 0, far8192 = 0, far32768 = 0, max_union = 0;
+    for (int j = 0; j < n_out; ++j) {
+        const int64_t pos = p + a + j;
+        const int64_t begin = std::max<int64_t>(0, pos - kSelectiveRecent + 1);
+        int32_t* out = selective_h_ids_ + (size_t) j * kSelectiveCap;
+        int q = 0, n = 0, pages = 0, last_page = -1;
+        int64_t recent = begin;
+        while (q < selective_proxy_width_ || recent <= pos) {
+            const int64_t proxy = q < selective_proxy_width_ ? selective_h_proxy_[q] : st_.max_cells;
+            const int64_t id = recent <= pos ? std::min(proxy, recent) : proxy;
+            if (q < selective_proxy_width_ && proxy == id) ++q;
+            if (recent <= pos && recent == id) ++recent;
+            if (id < 0 || id > pos || id >= st_.max_cells || n >= kSelectiveCap) { selective_fallback(4); return true; }
+            const int page = (int) (id / 4);
+            if (page != last_page) { last_page = page; ++pages; }
+            if (pages > kSelectiveSlots) { selective_fallback(5); return true; } // before resolve's atomic miss writes
+            if (id < begin) ++far8192;
+            if (id < pos - 32768 + 1) ++far32768;
+            out[n++] = (int32_t) id;
+        }
+        std::fill(out + n, out + kSelectiveCap, 0); // unused graph padding is never attended
+        selective_widths_[j] = n; total_ids += n; max_union = std::max<int64_t>(max_union, n);
+    }
+    if (selective_reset_) {
+        kv_stream_reset(selective_map_, cs_);
+        if (cudaGetLastError() != cudaSuccess) { err = "mtp selective: resetting private map"; return false; }
+        ++selective_resets_; selective_reset_ = false;
+    }
+    h_step_[(2 * max_t_ - 1) * 4 + kStepWidth] = selective_widths_[0];
+    for (int j = 1; j < n_out; ++j) h_step_[(max_t_ + j - 1) * 4 + kStepWidth] = selective_widths_[j];
+    selective_active_ = true; selective_source_ok_ = false; selective_last_valid_ = true;
+    selective_last_n_ = n_out; selective_last_pos_ = p + a + n_out - 1;
+    ++selective_chains_; selective_ids_ += total_ids;
+    selective_far8192_ += far8192; selective_far32768_ += far32768;
+    selective_max_union_ = std::max(selective_max_union_, max_union);
+    return true;
+}
+
+bool MtpDrafter::selective_check(std::string& err) {
+    using namespace strata::kernels;
+    if (!selective_supported_ || !selective_last_valid_ || selective_chains_ == 0 || chain_live_) {
+        err = "mtp selective: parity gate has no completed selective chain"; return false;
+    }
+    const OnDevice on_device(device_);
+    if (!idle(err)) return false;
+    const QsaShapes shape = shapes_of(*g_);
+    const size_t row_bytes = (size_t) shape.head_dim, scale_bytes = (size_t) (shape.head_dim / KV_Q8_GROUP) * 2;
+    const size_t pool_rows = (size_t) kSelectiveSlots * shape.n_head_kv * shape.page_size;
+    const size_t host_rows = (size_t) selective_map_.n_blocks * shape.n_head_kv * shape.page_size;
+    std::vector<int32_t> pages((size_t) selective_map_.n_blocks);
+    int32_t ctl[kKvCtlInts] = {};
+    if (cudaMemcpy(pages.data(), selective_map_.page_table, pages.size() * 4, cudaMemcpyDeviceToHost) != cudaSuccess ||
+        cudaMemcpy(ctl, selective_map_.ctl, sizeof ctl, cudaMemcpyDeviceToHost) != cudaSuccess || ctl[3] != 0) {
+        err = "mtp selective: parity map/overflow failure"; return false;
+    }
+    const int32_t* ids = selective_h_ids_ + (size_t) (selective_last_n_ - 1) * kSelectiveCap;
+    const int n = selective_widths_[selective_last_n_ - 1];
+    const void* pools[4] = {selective_pools_.k_q, selective_pools_.v_q, selective_pools_.k_scale, selective_pools_.v_scale};
+    const void* hosts[4] = {st_.host.k_q, st_.host.v_q, st_.host.k_scale, st_.host.v_scale};
+    // Diagnostic only, after decode_ms was frozen. Bulk reads avoid thousands of tiny WDDM transactions.
+    for (int run = 0; run < 4; ++run) {
+        const size_t stride = run < 2 ? row_bytes : scale_bytes;
+        std::vector<uint8_t> got(pool_rows * stride), expected(host_rows * stride);
+        if (cudaMemcpy(got.data(), pools[run], got.size(), cudaMemcpyDeviceToHost) != cudaSuccess ||
+            cudaMemcpy(expected.data(), hosts[run], expected.size(), cudaMemcpyDefault) != cudaSuccess) {
+            err = "mtp selective: parity readback failure"; return false;
+        }
+        for (int i = 0; i < n; ++i) {
+            const int id = ids[i], block = id / (int) shape.page_size, slot = pages[(size_t) block];
+            if (slot < 0 || slot >= kSelectiveSlots) { err = "mtp selective: selected parity cell is not resident"; return false; }
+            for (int h = 0; h < shape.n_head_kv; ++h) {
+                const size_t in_page = (size_t) h * shape.page_size + id % shape.page_size;
+                const size_t actual = ((size_t) slot * shape.n_head_kv * shape.page_size + in_page) * stride;
+                const size_t reference = ((size_t) block * shape.n_head_kv * shape.page_size + in_page) * stride;
+                if (std::memcmp(got.data() + actual, expected.data() + reference, stride) != 0) {
+                    err = "mtp selective: private/host mismatch at cell " + std::to_string(id) + " run " + std::to_string(run);
+                    return false;
+                }
+            }
+        }
+    }
+    selective_check_cells_ = n; selective_check_distant_ = 0;
+    for (int i = 0; i < n; ++i) if (ids[i] < selective_last_pos_ - kSelectiveRecent + 1) ++selective_check_distant_;
+    return true;
+}
+
+bool MtpDrafter::selective_report(std::FILE* out, int64_t request, std::string& err) const {
+    const OnDevice on_device(device_);
+    int32_t ctl[strata::kernels::kKvCtlInts] = {};
+    const bool counter_ok = selective_supported_ && selective_resets_ > 0 &&
+        cudaMemcpy(ctl, selective_map_.ctl, sizeof ctl, cudaMemcpyDeviceToHost) == cudaSuccess;
+    if (selective_supported_ && selective_resets_ > 0 && (!counter_ok || ctl[3] != 0)) {
+        err = "mtp selective: final map readback or overflow failure"; return false;
+    }
+    uint64_t misses = 0, lookups = 0, calls = 0;
+    if (counter_ok) { std::memcpy(&misses, ctl + 4, 8); std::memcpy(&lookups, ctl + 6, 8); std::memcpy(&calls, ctl + 8, 8); }
+    std::fprintf(out, "strata lab selective: request %lld mode=%d selective_chains=%lld dense_chains=%lld resets=%lld "
+                     "pool_pages=%d pool_bytes=%llu ids=%lld ids_recent=%lld ids_beyond8192=%lld ids_beyond32768=%lld "
+                     "max_union=%lld mirror_overlap_cells=%lld full_until=%lld history_epoch=%llu source_ms=%.3f "
+                     "fallback_off=%lld fallback_storage=%lld fallback_history=%lld fallback_source=%lld "
+                     "fallback_bounds=%lld fallback_pages=%lld fallback_reserved=%lld fallback_graph=%lld "
+                     "map_counters_ok=%d map_counter_epoch=%lld map_miss_pages=%llu map_upload_bytes=%llu "
+                     "map_lookups=%llu map_calls=%llu map_overflow=%d "
+                     "check_pass=%d check_mismatches=0 check_cells=%lld check_distant=%lld check_recent=%lld check_outside_decode=1\n",
+                 (long long) request, selective_on_ ? kSelectiveRecent : 0, (long long) selective_chains_,
+                 (long long) selective_dense_, (long long) selective_resets_, selective_supported_ ? kSelectiveSlots : 0,
+                 (unsigned long long) selective_bytes_, (long long) selective_ids_,
+                 (long long) (selective_ids_ - selective_far8192_), (long long) selective_far8192_,
+                 (long long) selective_far32768_, (long long) selective_max_union_,
+                 (long long) selective_mirror_cells_, (long long) selective_full_until_, (unsigned long long) selective_epoch_,
+                 selective_source_ms_, (long long) selective_fallbacks_[0], (long long) selective_fallbacks_[1],
+                 (long long) selective_fallbacks_[2], (long long) selective_fallbacks_[3], (long long) selective_fallbacks_[4],
+                 (long long) selective_fallbacks_[5], (long long) selective_fallbacks_[6], (long long) selective_fallbacks_[7],
+                 counter_ok ? 1 : 0, (long long) selective_resets_, (unsigned long long) misses,
+                 (unsigned long long) (misses * 4224), (unsigned long long) lookups, (unsigned long long) calls,
+                 counter_ok ? ctl[3] : -1, selective_check_cells_ > 0 ? 1 : 0,
+                 (long long) selective_check_cells_, (long long) selective_check_distant_,
+                 (long long) (selective_check_cells_ - selective_check_distant_));
+    return true;
 }
 
 bool MtpDrafter::idle(std::string& err) {
@@ -492,6 +730,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         return false;
     }
 #endif
+    if (selective_config_ && !selective_allocate(err)) return false;
     const double files_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_files).count();
     if (shared != nullptr) {
         std::fprintf(stderr, "strata mtp: shared draft weights, %.0f MiB of private state and buffers\n",
@@ -926,6 +1165,10 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
                     kv_append_step(st_.k_pool, st_.v_pool, st_.page_table, step + t * 4, kcur_ + t * NKV * HD,
                                    vcur_ + t * NKV * HD, s, cs, &st_.host);
             }
+        if (selective_record_)
+            kv_append_q8_steps(const_cast<int8_t*>(selective_pools_.k_q), const_cast<int8_t*>(selective_pools_.v_q),
+                               const_cast<uint16_t*>(selective_pools_.k_scale), const_cast<uint16_t*>(selective_pools_.v_scale),
+                               selective_map_.page_table, step, 4, kcur_, vcur_, (int) (NKV * HD), T, s, cs, nullptr);
     } catch (const std::exception& e) {
         err = std::string("mtp: ") + e.what();
         return false;
@@ -972,9 +1215,19 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             norm_rope(qcur_, f32("self_attn.q_norm.weight"), (int) (T * NH), (int) HD, pos, cs);
         }
         if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);
-        const QsaAttnPools pools = qsa_attn_pools(st_);
-        if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
-        qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
+        if (selective_record_) {
+            // Fixed mapped rows survive every graph until chain_poll reports the complete chain idle.
+            const int j = step_row == 2 * max_t_ - 1 ? 0 : step_row - max_t_ + 1;
+            copy_i32_from_mapped(selective_d_ids_, selective_m_ids_ + (size_t) j * kSelectiveCap, kSelectiveCap, cs);
+            kv_stream_resolve(selective_map_, selective_pools_, st_.host, kKvInt8, selective_d_ids_, step,
+                               1, kSelectiveCap, s, cs);
+            qsa_decode_attn_batch(qcur_, selective_pools_, selective_d_ids_, step, kSelectiveCap, s,
+                                  attn_scratch_, attn_, T, cs);
+        } else {
+            const QsaAttnPools pools = qsa_attn_pools(st_);
+            if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
+            qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
+        }
         if (st_.kv_rot) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
         native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
         native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
@@ -1195,7 +1448,7 @@ bool MtpDrafter::capture_prefill_dev(int T, std::string& err) {
 }
 
 bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
-    cudaGraphExec_t& exec = coupled ? round_exec_c_[T] : round_exec_[T];
+    cudaGraphExec_t& exec = selective_record_ ? selective_round_[T] : (coupled ? round_exec_c_[T] : round_exec_[T]);
     if (exec) return true;
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
@@ -1241,7 +1494,7 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
 // Chain step j (1..max_t-2): one row at the cell staged in step row `max_t + j - 1`, from the previous step's
 // residual and token (left in Rin_[0] / tok_[0] by mtp_select); draft j and its probability to the mapped outputs.
 bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
-    cudaGraphExec_t& exec = coupled ? step_exec_c_[j] : step_exec_[j];
+    cudaGraphExec_t& exec = selective_record_ ? selective_step_[j] : (coupled ? step_exec_c_[j] : step_exec_[j]);
     if (exec) return true;
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
@@ -1731,6 +1984,14 @@ bool MtpDrafter::prepare_chain(std::string& err) {
         if (!capture_round(T, false, err)) return false;
     for (int j = 1; j <= max_t_ - 2; ++j)
         if (!capture_step(j, false, err)) return false;
+    if (selective_supported_) {
+        selective_record_ = true;
+        bool ok = true;
+        for (int T = 1; ok && T <= max_t_; ++T) ok = capture_round(T, false, err);
+        for (int j = 1; ok && j <= max_t_ - 2; ++j) ok = capture_step(j, false, err);
+        selective_record_ = false;
+        if (!ok) return false;
+    }
     if (ev_chain_ == nullptr && cudaEventCreateWithFlags(&ev_chain_, cudaEventDisableTiming) != cudaSuccess) {
         err = "mtp: event creation failed";
         return false;
@@ -1774,13 +2035,14 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     for (int j = 0; j < 16; ++j) h_force_[j] = j < n_force ? force[j] : -1;
     h_row_[0] = a;
     h_row_[1] = 0;
+    if (selective_config_ && !selective_stage(T, p, a, n_out, err)) return false;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
     chain_early_ = std::max(0, std::min(n_early, n_out));
-    bool ok = cudaGraphLaunch(round_exec_[T], cs_) == cudaSuccess;
+    bool ok = cudaGraphLaunch(selective_active_ ? selective_round_[T] : round_exec_[T], cs_) == cudaSuccess;
     if (ok && chain_early_ >= 1) ok = cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
     for (int j = 1; ok && j < n_out; ++j) {
-        ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
+        ok = cudaGraphLaunch(selective_active_ ? selective_step_[j] : step_exec_[j], cs_) == cudaSuccess;
         if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
     }
     if (!ok || cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {
