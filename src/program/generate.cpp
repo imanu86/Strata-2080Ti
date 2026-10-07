@@ -6590,6 +6590,16 @@ int main(int argc, char** argv) {
         const strata::core::PrefillSeedCfg seed_env = strata::core::prefill_seed_from_env();
         struct SeedBuf { float* mass = nullptr; float* count = nullptr; int dev = -1; cudaStream_t stream = nullptr; };
         std::vector<SeedBuf> seed_bufs;
+        // the seed's carry: one conversation's accumulated prompt mass (see prefill_seed below for its rules); parked
+        // with the conversation (park_current_body) and restored with it (the incoming image)
+        struct SeedCarry {
+            std::vector<int32_t> ids;        ///< the prompt tokens the table describes
+            std::vector<float> mass, count;
+            int64_t tokens = 0;
+            bool restored = false;           ///< it came back with a parked conversation (for the log of its first use)
+            void clear() { ids.clear(); mass.clear(); count.clear(); tokens = 0; restored = false; }
+        };
+        SeedCarry seed_carry;
         if (seed_env.armed) {
             if (host_res.empty() || srcp == nullptr) {
                 std::fprintf(stderr, "strata prefill seed: needs --expert-profile (a residency table) and an expert "
@@ -7025,6 +7035,15 @@ int main(int argc, char** argv) {
                 if (!strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), 0, floor)) {
                     std::fprintf(stderr, "strata serve: conversation cache: skip parking (physical RAM floor after capture, or telemetry unavailable)\n");
                     return true;
+                }
+                // docs/PREFILL_SEED.md: the seed's carry leaves with the conversation it describes (its prompt tokens
+                // are a prefix of the parked ids); any other carry stays behind and the restore validates it anyway
+                if (!seed_carry.ids.empty() && seed_carry.ids.size() <= live.size() &&
+                    std::equal(seed_carry.ids.begin(), seed_carry.ids.end(), live.begin())) {
+                    image.seed_ids = seed_carry.ids;
+                    image.seed_mass = seed_carry.mass;
+                    image.seed_count = seed_carry.count;
+                    image.seed_tokens = seed_carry.tokens;
                 }
                 const size_t snapshot_bytes = image.bytes();
                 const bool stored = conversations.put(std::move(image), held);
@@ -7463,10 +7482,13 @@ int main(int argc, char** argv) {
         // paths as the adaptive tier's (resident_stage_swaps for the RAM copy, the home card's refill stream, the
         // batched DMA of CUDA0) so the elastic core, a split's later stages and the resident RAM mode keep their
         // rules.  The routing never changes: the output is the default's bit for bit, only the placement moves.
-        // The prompt cache hands the prefill the suffix only: with CARRY the live conversation's earlier prompts'
-        // mass is carried over, so the ranking sees the whole conversation, not the last message.
-        std::vector<float> seed_carry_mass, seed_carry_count;
-        int64_t seed_carry_tokens = 0;
+        // The prompt cache hands the prefill the suffix only: with CARRY the conversation's earlier prompts' mass is
+        // carried over, so the ranking sees the whole conversation, not the last message.  The carry belongs to ONE
+        // conversation: `ids` are the prompt tokens it describes, and a prompt takes it only when those tokens are its
+        // own prefix (so a conversation that merely shares a system-prompt root with another never inherits its
+        // mass); it is parked and restored with the conversation (SavedConversation::seed_*), so coming back to a
+        // parked 131k context seeds from THAT context's prompts (`seed_carry`, declared with the buffers: the park
+        // and restore paths above use it).
         auto seed_home_of = [&](int64_t layer) -> SwapHome {   // as adapt's home_of: the layer's own cache
             const int stn = multi_gpu ? stage_of(layer) : 0;
             if (stn > 0) {
@@ -7475,9 +7497,10 @@ int main(int argc, char** argv) {
             }
             return {&xcache, adapt_stream, -1};
         };
-        auto prefill_seed = [&](const strata::core::PrefillSeedCfg& cfg, int64_t new_tokens, int64_t resume,
-                                bool from_live) -> bool {
+        auto prefill_seed = [&](const strata::core::PrefillSeedCfg& cfg, const std::vector<int64_t>& prompt,
+                                int64_t resume) -> bool {
             if (seed_bufs.empty()) return true;
+            const int64_t new_tokens = (int64_t) prompt.size() - resume;
             const auto began = Clock::now();
             const size_t cells = (size_t) (g.n_layers * g.n_expert);
             const size_t bytes = cells * sizeof(float);
@@ -7497,19 +7520,42 @@ int main(int argc, char** argv) {
                     for (size_t i = 0; i < cells; ++i) acc[i] += part[i];
                 }
             }
-            // 2. the live conversation's earlier prompts (the prompt cache gives the prefill the suffix only); a
-            // prompt that resumes from elsewhere, or starts over, starts the carry over
+            // 2. the conversation's earlier prompts (the prompt cache gives the prefill the suffix only).  The carry
+            // is taken when it describes this prompt's own prefix: its tokens agree with the prompt over at least
+            // min(resume, its length) AND over at least half of its own length (a shared system-prompt root of
+            // another conversation is far shorter than half of it; a rewind that threw away more than half starts
+            // over).  A prompt read from the start (resume 0) has everything in its own mass: no carry.
             int64_t tokens = new_tokens;
-            if (cfg.carry && resume > 0 && from_live && seed_carry_mass.size() == cells) {
-                for (size_t i = 0; i < cells; ++i) { mass[i] += seed_carry_mass[i]; count[i] += seed_carry_count[i]; }
-                tokens += seed_carry_tokens;
+            const char* carry_src = "senza riporto";
+            {
+                size_t common = 0;
+                const size_t lim = std::min(seed_carry.ids.size(), prompt.size());
+                while (common < lim && (int64_t) seed_carry.ids[common] == prompt[common]) ++common;
+                const bool fits = resume > 0 && !seed_carry.ids.empty() && seed_carry.mass.size() == cells &&
+                                  (int64_t) common >= std::min<int64_t>(resume, (int64_t) seed_carry.ids.size()) &&
+                                  2 * common >= seed_carry.ids.size();
+                if (cfg.carry && fits) {
+                    for (size_t i = 0; i < cells; ++i) { mass[i] += seed_carry.mass[i]; count[i] += seed_carry.count[i]; }
+                    tokens += seed_carry.tokens;
+                    carry_src = seed_carry.restored ? "riporto da contesto ripristinato" : "riporto da conversazione viva";
+                } else if (cfg.carry && !seed_carry.ids.empty()) {
+                    carry_src = resume > 0 ? "riporto rifiutato: prefisso di un'altra conversazione" : "senza riporto: prompt letto da capo";
+                }
             }
-            if (cfg.carry) { seed_carry_mass = mass; seed_carry_count = count; seed_carry_tokens = tokens; }
-            else { seed_carry_mass.clear(); seed_carry_count.clear(); seed_carry_tokens = 0; }
+            if (cfg.carry) {
+                seed_carry.ids.resize(prompt.size());
+                for (size_t i = 0; i < prompt.size(); ++i) seed_carry.ids[i] = (int32_t) prompt[i];
+                seed_carry.mass = mass;
+                seed_carry.count = count;
+                seed_carry.tokens = tokens;
+                seed_carry.restored = false;
+            } else {
+                seed_carry.clear();
+            }
             if (!cfg.enabled) return true;
             if (new_tokens < cfg.min_tokens) {
-                std::fprintf(stderr, "strata prefill seed: saltato, %lld token nuovi sotto MIN_TOKENS %lld\n",
-                             (long long) new_tokens, (long long) cfg.min_tokens);
+                std::fprintf(stderr, "strata prefill seed: saltato, %lld token nuovi sotto MIN_TOKENS %lld (%s)\n",
+                             (long long) new_tokens, (long long) cfg.min_tokens, carry_src);
                 return true;
             }
             // 3. the plan: the adaptive tier's own eviction and admission rules
@@ -7522,6 +7568,14 @@ int main(int argc, char** argv) {
             };
             strata::core::PrefillSeedPlan plan =
                 strata::core::prefill_seed_plan(mass.data(), host_res.data(), g.n_layers, g.n_expert, cfg, may_evict, may_enter);
+            const double pct = plan.mass_total > 0.0 ? 100.0 / plan.mass_total : 0.0;
+            if (cfg.min_gain > 0.0f && (plan.mass_after - plan.mass_resident) * pct < (double) cfg.min_gain) {
+                std::fprintf(stderr, "strata prefill seed: saltato, guadagno atteso %.2f punti sotto MIN_GAIN %.2f "
+                                     "(copertura massa %.1f%%, %zu scambi possibili, %lld token, %s)\n",
+                             (plan.mass_after - plan.mass_resident) * pct, cfg.min_gain, plan.mass_resident * pct,
+                             plan.swaps_possible, (long long) tokens, carry_src);
+                return true;
+            }
             // 4. the swaps, synchronous, in batches the exchange buffers hold (the RAM copy mode; else 96 at a time)
             const auto& lay = strata::kernels::cpu::expert_layout();
             const size_t batch_max = (size_t) std::max<int64_t>(1, src.complement_ready() ? src.exchange_capacity() : 96);
@@ -7603,12 +7657,14 @@ int main(int argc, char** argv) {
             if (cfg.prior > 0.0f && !drive.d.usage.empty())
                 raised = strata::core::prefill_seed_prior(drive.d.usage, mass.data(), count.data(), cells, tokens, cfg.prior);
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - began).count();
-            const double pct = plan.mass_total > 0.0 ? 100.0 / plan.mass_total : 0.0;
             std::fprintf(stderr, "strata prefill seed: %lld scambi, %lld esperti, copertura massa %.1f%% -> %.1f%%, %.1f ms "
-                                 "(pianificati %zu, candidati %lld, %lld token%s, %.1f MiB copiati, prior su %lld celle)\n",
+                                 "(pianificati %zu di %zu possibili, %.0f%% del guadagno, candidati %lld, %lld token di cui "
+                                 "%lld nuovi, %s, %.1f MiB copiati, prior su %lld celle)\n",
                          (long long) done, (long long) plan.experts_seen, plan.mass_resident * pct, mass_now * pct, ms,
-                         plan.swaps.size(), (long long) plan.candidates, (long long) tokens,
-                         tokens != new_tokens ? " con riporto" : "", (double) copied / 1048576.0, (long long) raised);
+                         plan.swaps.size(), plan.swaps_possible,
+                         plan.gain_possible > 0.0 ? 100.0 * (plan.mass_after - plan.mass_resident) / plan.gain_possible : 0.0,
+                         (long long) plan.candidates, (long long) tokens, (long long) new_tokens, carry_src,
+                         (double) copied / 1048576.0, (long long) raised);
             return true;
         };
         // ---- fork «Strata adattivo»: THE ELASTIC EXPERT CACHE.  The arena is a reserved address range backed by
@@ -9626,6 +9682,16 @@ int main(int argc, char** argv) {
                 cvec_cached = incoming->cvec;
                 resume = incoming_tokens;
                 from_live = incoming_live;
+                // docs/PREFILL_SEED.md: the seed's carry is the restored conversation's (none for a disk image or one
+                // parked without it: the previous conversation's carry must not seed this context)
+                seed_carry.clear();
+                if (!incoming->seed_ids.empty()) {
+                    seed_carry.ids = std::move(incoming->seed_ids);
+                    seed_carry.mass = std::move(incoming->seed_mass);
+                    seed_carry.count = std::move(incoming->seed_count);
+                    seed_carry.tokens = incoming->seed_tokens;
+                    seed_carry.restored = true;
+                }
                 if (std::getenv("STRATA_SNAPSHOT_FULL_CAPTURE") == nullptr) {
                     std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park
                     for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));
@@ -10352,7 +10418,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR an adaptive refill failed\n");
                     return 1;
                 }
-                if (!prefill_seed(req_pseed, n - resume, resume, from_live)) {
+                if (!prefill_seed(req_pseed, ids, resume)) {
                     std::printf("ERR prefill seed: %s\n", err.c_str());
                     return 1;
                 }

@@ -152,10 +152,17 @@ struct SavedConversation {
     bool cvec = true;
     // with a layer split, the later stages' own images, one per stage, in stage order
     std::vector<SavedConversation> stage_images;
+    // docs/PREFILL_SEED.md: the prompt routing mass this conversation accumulated (the seed's carry), parked and
+    // restored with it so the seed of a restored context ranks by ITS prompts, not the previous conversation's.
+    // `seed_ids` are the prompt tokens the table describes; empty = no carry (a disk image never holds one).
+    std::vector<int32_t> seed_ids;
+    std::vector<float> seed_mass, seed_count;
+    int64_t seed_tokens = 0;
 
     size_t bytes() const {
         size_t n = live.bytes() + checkpoints.capacity() * sizeof(ConversationCheckpoint) +
-                   kv.capacity() * sizeof(ConversationKv);
+                   kv.capacity() * sizeof(ConversationKv) + seed_ids.capacity() * sizeof(int32_t) +
+                   (seed_mass.capacity() + seed_count.capacity()) * sizeof(float);
         for (const auto& s : stage_images) n += s.bytes();
         for (const auto& c : checkpoints) n += c.bytes();
         for (const auto& k : kv) n += k.bytes();
