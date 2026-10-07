@@ -1,8 +1,10 @@
 # Seme della cache esperti dalla massa della prefill (`STRATA_PREFILL_SEED`)
 
 Branch `lab/prefill-seed`. Opt-in: senza `STRATA_PREFILL_SEED` nell'ambiente il motore è invariato (nessun buffer,
-nessun kernel, nessuna riga di log). **Compilato no, provato no**: il codice è stato scritto a banco occupato; la
-prima cosa da fare è la build e il banco qui sotto.
+nessun kernel, nessuna riga di log). Stato: c9a3cef compilato e girato (512 scambi in 70-90 ms, copertura 84% →
+92%; su un solo contesto i t/s non cambiano perché la cache era già giusta). La revisione successiva (riporto per
+conversazione, budget sul guadagno, `MIN_TOKENS=1`, `MIN_GAIN`) è **compilata no, provata no**: scritta a banco
+occupato, la prima cosa da fare è la build e la prova a due contesti.
 
 ## Cosa fa
 
@@ -25,8 +27,10 @@ giusti prima del decode**.
    residenti ordinati per massa decrescente (parità: id crescente) e i residenti sfrattabili per massa crescente; il
    candidato i-esimo prende il posto della vittima i-esima finché `massa_cand ≥ GAIN × massa_vittima` e
    strettamente maggiore (un esperto mai scelto dal prompt non entra mai). Poi il budget: `FLOOR` scambi garantiti per
-   layer, il resto a budget globale `SWAPS` per guadagno (`massa_cand − massa_vittima`) decrescente. **Gli scambi
-   restano dentro lo stesso layer**, nella cache della scheda che lo possiede.
+   layer, il resto per guadagno (`massa_cand − massa_vittima`) decrescente finché la somma raggiunge `GAIN_SHARE`
+   del guadagno di tutti gli scambi ammissibili (i guadagni hanno la coda lunga: la quasi totalità sta nei primi), e
+   mai oltre il tetto `SWAPS`. **Gli scambi restano dentro lo stesso layer**, nella cache della scheda che lo
+   possiede.
 3. **Esecuzione** (`src/program/generate.cpp`, lambda `prefill_seed`, chiamata dopo `refill(err)` e dopo
    `closed_refill`): prima `apply_pending(true)` e `adapt_tick(true)` (nulla del tier adattivo in volo), poi per lotti
    pari alla capacità degli scambi (`exchange_capacity()` in modalità RAM residente, altrimenti 96):
@@ -54,12 +58,14 @@ per bit al default**, cambia solo dove stanno i pesi (come per gli scambi adatti
 | Variabile | Default | Significato |
 |---|---:|---|
 | `STRATA_PREFILL_SEED` | non impostata | Impostata (anche `=0`): buffer allocati e accumulo attivo («armato»), il seme si accende per richiesta. `=1`: il seme gira dopo ogni prompt. |
-| `STRATA_PREFILL_SEED_SWAPS` | 512 | Tetto totale di scambi per richiesta su tutti i layer (0 = nessun tetto). ~1-2,5 MiB a blob: 512 scambi ≈ 0,5-1,2 GiB ≈ 50-100 ms di PCIe. |
-| `STRATA_PREFILL_SEED_FLOOR` | 0 | Scambi garantiti a ogni layer prima del budget globale. |
+| `STRATA_PREFILL_SEED_SWAPS` | 1024 | Tetto di scambi per richiesta su tutti i layer (0 = nessun tetto). Misurato al banco: ~0,15 ms e ~1,6 MiB per scambio (512 scambi in 70-90 ms, copertura 84% → 92%, ~4.200 candidati). 1024 ≈ 150 ms e 1,6 GiB. |
+| `STRATA_PREFILL_SEED_GAIN_SHARE` | 0.9 | Il budget segue il guadagno: scambi dal migliore finché la somma dei guadagni raggiunge questa quota del guadagno di tutti gli scambi ammissibili (1 = tutti fino al tetto). La riga di log dice la quota raggiunta. |
+| `STRATA_PREFILL_SEED_FLOOR` | 0 | Scambi garantiti a ogni layer prima del budget globale (mai tagliati dalla quota). |
 | `STRATA_PREFILL_SEED_GAIN` | 1.5 | Soglia moltiplicativa: il candidato entra se la sua massa è almeno GAIN volte quella della vittima (minimo 1). |
-| `STRATA_PREFILL_SEED_MIN_TOKENS` | 256 | Il seme gira solo se la prefill ha letto almeno N token **nuovi** (sotto: riga `saltato`). |
+| `STRATA_PREFILL_SEED_MIN_TOKENS` | 1 | Il seme gira solo se la prefill ha letto almeno N token **nuovi**: a ogni turno, anche breve (sotto: riga `saltato`). |
+| `STRATA_PREFILL_SEED_MIN_GAIN` | 0 | Soglia sul guadagno atteso invece che sui token: il seme esegue gli scambi solo se il piano alza la copertura di massa residente di almeno N punti percentuali (es. `0.5`); 0 = sempre. |
 | `STRATA_PREFILL_SEED_PRIOR` | 32 | Orizzonte in token del prior su `usage` (0 = non toccare `usage`). |
-| `STRATA_PREFILL_SEED_CARRY` | 1 | Riporto della massa dei prompt precedenti della conversazione viva (vedi prompt cache). |
+| `STRATA_PREFILL_SEED_CARRY` | 1 | Riporto della massa dei prompt precedenti **della stessa conversazione** (vedi prompt cache). |
 
 Prerequisiti: `--serve`, `--expert-profile` (tabella di residenza) e una sorgente esperti; altrimenti
 `strata prefill seed: needs --expert-profile ... off`. In modalità RAM residente il seme riserva 96 buffer di scambio
@@ -80,20 +86,34 @@ stessa stringa a entrambi i parser. Un elemento malformato lascia la richiesta a
 ## Prompt cache: cosa vede la prefill
 
 Con `--prompt-cache` la prefill legge **solo il suffisso** oltre il prefisso ripreso (`n − resume` token). La massa
-accumulata è quindi quella del suffisso, e `MIN_TOKENS` si confronta con i token nuovi: un turno breve di una
-conversazione lunga non semina (il decode si è già adattato a quella conversazione).
+accumulata è quindi quella del suffisso, e `MIN_TOKENS` (default 1) si confronta con i token nuovi: ogni turno con
+almeno un token nuovo semina, col riporto che segue.
 
-`CARRY=1` (default) tiene sul host la massa e il conteggio dell'ultima prefill della conversazione viva
-(`seed_carry_*`): se la richiesta riprende dalla sessione viva (`from_live`), la massa del suffisso si somma a quella
-dei prompt precedenti e il piano vede la conversazione intera; se riprende da un checkpoint parcheggiato/su disco o
-riparte da zero, il riporto riparte dal suffisso corrente. I token generati fra una prefill e l'altra non sono nella
-massa (solo i token del prompt). Usare «anche gli ultimi token» del prefisso ripreso richiederebbe salvare la massa
-per checkpoint accanto alla prompt cache: non fatto, il riporto copre il caso che conta (la conversazione che
-continua).
+`CARRY=1` (default) tiene **per conversazione** la massa e il conteggio cumulati dei suoi prompt (`SeedCarry`: i
+token del prompt che la tabella descrive, massa, conteggio, token). A ogni prefill il riporto si somma al suffisso
+solo se descrive il prefisso di QUESTO prompt: i suoi token coincidono col prompt su almeno `min(resume, lunghezza
+del riporto)` **e** su almeno metà della propria lunghezza. Così un'altra conversazione che condivide solo la radice
+(il system prompt) non eredita mai la massa (la radice è molto meno di metà di un contesto da 131k), un rewind che
+butta più di metà della conversazione riparte da capo, e un prompt letto da zero (`resume = 0`) non somma nulla
+(ha già tutto nella propria massa). La tabella viene poi riscritta col prompt corrente.
 
-Nota sul banco «due richieste uguali»: alla seconda richiesta il prefisso è in cache, la prefill vede 0-pochi token
-nuovi e il seme **non gira** (`saltato`). È voluto: il confronto è prima richiesta con seme vs prima richiesta senza
-(vedi sotto), non seconda vs seconda.
+Il riporto **viaggia con la conversazione**: quando viene parcheggiata (`park_current_body`, conversation cache
+`--conversation-cache-mib/--conversation-cache-slots`) la tabella è salvata nell'immagine
+(`SavedConversation::seed_ids/seed_mass/seed_count/seed_tokens`, contata nei byte dell'immagine: ~0,2 MiB più i
+token) se descrive un prefisso dei token parcheggiati; al restore di un contesto parcheggiato il riporto diventa
+quello di QUEL contesto (o nessuno se l'immagine non lo aveva), e la riga di log lo dice (`riporto da contesto
+ripristinato`). **Prima** (c9a3cef) il riporto era un'unica tabella «della conversazione viva» usata ogni volta che
+`from_live` era vero — e un restore dalla conversation cache arriva come `from_live`: tornando sul contesto B il
+seme usava la massa del contesto A appena parcheggiato. Corretto da questa versione.
+
+Non coperti: l'immagine su disco della prefix cache (`--prompt-cache-file`, formato non toccato: al restore da disco
+il riporto riparte dal suffisso), gli slot `--batch` (`BSlot`, stessa cosa), e i token **generati** fra una prefill e
+l'altra (solo i token dei prompt sono nella massa).
+
+Nota sul banco «due richieste uguali»: alla seconda richiesta il prefisso è in cache e la prefill vede 0 token
+nuovi: con `MIN_TOKENS=1` il seme non gira (`saltato`). È voluto: il confronto è prima richiesta con seme vs prima
+richiesta senza (vedi sotto), non seconda vs seconda. Nel caso degli agenti (due contesti da 131k che si alternano
+con la conversation cache) ogni turno ha token nuovi e il seme gira a ogni turno col riporto del proprio contesto.
 
 ## Come misurarlo
 
@@ -106,16 +126,23 @@ seconda.
    t/s di entrambe e, con `STRATA_EXPERT_USAGE=<prefisso>`, la riga `strata expert usage: ... residency flips seen` e
    la quota «AT THE CALL ... of the gate mass were resident» per richiesta.
 2. Braccio B: `STRATA_PREFILL_SEED=1` (o `lab=PREFILL_SEED:1` sulla richiesta 1) — stesso testo, stessa sequenza.
-   Attesi: la riga `strata prefill seed: N scambi, M esperti, copertura massa X% -> Y%, ms (pianificati, candidati,
-   token, MiB copiati, prior su K celle)` dopo il prompt della richiesta 1; t/s della richiesta 1 più vicino a quello
-   della richiesta 2 di A; meno residency flips nella richiesta 1; quota di massa residente alla chiamata più alta
-   dall'inizio del decode.
+   Attesi: la riga `strata prefill seed: N scambi, M esperti, copertura massa X% -> Y%, ms (pianificati P di Q
+   possibili, G% del guadagno, candidati C, T token di cui N nuovi, <riporto>, MiB copiati, prior su K celle)` dopo
+   il prompt della richiesta 1, dove `<riporto>` è `senza riporto`, `riporto da conversazione viva`, `riporto da
+   contesto ripristinato` o `riporto rifiutato: prefisso di un'altra conversazione`; t/s della richiesta 1 più vicino
+   a quello della richiesta 2 di A; meno residency flips nella richiesta 1; quota di massa residente alla chiamata
+   più alta dall'inizio del decode.
+   Caso agenti (due contesti da 131k alternati, `--conversation-cache-slots 4`): a ogni ritorno su un contesto la
+   riga deve dire `riporto da contesto ripristinato` e la copertura di partenza X% deve essere quella lasciata dal
+   decode dell'ALTRO contesto (bassa), Y% quella del proprio; senza seme il decode paga l'adattamento a ogni cambio.
 3. Costo del seme: i `ms` della riga (D2H + piano + copie) si pagano una volta, prima della prima finestra; vanno
    sottratti o inclusi coerentemente nel confronto end-to-end (`REUSED` → primo token).
 4. Testo: con `STRATA_FORCE_IDS` il testo è forzato; senza, il testo greedy deve restare **identico** fra A e B
    (cambia solo la residenza). Se differisce c'è un bug (copia in uno slot sbagliato), non una variante accettabile.
-5. B A B alternati per ogni voce, come nelle convenzioni di `FABLE_PLAN.md`. Leve da esplorare in ordine: `SWAPS`
-   (256/512/1024), `GAIN` (1.2/1.5/2), `PRIOR` (0/16/32/64), `FLOOR` (0/2/4).
+5. B A B alternati per ogni voce, come nelle convenzioni di `FABLE_PLAN.md`. Leve da esplorare in ordine:
+   `GAIN_SHARE` (0.8/0.9/1) col tetto `SWAPS` (1024/2048/4096: a 0,15 ms e 1,6 MiB per scambio, 4.200 scambi sono
+   ~0,6 s e 6,5 GiB, da pesare contro la durata del decode del turno), `MIN_GAIN` (0/0.5/1 punti), `GAIN`
+   (1.2/1.5/2), `PRIOR` (0/16/32/64), `FLOOR` (0/2/4).
 
 Test host-only (nessuna GPU): `ctest -R prefill_seed_test` con `STRATA_BUILD_TESTS=ON` — piano, soglie, tetto,
 floor, regole di esclusione, prior, chiave `lab=`.
@@ -143,7 +170,12 @@ floor, regole di esclusione, prior, chiave `lab=`.
   il decode (es. prompt lungo di contesto e risposta su altro). Se la seconda metà del decode peggiora, abbassare
   `PRIOR` o `SWAPS`.
 - **Prompt cache**: con `CARRY=0` ogni turno vede solo il suffisso; con `CARRY=1` un cambio di argomento dentro la
-  stessa conversazione porta con sé la massa vecchia (nessun decay sul riporto: da valutare un fattore).
+  stessa conversazione porta con sé la massa vecchia (nessun decay sul riporto: da valutare un fattore). Un rewind
+  che tiene più di metà della conversazione accetta il riporto con dentro la massa dei token scartati e riletti
+  (conteggio doppio di quel tratto: approssimazione accettata).
+- **Costo per turno** con `MIN_TOKENS=1`: il seme gira a ogni turno; `GAIN_SHARE` e `MIN_GAIN` sono le leve per non
+  pagare 100-150 ms quando il piano guadagna poco (turno breve sullo stesso contesto: copertura già alta, pochi
+  scambi ammissibili, riga `saltato, guadagno atteso ...` con `MIN_GAIN` > 0).
 
 ## Riferimenti
 
