@@ -1,3 +1,35 @@
+# Decode timeline with Nsight Systems (2026-10-08)
+
+`STRATA_LAB_NVTX_RANGES=1` adds opt-in request and host-decode ranges on Windows
+with the CUDA NVTX3 headers. No CUDA fence is added and the decode body is unchanged.
+The default makes no NVTX calls. The markers were observed as closed, nested ranges
+on the owned engine thread in actual Nsight Systems2024.5.1 CUDA traces.
+
+The first six-capture diagnostic completed with isolation PASS but had no NVTX:
+its whole-capture scope includes SSD restore and prefill, and its inferred graph
+tail is explicitly not an exact host decode boundary. A subsequent marked run
+completed all8 GENs and all6 captures but failed the profiler ownership/cleanup
+guard. Its original failure is retained. A later check found no owned or relevant
+processes and the named session was absent; this does not retroactively turn the
+run into an overall PASS. An earlier marked attempt failed at its final stop too.
+
+In the qualified marked diagnostic, the L01/L02 real-draft controls have host
+decode spans847.247/822.623ms. MTP kernel unions occupy137.121/138.325ms, target
+GPU0 kernels432.504/420.092ms and target GPU1 kernels469.919/489.901ms. These
+overlap and must not be summed as exclusive or recoverable costs. GPU0 executes
+35/35 full target graphs, GPU1 24/25, matching the engine's dispatch counters.
+MTP attention chunk+merge account for about45ms; routed expert GU+down about6ms.
+This identifies where to investigate, not a measured attainable acceleration.
+
+All measured requests restore131072 SSD tokens, generate64 fixed outputs with
+spec4/minp0.5, split16/pipeline2 on RTX3060 12GB Oculinkx4+8K display and modified
+RTX2080Ti 22GB PCIex16. Expert-cache elasticity remains enabled. The quality-oracle
+B arms have substantial timing drift; no unqualified throughput gain, free-chat
+quality, SM occupancy, or stall/bandwidth diagnosis is claimed. Daily is unchanged.
+
+See [the initial capture evidence](nsys-quality-20261007.json) and
+[the marked qualified evidence with both harness failures](nsys-ranges-20261008.json).
+
 # Free MTP precision gate (2026-10-08)
 
 `STRATA_LAB_MTP_HQ_FREE=1` permits real greedy output with the HQ hot switch
