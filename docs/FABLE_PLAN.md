@@ -130,8 +130,8 @@ compilatore può smentirla; una variante `DIFFERENT` non si usa.
 
 ### 6a. Esperti VRAM gate/up + down — `STRATA_FP_EXPERT_V`
 
-- Commit: `f33473da FABLE-KERNEL-Varianti opt-in dei kernel gate/up e down degli esperti VRAM con micro-bench bitwise`
-  (+ il commit della variante 4 persistente, vedi `git log`).
+- Commit: `f33473da FABLE-KERNEL-Varianti opt-in dei kernel gate/up e down degli esperti VRAM con micro-bench bitwise`,
+  `cf84a08f FABLE-KERNEL-Aggiungi la variante persistente dei kernel esperti con prefetch in registri …`.
 - Variabile: `STRATA_FP_EXPERT_V=0..4` (setter `native_expert_set_fp_variant`), solo per la coppia IQ3_S/IQ4_NL a
   2560/640: 1 = codebook IQ3_S in shared memory (gate/up); 2 = due righe per sub-warp con i load di entrambe prima dei
   dp4a (gate/up e down); 3 = 1+2; 4 = kernel persistente (griglia = k×SM, `STRATA_FP_EXPERT_PERSIST_K`, codebook
