@@ -10770,6 +10770,18 @@ int main(int argc, char** argv) {
                     const char* v = pipe_dbg_env("STRATA_PIPELINE_AGREE");
                     return v == nullptr || std::atoi(v) != 0;
                 }();
+                // FABLE STRATA_FP_EARLY_L1=1 (opt-in): a fresh A's stage-1 graph is launched right behind its stage-0
+                // graph, its stream waiting on stage 0's done event (the hand-off is written by then), so the stage-1
+                // launch's host cost (~1.2 ms of pl_launch for 1397 nodes, F0->L1 in the trace) overlaps stage 0's
+                // ~10 ms instead of sitting on the critical path.  A always goes to stage 1, so nothing is wasted; a
+                // speculative B still gets its stage 1 after A's verdict (B's stage 0 may be done by then anyway).
+                static const bool fp_early_l1 = [] {
+                    const char* v = std::getenv("STRATA_FP_EARLY_L1");
+                    const bool on = v != nullptr && std::atoi(v) != 0;
+                    if (on) std::fprintf(stderr, "strata pipeline: STRATA_FP_EARLY_L1: stage 1 launched behind stage 0's event\n");
+                    return on;
+                }();
+                int64_t pl_early_l1 = 0;
                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
                 while (true) {
                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
@@ -10923,6 +10935,15 @@ int main(int argc, char** argv) {
                         if (!V0(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.launched = true;
                         tre("L0", A.seq, A.T, 0);
+                        // FABLE STRATA_FP_EARLY_L1: stage 1 now, behind stage 0's event (stage 1 is idle here: the
+                        // previous A's verdict is in, and only commits may still run on its stream)
+                        if (fp_early_l1 && !A.s1 && !PV[1][0]->in_flight() && !PV[1][1]->in_flight()) {
+                            if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
+                            if (!V1(A).pl_launch(A.T, A.tok, A.p, err, V0(A).done_event())) return die(err);
+                            A.s1 = true;
+                            ++pl_early_l1;
+                            tre("L1", A.seq, A.T, 1);
+                        }
                     }
                     // ---- stage 0: B, speculatively, right behind A
                     if (B.ready && !B.launched && A.finished && !A.committed && !doomed) {
@@ -11168,6 +11189,9 @@ int main(int argc, char** argv) {
                                  avg(pl_chain_ms[1], pl_chain_n[1]), pl_chain_n[1]);
                     std::fprintf(stderr, "strata pipeline: %lld B from a running lookup (%lld after a chain window); yield %s\n",
                                  (long long) pl_lk_next, (long long) pl_lk_any, pl_yield ? "on" : "off");
+                    if (fp_early_l1)
+                        std::fprintf(stderr, "strata pipeline: STRATA_FP_EARLY_L1: %lld stage-1 windows launched behind stage 0's "
+                                             "event (of %lld)\n", (long long) pl_early_l1, (long long) dec_windows);
                     if (el_on)
                         std::fprintf(stderr, "strata pipeline: elastic tail beside the windows: %lld shrinks, %lld growths at "
                                              "gaps of stage 0, %.1f ms on the loop's thread; the %lld windows after them "
