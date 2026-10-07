@@ -1,3 +1,22 @@
+# Free MTP precision gate (2026-10-08)
+
+`STRATA_LAB_MTP_HQ_FREE=1` permits real greedy output with the HQ hot switch
+and private SSD prefix. It rejects external forcing, token oracles and window
+or policy traces, and reports real verification/dispatch counters separately.
+
+On the same dual-GPU workstation and 131k prompts, a fixed-residency gate
+(requested expert-cache3000, adapt-swaps0, pcie-frac0, no elasticity) completed
+14 GENs with 32-token budgets. Integrity, SSD restore and cleanup passed.
+Every B repeat and both repeated legacy controls were identical, but native
+Q2 on L02 and native Q4 on both cases differed from legacy at output index9.
+Native Q2 on L01 matched. A first cold startup failed inside nvcuda64.dll
+before READY; one unchanged retry completed and both attempts are retained.
+
+This finite gate does not establish output equivalence, a free-generation
+speedup or a quality improvement. Different verifier window shapes may change
+floating-point rounding; divergence alone is not proof of a bug or quality loss.
+No Daily setting was promoted. See [all conditions and evidence](mtp-hq-free-20261008.json).
+
 # MTP expert precision (laboratory only, 2026-10-07)
 
 The opt-in `STRATA_LAB_MTP_HQ_SWITCH` and `STRATA_LAB_MTP_HQ_PACK` compare

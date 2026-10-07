@@ -2141,6 +2141,22 @@ int main(int argc, char** argv) {
     // Lab-only synthetic continuation: the target still runs, but the fixture supplies future draft IDs.
     // This is a decode ceiling experiment, never a measurement of actual generation quality.
     // Lab diagnostics only: fixed POD buffers during decode, JSONL after its timer is frozen.
+
+    // A separate, explicit laboratory mode: real target outputs, no external continuation or token oracle.
+    const char* lab_hq_free_env = std::getenv("STRATA_LAB_MTP_HQ_FREE");
+    if (lab_hq_free_env != nullptr && std::strcmp(lab_hq_free_env, "0") != 0 && std::strcmp(lab_hq_free_env, "1") != 0) {
+        std::fprintf(stderr, "strata lab mtp free: HQ_FREE accepts only 0 or 1\n"); return 2;
+    }
+    const bool lab_hq_free = lab_hq_free_env != nullptr && std::strcmp(lab_hq_free_env, "1") == 0;
+    if (lab_hq_free) {
+        const char* forbidden[] = {"STRATA_FORCE_IDS", "STRATA_FORCE_WINDOWS", "STRATA_FORCE_TRACE",
+            "STRATA_LAB_POLICY_TRACE", "STRATA_LAB_MTP_SELECTIVE_SWITCH", "STRATA_CKPT_REREAD", "STRATA_STATE_HASH",
+            "STRATA_PIPELINE_SWITCH", "STRATA_PIPELINE_FORCE_MISS", "STRATA_PIPELINE_TRACE",
+            "STRATA_NEURON_PROBE_CONTROL", "STRATA_CLOSED_ROUTING"};
+        for (const char* name : forbidden) if (std::getenv(name) != nullptr) {
+            std::fprintf(stderr, "strata lab mtp free: forbidden environment key %s (must be absent)\n", name); return 2;
+        }
+    }
     const char* lab_policy_path = std::getenv("STRATA_LAB_POLICY_TRACE");
     const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
     enum class LabDraftOracle { Off, Quality, Instant };
@@ -2174,7 +2190,7 @@ int main(int argc, char** argv) {
     const bool lab_oracle_on = lab_oracle != LabDraftOracle::Off;
     const bool lab_oracle_instant = lab_oracle == LabDraftOracle::Instant;
     const char* lab_oracle_name = lab_oracle_instant ? "instant" : lab_oracle_on ? "quality" : "off";
-    if (lab_oracle_hot)
+    if (lab_oracle_hot && !lab_hq_free)
         std::fprintf(stderr, "strata lab oracle: hot switch=%s startup=%s; explicit fixture per request\n",
                      lab_oracle_switch, lab_oracle_name);
     if (lab_oracle_on || lab_oracle_hot || lab_policy) {
@@ -2183,7 +2199,7 @@ int main(int argc, char** argv) {
         if (!o.serve || o.batch != 0 || o.pipeline_windows != 2 || o.spec != 4 || o.mtp.empty() ||
             (o.mtp_max_t != 0 && o.mtp_max_t != 4) || o.suffix_draft != 0 || o.lookup_chain != 0 ||
             o.coupled_draft || !o.spec_oracle.empty() || !o.spec_follow.empty() || o.spec_corrupt != 0 ||
-            fi == nullptr || fi[0] == 0 || fw != nullptr ||
+            (!lab_hq_free && (fi == nullptr || fi[0] == 0)) || fw != nullptr ||
             std::getenv("STRATA_NEURON_PROBE_CONTROL") != nullptr ||
             std::getenv("STRATA_CLOSED_ROUTING") != nullptr ||
             ((lab_oracle_instant || lab_oracle_hot) && std::getenv("STRATA_STATE_HASH") != nullptr)) {
@@ -2192,11 +2208,13 @@ int main(int argc, char** argv) {
                                  "FORCE_WINDOWS, coupled/other oracle/probe modes and instant/hot STATE_HASH are unsupported\n");
             return 2;
         }
+        if (!lab_hq_free) {
         const auto& fixtures = force_id_lists();
         if (fixtures.empty() || std::any_of(fixtures.begin(), fixtures.end(),
                                           [](const std::vector<int32_t>& f) { return f.empty(); })) {
             std::fprintf(stderr, "strata lab oracle: every STRATA_FORCE_IDS fixture must exist and be nonempty\n");
             return 2;
+        }
         }
     }
     const char* lab_selective_switch = std::getenv("STRATA_LAB_MTP_SELECTIVE_SWITCH");
@@ -2220,6 +2238,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata lab mtp hq: both HQ_SWITCH and HQ_PACK are required; "
                              "use oracle-off hot SSD-prefix, no selective/REREAD\n"); return 2;
     }
+    if (lab_hq_free && (!lab_hq || !lab_oracle_hot || lab_oracle_on || lab_prefix_tokens != 131072)) {
+        std::fprintf(stderr, "strata lab mtp free: requires HQ pack/switch, oracle-off hot SSD prefix131072\n"); return 2;
+    }
+    if (lab_hq_free)
+        std::fprintf(stderr, "strata lab mtp free: enabled=1 target_forcing=0 synthetic_drafts=0 "
+                             "policy_trace=off window_trace=off prefix_tokens=131072\n");
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                                      [](int slots) { return slots > 0; }))) {
@@ -9730,12 +9754,15 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
+            if (lab_hq_free && (request_oracle != LabDraftOracle::Off || oracle_prefix_file.empty() || geni)) {
+                std::printf("ERR lab mtp free: text GEN and oracle switch0/off with explicit SSD path required\n"); return 1;
+            }
             // Deliberately request-local: every decode wrapper, guard, proof counter and live-cache decision
             // below uses this selected mode, including a control request after an instant request.
             const bool lab_oracle_on = request_oracle != LabDraftOracle::Off;
             const bool lab_oracle_instant = request_oracle == LabDraftOracle::Instant;
             const char* lab_oracle_name = lab_oracle_instant ? "instant" : lab_oracle_on ? "quality" : "off";
-            if (lab_oracle_hot)
+            if (lab_oracle_hot && !lab_hq_free)
                 std::fprintf(stderr, "strata lab oracle: selected mode=%s before GEN; switch=%s\n",
                              lab_oracle_name, lab_oracle_switch);
             bool selective_request_on = false, selective_request_check = false;
@@ -11066,8 +11093,8 @@ int main(int argc, char** argv) {
             }
             if (lab_oracle_on || lab_oracle_hot || lab_policy) {
                 const auto& fixtures = force_id_lists();
-                if (max_new <= 0 || force_k >= (int64_t) fixtures.size() ||
-                    (int64_t) fixtures[(size_t) force_k].size() < max_new ||
+                if (max_new <= 0 || (!lab_hq_free && (force_k >= (int64_t) fixtures.size() ||
+                    (int64_t) fixtures[(size_t) force_k].size() < max_new)) ||
                     !req_sp.greedy || hist_n != 0 || mtp.coupled() || !pipe || pl_pw != 2 ||
                     S_mtp != 4 || pl_force_miss != 0 || cancelled ||
                     n - 1 + max_new > o.max_context ||
@@ -11076,7 +11103,7 @@ int main(int argc, char** argv) {
                                 "requires greedy, no penalties, pipeline2, spec4, no forced misses and sufficient context\n");
                     return 1;
                 }
-                for (int64_t i = 0; i < max_new; ++i) {
+                for (int64_t i = 0; !lab_hq_free && i < max_new; ++i) {
                     const int32_t id = fixtures[(size_t) force_k][(size_t) i];
                     if (id < 0 || id >= n_vocab ||
                         std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) id) != o.eos_ids.end()) {
@@ -11084,6 +11111,10 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                 }
+            }
+            if (lab_hq_free && (lab_oracle_on || !std::isfinite(req_spec_min_p) || req_spec_min_p < 0.0 ||
+                                req_spec_min_p > 1.0 || pl_theta < 0.0f || !req_imgs.empty())) {
+                std::printf("ERR lab mtp free: invalid threshold, oracle mode or image request\n"); return 1;
             }
             if (lab_selective) {
                 if (!req_sp.greedy || hist_n != 0 || mtp.coupled() || !pipe || pl_pw != 2 || S_mtp != 4 ||
@@ -11125,6 +11156,9 @@ int main(int argc, char** argv) {
             const std::map<int64_t, std::vector<int32_t>>* force_win =
                 force_k < (int64_t) force_window_lists().size() && !force_window_lists()[(size_t) force_k].empty()
                     ? &force_window_lists()[(size_t) force_k] : nullptr;
+            if (lab_hq_free && (forced != nullptr || force_win != nullptr)) {
+                std::printf("ERR lab mtp free: external forcing unexpectedly active\n"); return 1;
+            }
             int64_t force_win_hit = 0, force_win_miss = 0;
             // STRATA_FORCE_WINDOWS: the reference's rows for a window at `pos` whose row 0 is `row0`: false when the
             // trace has no window there (or another row 0: a speculative guess the reference never made)
@@ -12691,7 +12725,22 @@ int main(int argc, char** argv) {
                 std::printf("ERR lab oracle: incomplete synthetic request or invalid final committed length\n");
                 return 1;
             }
-            if (lab_oracle_log) {
+            if (lab_hq_free) {
+                if (!pl_ran || forced != nullptr || force_win != nullptr || lab_oracle_on ||
+                    oracle_bypassed_chains != 0 || oracle_delivered != 0 || force_over != 0 || force_win_hit != 0) {
+                    std::printf("ERR lab mtp free: unqualified or externally altered output path\n"); return 1;
+                }
+                std::fprintf(stderr, "strata lab mtp free: request %lld mode=free target_forcing=0 synthetic_drafts=0 "
+                                     "requested=%lld produced=%lld finish=%s windows=%lld all_accept=%lld drafts=%lld accepted=%lld "
+                                     "chain_launches=%lld chain_bypasses=%lld oracle_delivered=%lld target_replacements=%lld "
+                                     "window_overrides=%lld target_rows=%lld stage0_launches=%lld stage1_launches=%lld mtp_vram_bytes=%llu\n",
+                             (long long) force_k, oracle_requested, (long long) produced_n, finish,
+                             (long long) dec_windows, (long long) oracle_all_accept,
+                             (long long) draft_offered, (long long) draft_accepted, (long long) oracle_real_chains,
+                             (long long) oracle_bypassed_chains, (long long) oracle_delivered, (long long) force_over,
+                             (long long) force_win_hit, (long long) oracle_target_rows, (long long) oracle_stage0_launches,
+                             (long long) oracle_stage1_launches, (unsigned long long) mtp.vram_bytes());
+            } else if (lab_oracle_log) {
                 std::fprintf(stderr, "strata lab oracle: request %lld mode=%s synthetic=1 requested=%lld produced=%lld "
                                      "output_ids_ok=%lld invalid_output_ids=%lld windows=%lld all_accept=%lld drafts=%lld accepted=%lld "
                                      "chain_launches=%lld chain_bypasses=%lld draft_ids_delivered=%lld padded_outputs=%lld "
