@@ -1,3 +1,24 @@
+# Causal window diagnostics, 7 October 2026
+
+`STRATA_LAB_POLICY_TRACE` enables default-off fixed buffers for MTP chain IDs,
+probabilities, host-observed readiness and verifier-window verdicts. Allocation
+precedes decode; JSONL is flushed after its timer. Raw target choices remain
+distinct from forced fixture IDs. Labels beyond the valid prefix or final output
+budget are censored; overflow, nonfinite values and incomplete chains invalidate
+the record. This is diagnostic timing, not GPU kernel duration or a speed claim.
+
+Build `6d033548e5a917f3f42795dce4016909ce4d2281d410cc055c79b5a098fd8aaa`
+passes the original sm75/sm86 build. Eighteen trace/parser tests and seventeen
+runner tests pass. `DET-policy-trace-01` completes fourteen GEN: two cold prefix
+warmups, then min-p0/0.5/0 hot BAB smoke and1024-token pairs. Every measured
+request restores131072 SSD tokens. JSONL, actual GEN wire, forced-window trace,
+IDs and counters agree; isolation passes and no owned process remains.
+
+Instrumented long BAB L01:62.22/71.39/62.53 t/s; L02:53.47/64.40/54.00.
+These rates are diagnostic, with all arms instrumented; they do not measure
+instrumentation overhead. The workload remains forced and is not a free-greedy
+quality test. The telemetry supplies observations for future policy decisions.
+
 # Hot MTP probability thresholds, 7 October 2026
 
 The same immutable oracle-capable executable runs with the oracle OFF, real MTP

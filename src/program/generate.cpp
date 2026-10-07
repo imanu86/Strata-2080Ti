@@ -2140,6 +2140,9 @@ int main(int argc, char** argv) {
 #endif
     // Lab-only synthetic continuation: the target still runs, but the fixture supplies future draft IDs.
     // This is a decode ceiling experiment, never a measurement of actual generation quality.
+    // Lab diagnostics only: fixed POD buffers during decode, JSONL after its timer is frozen.
+    const char* lab_policy_path = std::getenv("STRATA_LAB_POLICY_TRACE");
+    const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
     enum class LabDraftOracle { Off, Quality, Instant };
     LabDraftOracle lab_oracle = LabDraftOracle::Off;
     const char* lab_oracle_env = std::getenv("STRATA_LAB_DRAFT_ORACLE");
@@ -2174,7 +2177,7 @@ int main(int argc, char** argv) {
     if (lab_oracle_hot)
         std::fprintf(stderr, "strata lab oracle: hot switch=%s startup=%s; explicit fixture per request\n",
                      lab_oracle_switch, lab_oracle_name);
-    if (lab_oracle_on || lab_oracle_hot) {
+    if (lab_oracle_on || lab_oracle_hot || lab_policy) {
         const char* fi = std::getenv("STRATA_FORCE_IDS");
         const char* fw = std::getenv("STRATA_FORCE_WINDOWS");
         if (!o.serve || o.batch != 0 || o.pipeline_windows != 2 || o.spec != 4 || o.mtp.empty() ||
@@ -4238,7 +4241,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (lab_oracle_on || lab_oracle_hot || lab_selective) {
+    if (lab_oracle_on || lab_oracle_hot || lab_selective || lab_policy) {
 #if defined(STRATA_USE_HIP)
         std::fprintf(stderr, "strata lab oracle: this experiment requires CUDA\n");
         return 2;
@@ -11024,7 +11027,12 @@ int main(int argc, char** argv) {
             static int64_t force_req = 0;
             const int64_t force_k = force_req++;
             const long long oracle_requested = max_new;
-            if (lab_oracle_on || lab_oracle_hot) {
+            if (lab_policy && (lab_oracle_on || !std::isfinite(req_spec_min_p) || req_spec_min_p < 0.0 ||
+                               req_spec_min_p > 1.0 || !std::isfinite(pl_theta))) {
+                std::printf("ERR lab policy trace: requires real MTP (oracle off) and finite thresholds in range\n");
+                return 1;
+            }
+            if (lab_oracle_on || lab_oracle_hot || lab_policy) {
                 const auto& fixtures = force_id_lists();
                 if (max_new <= 0 || force_k >= (int64_t) fixtures.size() ||
                     (int64_t) fixtures[(size_t) force_k].size() < max_new ||
@@ -11162,7 +11170,35 @@ int main(int argc, char** argv) {
             consumed.reserve((size_t) (n + max_new + S));
             for (int64_t i = 0; i < n - 1; ++i) consumed.push_back((int32_t) ids[(size_t) i]);
             const char* finish = "length";
+            // Truncation is an invalid experiment, never an invitation to allocate within the measured loop.
+            // A chain's forced inputs differ from its own predictions: retain both for conditional calibration.
+            struct PolicyChain {
+                int64_t id = -1, p = 0, fixture_base = 0;
+                int T = 0, accepted = 0, n_force = 0, n_out = 0, ready = 0, kind = 0, agree = -1;
+                int32_t root = 0, ids[7] = {}, force_ids[7] = {};
+                float prob[7] = {};
+                double launch_ms = -1, complete_ms = -1, ready_ms[7] = {-1,-1,-1,-1,-1,-1,-1};
+            };
+            struct PolicyWindow {
+                int64_t p = 0, chain = -1, b_chain = -1, emitted_before = 0;
+                int seq = 0, T = 0, a = 0, emitted = 0, b_T = 0, b_root_match = -1, b_f0_ready = -1, agree = -1;
+                bool spec = false, prev_rollback = false, b_made = false, b_ready = false, b_launched = false;
+                int32_t rows[4] = {}, target[4] = {}, raw_target[4] = {}, b_root = 0;
+                float prob[3] = {}, pa = 0, bonus_prob = 0, p_on = 0;
+                double l0_ms = -1, f0_ms = -1, l1_ms = -1, f1_ms = -1, verdict_ms = -1, interval_ms = -1;
+            };
+            std::vector<PolicyChain> policy_chains;
+            std::vector<PolicyWindow> policy_windows;
+            size_t policy_nc = 0, policy_nw = 0;
+            int64_t policy_chains_seen = 0, policy_windows_seen = 0, policy_current_chain = -1;
+            bool policy_truncated = false;
+            double policy_last_verdict = 0;
+            if (lab_policy) {
+                policy_chains.resize((size_t) max_new + 8);
+                policy_windows.resize((size_t) max_new + 8);
+            }
             const Clock::time_point d0 = Clock::now();
+            auto policy_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - d0).count(); };
             // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
             static const bool dec_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;
             const std::string decode_io_before = dec_timing ? ple_table.io_report() : std::string{};
@@ -11213,7 +11249,7 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: --pipeline-windows: a request with %s decodes serially\n",
                                  pl_serial);
             }
-            if ((lab_oracle_on || lab_oracle_hot || lab_selective) && (!pl_want || pl_serial != nullptr)) {
+            if ((lab_oracle_on || lab_oracle_hot || lab_selective || lab_policy) && (!pl_want || pl_serial != nullptr)) {
                 std::printf("ERR lab oracle: request cannot enter the qualified two-stage decode pipeline\n");
                 return 1;
             }
@@ -11236,6 +11272,10 @@ int main(int argc, char** argv) {
                     bool lookup = false;   // a B taken from the lookup's continuation (pick_lookup, lookup_next)
                     int sfx_match = 0;
                     bool selective_stage0_seen = false;
+                    int64_t policy_chain = -1;
+                    int policy_b_f0_ready = -1, policy_agree = -1;
+                    float policy_pa = 0, policy_bonus_prob = 0;
+                    double policy_l0 = -1, policy_f0 = -1, policy_l1 = -1, policy_f1 = -1;
                 };
                 auto V0 = [&](const PW& w) -> strata::core::Verifier& { return *PV[0][w.seq & 1]; };
                 auto V1 = [&](const PW& w) -> strata::core::Verifier& { return *PV[1][w.seq & 1]; };
@@ -11263,6 +11303,20 @@ int main(int argc, char** argv) {
                     }
                 };
                 strata::core::Verifier* selective_verifier = nullptr;
+                // The existing readiness events alone permit reading host outputs; no new event waits or readbacks.
+                auto policy_ready = [&](int ready, bool complete) {
+                    if (!lab_policy || policy_current_chain < 0) return;
+                    auto& c = policy_chains[(size_t) policy_current_chain];
+                    const int upto = std::min(ready, c.n_out);
+                    if (upto > c.ready || (complete && c.complete_ms < 0)) {
+                        const double now = policy_now();
+                        for (int j = c.ready; j < upto; ++j) {
+                            c.ids[j] = mtp.chain_tok()[j]; c.prob[j] = mtp.chain_prob()[j]; c.ready_ms[j] = now;
+                        }
+                        c.ready = std::max(c.ready, upto);
+                        if (complete && c.complete_ms < 0) c.complete_ms = now;
+                    }
+                };
                 auto chain_launch = [&](int T, const int32_t* tokens, int64_t pos, int accepted,
                                         const int32_t* force, int n_force, int n_out, int n_early,
                                         std::string& e) -> bool {
@@ -11282,6 +11336,19 @@ int main(int argc, char** argv) {
                         if (!mtp.selective_source(selected, width, pos + accepted,
                                 selective_verifier ? selective_verifier->device() : -1, (uint64_t) force_k + 1, e)) return false;
                     }
+                    if (lab_policy) {
+                        const int64_t id = policy_chains_seen++;
+                        policy_current_chain = -1;
+                        if (policy_nc < policy_chains.size()) {
+                            policy_current_chain = (int64_t) policy_nc++;
+                            auto& c = policy_chains[(size_t) policy_current_chain];
+                            c.id = id; c.p = pos; c.fixture_base = pos - (n - 1) + accepted + 1;
+                            c.T = T; c.accepted = accepted; c.root = tokens[accepted];
+                            c.n_force = n_force; c.n_out = n_out; c.kind = force != nullptr ? 1 : 2;
+                            for (int j = 0; j < n_force && j < 7; ++j) c.force_ids[j] = force[j];
+                            c.launch_ms = policy_now();
+                        } else policy_truncated = true;
+                    }
                     const bool ok = mtp.chain_launch(T, tokens, pos, accepted, force, n_force, n_out, n_early, e);
                     if (ok && lab_oracle_log) ++oracle_real_chains;
                     return ok;
@@ -11289,11 +11356,16 @@ int main(int argc, char** argv) {
                 auto chain_outputs_ready = [&](std::string& e) {
                     const int ready = lab_oracle_instant ? oracle_chain_size : mtp.chain_outputs_ready(e);
                     if (ready >= 0) oracle_publish(ready);
+                    if (ready >= 0) policy_ready(ready, false);
                     return ready;
                 };
                 auto chain_poll = [&](std::string& e) {
                     const int ready = lab_oracle_instant ? 1 : mtp.chain_poll(e);
-                    if (ready == 1) oracle_publish(oracle_chain_size);
+                    if (ready == 1) {
+                        oracle_publish(oracle_chain_size);
+                        if (lab_policy && policy_current_chain >= 0)
+                            policy_ready(policy_chains[(size_t) policy_current_chain].n_out, true);
+                    }
                     return ready;
                 };
                 auto chain_tok = [&]() -> const int32_t* { return lab_oracle_on ? oracle_chain_tok : mtp.chain_tok(); };
@@ -11394,6 +11466,11 @@ int main(int argc, char** argv) {
                     if (v.done(err)) {
                         if (!v.pl_finish(nullptr, err)) return false;
                         w.finished = true;
+                        if (lab_policy) {
+                            w.policy_f0 = policy_now();
+                            // If w is still B, its successor does not exist: the field stays unknown, not false.
+                            if (&w == &A) w.policy_b_f0_ready = B.ready ? 1 : 0;
+                        }
                         tre("F0", w.seq, w.T, w.spec);
                     }
                     return err.empty();
@@ -11408,7 +11485,7 @@ int main(int argc, char** argv) {
                     return std::max(1, std::min(T, 1 + avail - from));
                 };
                 // B from the chain's outputs: its row 0 is the guess at index `base`, its drafts follow
-                auto make_b = [&](const int32_t* oc, const float* op, int base, int avail, float pa) {
+                auto make_b = [&](const int32_t* oc, const float* op, int base, int avail, float pa, int agree) {
                     B = PW{};
                     if (base >= avail) return;
                     B.seq = A.seq + 1;
@@ -11422,6 +11499,10 @@ int main(int argc, char** argv) {
                         B.prob[i - 1] = op[base + i];
                     }
                     B.p_on = pa * op[base];
+                    if (lab_policy) {
+                        B.policy_chain = policy_current_chain;
+                        B.policy_pa = pa; B.policy_bonus_prob = op[base]; B.policy_agree = agree;
+                    }
                     if (force_miss > 0 && ++pl_fm % force_miss == 0) B.tok[0] = B.tok[0] == 0 ? 1 : 0;
                     B.ready = true;
                     B.made = true;
@@ -11736,6 +11817,7 @@ int main(int argc, char** argv) {
                             if (!v.pl_finish(outp.data(), err)) return die(err);
                             force_rows_out(outp.data(), A.T, produced_n);   // lab bench: STRATA_FORCE_IDS
                             A.s1_done = true;
+                            if (lab_policy) A.policy_f1 = policy_now();
                             tre("F1", A.seq, A.T);
                         } else if (!err.empty()) return die(err);
                     }
@@ -11786,6 +11868,7 @@ int main(int argc, char** argv) {
                                     A.tok[i] = chain_tok()[i - 1];
                                     A.prob[i - 1] = chain_prob()[i - 1];
                                 }
+                                if (lab_policy) A.policy_chain = policy_current_chain;
                                 pick_lookup(A, chain_tok());
                                 A.ready = true;
                                 early_used = true;
@@ -11804,6 +11887,7 @@ int main(int argc, char** argv) {
                                 A.tok[i] = oc[i - 1];
                                 A.prob[i - 1] = op[i - 1];
                             }
+                            if (lab_policy) A.policy_chain = policy_current_chain;
                             pick_lookup(A, oc);
                             A.ready = true;
                             early_used = true;
@@ -11816,6 +11900,7 @@ int main(int argc, char** argv) {
                                     if (op[j] < (float) req_spec_min_p) { decided = true; break; }
                             if (decided) {
                                 float pa = 1.0f;
+                                int policy_agree = -1;
                                 if (chain_kind == 1) {
                                     // forced through A's drafts: its outputs there are the drafter's own picks from
                                     // A's verified predecessor, a better estimate of A's acceptance than the chain that
@@ -11825,11 +11910,16 @@ int main(int argc, char** argv) {
                                         if (oc[i] != A.tok[i + 1]) agree = false;
                                         pa *= pl_agree ? op[i] : A.prob[i];
                                     }
+                                    if (lab_policy) {
+                                        policy_agree = agree ? 1 : 0;
+                                        if (policy_current_chain >= 0)
+                                            policy_chains[(size_t) policy_current_chain].agree = policy_agree;
+                                    }
                                     if (pl_agree && !agree) { pa = 0.0f; ++pl_disagree; }
                                 } else {
                                     for (int i = 0; i + 1 < A.T; ++i) pa *= A.prob[i];
                                 }
-                                if (!A.sfx) make_b(oc, op, base, k, pa);   // a lookup window's bonus is not the chain's
+                                if (!A.sfx) make_b(oc, op, base, k, pa, policy_agree);   // a lookup window's bonus is not the chain's
                                 // stage B now (its PLE rows from the tokens before it as they will be once A is
                                 // committed whole), so its launch behind A is only the graph launch (never while a
                                 // rollback is pending: B's verifier is the one the undo commit reads)
@@ -11863,6 +11953,7 @@ int main(int argc, char** argv) {
                         if (!snap_take(A.seq)) return die("the GDN snapshot failed");
                         if (!V0(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.launched = true;
+                        if (lab_policy) A.policy_l0 = policy_now();
                         if (lab_oracle_log) ++oracle_stage0_launches;
                         tre("L0", A.seq, A.T, 0);
                     }
@@ -11888,6 +11979,7 @@ int main(int argc, char** argv) {
                                 return die(err.empty() ? std::string("the GDN snapshot failed") : err);
                             A.committed = true;
                             B.launched = true;
+                            if (lab_policy) B.policy_l0 = policy_now();
                             if (lab_oracle_log) ++oracle_stage0_launches;
                             B.spec = true;
                             tre("L0", B.seq, B.T, 1);
@@ -11903,6 +11995,7 @@ int main(int argc, char** argv) {
                         if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
                         if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.s1 = true;
+                        if (lab_policy) A.policy_l1 = policy_now();
                         if (lab_oracle_log) ++oracle_stage1_launches;
                         tre("L1", A.seq, A.T);
                     }
@@ -11939,6 +12032,28 @@ int main(int argc, char** argv) {
                                 }
                             }
                         }
+                    }
+                    if (lab_policy) {
+                        ++policy_windows_seen;
+                        const double now = policy_now();
+                        if (policy_nw < policy_windows.size()) {
+                            auto& w = policy_windows[policy_nw++];
+                            w.seq = A.seq; w.p = A.p; w.chain = A.policy_chain; w.b_chain = B.policy_chain;
+                            w.T = A.T; w.a = a; w.spec = A.spec; w.prev_rollback = pl_prev_rolled;
+                            w.emitted_before = produced_n; w.emitted = (int) std::min<int64_t>(a + 1, max_new - produced_n);
+                            for (int i = 0; i < A.T; ++i) {
+                                w.rows[i] = A.tok[i]; w.target[i] = outp[(size_t) i]; w.raw_target[i] = force_orig[(size_t) i];
+                                if (i + 1 < A.T) w.prob[i] = A.prob[i];
+                            }
+                            w.b_T = B.T; w.b_made = B.made; w.b_ready = B.ready; w.b_launched = B.launched;
+                            w.b_root = B.tok[0]; w.b_root_match = B.made && a == A.T - 1 && w.emitted == A.T
+                                ? (B.tok[0] == outp[(size_t) A.T - 1] ? 1 : 0) : -1;
+                            w.b_f0_ready = A.policy_b_f0_ready; w.agree = B.policy_agree;
+                            w.pa = B.policy_pa; w.bonus_prob = B.policy_bonus_prob; w.p_on = B.p_on;
+                            w.l0_ms = A.policy_l0; w.f0_ms = A.policy_f0; w.l1_ms = A.policy_l1; w.f1_ms = A.policy_f1;
+                            w.verdict_ms = now; w.interval_ms = now - policy_last_verdict;
+                        } else policy_truncated = true;
+                        policy_last_verdict = now;
                     }
                     force_note(A.p, A.T, a, A.tok);
                     if (!V1(A).pl_commit_async(a + 1, err)) return die(err);
@@ -12398,6 +12513,117 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            if (lab_policy) {
+                // This diagnostic cannot be used as an uninstrumented performance result. All formatting and I/O
+                // are outside decode_ms; timestamps are host observations, not GPU execution durations.
+                std::FILE* fp = std::fopen(lab_policy_path, "ab");
+                if (fp == nullptr) { std::printf("ERR lab policy trace: cannot append JSONL\n"); return 1; }
+                int64_t nonfinite = 0;
+                auto number = [&](double value) {
+                    if (std::isfinite(value)) std::fprintf(fp, "%.17g", value);
+                    else { std::fputs("null", fp); ++nonfinite; }
+                };
+                auto optional_int = [&](int value) {
+                    if (value < 0) std::fputs("null", fp); else std::fprintf(fp, "%d", value);
+                };
+                auto optional_time = [&](double value) {
+                    if (value < 0) std::fputs("null", fp); else number(value);
+                };
+                auto begin_record = [&](const char* type) {
+                    std::fprintf(fp, "{\"schema\":\"strata.policy.v1\",\"type\":\"%s\",\"request\":%lld",
+                                 type, (long long) force_k);
+                };
+                begin_record("request");
+                std::fprintf(fp, ",\"context_tokens\":%lld,\"requested\":%lld,\"produced\":%lld,\"reused\":%lld,"
+                                 "\"history_source\":\"%s\",\"selective\":%d,\"forced_target\":true,\"synthetic_drafts\":false,"
+                                 "\"clock\":\"host_observed_ms_since_d0\",\"capacity\":%zu,\"buffer_bytes\":%zu,\"min_p\":",
+                             (long long) n, oracle_requested, (long long) produced_n, (long long) read_from,
+                             incoming_disk ? "validated_ssd" : "other", lab_selective && selective_request_on ? 8192 : 0,
+                             policy_windows.size(), policy_windows.size() * sizeof(PolicyWindow) + policy_chains.size() * sizeof(PolicyChain));
+                number(req_spec_min_p); std::fputs(",\"theta\":", fp); number(pl_theta);
+                std::fputs(",\"decode_ms\":", fp); number(decode_ms); std::fputs("}\n", fp);
+                for (size_t ci = 0; ci < policy_nc; ++ci) {
+                    const auto& c = policy_chains[ci];
+                    begin_record("chain");
+                    std::fprintf(fp, ",\"id\":%lld,\"kind\":\"%s\",\"base_pos\":%lld,\"fixture_base\":%lld,"
+                                     "\"T\":%d,\"accepted\":%d,\"root\":%d,\"n_force\":%d,\"n_out\":%d,\"ready\":%d,\"agree\":",
+                                 (long long) c.id, c.kind == 1 ? "forced" : "fresh", (long long) c.p, (long long) c.fixture_base,
+                                 c.T, c.accepted, c.root, c.n_force, c.n_out, c.ready);
+                    optional_int(c.agree); std::fputs(",\"launch_ms\":", fp); optional_time(c.launch_ms);
+                    std::fputs(",\"complete_ms\":", fp); optional_time(c.complete_ms);
+                    std::fputs(",\"forced_ids\":[", fp);
+                    for (int j = 0; j < c.n_force; ++j) { if (j) std::fputc(',', fp); std::fprintf(fp, "%d", c.force_ids[j]); }
+                    std::fputs("],\"ids\":[", fp);
+                    for (int j = 0; j < c.n_out; ++j) {
+                        if (j) std::fputc(',', fp);
+                        if (j < c.ready) std::fprintf(fp, "%d", c.ids[j]); else std::fputs("null", fp);
+                    }
+                    std::fputs("],\"prob\":[", fp);
+                    for (int j = 0; j < c.n_out; ++j) {
+                        if (j) std::fputc(',', fp);
+                        if (j < c.ready) number(c.prob[j]); else std::fputs("null", fp);
+                    }
+                    std::fputs("],\"ready_ms\":[", fp);
+                    for (int j = 0; j < c.n_out; ++j) { if (j) std::fputc(',', fp); optional_time(c.ready_ms[j]); }
+                    // Reference IDs are labels for this fixed continuation, not target evaluations of an off-path prefix.
+                    std::fputs("],\"fixture_ids\":[", fp);
+                    for (int j = 0; j < c.n_out; ++j) {
+                        if (j) std::fputc(',', fp);
+                        const int64_t index = c.fixture_base + j;
+                        if (index >= 0 && index < oracle_requested) std::fprintf(fp, "%d", (*forced)[(size_t) index]);
+                        else std::fputs("null", fp);
+                    }
+                    std::fputs("]}\n", fp);
+                }
+                for (size_t wi = 0; wi < policy_nw; ++wi) {
+                    const auto& w = policy_windows[wi];
+                    begin_record("window");
+                    std::fprintf(fp, ",\"seq\":%d,\"pos\":%lld,\"chain\":%lld,\"B_chain\":%lld,\"T\":%d,\"a\":%d,"
+                                     "\"emitted_before\":%lld,\"emitted\":%d,\"A_spec\":%d,\"previous_rollback\":%d,\"rows\":[",
+                                 w.seq, (long long) w.p, (long long) w.chain, (long long) w.b_chain, w.T, w.a,
+                                 (long long) w.emitted_before, w.emitted, w.spec ? 1 : 0, w.prev_rollback ? 1 : 0);
+                    for (int i = 0; i < w.T; ++i) { if (i) std::fputc(',', fp); std::fprintf(fp, "%d", w.rows[i]); }
+                    std::fputs("],\"prob_A\":[", fp);
+                    for (int i = 0; i + 1 < w.T; ++i) { if (i) std::fputc(',', fp); number(w.prob[i]); }
+                    // Only the on-path prefix through its first mismatch, within the requested budget, is labeled.
+                    std::fputs("],\"target_ids_valid_prefix\":[", fp);
+                    for (int i = 0; i < w.emitted; ++i) { if (i) std::fputc(',', fp); std::fprintf(fp, "%d", w.target[i]); }
+                    std::fputs("],\"raw_target_ids_valid_prefix\":[", fp);
+                    for (int i = 0; i < w.emitted; ++i) { if (i) std::fputc(',', fp); std::fprintf(fp, "%d", w.raw_target[i]); }
+                    std::fprintf(fp, "],\"B_T\":%d,\"B_made\":%d,\"B_ready\":%d,\"B_launched\":%d,\"B_root\":%d,"
+                                     "\"B_root_match_after_Aall\":", w.b_T, w.b_made ? 1 : 0, w.b_ready ? 1 : 0,
+                                 w.b_launched ? 1 : 0, w.b_root);
+                    optional_int(w.b_root_match); std::fputs(",\"B_ready_at_F0\":", fp); optional_int(w.b_f0_ready);
+                    std::fputs(",\"agree\":", fp); optional_int(w.agree);
+                    std::fputs(",\"pa\":", fp); if (w.b_made) number(w.pa); else std::fputs("null", fp);
+                    std::fputs(",\"bonus_prob\":", fp); if (w.b_made) number(w.bonus_prob); else std::fputs("null", fp);
+                    std::fputs(",\"p_on\":", fp); if (w.b_made) number(w.p_on); else std::fputs("null", fp);
+                    std::fputs(",\"L0_ms\":", fp); optional_time(w.l0_ms);
+                    std::fputs(",\"F0_ms\":", fp); optional_time(w.f0_ms);
+                    std::fputs(",\"L1_ms\":", fp); optional_time(w.l1_ms);
+                    std::fputs(",\"F1_ms\":", fp); optional_time(w.f1_ms);
+                    std::fputs(",\"verdict_ms\":", fp); optional_time(w.verdict_ms);
+                    std::fputs(",\"interval_ms\":", fp); optional_time(w.interval_ms);
+                    std::fputs("}\n", fp);
+                }
+                int64_t incomplete_chains = 0;
+                for (size_t ci = 0; ci < policy_nc; ++ci)
+                    if (policy_chains[ci].complete_ms < 0 || policy_chains[ci].ready != policy_chains[ci].n_out) ++incomplete_chains;
+                const bool valid = !policy_truncated && nonfinite == 0 && incomplete_chains == 0 && pl_ran &&
+                                   produced_n == oracle_requested && policy_windows_seen == dec_windows;
+                begin_record("end");
+                std::fprintf(fp, ",\"valid\":%s,\"truncated\":%s,\"nonfinite\":%lld,\"incomplete_chains\":%lld,"
+                                 "\"windows_seen\":%lld,\"windows_recorded\":%zu,\"chains_seen\":%lld,\"chains_recorded\":%zu}\n",
+                             valid ? "true" : "false", policy_truncated ? "true" : "false", (long long) nonfinite,
+                             (long long) incomplete_chains, (long long) policy_windows_seen, policy_nw,
+                             (long long) policy_chains_seen, policy_nc);
+                const bool write_failed = std::ferror(fp) != 0;
+                const int close_result = std::fclose(fp);
+                if (write_failed || close_result != 0) { std::printf("ERR lab policy trace: JSONL write failed\n"); return 1; }
+                std::fprintf(stderr, "strata lab policy: request %lld valid=%d windows=%zu chains=%zu truncated=%d nonfinite=%lld\n",
+                             (long long) force_k, valid ? 1 : 0, policy_nw, policy_nc, policy_truncated ? 1 : 0, (long long) nonfinite);
+            }
+
             if (lab_selective) {
                 // Both pipeline and request decode timers are frozen. This opt-in gate is deliberately untimed.
                 if (selective_request_check && !mtp.selective_check(err)) {
