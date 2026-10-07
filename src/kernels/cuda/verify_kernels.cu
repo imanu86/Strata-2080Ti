@@ -644,6 +644,34 @@ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const 
     check("mtp_select");
 }
 
+namespace {
+__global__ void mtp_feature_step_kernel(float* residual, int64_t stride, const int32_t* token,
+                                        const float* bank, const int32_t* fixture, const int32_t* meta,
+                                        int32_t* mask, unsigned long long* stats, int j) {
+    __shared__ int take;
+    __shared__ int at;
+    if (threadIdx.x == 0) {
+        take = 0; at = meta[1] + j;
+        if (j == 1) *mask = meta[3]; // every chain resets; only fresh chains with a verified root qualify
+        if (!meta[3]) ++stats[5];
+        else if (at < 0 || at >= meta[2]) { *mask = 0; ++stats[3]; }
+        else if (!*mask) ++stats[4];
+        else if (*token != fixture[at]) { *mask = 0; ++stats[2]; }
+        else { ++stats[0]; take = meta[0] == 2; stats[1] += take; }
+    }
+    __syncthreads();
+    if (take) for (int64_t i = threadIdx.x; i < stride; i += blockDim.x)
+        residual[i] = bank[(size_t) at * stride + i];
+}
+} // namespace
+
+void mtp_feature_step(float* residual, int64_t stride, const int32_t* token, const float* bank,
+                      const int32_t* fixture, const int32_t* meta, int32_t* mask,
+                      unsigned long long* stats, int j, void* stream) {
+    mtp_feature_step_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(residual, stride, token, bank, fixture, meta, mask, stats, j);
+    check("mtp_feature_step");
+}
+
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream) {
     force_token_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(tok, force, j);
     check("force_token");

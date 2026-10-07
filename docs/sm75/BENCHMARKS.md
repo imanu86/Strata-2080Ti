@@ -1,3 +1,44 @@
+# Future-residual MTP oracle (2026-10-08)
+
+An opt-in laboratory oracle records1024 committed target residual rows, then
+replays them into the recursive MTP input. It keeps MTP tokens/logits real and
+does not directly alter the first draft. Injection is restricted to fresh chains
+with the matching reference root and input prefix; the first mismatch latches it
+off. A nonnull forced pointer with zero forced rows is correctly excluded too.
+
+One process completed16 GEN: two warmups, two instrumented record requests,
+smoke FEATURE/OFF/FEATURE and long1024-token FEATURE/OFF/FEATURE on both cases.
+Every postwarm request restores131072 tokens from its private SSD prefix. The
+complete40MiB bank is identity/prompt/fixture/payload-hash bound and loaded in
+both measured modes. Common GPU allocation and hooks remain in all arms.
+
+| Case | FEATURE B1 | OFF A | FEATURE B2 | B1/B2 gain over A |
+|---|---:|---:|---:|---:|
+| L01 |76.001|71.373|75.274|+6.48% / +5.46%|
+| L02 |69.688|64.754|69.052|+7.62% / +6.64%|
+
+These are instrumented synthetic decode rates, not deployable speedups. The
+intervention covers about23%/20% of all recursive hook calls and improves longer
+matching prefixes, while first-draft accuracy remains roughly68-71%/58-60%.
+Wrong speculative B roots still occur in53-61% of scoreable all-accepted-A cases.
+The recorded future teacher state can also alter private MTP KV and window
+shapes. A causal correction has not been demonstrated by this experiment.
+
+Source/runner contracts passed; the production kernel passed76 direct/graph
+cases across both GPUs, including mismatch latching, bounds, off/exclusion,
+all10240 residual floats and guard regions. All16 real GEN audits, independently
+reconstructed GPU counters, bank/prefix integrity and isolation passed. The
+record GENs are excluded from comparisons. Bank load65-67ms occurs after the
+prompt timer and before decode, and remains included in wall GEN. Four elastic
+cache events total62.4ms in long requests; no cost is subtracted from results.
+
+Same Windows Ryzen5800X/96GB dual-GPU setup: GPU0 RTX3060 12GB/Oculinkx4/8K,
+GPU1 modified RTX2080Ti 22GB/PCIex16, split16/pipeline2, spec4/minp0.5,
+KVint8 resident32768, prompts131248/131239, forced IDs without forced windows.
+Raw target picks differ from the fixture on64-81/1024 positions. This does not
+establish free-output equivalence or quality. Daily and defaults are unchanged.
+See [complete conditions, source/build pins and evidence](mtp-feature-oracle-20261008.json).
+
 # Decode timeline with Nsight Systems (2026-10-08)
 
 `STRATA_LAB_NVTX_RANGES=1` adds opt-in request and host-decode ranges on Windows

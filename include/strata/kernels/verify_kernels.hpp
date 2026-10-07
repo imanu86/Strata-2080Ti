@@ -100,6 +100,10 @@ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const 
 /// --pipeline-windows, the drafter's chain teacher forced: `*tok = force[j]` when force[j] >= 0 (`force` is mapped
 /// host memory, read when the kernel runs), else `*tok` is left as it is.
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream);
+// Lab future-residual oracle: no token/logit writes. Sequential on the drafter stream; mask resets at step1.
+void mtp_feature_step(float* residual, int64_t stride, const int32_t* token, const float* bank,
+                      const int32_t* fixture, const int32_t* meta, int32_t* mask,
+                      unsigned long long* stats, int j, void* stream);
 /// Row *row_dev of a, b and c (a_n, b_n, c_n floats a row) copied to their row 0 (the draft layer's rest runs on
 /// row 0).  Graph-capturable: the row is read on the device.
 void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, int64_t b_n, float* c, int64_t c_n,

@@ -2201,6 +2201,17 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata lab mtp free: forbidden environment key %s (must be absent)\n", name); return 2;
         }
     }
+    const char* lab_feature_switch = std::getenv("STRATA_LAB_MTP_FEATURE_SWITCH");
+    const bool lab_feature = lab_feature_switch != nullptr;
+    if (lab_feature) {
+        if (lab_feature_switch[0] == 0) { std::fprintf(stderr, "strata lab mtp feature: empty switch path\n"); return 2; }
+        const char* forbidden[] = {"STRATA_FORCE_WINDOWS", "STRATA_CKPT_REREAD", "STRATA_STATE_HASH",
+            "STRATA_PIPELINE_SWITCH", "STRATA_PIPELINE_FORCE_MISS", "STRATA_NEURON_PROBE_CONTROL",
+            "STRATA_CLOSED_ROUTING", "STRATA_MTP_TOP2", "STRATA_MTP_FULL_HEAD", "STRATA_MTP_CATCHUP_ALL"};
+        for (const char* name : forbidden) if (std::getenv(name) != nullptr) {
+            std::fprintf(stderr, "strata lab mtp feature: forbidden key %s\n", name); return 2;
+        }
+    }
     const char* lab_policy_path = std::getenv("STRATA_LAB_POLICY_TRACE");
     const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
     enum class LabDraftOracle { Off, Quality, Instant };
@@ -2288,6 +2299,11 @@ int main(int argc, char** argv) {
     if (lab_hq_free)
         std::fprintf(stderr, "strata lab mtp free: enabled=1 target_forcing=0 synthetic_drafts=0 "
                              "policy_trace=off window_trace=off prefix_tokens=131072\n");
+    if (lab_feature && (!lab_oracle_hot || lab_oracle_on || lab_hq || lab_hq_free || lab_selective ||
+                        lab_prefix_tokens != 131072 || o.prompt_cache_file.empty() || o.mtp_window != 32768)) {
+        std::fprintf(stderr, "strata lab mtp feature: requires original MTP, oracle-off hot SSD131072; "
+                             "HQ/FREE/selective modes excluded\n"); return 2;
+    }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                                      [](int slots) { return slots > 0; }))) {
@@ -4355,6 +4371,7 @@ int main(int argc, char** argv) {
         const int mtp_t = o.pipeline_windows >= 2 ? strata::kernels::kVerifyMaxT : o.spec;
         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
         mtp.set_selective_capture(lab_selective);
+        mtp.set_feature_capture(lab_feature);
         if (lab_hq) mtp.set_hq_pack(lab_hq_pack);
         if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st && !mtp_cross_device ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
         mtp.set_ple_session(&ss);
@@ -9832,6 +9849,42 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata lab selective: selected mode=%d check=%d before GEN\n",
                              selective_request_on ? 8192 : 0, selective_request_check ? 1 : 0);
             }
+            int feature_request_mode = 0;
+            std::string feature_bank_path;
+            if (lab_feature) {
+                std::ifstream control(lab_feature_switch);
+                std::string mode, extra;
+                if (!std::getline(control, mode) || !std::getline(control, feature_bank_path)) {
+                    std::printf("ERR lab mtp feature: switch requires mode and absolute bank path\n"); return 1;
+                }
+                if (!mode.empty() && mode.back() == '\r') mode.pop_back();
+                if (!feature_bank_path.empty() && feature_bank_path.back() == '\r') feature_bank_path.pop_back();
+                if ((mode != "off" && mode != "record" && mode != "feature") ||
+                    std::getline(control, extra) || geni || lab_oracle_on || oracle_prefix_file.empty()) {
+                    std::printf("ERR lab mtp feature: record/off/feature, text GEN and oracle-off SSD path required\n"); return 1;
+                }
+                feature_request_mode = mode == "record" ? 1 : mode == "feature" ? 2 : 0;
+                try {
+                    const std::filesystem::path raw(feature_bank_path);
+                    if (raw.empty() || !raw.is_absolute() || !std::filesystem::is_directory(raw.parent_path()))
+                        throw std::runtime_error("bank path must be absolute with an existing parent");
+                    const auto destination = std::filesystem::weakly_canonical(raw);
+                    if (destination == std::filesystem::weakly_canonical(oracle_prefix_file) ||
+                        destination == std::filesystem::weakly_canonical(lab_feature_switch) ||
+                        destination == std::filesystem::weakly_canonical(lab_oracle_switch))
+                        throw std::runtime_error("bank overlaps control or SSD prefix");
+                    for (const auto& path : prefix_cache_assets) {
+                        if (path.empty() || !std::filesystem::exists(path)) continue;
+                        const auto asset = std::filesystem::canonical(path);
+                        const auto relative = destination.lexically_relative(asset);
+                        if (destination == asset || (std::filesystem::is_directory(asset) && !relative.empty() && *relative.begin() != ".."))
+                            throw std::runtime_error("bank overlaps model assets");
+                    }
+                    feature_bank_path = destination.string();
+                } catch (const std::exception& e) {
+                    std::printf("ERR lab mtp feature: %s\n", e.what()); return 1;
+                }
+            }
             int hq_request_mode = 0;
             if (lab_hq) {
                 std::ifstream control(lab_hq_switch);
@@ -11188,6 +11241,26 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata lab mtp hq: history request=%lld source=%s full_until=%lld\n",
                              (long long) force_k, incoming_disk ? "validated_ssd" : "full_prefill", (long long) (n - 1));
             }
+            if (lab_feature) {
+                const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && incoming_tokens == 131072) ||
+                                                  (read_from == 0 && mtp.first_needed() <= 0));
+                if (!prefix_disk_enabled || !full || !req_imgs.empty() || lab_oracle_on ||
+                    ((feature_request_mode != 0 || max_new != 15) && !incoming_disk) ||
+                    !std::isfinite(req_spec_min_p) || req_spec_min_p < 0 || req_spec_min_p > 1 || pl_theta < 0) {
+                    std::printf("ERR lab mtp feature: requires qualified full history and measured SSD131072 restore\n"); return 1;
+                }
+                const auto& fixture = force_id_lists()[(size_t) force_k];
+                if (fixture.size() != 1024 || std::any_of(fixture.begin(), fixture.end(), [&](int32_t id) {
+                        return id < 0 || id >= n_vocab || std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) id) != o.eos_ids.end();
+                    }) || !mtp.feature_begin(feature_request_mode, feature_bank_path, prefix_identity.data(), ids,
+                                              fixture, max_new, err)) {
+                    std::printf("ERR lab mtp feature: fixture/bank request invalid: %s\n", err.c_str()); return 1;
+                }
+                std::fprintf(stderr, "strata lab mtp feature: history request=%lld source=%s full_until=%lld "
+                                     "target_forced=1 draft_tokens_real=1 record_instrumented=%d\n",
+                             (long long) force_k, incoming_disk ? "validated_ssd" : "full_prefill", (long long) (n - 1),
+                             feature_request_mode == 1);
+            }
             int64_t sel_a_reject = 0, sel_a_all = 0, sel_b_missing = 0, sel_b_wrong = 0, sel_b_unused = 0, sel_b_useful = 0;
             int64_t sel_b_scored = 0, sel_b_match = 0, sel_b_gate = 0, sel_b_notready = 0, sel_opportunities = 0;
             int64_t oracle_real_chains = 0, oracle_bypassed_chains = 0, oracle_delivered = 0, oracle_padded = 0;
@@ -12178,6 +12251,7 @@ int main(int argc, char** argv) {
                         } else policy_truncated = true;
                         policy_last_verdict = now;
                     }
+                    if (lab_feature && !mtp.feature_record(V1(A).final_R(0), A.p, A.tok, a + 1, err)) return die(err);
                     force_note(A.p, A.T, a, A.tok);
                     if (!V1(A).pl_commit_async(a + 1, err)) return die(err);
                     for (int i = 0; i <= a; ++i) consumed.push_back(A.tok[i]);
@@ -12640,6 +12714,9 @@ int main(int argc, char** argv) {
             if (lab_nvtx)
                 std::fprintf(stderr, "strata lab nvtx: gen=%lld request=%lld decode_ms=%.6f scope=host_thread\n",
                              (long long) lab_nvtx_gen, (long long) force_k, decode_ms);
+            if (lab_feature && !mtp.feature_finish(stderr, force_k, produced_n, finish, err)) {
+                std::printf("ERR %s\n", err.c_str()); return 1;
+            }
             if (lab_policy) {
                 // This diagnostic cannot be used as an uninstrumented performance result. All formatting and I/O
                 // are outside decode_ms; timestamps are host observations, not GPU execution durations.

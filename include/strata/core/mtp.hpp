@@ -73,6 +73,13 @@ public:
     void set_hq_pack(const std::string& dir) { hq_pack_ = dir; }
     bool hq_switch(int mode, std::string& err);
     bool hq_report(std::FILE* out, int64_t request, std::string& err) const;
+    // Lab-only future-residual oracle. Configure before load: equal allocation and graph nodes in all modes.
+    void set_feature_capture(bool on) { feature_config_ = on; }
+    bool feature_begin(int mode, const std::string& path, const uint8_t* identity,
+                       const std::vector<int64_t>& prompt, const std::vector<int32_t>& fixture,
+                       int64_t requested, std::string& err);
+    bool feature_record(const float* R, int64_t pos, const int32_t* input, int keep, std::string& err);
+    bool feature_finish(std::FILE* out, int64_t request, int64_t produced, const char* finish, std::string& err);
     /// After an idle, completed prefill/validated SSD restore. `full_until` is exclusive and -1 means unproven.
     bool selective_begin_request(uint64_t epoch, int64_t full_until, bool on, std::string& err);
     /// Once per verdict, while the old MTP chain is idle and the verifier's selection is still stable.
@@ -294,6 +301,27 @@ private:
     // --pipeline-windows 2 (chain_launch)
     bool stage_source_R(int T, std::string& err);   ///< set_source_R's rows into the bound buffer
     bool force_on_ = false, chain_live_ = false;
+    bool feature_allocate(std::string& err);
+    struct FeatureHeader {
+        char magic[8];
+        uint32_t version, hc, n_embd, rows;
+        int64_t prompt_tokens, first_pos;
+        uint8_t identity[32], prompt[32], fixture[32], payload[32];
+    };
+    static_assert(sizeof(FeatureHeader) == 168, "feature bank v1 header layout");
+    bool feature_config_ = false;
+    int feature_mode_ = 0, feature_bank_rows_ = 0, feature_captured_ = 0;
+    int32_t feature_prompt_last_ = -1;
+    int64_t feature_requested_ = 0, feature_fresh_ = 0, feature_forced_ = 0, feature_root_mismatch_ = 0;
+    uint64_t feature_bytes_ = 0;
+    double feature_load_ms_ = 0;
+    FeatureHeader feature_header_{};
+    std::string feature_path_;
+    float *feature_bank_ = nullptr, *feature_host_ = nullptr;
+    int32_t *feature_fixture_ = nullptr, *feature_mask_ = nullptr;
+    int32_t *feature_h_meta_ = nullptr, *feature_m_meta_ = nullptr;
+    int32_t feature_ids_[1024] = {};
+    unsigned long long* feature_stats_ = nullptr;
     const float* src_R_ = nullptr;
     int32_t *h_force_ = nullptr, *m_force_ = nullptr;   ///< the forced tokens (mapped), -1 = the step's own pick
     cudaEvent_t ev_chain_ = nullptr;

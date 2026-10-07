@@ -6,6 +6,10 @@
 
 #include "strata/core/native_head.hpp"
 #include "strata/core/peer_experts.hpp"
+#include "strata/core/prefix_cache_file.hpp"
+#include <filesystem>
+#include <cmath>
+#include <cstddef>
 #include "strata/platform/memory.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/cpu/expert.hpp"
@@ -150,6 +154,12 @@ MtpDrafter::~MtpDrafter() {
         if (slot.consumed) cudaEventDestroy(slot.consumed);
         if (slot.host) cudaFreeHost(slot.host);
     }
+    if (feature_bank_) cudaFree(feature_bank_);
+    if (feature_fixture_) cudaFree(feature_fixture_);
+    if (feature_mask_) cudaFree(feature_mask_);
+    if (feature_stats_) cudaFree(feature_stats_);
+    if (feature_host_) cudaFreeHost(feature_host_);
+    if (feature_h_meta_) cudaFreeHost(feature_h_meta_);
     if (prefill_host_R_) cudaFreeHost(prefill_host_R_);
     if (local_window_R_) cudaFree(local_window_R_);
     if (private_gr_arena_) cudaFree(private_gr_arena_);
@@ -290,6 +300,155 @@ bool MtpDrafter::hq_report(std::FILE* out, int64_t request, std::string& err) co
 }
 
 // Lab selective MTP uses only its OWN authoritative K/V. The target provides logical positions, never values.
+
+bool MtpDrafter::feature_allocate(std::string& err) {
+    if (!force_on_ || selective_config_ || !hq_pack_.empty() || g_->hc != 4 || g_->n_embd != 2560) {
+        err = "mtp feature: unsupported geometry or graph configuration"; return false;
+    }
+    const size_t bytes = (size_t) 1024 * 4 * 2560 * sizeof(float);
+    if (cudaMalloc((void**) &feature_bank_, bytes) != cudaSuccess ||
+        cudaMalloc((void**) &feature_fixture_, 1024 * sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc((void**) &feature_mask_, sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc((void**) &feature_stats_, 6 * sizeof(unsigned long long)) != cudaSuccess ||
+        cudaHostAlloc((void**) &feature_host_, bytes, cudaHostAllocPortable) != cudaSuccess ||
+        cudaHostAlloc((void**) &feature_h_meta_, 4 * sizeof(int32_t), cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+        cudaHostGetDevicePointer((void**) &feature_m_meta_, feature_h_meta_, 0) != cudaSuccess) {
+        err = "mtp feature: equal-allocation buffers do not fit"; return false;
+    }
+    std::memset(feature_h_meta_, 0, 4 * sizeof(int32_t));
+    feature_bytes_ = bytes + 1024 * sizeof(int32_t) + sizeof(int32_t) + 6 * sizeof(unsigned long long);
+    vram_ += feature_bytes_;
+    std::fprintf(stderr, "strata lab mtp feature: allocation=retained table_rows=1024 row_floats=10240 "
+                         "vram_bytes=%llu graph_gate=all_modes intervention=Rin_only fresh_only=1\n",
+                 (unsigned long long) feature_bytes_);
+    return true;
+}
+
+bool MtpDrafter::feature_begin(int mode, const std::string& path, const uint8_t* identity,
+                              const std::vector<int64_t>& prompt, const std::vector<int32_t>& fixture,
+                              int64_t requested, std::string& err) {
+    const OnDevice on_device(device_);
+    if (!feature_config_ || mode < 0 || mode > 2 || prompt.empty() || fixture.size() != 1024 ||
+        requested < 1 || requested > 1024 || (mode == 1 && requested != 1024)) {
+        err = "mtp feature: invalid request or fixture (exactly1024 required)"; return false;
+    }
+    while (chain_live_) if (chain_poll(err) < 0) return false;
+    if (cudaStreamSynchronize(cs_) != cudaSuccess || (side_ && cudaStreamSynchronize(side_) != cudaSuccess)) {
+        err = "mtp feature: request drain failed"; return false;
+    }
+    const auto started = Clock::now();
+    feature_mode_ = mode; feature_path_ = path; feature_requested_ = requested;
+    feature_prompt_last_ = (int32_t) prompt.back();
+    feature_captured_ = feature_bank_rows_ = 0;
+    feature_fresh_ = feature_forced_ = feature_root_mismatch_ = 0;
+    FeatureHeader expected{};
+    std::memcpy(expected.magic, "SMTPR1\0", 8);
+    expected.version = 1; expected.hc = 4; expected.n_embd = 2560; expected.rows = 1024;
+    expected.prompt_tokens = (int64_t) prompt.size(); expected.first_pos = expected.prompt_tokens - 1;
+    std::memcpy(expected.identity, identity, 32);
+    try {
+        const auto ph = prefix_cache_digest(prompt.data(), prompt.size() * sizeof(int64_t));
+        const auto fh = prefix_cache_digest(fixture.data(), fixture.size() * sizeof(int32_t));
+        std::memcpy(expected.prompt, ph.data(), 32); std::memcpy(expected.fixture, fh.data(), 32);
+        feature_header_ = expected;
+        const bool exists = std::filesystem::exists(path);
+        if (mode == 1 && exists) { err = "mtp feature: refusing to overwrite an existing bank"; return false; }
+        if (mode != 1 && exists) {
+            std::ifstream in(path, std::ios::binary);
+            FeatureHeader got{};
+            if (!in.read((char*) &got, sizeof(got)) || std::memcmp(&got, &expected, offsetof(FeatureHeader, payload)) != 0) {
+                err = "mtp feature: bank identity/shape/prompt/fixture mismatch"; return false;
+            }
+            const size_t bytes = (size_t) 1024 * 10240 * sizeof(float);
+            if (!in.read((char*) feature_host_, bytes) || in.peek() != std::char_traits<char>::eof()) {
+                err = "mtp feature: incomplete or trailing bank payload"; return false;
+            }
+            const auto payload = prefix_cache_digest(feature_host_, bytes);
+            if (std::memcmp(got.payload, payload.data(), 32) != 0) { err = "mtp feature: payload SHA256 mismatch"; return false; }
+            for (size_t i = 0; i < bytes / sizeof(float); ++i) if (!std::isfinite(feature_host_[i])) {
+                err = "mtp feature: nonfinite bank residual"; return false;
+            }
+            if (cudaMemcpy(feature_bank_, feature_host_, bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+                err = "mtp feature: bank upload failed"; return false;
+            }
+            feature_header_ = got; feature_bank_rows_ = 1024;
+        } else if (mode == 2 || (mode == 0 && requested != 15)) {
+            err = "mtp feature: bank missing (only off15 bootstrap may omit it)"; return false;
+        }
+    } catch (const std::exception& e) { err = std::string("mtp feature: ") + e.what(); return false; }
+    std::memcpy(feature_ids_, fixture.data(), sizeof(feature_ids_));
+    if (cudaMemcpy(feature_fixture_, feature_ids_, sizeof(feature_ids_), cudaMemcpyHostToDevice) != cudaSuccess ||
+        cudaMemset(feature_stats_, 0, 6 * sizeof(unsigned long long)) != cudaSuccess) {
+        err = "mtp feature: request metadata upload failed"; return false;
+    }
+    feature_load_ms_ = ms_since(started);
+    return true;
+}
+
+bool MtpDrafter::feature_record(const float* R, int64_t pos, const int32_t* input, int keep, std::string& err) {
+    if (!feature_config_ || feature_mode_ != 1) return true;
+    const OnDevice on_device(device_);
+    if (keep < 1 || pos != feature_header_.first_pos + feature_captured_ || feature_captured_ >= 1024) {
+        err = "mtp feature: noncontiguous committed residual capture"; return false;
+    }
+    const int n = std::min(keep, 1024 - feature_captured_);
+    for (int i = 0; i < n; ++i) {
+        const int at = feature_captured_ + i;
+        // The first row is the prompt's last input; all subsequent inputs are earlier forced outputs.
+        if (input[i] != (at == 0 ? feature_prompt_last_ : feature_ids_[at - 1])) {
+            err = "mtp feature: captured input row does not follow the fixture"; return false;
+        }
+    }
+    // Instrumented record GEN only. Source producer has finished; copy completes before verifier parity reuse.
+    if (cudaMemcpy(feature_host_ + (size_t) feature_captured_ * 10240, R,
+                   (size_t) n * 10240 * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        err = "mtp feature: committed residual readback failed"; return false;
+    }
+    feature_captured_ += n;
+    return true;
+}
+
+bool MtpDrafter::feature_finish(std::FILE* out, int64_t request, int64_t produced, const char* finish, std::string& err) {
+    if (!feature_config_) return true;
+    const OnDevice on_device(device_);
+    while (chain_live_) if (chain_poll(err) < 0) return false;
+    if (produced != feature_requested_ || std::strcmp(finish, "length") != 0) {
+        err = "mtp feature: incomplete fixed-continuation request"; return false;
+    }
+    if (feature_mode_ == 1) {
+        if (feature_captured_ != 1024) { err = "mtp feature: incomplete bank capture"; return false; }
+        try {
+            const size_t bytes = (size_t) 1024 * 10240 * sizeof(float);
+            for (size_t i = 0; i < bytes / sizeof(float); ++i) if (!std::isfinite(feature_host_[i])) {
+                err = "mtp feature: nonfinite captured residual"; return false;
+            }
+            const auto hash = prefix_cache_digest(feature_host_, bytes);
+            std::memcpy(feature_header_.payload, hash.data(), 32);
+            if (std::filesystem::exists(feature_path_)) { err = "mtp feature: bank appeared during capture"; return false; }
+            std::ofstream file(feature_path_, std::ios::binary);
+            file.write((const char*) &feature_header_, sizeof(feature_header_));
+            file.write((const char*) feature_host_, bytes); file.flush();
+            if (!file.good()) { err = "mtp feature: bank write failed"; return false; }
+            feature_bank_rows_ = 1024;
+        } catch (const std::exception& e) { err = std::string("mtp feature: ") + e.what(); return false; }
+    }
+    unsigned long long stats[6]{};
+    if (cudaMemcpy(stats, feature_stats_, sizeof(stats), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        err = "mtp feature: counter readback failed"; return false;
+    }
+    char digest[65]{};
+    for (int i = 0; i < 32; ++i) std::snprintf(digest + 2 * i, 3, "%02x", feature_header_.payload[i]);
+    std::fprintf(out, "strata lab mtp feature: request %lld mode=%s bank_rows=%d captured_rows=%d "
+                      "eligible_steps=%llu injected_steps=%llu mismatch_steps=%llu bounds_steps=%llu latched_steps=%llu excluded_steps=%llu "
+                      "fresh_chains=%lld forced_chains=%lld root_mismatch_chains=%lld vram_bytes=%llu bank_load_ms=%.3f "
+                      "record_instrumented=%d target_features_synthetic=%d draft_token_substitutions=0 draft_logit_substitutions=0 target_forced=1 payload_sha256=%s\n",
+                 (long long) request, feature_mode_ == 1 ? "record" : feature_mode_ == 2 ? "feature" : "off",
+                 feature_bank_rows_, feature_captured_, stats[0], stats[1], stats[2], stats[3], stats[4], stats[5],
+                 (long long) feature_fresh_, (long long) feature_forced_, (long long) feature_root_mismatch_,
+                 (unsigned long long) feature_bytes_, feature_load_ms_, feature_mode_ == 1, feature_mode_ == 2, digest);
+    return true;
+}
+
 bool MtpDrafter::selective_allocate(std::string& err) {
     using namespace strata::kernels;
 #if defined(STRATA_USE_HIP)
@@ -839,6 +998,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     }
 #endif
     if (selective_config_ && !selective_allocate(err)) return false;
+    if (feature_config_ && !feature_allocate(err)) return false;
     const double files_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_files).count();
     if (shared != nullptr) {
         std::fprintf(stderr, "strata mtp: shared draft weights, %.0f MiB of private state and buffers\n",
@@ -1634,6 +1794,9 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
 #endif
     coupled_rec_ = coupled;
     coupled_j_ = j;
+    if (feature_config_)
+        strata::kernels::mtp_feature_step(Rin_, HCN, tok_, feature_bank_, feature_fixture_, feature_m_meta_,
+                                         feature_mask_, feature_stats_, j, cs_);
     bool ok = record_forward(1, row, cs_, err);
     coupled_rec_ = false;
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
@@ -2174,6 +2337,21 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     h_row_[0] = a;
     h_row_[1] = 0;
     if (selective_config_ && !selective_stage(T, p, a, n_out, err)) return false;
+    if (feature_config_) {
+        const int64_t base = p + a - feature_header_.first_pos;
+        if (base < 0 || base > 1024) { err = "mtp feature: chain base outside bank request"; return false; }
+        const bool fresh = force == nullptr && n_force == 0;
+        if (fresh) ++feature_fresh_; else ++feature_forced_;
+        const bool root_ok = base < 1024 && tokens[a] == feature_ids_[base];
+        if (fresh && !root_ok) ++feature_root_mismatch_;
+        feature_h_meta_[0] = feature_mode_;
+        feature_h_meta_[1] = (int32_t) base;
+        feature_h_meta_[2] = feature_bank_rows_;
+        feature_h_meta_[3] = fresh && root_ok && feature_bank_rows_ == 1024;
+        if (cudaMemsetAsync(feature_mask_, 0, sizeof(int32_t), cs_) != cudaSuccess) {
+            err = "mtp feature: chain mask reset failed"; return false;
+        }
+    }
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
     chain_early_ = std::max(0, std::min(n_early, n_out));
