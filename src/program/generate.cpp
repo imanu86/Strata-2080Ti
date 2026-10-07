@@ -90,6 +90,13 @@
 #endif
 
 #include <cuda_runtime.h>
+// NVTX3 is header-only in the installed CUDA toolkit. Opt-in laboratory ranges only.
+#if defined(_WIN32) && __has_include(<nvtx3/nvToolsExt.h>)
+#include <nvtx3/nvToolsExt.h>
+#define STRATA_LAB_NVTX_AVAILABLE 1
+#else
+#define STRATA_LAB_NVTX_AVAILABLE 0
+#endif
 
 #include <array>
 #include <chrono>
@@ -146,6 +153,31 @@ static int64_t sm75_prompt_extra_bytes(const strata::core::ModelGeometry& g, int
 }
 
 namespace {
+// Same-thread push/pop ranges. Disabled mode makes no NVTX calls or formatted labels.
+struct LabNvtxRange {
+    bool active_ = false;
+    char label_[96] = {};
+    LabNvtxRange(bool enabled, const char* kind, int64_t gen) : active_(enabled) {
+#if STRATA_LAB_NVTX_AVAILABLE
+        if (active_) {
+            std::snprintf(label_, sizeof(label_), "strata.%s gen=%lld", kind, (long long) gen);
+            nvtxRangePushA(label_);
+        }
+#else
+        (void) kind; (void) gen;
+#endif
+    }
+    LabNvtxRange(const LabNvtxRange&) = delete;
+    LabNvtxRange& operator=(const LabNvtxRange&) = delete;
+    void finish() noexcept {
+#if STRATA_LAB_NVTX_AVAILABLE
+        if (active_) nvtxRangePop();
+#endif
+        active_ = false;
+    }
+    ~LabNvtxRange() { finish(); }
+};
+
 // Windows' WDDM driver model: native Windows, or WSL2 (its GPU goes through /dev/dxg to the Windows driver).  There,
 // pinning a large arena into two CUDA contexts leaves WDDM refusing every later allocation (the 5080 + 3090 rig);
 // a Linux driver has no such limit (#253: the 8 GiB cap cost a 4090 + 3060 split 3x of its prompt speed).
@@ -2141,6 +2173,18 @@ int main(int argc, char** argv) {
     // Lab-only synthetic continuation: the target still runs, but the fixture supplies future draft IDs.
     // This is a decode ceiling experiment, never a measurement of actual generation quality.
     // Lab diagnostics only: fixed POD buffers during decode, JSONL after its timer is frozen.
+
+    const char* lab_nvtx_env = std::getenv("STRATA_LAB_NVTX_RANGES");
+    if (lab_nvtx_env != nullptr && std::strcmp(lab_nvtx_env, "0") != 0 && std::strcmp(lab_nvtx_env, "1") != 0) {
+        std::fprintf(stderr, "strata lab nvtx: NVTX_RANGES accepts only 0 or 1\n"); return 2;
+    }
+    const bool lab_nvtx = lab_nvtx_env != nullptr && std::strcmp(lab_nvtx_env, "1") == 0;
+    if (lab_nvtx && (!STRATA_LAB_NVTX_AVAILABLE || !o.serve || o.batch != 0)) {
+        std::fprintf(stderr, "strata lab nvtx: requires Windows NVTX3 headers and single-chat --serve\n"); return 2;
+    }
+    if (lab_nvtx)
+        std::fprintf(stderr, "strata lab nvtx: ranges=on schema=1 request=strata.request decode=strata.decode "
+                             "gen_index=accepted_command_ordinal scope=host_thread\n");
 
     // A separate, explicit laboratory mode: real target outputs, no external continuation or token oracle.
     const char* lab_hq_free_env = std::getenv("STRATA_LAB_MTP_HQ_FREE");
@@ -9704,6 +9748,9 @@ int main(int argc, char** argv) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
                 continue;
             }
+            static int64_t lab_nvtx_next_gen = 0;
+            const int64_t lab_nvtx_gen = lab_nvtx ? lab_nvtx_next_gen++ : -1;
+            LabNvtxRange lab_nvtx_request_range(lab_nvtx, "request", lab_nvtx_gen);
             // Read the treatment once, before this request changes any session state or starts prefill. A bad
             // switch file is fatal: continuing with the startup/previous mode would invalidate the hot BAB.
             LabDraftOracle request_oracle = lab_oracle;
@@ -11272,6 +11319,7 @@ int main(int argc, char** argv) {
                 policy_chains.resize((size_t) max_new + 8);
                 policy_windows.resize((size_t) max_new + 8);
             }
+            LabNvtxRange lab_nvtx_decode_range(lab_nvtx, "decode", lab_nvtx_gen);
             const Clock::time_point d0 = Clock::now();
             auto policy_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - d0).count(); };
             // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
@@ -12588,6 +12636,10 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            lab_nvtx_decode_range.finish();
+            if (lab_nvtx)
+                std::fprintf(stderr, "strata lab nvtx: gen=%lld request=%lld decode_ms=%.6f scope=host_thread\n",
+                             (long long) lab_nvtx_gen, (long long) force_k, decode_ms);
             if (lab_policy) {
                 // This diagnostic cannot be used as an uninstrumented performance result. All formatting and I/O
                 // are outside decode_ms; timestamps are host observations, not GPU execution durations.
@@ -13001,6 +13053,7 @@ int main(int argc, char** argv) {
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                         (long long) req_offload, chain_txt);
             std::fflush(stdout);
+            lab_nvtx_request_range.finish();
             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
                             (int64_t) live.size() == p;
