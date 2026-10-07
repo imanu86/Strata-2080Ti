@@ -69,6 +69,10 @@ public:
     uint64_t vram_bytes() const { return vram_; }
     /// Lab v1: optional private int8 KV pool and a second pre-captured chain graph family. Before load.
     void set_selective_capture(bool on) { selective_config_ = on; }
+    /// Lab-only equal-allocation comparison. Configure before load; switch only at an idle GEN boundary.
+    void set_hq_pack(const std::string& dir) { hq_pack_ = dir; }
+    bool hq_switch(int mode, std::string& err);
+    bool hq_report(std::FILE* out, int64_t request, std::string& err) const;
     /// After an idle, completed prefill/validated SSD restore. `full_until` is exclusive and -1 means unproven.
     bool selective_begin_request(uint64_t epoch, int64_t full_until, bool on, std::string& err);
     /// Once per verdict, while the old MTP chain is idle and the verifier's selection is still stable.
@@ -273,6 +277,15 @@ private:
     std::string vocab_file() const { return dvocab_path_.empty() ? rt_dir_ + "/draft_vocab.bin" : dvocab_path_; }
     /// a projection's weights for the draft layer's own pass: the Q4_0 copy under --mtp-q4, else the Q8_0 original
     const void* wq(const char* name, int& type) const;
+    bool hq_validate(const ModelGeometry& g, const MtpDrafter* shared, std::string& err);
+    std::string hq_pack_, hq_sha_[3];
+    int hq_mode_ = 0, hq_record_mode_ = 0;
+    uint64_t hq_upload_bytes_ = 0;
+    double hq_upload_ms_ = 0.0;
+    int64_t hq_chains_[3] = {};
+    cudaGraphExec_t hq_round_[2][9] = {}, hq_step_[2][9] = {};
+    uint8_t* hq_xq_ = nullptr; // private: shared_expert concurrently consumes xq_
+    void* hq_scratch_ = nullptr; // both carved from the ordinary arena before expert-cache sizing
     bool make_q4_dense(const std::vector<uint8_t>& blob, std::string& err);
     bool make_q4_head(std::string& err);
     void record_top2(int j);

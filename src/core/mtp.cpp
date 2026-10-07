@@ -47,6 +47,7 @@
 #endif
 
 #ifdef STRATA_NATIVE_EXPERTS
+#include "strata/kernels/iq_kernels.hpp"
 #include "ggml.h"   // --mtp-q4: the head rows' and projections' formats, dequantized and requantized at load
 #endif
 
@@ -152,6 +153,8 @@ MtpDrafter::~MtpDrafter() {
     if (prefill_host_R_) cudaFreeHost(prefill_host_R_);
     if (local_window_R_) cudaFree(local_window_R_);
     if (private_gr_arena_) cudaFree(private_gr_arena_);
+    for (auto& family : hq_round_) for (auto& e : family) if (e) cudaGraphExecDestroy(e);
+    for (auto& family : hq_step_) for (auto& e : family) if (e) cudaGraphExecDestroy(e);
     for (auto& e : selective_round_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : selective_step_) if (e) cudaGraphExecDestroy(e);
     if (selective_arena_) cudaFree(selective_arena_);
@@ -187,6 +190,103 @@ MtpDrafter::~MtpDrafter() {
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
     for (void* h : hosts) if (h) cudaFreeHost(h);
+}
+
+namespace {
+constexpr uint64_t hq_slab_bytes = 1415577600ull;
+const char* hq_names[3] = {"q2legacy", "q2native", "q4native"};
+uint64_t hq_bytes(int mode) { return mode == 2 ? hq_slab_bytes : hq_slab_bytes / 2; }
+bool hq_file_size(const std::string& path, uint64_t bytes) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    const bool ok = STRATA_FILE_SEEK64(f, 0, SEEK_END) == 0 &&
+                    STRATA_FILE_TELL64(f) == (int64_t) bytes;
+    std::fclose(f); return ok;
+}
+}
+
+bool MtpDrafter::hq_validate(const ModelGeometry& g, const MtpDrafter* shared, std::string& err) {
+#if !defined(STRATA_NATIVE_EXPERTS) || defined(STRATA_USE_HIP)
+    err = "mtp hq: CUDA native expert build required"; return false;
+#else
+    if (shared || selective_config_ || !force_on_ || g.n_embd != 2560 || g.n_ff != 640 || g.n_expert != 512) {
+        err = "mtp hq: unsupported geometry, sharing or selective configuration"; return false;
+    }
+    std::ifstream in(hq_pack_ + "/experts.txt");
+    std::string magic, extra; int ne = 0, h = 0, ff = 0;
+    if (!(in >> magic >> ne >> h >> ff) || magic != "STRATA_MTP_HQ_V1" || ne != 512 || h != 2560 || ff != 640) {
+        err = "mtp hq: invalid versioned experts.txt geometry"; return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        std::string name, layout, sha; int gu = -1, down = -1; uint64_t stride = 0, bytes = 0;
+        const int type = i == 2 ? 2 : 42;
+        const std::string path = i == 0 ? rt_dir_ + "/experts.bin" : hq_pack_ + "/" + hq_names[i] + ".bin";
+        if (!(in >> name >> layout >> gu >> down >> stride >> bytes >> sha) || name != hq_names[i] ||
+            layout != (i == 0 ? "legacy-planar" : "native-gguf") || gu != type || down != type ||
+            stride != hq_bytes(i) / 512 || bytes != hq_bytes(i) || sha.size() != 64 ||
+            !std::all_of(sha.begin(), sha.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }) ||
+            !hq_file_size(path, bytes) || !strata::kernels::native_expert_supported(type, type, h, ff) ||
+            strata::kernels::native_expert_layout(type, type, h, ff).bytes != stride) {
+            err = "mtp hq: invalid layout/type/stride/hash declaration/file size for " + std::string(hq_names[i]); return false;
+        }
+        hq_sha_[i] = sha;
+    }
+    if (in >> extra) { err = "mtp hq: trailing experts.txt data"; return false; }
+    std::fprintf(stderr, "strata lab mtp hq: allocation=retained slab_bytes=%llu families=q2legacy,q2native,q4native "
+                         "prefill=front_only q2native=bit_repack native_activation=q8_1 legacy_activation=q8_scaled "
+                         "hash_validation=manifest_declared\n", (unsigned long long) hq_slab_bytes);
+    return true;
+#endif
+}
+
+bool MtpDrafter::hq_switch(int mode, std::string& err) {
+    const OnDevice on_device(device_);
+    if (hq_pack_.empty() || mode < 0 || mode > 2 || chain_live_ || coupled_active_ || selective_config_) {
+        err = "mtp hq: invalid mode or draft chain not idle"; return false;
+    }
+    // Every possible producer/reader is idle before overwriting the fixed slab. No mode change during decode.
+    if ((cs_ && cudaStreamSynchronize(cs_) != cudaSuccess) ||
+        (side_ && cudaStreamSynchronize(side_) != cudaSuccess)) {
+        err = "mtp hq: stream synchronization failed"; return false;
+    }
+    for (auto& count : hq_chains_) count = 0;
+    hq_upload_bytes_ = 0; hq_upload_ms_ = 0;
+    if (mode == hq_mode_) return true;
+    const auto start = Clock::now();
+    const uint64_t bytes = hq_bytes(mode);
+    const std::string path = mode == 0 ? rt_dir_ + "/experts.bin" : hq_pack_ + "/" + hq_names[mode] + ".bin";
+    if (!hq_file_size(path, bytes)) { err = "mtp hq: pack size changed"; return false; }
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) { err = "mtp hq: cannot reopen expert pack"; return false; }
+    struct Closer { FILE* f; ~Closer() { std::fclose(f); } } closer{f};
+    std::vector<uint8_t> chunk(64u << 20); // GEN boundary only, before prompt/decode timers
+    for (uint64_t off = 0; off < bytes;) {
+        const size_t n = (size_t) std::min<uint64_t>(chunk.size(), bytes - off);
+        if (std::fread(chunk.data(), 1, n, f) != n ||
+            cudaMemcpy(experts_ + off, chunk.data(), n, cudaMemcpyHostToDevice) != cudaSuccess) {
+            err = "mtp hq: expert upload failed; mixed slab cannot be used"; return false;
+        }
+        off += n;
+    }
+    if (std::fgetc(f) != EOF || std::ferror(f) || cudaStreamSynchronize(cs_) != cudaSuccess ||
+        (side_ && cudaStreamSynchronize(side_) != cudaSuccess)) {
+        err = "mtp hq: expert upload completion failed"; return false;
+    }
+    hq_mode_ = mode; hq_upload_bytes_ = bytes; hq_upload_ms_ = ms_since(start);
+    return true;
+}
+
+bool MtpDrafter::hq_report(std::FILE* out, int64_t request, std::string& err) const {
+    if (hq_pack_.empty()) return true;
+    if (chain_live_) { err = "mtp hq: report while chain live"; return false; }
+    std::fprintf(out, "strata lab mtp hq: request %lld mode=%s slab_bytes=%llu upload_bytes=%llu upload_ms=%.17g "
+                      "q2legacy_chains=%lld q2native_chains=%lld q4native_chains=%lld expert_path=%s ggml_gu=%d ggml_down=%d weights_sha256_declared=%s "
+                      "hash_validation=manifest_declared\n", (long long) request, hq_names[hq_mode_],
+                 (unsigned long long) hq_slab_bytes, (unsigned long long) hq_upload_bytes_, hq_upload_ms_,
+                 (long long) hq_chains_[0], (long long) hq_chains_[1], (long long) hq_chains_[2],
+                 hq_mode_ == 0 ? "legacy_planar" : "native_gguf", hq_mode_ == 2 ? 2 : 42,
+                 hq_mode_ == 2 ? 2 : 42, hq_sha_[hq_mode_].c_str());
+    return std::ferror(out) == 0;
 }
 
 // Lab selective MTP uses only its OWN authoritative K/V. The target provides logical positions, never values.
@@ -517,6 +617,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     if (ple_ss_ == nullptr) ple_ss_ = &ss;
     max_t_ = max_t;
     rt_dir_ = rt_dir;
+    if (!hq_pack_.empty() && !hq_validate(g, shared, err)) return false;
     if (max_t < 1 || max_t > strata::kernels::kVerifyMaxT) { err = "mtp: max_t out of range"; return false; }
     if (shared != nullptr) {
         if (shared->device_ != device_ || shared->g_ != &g || shared->dense_ == nullptr ||
@@ -572,7 +673,8 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
             FILE* f;
             ~Closer() { if (f != nullptr) std::fclose(f); }
         } closer{f};
-        if (cudaMalloc((void**) &experts_, bytes) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
+        const uint64_t allocated = hq_pack_.empty() ? bytes : 1415577600ull;
+        if (cudaMalloc((void**) &experts_, allocated) != cudaSuccess) { err = "mtp: the 512 experts do not fit in VRAM"; return false; }
 #if !defined(_WIN32)
         strata::platform::advise_willneed(fileno(f), 0, bytes);
 #endif
@@ -583,7 +685,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
             cudaMemcpy(experts_ + off, chunk.data(), n, cudaMemcpyHostToDevice);
             off += n;
         }
-        vram_ += bytes;
+        vram_ += allocated;
     }
     const char* required[] = {"fc_embedding.weight", "fc_hidden.weight", "self_attn.q_proj.weight", "self_attn.k_proj.weight",
                               "self_attn.v_proj.weight", "self_attn.o_proj.weight", "mlp.shared_expert.gate_proj.weight",
@@ -688,6 +790,12 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         grp_counts_ = b.take<int32_t>(4);
         hit_xq_ = b.take<uint8_t>(T * (N / 32) * 34); hit_xs_ = b.take<float>(T * (N / 32));
         hit_scratch_ = b.take<uint8_t>(strata::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff));
+#ifdef STRATA_NATIVE_EXPERTS
+        if (!hq_pack_.empty()) {
+            hq_xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes((int) N, (int) T));
+            hq_scratch_ = b.take<uint8_t>(strata::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff));
+        }
+#endif
         sh_scratch_ = (float*) b.take<uint8_t>(strata::kernels::shared_expert_scratch_bytes(g.n_ff));
         x_bf16_ = b.take<uint16_t>(N);
         out_ids_ = b.take<int32_t>(T + 4);
@@ -1310,11 +1418,25 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             else router_top10(logits_ + t * g.n_expert, 1, (int) g.n_expert, (int) K, ids_ + t * K, w_ + t * K, cs);
         }
         }
+        if (hq_record_mode_ != 0) {
+#ifdef STRATA_NATIVE_EXPERTS
+            const int type = hq_record_mode_ == 1 ? 42 : 2;
+            const auto layout = native_expert_layout(type, type, N, g.n_ff);
+            moe_group_resident(ids_, (int) (T * K), (int) K, experts_, (int64_t) layout.bytes, grp_ptr_,
+                               grp_start_, grp_counts_, hit_dst_, hit_slot_, cs);
+            native_quantize_q8_1(mixed_, hq_xq_, (int) N, T, cs);
+            native_expert_grouped(layout, grp_ptr_, grp_start_, grp_counts_, hit_dst_, hit_slot_,
+                                  (int64_t) T * K, (int64_t) T * K, hq_xq_, hq_scratch_, parts_, cs);
+#else
+            err = "mtp hq: native expert kernels unavailable"; return false;
+#endif
+        } else {
         moe_group_resident(ids_, (int) (T * K), (int) K, experts_, (int64_t) strata::kernels::cpu::BLOB, grp_ptr_,
                            grp_start_, grp_counts_, hit_dst_, hit_slot_, cs);
         quantize_q8_0_scaled(mixed_, hit_xq_, hit_xs_, (int64_t) T * N, cs);
         moe_grouped_s2(grp_ptr_, grp_start_, grp_counts_, hit_dst_, hit_slot_, (int64_t) T * K, (int64_t) T * K, hit_xq_,
                        hit_xs_, hit_scratch_, parts_, cs);
+        }
         if (branch_on) {
             if (cudaStreamWaitEvent(cs, sh_join_, 0) != cudaSuccess) { err = "mtp: the shared expert's join"; return false; }
         } else {
@@ -1448,7 +1570,8 @@ bool MtpDrafter::capture_prefill_dev(int T, std::string& err) {
 }
 
 bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
-    cudaGraphExec_t& exec = selective_record_ ? selective_round_[T] : (coupled ? round_exec_c_[T] : round_exec_[T]);
+    cudaGraphExec_t& exec = hq_record_mode_ ? hq_round_[hq_record_mode_ - 1][T] :
+        (selective_record_ ? selective_round_[T] : (coupled ? round_exec_c_[T] : round_exec_[T]));
     if (exec) return true;
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
@@ -1494,7 +1617,8 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
 // Chain step j (1..max_t-2): one row at the cell staged in step row `max_t + j - 1`, from the previous step's
 // residual and token (left in Rin_[0] / tok_[0] by mtp_select); draft j and its probability to the mapped outputs.
 bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
-    cudaGraphExec_t& exec = selective_record_ ? selective_step_[j] : (coupled ? step_exec_c_[j] : step_exec_[j]);
+    cudaGraphExec_t& exec = hq_record_mode_ ? hq_step_[hq_record_mode_ - 1][j] :
+        (selective_record_ ? selective_step_[j] : (coupled ? step_exec_c_[j] : step_exec_[j]));
     if (exec) return true;
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
@@ -1992,6 +2116,16 @@ bool MtpDrafter::prepare_chain(std::string& err) {
         selective_record_ = false;
         if (!ok) return false;
     }
+    if (!hq_pack_.empty()) {
+        bool ok = true;
+        for (int mode = 1; ok && mode <= 2; ++mode) {
+            hq_record_mode_ = mode;
+            for (int T = 1; ok && T <= max_t_; ++T) ok = capture_round(T, false, err);
+            for (int j = 1; ok && j <= max_t_ - 2; ++j) ok = capture_step(j, false, err);
+        }
+        hq_record_mode_ = 0;
+        if (!ok) return false;
+    }
     if (ev_chain_ == nullptr && cudaEventCreateWithFlags(&ev_chain_, cudaEventDisableTiming) != cudaSuccess) {
         err = "mtp: event creation failed";
         return false;
@@ -2014,9 +2148,13 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
         err = "mtp: chain arguments out of range";
         return false;
     }
-    if (round_exec_[T] == nullptr) { err = "mtp: chain graphs not prepared"; return false; }
+    if ((hq_mode_ ? hq_round_[hq_mode_ - 1][T] : round_exec_[T]) == nullptr) {
+        err = "mtp: chain graphs not prepared"; return false;
+    }
     for (int j = 1; j < n_out; ++j)
-        if (step_exec_[j] == nullptr) { err = "mtp: chain graphs not prepared"; return false; }
+        if ((hq_mode_ ? hq_step_[hq_mode_ - 1][j] : step_exec_[j]) == nullptr) {
+            err = "mtp: chain graphs not prepared"; return false;
+        }
     const Clock::time_point t0 = Clock::now();
     const int64_t NH = g_->n_head;
     auto put = [&](int row, int64_t cell) {
@@ -2039,10 +2177,10 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
     chain_early_ = std::max(0, std::min(n_early, n_out));
-    bool ok = cudaGraphLaunch(selective_active_ ? selective_round_[T] : round_exec_[T], cs_) == cudaSuccess;
+    bool ok = cudaGraphLaunch(hq_mode_ ? hq_round_[hq_mode_ - 1][T] : (selective_active_ ? selective_round_[T] : round_exec_[T]), cs_) == cudaSuccess;
     if (ok && chain_early_ >= 1) ok = cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
     for (int j = 1; ok && j < n_out; ++j) {
-        ok = cudaGraphLaunch(selective_active_ ? selective_step_[j] : step_exec_[j], cs_) == cudaSuccess;
+        ok = cudaGraphLaunch(hq_mode_ ? hq_step_[hq_mode_ - 1][j] : (selective_active_ ? selective_step_[j] : step_exec_[j]), cs_) == cudaSuccess;
         if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
     }
     if (!ok || cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {
@@ -2053,6 +2191,7 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     steps_seen_ = 0;
     chain_live_ = true;
     chain_n_ = n_out;
+    if (!hq_pack_.empty()) ++hq_chains_[hq_mode_];
     ms_draft += ms_since(t0);
     ++rounds;
     return true;

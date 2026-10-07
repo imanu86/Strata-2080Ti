@@ -2211,6 +2211,15 @@ int main(int argc, char** argv) {
                              "lookup/suffix0, oracle off hot-prefix SSD and no other probe/window forcing\n");
         return 2;
     }
+    const char* lab_hq_switch = std::getenv("STRATA_LAB_MTP_HQ_SWITCH");
+    const char* lab_hq_pack = std::getenv("STRATA_LAB_MTP_HQ_PACK");
+    const bool lab_hq = lab_hq_switch != nullptr && lab_hq_switch[0] != 0;
+    if ((lab_hq_pack != nullptr && lab_hq_pack[0] != 0) != lab_hq ||
+        (lab_hq && (!lab_oracle_hot || lab_oracle_on || lab_selective || o.prompt_cache_file.empty() ||
+                    lab_prefix_tokens <= 0 || std::getenv("STRATA_CKPT_REREAD") != nullptr))) {
+        std::fprintf(stderr, "strata lab mtp hq: both HQ_SWITCH and HQ_PACK are required; "
+                             "use oracle-off hot SSD-prefix, no selective/REREAD\n"); return 2;
+    }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                                      [](int slots) { return slots > 0; }))) {
@@ -4278,6 +4287,7 @@ int main(int argc, char** argv) {
         const int mtp_t = o.pipeline_windows >= 2 ? strata::kernels::kVerifyMaxT : o.spec;
         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
         mtp.set_selective_capture(lab_selective);
+        if (lab_hq) mtp.set_hq_pack(lab_hq_pack);
         if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st && !mtp_cross_device ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
         mtp.set_ple_session(&ss);
         if (batch_mtp) {
@@ -7347,6 +7357,12 @@ int main(int argc, char** argv) {
             for (const auto& p : o.native_head_shards) assets.emplace_back(p);
             for (const auto& p : o.native_dense_gguf) assets.emplace_back(p);
             for (const auto& item : o.cvec_files) assets.emplace_back(item.first);
+            if (lab_hq) {
+                assets.emplace_back(std::string(lab_hq_pack) + "/experts.txt");
+                assets.emplace_back(std::string(lab_hq_pack) + "/manifest.json");
+                assets.emplace_back(std::string(lab_hq_pack) + "/q2native.bin");
+                assets.emplace_back(std::string(lab_hq_pack) + "/q4native.bin");
+            }
             prefix_cache_assets = assets;
             std::vector<std::string> settings;
             if (mtp_cross_device) settings.push_back("draft-device=0");
@@ -9742,6 +9758,18 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata lab selective: selected mode=%d check=%d before GEN\n",
                              selective_request_on ? 8192 : 0, selective_request_check ? 1 : 0);
             }
+            int hq_request_mode = 0;
+            if (lab_hq) {
+                std::ifstream control(lab_hq_switch);
+                std::string mode, extra;
+                if (!(control >> mode) || (control >> extra) ||
+                    (mode != "q2legacy" && mode != "q2native" && mode != "q4native") ||
+                    geni || lab_oracle_on || oracle_prefix_file.empty()) {
+                    std::printf("ERR lab mtp hq: switch requires q2legacy/q2native/q4native; text GEN, "
+                                "oracle off and explicit SSD path required\n"); return 1;
+                }
+                hq_request_mode = mode == "q4native" ? 2 : mode == "q2native" ? 1 : 0;
+            }
             char* endp = nullptr;
             long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);   // (STRATA_FORCE_IDS may lower it)
             // optional sampling keys between max_new and the ids: temperature=F, top_p=F, top_k=N, min_p=F,
@@ -9929,7 +9957,7 @@ int main(int argc, char** argv) {
                 wait_before[(size_t) r] = remote_experts[(size_t) r].ms_wait();
             }
             cur = ids;
-            const Clock::time_point r0 = Clock::now();
+            Clock::time_point r0 = Clock::now();
             // ---- where this request starts reading: the live session, or a checkpoint, whose tokens AND pictures are
             // exactly the start of this prompt - at most n - 1 of them, the last token is always the first window
             auto starts_with = [&](const std::vector<int32_t>& pre, const std::vector<ImgKey>& pre_imgs) -> bool {
@@ -9959,6 +9987,10 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                 }
+                if (lab_hq && !mtp.hq_switch(hq_request_mode, err)) {
+                    std::printf("ERR %s\n", err.c_str()); return 1;
+                }
+                if (lab_hq) r0 = Clock::now(); // upload is reported separately; SSD restore/prefill starts here
                 live_ok = false;
                 live.clear(); live_imgs.clear(); checks.clear();
                 tail_ckpt_len = -1; check_clock = 0; cvec_cached = want_cvec;
@@ -11068,6 +11100,15 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata lab selective: history request=%lld source=%s full_until=%lld\n",
                              (long long) force_k, full ? (incoming_disk ? "validated_ssd" : "full_prefill") : "unproven",
                              (long long) (full ? n - 1 : -1));
+            }
+            if (lab_hq) {
+                const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && read_from > 0) ||
+                                                  (read_from == 0 && mtp.first_needed() <= 0));
+                if (!full || !req_imgs.empty()) {
+                    std::printf("ERR lab mtp hq: a complete full-prefill or validated SSD restore is required\n"); return 1;
+                }
+                std::fprintf(stderr, "strata lab mtp hq: history request=%lld source=%s full_until=%lld\n",
+                             (long long) force_k, incoming_disk ? "validated_ssd" : "full_prefill", (long long) (n - 1));
             }
             int64_t sel_a_reject = 0, sel_a_all = 0, sel_b_missing = 0, sel_b_wrong = 0, sel_b_unused = 0, sel_b_useful = 0;
             int64_t sel_b_scored = 0, sel_b_match = 0, sel_b_gate = 0, sel_b_notready = 0, sel_opportunities = 0;
@@ -12624,6 +12665,9 @@ int main(int argc, char** argv) {
                              (long long) force_k, valid ? 1 : 0, policy_nw, policy_nc, policy_truncated ? 1 : 0, (long long) nonfinite);
             }
 
+            if (lab_hq && !mtp.hq_report(stderr, force_k, err)) {
+                std::printf("ERR %s\n", err.c_str()); return 1;
+            }
             if (lab_selective) {
                 // Both pipeline and request decode timers are frozen. This opt-in gate is deliberately untimed.
                 if (selective_request_check && !mtp.selective_check(err)) {

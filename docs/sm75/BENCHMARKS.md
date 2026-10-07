@@ -1,3 +1,38 @@
+# MTP expert precision (laboratory only, 2026-10-07)
+
+The opt-in `STRATA_LAB_MTP_HQ_SWITCH` and `STRATA_LAB_MTP_HQ_PACK` compare
+the existing Q2 expert kernel, a lossless Q2 repack using the native kernel,
+and Q4 experts quantized from the original local BF16 tensors. All three
+keep the same 1,350 MiB expert allocation and pre-captured graph families;
+weights change only at an idle GEN boundary, before prefix restore and decode.
+The native paths also change activation quantization, so Q2-native is a
+separate control. The default engine path is unchanged.
+
+On the Ryzen 5800X / 96 GB Windows workstation, stage 0 is the RTX 3060 12 GB
+on Oculink x4 with an 8K display; stage 1 and MTP use the modified RTX 2080 Ti
+22 GB on PCIe x16. At 131,248 / 131,239 input tokens, 1,024 fixed output IDs,
+spec4/min-p0.5, int8 KV/resident32768, split16/pipeline2 and automatic elastic
+expert cache, the final hot Q4/legacy/Q4 B-A-B was:
+
+| Case | Q4 B1 | Q2 legacy A | Q4 B2 |
+|---|---:|---:|---:|
+| L01 | 72.7603 | 71.0100 | 72.7004 |
+| L02 | 64.9598 | 65.0692 | 65.3040 |
+
+Values are decode tokens/s with identical policy telemetry in every arm.
+All measured GENs restore 131,072 tokens from private SSD files. This is a
+fixed-continuation diagnostic, not free-generation quality or a deployment
+speedup: L01 improves about 2.4%, L02 is neutral, and the common allocation
+already charges the Q2 controls the extra 675 MiB. Upload time is outside
+decode; cache resize activity remains in decode and is recorded without
+subtraction. No Daily setting was promoted.
+
+The 32-request integrity/cleanup audit passed. All 512 Q2 experts pass the
+exporter's lossless round-trip; a separate decoder verifies byte/float-bit
+parity and lower Q4 weight error on 12 complete matrices from four fixed
+experts. These numerical checks do not prove draft quality.
+See [the frozen source, build, protocol, controls and numerical evidence](mtp-hq-20261007.json).
+
 # Causal window diagnostics, 7 October 2026
 
 `STRATA_LAB_POLICY_TRACE` enables default-off fixed buffers for MTP chain IDs,
