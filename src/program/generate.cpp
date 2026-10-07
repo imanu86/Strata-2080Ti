@@ -7574,6 +7574,51 @@ int main(int argc, char** argv) {
         // fills (residency index, slot), published by the loop once `el_fill_ev` has passed; never a device-wide wait
         std::vector<std::pair<int32_t, int32_t>> el_fill;
         cudaEvent_t el_fill_ev = nullptr;
+        // FABLE STRATA_FP_EL_ASYNC=1 (opt-in, the pipelined decode's growth only): a cudaMemcpyAsync from PAGEABLE memory
+        // (the file / mmap source) copies the whole blob through the driver's staging on the calling thread - the loop
+        // thread stalled ~88 ms per request and ~0.37 ms per window on the owner's machine.  Here the growth at a gap maps
+        // and zeroes the slots as before, then a worker thread reads the blobs into a pinned bounce buffer
+        // (ExpertSource::copy_blob, as the asynchronous tier's job does) and the loop queues the pinned -> device copies at
+        // a LATER gap of stage 0 (el_gap), where they are truly asynchronous; the fills publish as before once their event
+        // has passed.  One growth in flight at a time (the bounce holds it); a source already pinned copies directly.
+        static const bool fp_el_async = [] {
+            const char* v = std::getenv("STRATA_FP_EL_ASYNC");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        struct ElAsyncItem { int32_t i, slot; int64_t bytes; size_t off; };
+        std::vector<ElAsyncItem> el_async_q;         // the growth's blobs the worker bounces (queued at the next gap)
+        uint8_t* el_bounce = nullptr;
+        size_t el_bounce_cap = 0;
+        std::thread el_async_thr;
+        std::atomic<int> el_async_state{0};          // 0 idle, 1 the worker copies, 2 the bounce is filled
+        std::atomic<bool> el_async_ok{true};
+        int64_t pl_el_async_n = 0;
+        auto el_async_join = [&]() {
+            if (el_async_thr.joinable()) el_async_thr.join();
+            el_async_state.store(0);
+        };
+        // the bounced blobs to their slots (the current device must be CUDA0's): false with `e` on a failure
+        auto el_async_issue = [&](std::string& e) -> bool {
+            el_async_join();
+            if (!el_async_ok.load()) { e = "elastic cache: a blob could not be read for the growth"; return false; }
+            for (const ElAsyncItem& it : el_async_q) {
+                if (cudaMemcpyAsync(xcache.device_slot(it.slot), el_bounce + it.off, (size_t) it.bytes, cudaMemcpyHostToDevice,
+                                    adapt_stream) != cudaSuccess) {
+                    e = "elastic cache: a fill copy failed";
+                    return false;
+                }
+                el_fill.emplace_back(it.i, it.slot);
+            }
+            el_async_q.clear();
+            if (el_fill_ev == nullptr && cudaEventCreateWithFlags(&el_fill_ev, cudaEventDisableTiming) != cudaSuccess) {
+                e = "elastic cache: event creation failed";
+                return false;
+            }
+            cudaEventRecord(el_fill_ev, adapt_stream);
+            (void) cudaStreamQuery(adapt_stream);   // WDDM: submit now
+            ++pl_el_async_n;
+            return true;
+        };
         // the asynchronous tier's round (set where it is built): the elastic cache acts only between rounds
         std::function<bool()> el_tier_busy;
         bool el_hold_tier = false;   // no round of either tier starts while a growth's fills are unpublished
@@ -7624,9 +7669,19 @@ int main(int argc, char** argv) {
                 e.clear();
                 return true;
             }
+            // FABLE STRATA_FP_EL_ASYNC (pipe_gap): the pageable blobs go to the worker's bounce, the pinned ones straight
+            // to the device as before
+            const bool bounce = pipe_gap && fp_el_async && el_async_q.empty() && el_async_state.load() == 0;
+            size_t bounce_bytes = 0;
             for (size_t j = 0; j < pick.size(); ++j) {
                 const int32_t i = pick[j];
-                const uint8_t* b = srcp->blob(i / g.n_expert, i % g.n_expert);
+                const int64_t layer = i / g.n_expert, expert = i % g.n_expert;
+                if (bounce && !srcp->pinned(layer, expert)) {
+                    el_async_q.push_back(ElAsyncItem{i, (int32_t) (first + (int64_t) j), bytes[j], bounce_bytes});
+                    bounce_bytes += (size_t) ((bytes[j] + 255) / 256 * 256);
+                    continue;
+                }
+                const uint8_t* b = srcp->blob(layer, expert);
                 if (b == nullptr || cudaMemcpyAsync(xcache.device_slot((int32_t) (first + (int64_t) j)), b, (size_t) bytes[j],
                                                     cudaMemcpyHostToDevice, adapt_stream) != cudaSuccess) {
                     e = "elastic cache: a fill copy failed";
@@ -7635,13 +7690,39 @@ int main(int argc, char** argv) {
                 if (pipe_gap) el_fill.emplace_back(i, (int32_t) (first + (int64_t) j));
                 else pending.emplace_back(i, (int32_t) (first + (int64_t) j));
             }
-            if (pipe_gap) {
-                if (el_fill_ev == nullptr && cudaEventCreateWithFlags(&el_fill_ev, cudaEventDisableTiming) != cudaSuccess) {
-                    e = "elastic cache: event creation failed";
-                    return false;
+            if (!el_async_q.empty()) {   // the worker reads them into the pinned bounce; el_gap queues the copies later
+                if (el_bounce_cap < bounce_bytes) {
+                    if (el_bounce != nullptr) cudaFreeHost(el_bounce);
+                    el_bounce = nullptr;
+                    el_bounce_cap = 0;
+                    const size_t want_cap = std::max(bounce_bytes, (size_t) std::max<int64_t>(room, 0));   // a growth is <= room
+                    if (cudaHostAlloc((void**) &el_bounce, want_cap, cudaHostAllocDefault) != cudaSuccess) {
+                        cudaGetLastError();
+                        e = "elastic cache: the pinned bounce buffer could not be allocated (STRATA_FP_EL_ASYNC)";
+                        return false;
+                    }
+                    el_bounce_cap = want_cap;
                 }
-                cudaEventRecord(el_fill_ev, adapt_stream);
-                (void) cudaStreamQuery(adapt_stream);   // WDDM: submit now
+                el_async_ok.store(true);
+                el_async_state.store(1);
+                const std::vector<ElAsyncItem> items = el_async_q;   // the worker's own copy of the list
+                el_async_thr = std::thread([&, items] {
+                    bool ok = true;
+                    for (const ElAsyncItem& it : items)
+                        ok = ok && srcp->copy_blob(it.i / g.n_expert, it.i % g.n_expert, el_bounce + it.off);
+                    el_async_ok.store(ok);
+                    el_async_state.store(2);
+                });
+            }
+            if (pipe_gap) {
+                if (!el_fill.empty()) {   // the direct copies (none when every blob went to the bounce)
+                    if (el_fill_ev == nullptr && cudaEventCreateWithFlags(&el_fill_ev, cudaEventDisableTiming) != cudaSuccess) {
+                        e = "elastic cache: event creation failed";
+                        return false;
+                    }
+                    cudaEventRecord(el_fill_ev, adapt_stream);
+                    (void) cudaStreamQuery(adapt_stream);   // WDDM: submit now
+                }
                 el_hold_tier = true;
             } else {
                 cudaEventRecord(adapt_ev, adapt_stream);
@@ -10490,6 +10571,7 @@ int main(int argc, char** argv) {
                         std::this_thread::yield();
                     }
                     if (pl_adapt_thr.joinable()) pl_adapt_thr.join();
+                    el_async_join();   // FABLE STRATA_FP_EL_ASYNC: the worker reads the source: never outlive the loop
                     if (ajob) {
                         ajob->wait();
                         a_pl_idle = nullptr;
@@ -10639,6 +10721,15 @@ int main(int argc, char** argv) {
                 bool el_res_dirty = false;   // the later stages' residency tables, uploaded once the loop has drained
                 auto el_gap = [&]() -> bool {
                     if (!el_on || PV[0][0]->in_flight() || PV[0][1]->in_flight()) return true;
+                    if (!el_async_q.empty()) {   // FABLE STRATA_FP_EL_ASYNC: the bounced blobs to their slots at this gap
+                        if (el_async_state.load() != 2) return true;   // the worker still reads them
+                        const strata::core::OnDevice on(dev0);
+                        const Clock::time_point t0 = Clock::now();
+                        if (!el_async_issue(err)) return false;
+                        pl_el_ms += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                        tre("EA", A.seq, (int) el_fill.size());
+                        return true;   // the fills publish at a later gap, once their event has passed
+                    }
                     if (!el_fill.empty()) {   // a growth's fills: published once landed
                         const cudaError_t q = cudaEventQuery(el_fill_ev);
                         if (q == cudaErrorNotReady) return true;
@@ -11246,6 +11337,14 @@ int main(int argc, char** argv) {
                 // unfenced (the INVARIANT at pl_drain: a checkpoint, a park, the serial loop and the next request find
                 // nothing pipelined in flight) at the next tick, the next request's drain
                 a_pl_settle();
+                if (!el_async_q.empty()) {   // FABLE STRATA_FP_EL_ASYNC: a growth still in the bounce - to the device now
+                    const strata::core::OnDevice on(dev0);
+                    std::string e2;
+                    if (!el_async_issue(e2)) {
+                        std::printf("ERR %s\n", e2.c_str());
+                        return 1;
+                    }
+                }
                 if (!el_fill.empty()) {   // lab P3: nothing in flight - the growth's fills land and are published
                     if (cudaEventSynchronize(el_fill_ev) != cudaSuccess) {
                         std::printf("ERR elastic cache: a fill copy failed\n");
@@ -11303,6 +11402,10 @@ int main(int argc, char** argv) {
                         std::fprintf(stderr, "strata pipeline: STRATA_FP_CHAIN_TRIM: %lld chain steps never launched this request%s\n",
                                      (long long) (mtp.chain_trimmed - fp_trim0),
                                      fp_chain_trim ? "" : " (off: the request has no spec_min_p rule)");
+                    if (fp_el_async && el_on)
+                        std::fprintf(stderr, "strata pipeline: STRATA_FP_EL_ASYNC: %lld growths bounced through pinned memory so far "
+                                             "(all requests); the loop-thread ms above exclude the worker's reads\n",
+                                     (long long) pl_el_async_n);
                     if (el_on)
                         std::fprintf(stderr, "strata pipeline: elastic tail beside the windows: %lld shrinks, %lld growths at "
                                              "gaps of stage 0, %.1f ms on the loop's thread; the %lld windows after them "
