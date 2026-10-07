@@ -27,7 +27,8 @@ All opt-in; unset, every path is the one of `lab/multichat` / 0.1.40.
 | `STRATA_BATCH_MTP_PSCALE=s` | 1 | with `_DRAFTS`: multiplies the drafter's probabilities (calibration: < 1 when they are over-confident). |
 | `STRATA_BATCH_MTP_PARALLEL=1` | off | the slot drafters run at once (`MtpDrafter::draft_launch` / `draft_wait`, each on its own stream) instead of one after the other. Matters more with `_DRAFTS` (D steps per slot). |
 | `STRATA_BATCH_GRAPHS=N` | 64 | captured batch-window graphs kept per stage (LRU, one per row layout). Per-slot draft lengths make more layouts; each new one costs a capture. |
-| `STRATA_BATCH_PIPELINE=1` | off | keeps `--pipeline-windows` with `--batch` for a chat alone (the solo path); batch windows stay serial. See `docs/BATCH_PIPELINE.md` (phase A; phase B is a design). |
+| `STRATA_BATCH_PIPELINE=1` | off | keeps `--pipeline-windows` with `--batch` for a chat alone (the solo path); batch windows stay serial. See `docs/BATCH_PIPELINE.md` (phase A). |
+| `STRATA_BATCH_PIPELINE=2` | off | phase A plus the batch windows of two slot groups overlapped across the two cards on the pipeline's two verifiers per stage, with the slots' MTP draft rows, deferred commits per group and the drafts polled beside the other group's window (`docs/BATCH_PIPELINE.md`, phase B; `STRATA_BATCH_PIPELINE_GAP_MS`, `_MIN_FREE_MIB`). Not compiled. |
 
 The `strata batch:` timing line printed when the slots go idle counts in "avg rows" the rows KEPT (every slot's
 tokens); with `--batch-mtp` a second line, `strata batch MTP:`, gives the rows the windows carried, the drafts verified
