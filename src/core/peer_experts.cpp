@@ -236,7 +236,7 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
         const auto& f = lay.fmt[(size_t) layer];
         const auto L = strata::kernels::native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff);
         strata::kernels::native_expert_grouped(L, dm->ptr, dm->start, dm->count, dm->dst, dm->tok, groups, rows, d_q8_,
-                                               d_scratch_, d_out_, s);
+                                               d_scratch_, d_out_, s, 0, (int) n_tok);
     } else {
         err = "peer experts: only native packs are supported";
         return false;

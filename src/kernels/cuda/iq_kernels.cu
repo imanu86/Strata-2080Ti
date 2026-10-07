@@ -21,7 +21,9 @@
 #include <cmath>
 #include <utility>
 #include <cstdlib>
+#include <string>
 #include <type_traits>
+#include <vector>
 
 namespace strata::kernels {
 namespace {
@@ -3492,13 +3494,244 @@ __global__ void __launch_bounds__(256, STRATA_FP_PERSIST_MINB) fp_down_persist_k
     }
 }
 
+// ---------------------------------------------------------------- when the persistent kernels run (fp_expert_bench, lab/expert-persist)
+// fp_expert_bench 300 -1 20 on the owner's cards (build a173807): V=4 bitwise on every pair; at T = 1 it beats the default
+// kernels by up to 2x on some pairs (the default's 800-1600 short blocks per layer at ~10-15% of the DRAM peak), from
+// T = 2 on the default kernels win by 1.0-1.3x.  So V=4 is taken per call:
+//   STRATA_FP_EXPERT_V4_TMAX=N (hot lever EXPERT_V4_TMAX, graphs recaptured): with N > 0 only for calls of T <= N tokens
+//     (T = the window tokens behind the call's groups, passed by the caller; 0 = unknown, then only when N == 0; N == 0 =
+//     every call, the behaviour before this lever);
+//   STRATA_FP_EXPERT_V4_PAIRS: the (device, gate/up / down format) pairs that take it - "gu/d,gu/d" for every device or
+//     "dev:gu/d,gu/d;dev:..." per CUDA ordinal (a device with no entry of its own takes the device-less entries; unset or
+//     empty = every pair), e.g. "0:18/20,21/42,22/42;1:18/20,17/42,18/42".
+int g_fp_v4_tmax = [] {
+    const char* v = std::getenv("STRATA_FP_EXPERT_V4_TMAX");
+    const int x = v != nullptr ? std::atoi(v) : 0;
+    return x > 0 ? x : 0;
+}();
+
+struct FpV4Pair { int dev, gu, d; };   // dev < 0: every device
+std::vector<FpV4Pair> g_fp_v4_pairs;
+
+bool fp_v4_pairs_parse(const char* spec, std::vector<FpV4Pair>& out) {
+    out.clear();
+    if (spec == nullptr) return true;
+    std::string s(spec);
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t j = s.find(';', i);
+        if (j == std::string::npos) j = s.size();
+        std::string sec = s.substr(i, j - i);
+        i = j + 1;
+        if (sec.empty()) continue;
+        int dev = -1;
+        const size_t c = sec.find(':');
+        if (c != std::string::npos) {
+            char* end = nullptr;
+            dev = (int) std::strtol(sec.c_str(), &end, 10);
+            if (end == nullptr || *end != ':' || dev < 0) return false;
+            sec = sec.substr(c + 1);
+        }
+        size_t k = 0;
+        while (k < sec.size()) {
+            size_t m = sec.find(',', k);
+            if (m == std::string::npos) m = sec.size();
+            const std::string item = sec.substr(k, m - k);
+            k = m + 1;
+            if (item.empty()) continue;
+            const size_t sl = item.find('/');
+            if (sl == std::string::npos || sl == 0 || sl + 1 >= item.size()) return false;
+            char* e1 = nullptr;
+            char* e2 = nullptr;
+            const long gu = std::strtol(item.c_str(), &e1, 10), d = std::strtol(item.c_str() + sl + 1, &e2, 10);
+            if (e1 == nullptr || *e1 != '/' || e2 == nullptr || *e2 != '\0' || gu <= 0 || d <= 0) return false;
+            out.push_back(FpV4Pair{dev, (int) gu, (int) d});
+        }
+    }
+    return true;
+}
+
+bool g_fp_v4_pairs_init = [] {
+    const char* v = std::getenv("STRATA_FP_EXPERT_V4_PAIRS");
+    if (v != nullptr && v[0] != '\0' && !fp_v4_pairs_parse(v, g_fp_v4_pairs)) {
+        std::fprintf(stderr, "STRATA_FP_EXPERT_V4_PAIRS '%s' is not \"gu/d,...\" or \"dev:gu/d,...;...\": ignored (every pair)\n", v);
+        g_fp_v4_pairs.clear();
+    }
+    return true;
+}();
+
+bool fp_v4_pair_ok(int gu, int d) {
+    if (g_fp_v4_pairs.empty()) return true;
+    int dev = -1;
+    cudaGetDevice(&dev);
+    bool own = false;   // the device has entries of its own: only those count
+    for (const FpV4Pair& p : g_fp_v4_pairs) own = own || p.dev == dev;
+    for (const FpV4Pair& p : g_fp_v4_pairs)
+        if ((own ? p.dev == dev : p.dev < 0) && p.gu == gu && p.d == d) return true;
+    return false;
+}
+
+// the persistent kernels for this call?  (the pair / shape checks of each role come on top)
+bool fp_v4_now(const NativeExpertLayout& L, int tokens) {
+    if (g_fp_variant != 4) return false;
+    if (g_fp_v4_tmax > 0 && (tokens <= 0 || tokens > g_fp_v4_tmax)) return false;
+    return fp_v4_pair_ok(L.gu_type, L.d_type);
+}
+
+// ---------------------------------------------------------------- STRATA_FP_DEF_TILES_T1: the default kernels' rows in fewer blocks at T = 1
+// The bench's T = 1 reading (above) points at the default launch's shape, not its arithmetic: 80 x groups gate/up blocks
+// and 80-160 x groups down blocks that each live for one row pass (one entry per row) - the persistent kernels, few
+// long-lived blocks over the same rows, run the same work in half the time.  STRATA_FP_DEF_TILES_T1=k (default 1 = the
+// default launch; the bench's "0t<k>" rows) keeps the default kernels' row code and launches, for calls of T == 1,
+// grid.x = ceil(tiles / k) blocks that each take k row tiles in turn (tile = the rows one default block owns: 16
+// gate/up rows; 32 IQ4_NL / 16 Q2_0 down rows), the codebook staged once per block and the h chunk once per (group,
+// chunk) for all its tiles.  Every row is still one sub-warp running row_dot_80_sub16 / row_dot_40_sub8 /
+// row_dot_20_sub16 on the same words: bitwise the default's.  (A "bigger grid" is not available without changing the
+// per-row tree: a row is already one 16- or 8-lane sub-warp; the only free shape is rows per block, and the evidence
+// says fewer, longer blocks.)
+int g_fp_def_tiles_t1 = [] {
+    const char* v = std::getenv("STRATA_FP_DEF_TILES_T1");
+    const int x = v != nullptr ? std::atoi(v) : 1;
+    return x >= 1 && x <= 64 ? x : 1;
+}();
+
+template<int TG, bool STAGE_GRID>
+__global__ void __launch_bounds__(256) fp_gu_tiles_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                           const int32_t* __restrict__ grp_start,
+                                                           const int32_t* __restrict__ n_groups,
+                                                           const int32_t* __restrict__ ent_tok,
+                                                           const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                           float* __restrict__ gate, float* __restrict__ up) {
+    const int ng = *n_groups;
+    if (blockIdx.y >= ng) return;
+    STRATA_SHARED_ALIGN16_U32(s_grid_buf, IqGridWords<TG, STAGE_GRID>::value);
+    const uint32_t* s_grid = stage_iq_grid<TG, STAGE_GRID>(s_grid_buf, threadIdx.x, 256);
+    const int subwarp = threadIdx.x >> 4, t = threadIdx.x & 15;
+    const int nff = (int) L.n_ff, ntiles = (2 * nff + 15) / 16;
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {
+        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int tile = blockIdx.x; tile < ntiles; tile += gridDim.x) {
+            const int row = tile * 16 + subwarp;
+            if (row >= 2 * nff) continue;   // whole warps (n_ff % 32 == 0: a tile is all rows or none)
+            const bool is_up = row >= nff;
+            const int r = is_up ? row - nff : row;
+            const uint8_t* wr = blob + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
+            float* dst = is_up ? up : gate;
+            for (int e = e0; e < e1; e += GRP_NC) {   // native_gu_multi_kernel's SUB16 chunk code
+                const int n = min(GRP_NC, e1 - e);
+                if (n == 1) {
+                    const int off1[1] = { ent_tok[e] * 80 };
+                    float s1[1];
+                    row_dot_80_sub16<TG, 1, true, STAGE_GRID>(wr, xq, off1, 1, t, s1, s_grid);
+                    if (t == 0) dst[(size_t) e * L.n_ff + r] = s1[0];
+                } else if (n == 2) {
+                    const int off2[2] = { ent_tok[e] * 80, ent_tok[e + 1] * 80 };
+                    float s2[2];
+                    row_dot_80_sub16<TG, 2, true, STAGE_GRID>(wr, xq, off2, 2, t, s2, s_grid);
+                    if (t < 2) dst[(size_t) (e + t) * L.n_ff + r] = s2[t];
+                } else if (n == 3) {
+                    const int off3[3] = { ent_tok[e] * 80, ent_tok[e + 1] * 80, ent_tok[e + 2] * 80 };
+                    float s3[3];
+                    row_dot_80_sub16<TG, 3, true, STAGE_GRID>(wr, xq, off3, 3, t, s3, s_grid);
+                    if (t < 3) dst[(size_t) (e + t) * L.n_ff + r] = s3[t];
+                } else {
+                    const int off4[4] = { ent_tok[e] * 80, ent_tok[e + 1] * 80, ent_tok[e + 2] * 80, ent_tok[e + 3] * 80 };
+                    float s4[4];
+                    row_dot_80_sub16<TG, 4, true, STAGE_GRID>(wr, xq, off4, 4, t, s4, s_grid);
+                    if (t < 4) dst[(size_t) (e + t) * L.n_ff + r] = s4[t];
+                }
+            }
+        }
+    }
+}
+
+template<int TD>
+__global__ void __launch_bounds__(256) fp_down_tiles_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                             const int32_t* __restrict__ grp_start,
+                                                             const int32_t* __restrict__ n_groups,
+                                                             const int32_t* __restrict__ ent_dst,
+                                                             const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                             float* __restrict__ out) {
+    using D = FpDown<TD>;   // kLanes lanes per row, kRows rows per tile, as the default kernel's block
+    const int ng = *n_groups;
+    if (blockIdx.y >= ng) return;
+    __shared__ uint32_t s_hq_buf[GRP_NC * 20 * 9];
+    const block_q8_1* s_hq = reinterpret_cast<const block_q8_1*>(s_hq_buf);
+    const int nemb = (int) L.n_embd, ntiles = (nemb + D::kRows - 1) / D::kRows;
+    const int sub = (int) threadIdx.x / D::kLanes, t = (int) threadIdx.x % D::kLanes;
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {
+        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += GRP_NC) {
+            const int n = min(GRP_NC, e1 - e);
+            const uint32_t* src = reinterpret_cast<const uint32_t*>(hq + (size_t) e * 20);
+            const int words = n * (20 * 9);
+            __syncthreads();   // block-uniform: the previous chunk's readers are done
+            for (int i = threadIdx.x; i < words; i += 256) s_hq_buf[i] = src[i];
+            __syncthreads();
+            for (int tile = blockIdx.x; tile < ntiles; tile += gridDim.x) {
+                const int r = tile * D::kRows + sub;
+                if (r >= nemb) continue;   // whole warps (n_embd % 32 == 0)
+                const uint8_t* wr = blob + L.down_off + (size_t) r * L.d_row;
+                float* o = out + (size_t) r;
+                // native_down_multi_kernel<TD, true>'s chunk code (row_dot_40_sub8 for IQ4_NL, row_dot_20_sub16 for Q2_0)
+#define STRATA_FP_TILE_DOT(NC, OFF, S) \
+                if constexpr (TD == 20) row_dot_40_sub8<TD, NC, true>(wr, s_hq, OFF, NC, t, S); \
+                else row_dot_20_sub16<TD, NC, true>(wr, s_hq, OFF, NC, t, S);
+                if (n == 1) {
+                    const int off1[1] = { 0 };
+                    float s1[1];
+                    STRATA_FP_TILE_DOT(1, off1, s1)
+                    if (t == 0) o[(size_t) ent_dst[e] * L.n_embd] = s1[0];
+                } else if (n == 2) {
+                    const int off2[2] = { 0, 20 };
+                    float s2[2];
+                    STRATA_FP_TILE_DOT(2, off2, s2)
+                    if (t < 2) o[(size_t) ent_dst[e + t] * L.n_embd] = s2[t];
+                } else if (n == 3) {
+                    const int off3[3] = { 0, 20, 40 };
+                    float s3[3];
+                    STRATA_FP_TILE_DOT(3, off3, s3)
+                    if (t < 3) o[(size_t) ent_dst[e + t] * L.n_embd] = s3[t];
+                } else {
+                    const int off4[4] = { 0, 20, 40, 60 };
+                    float s4[4];
+                    STRATA_FP_TILE_DOT(4, off4, s4)
+                    if (t < 4) o[(size_t) ent_dst[e + t] * L.n_embd] = s4[t];
+                }
+#undef STRATA_FP_TILE_DOT
+            }
+        }
+    }
+}
+
+// the default kernels' rows in ceil(tiles / k) blocks for this call?  (T == 1 and the default sub-warp shapes)
+bool fp_def_tiles_now(const NativeExpertLayout& L, int tokens) {
+    return g_fp_def_tiles_t1 > 1 && tokens == 1 && !g_old_kernels && !g_no_sub16_gu && L.n_embd == 2560 && L.n_ff == 640;
+}
+
 template<int TG>
 void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
-               float* gate, float* up) {
-    if constexpr (kFpPersistGu<TG>) {   // STRATA_FP_EXPERT_V=4: fp_gu_persist_kernel, every format of FpGu<TG>
-        if (g_fp_variant == 4 && fp_persist_gu_ok(L)) {
+               float* gate, float* up, int tokens) {
+    if constexpr (kFpPersistGu<TG>) {   // STRATA_FP_EXPERT_V=4 (for this call: fp_v4_now): fp_gu_persist_kernel
+        if (fp_v4_now(L, tokens) && fp_persist_gu_ok(L)) {
             fp_gu_persist_kernel<TG><<<dim3((unsigned) fp_persist_blocks()), 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            return;
+        }
+    }
+    if constexpr (kSplit<TG>) {   // STRATA_FP_DEF_TILES_T1: the default rows in fewer blocks of k tiles (T == 1)
+        if (fp_def_tiles_now(L, tokens)) {
+            const unsigned nt = (unsigned) ((2 * L.n_ff + 15) / 16), k = (unsigned) g_fp_def_tiles_t1;
+            const dim3 gt((nt + k - 1) / k, grid.y);
+            if constexpr (kStageIqGrid<TG>) {
+                if (g_stage_grid) {
+                    fp_gu_tiles_kernel<TG, true><<<gt, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+                    return;
+                }
+            }
+            fp_gu_tiles_kernel<TG, false><<<gt, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
             return;
         }
     }
@@ -3531,10 +3764,16 @@ void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, con
 template<int TD>
 void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                  const int32_t* n_groups, const int32_t* ent_dst, const block_q8_1* hq, const NativeExpertLayout& L,
-                 float* out) {
-    if constexpr (kFpPersistDown<TD>) {   // STRATA_FP_EXPERT_V=4: fp_down_persist_kernel, every format of FpDown<TD>
-        if (g_fp_variant == 4 && fp_persist_down_ok(L)) {
+                 float* out, int tokens) {
+    if constexpr (kFpPersistDown<TD>) {   // STRATA_FP_EXPERT_V=4 (for this call: fp_v4_now): fp_down_persist_kernel
+        if (fp_v4_now(L, tokens) && fp_persist_down_ok(L)) {
             fp_down_persist_kernel<TD><<<dim3((unsigned) fp_persist_blocks()), 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            return;
+        }
+        if (fp_def_tiles_now(L, tokens)) {   // STRATA_FP_DEF_TILES_T1: the default rows in fewer blocks of k tiles (T == 1)
+            const unsigned nt = (unsigned) ((L.n_embd + FpDown<TD>::kRows - 1) / FpDown<TD>::kRows), k = (unsigned) g_fp_def_tiles_t1;
+            const dim3 gt((nt + k - 1) / k, grid.y);
+            fp_down_tiles_kernel<TD><<<gt, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
             return;
         }
     }
@@ -3557,6 +3796,16 @@ void iq_set_old_kernels(bool old) { g_old_kernels = old; }
 bool iq_old_kernels() { return g_old_kernels; }
 void native_expert_set_fp_variant(int v) { g_fp_variant = v >= 0 && v <= 4 ? v : 0; }
 int native_expert_fp_variant() { return g_fp_variant; }
+void native_expert_set_fp_v4_tmax(int tmax) { g_fp_v4_tmax = tmax > 0 ? tmax : 0; }
+int native_expert_fp_v4_tmax() { return g_fp_v4_tmax; }
+bool native_expert_set_fp_v4_pairs(const char* spec) {
+    std::vector<FpV4Pair> parsed;
+    if (!fp_v4_pairs_parse(spec, parsed)) return false;
+    g_fp_v4_pairs = std::move(parsed);
+    return true;
+}
+void native_expert_set_fp_def_tiles_t1(int k) { g_fp_def_tiles_t1 = k >= 1 && k <= 64 ? k : 1; }
+int native_expert_fp_def_tiles_t1() { return g_fp_def_tiles_t1; }
 
 bool iq_supported(int t) noexcept { return is_iq(t); }
 bool embed_type_supported(int t) noexcept { return is_iq(t) || t == 30; }
@@ -4235,7 +4484,7 @@ void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
-                           int64_t grid_groups) {
+                           int64_t grid_groups, int tokens) {
     if (cap_groups <= 0 || cap_entries <= 0) return;
     if (L.n_ff % 32 != 0) { std::fprintf(stderr, "native_expert_grouped: n_ff %lld\n", (long long) L.n_ff); std::exit(1); }
     cudaStream_t s = (cudaStream_t) stream;
@@ -4328,7 +4577,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #undef STRATA_GU_AMD
 #endif
     switch (L.gu_type) {
-#define STRATA_GU(T) case T: launch_gu<T>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
+#define STRATA_GU(T) case T: launch_gu<T>(ggu, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, tokens); break;
         STRATA_GU_FMTS(STRATA_GU)
 #undef STRATA_GU
         default: std::fprintf(stderr, "native_expert_grouped: gate/up type %d\n", L.gu_type); std::exit(1);
@@ -4394,7 +4643,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #undef STRATA_D_AMD
 #endif
     switch (L.d_type) {
-#define STRATA_DOWN(T) case T: launch_down<T>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+#define STRATA_DOWN(T) case T: launch_down<T>(gd, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out, tokens); break;
         STRATA_D_FMTS(STRATA_DOWN)
 #undef STRATA_DOWN
         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);

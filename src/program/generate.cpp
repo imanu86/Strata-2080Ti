@@ -6705,6 +6705,10 @@ int main(int argc, char** argv) {
                 strata::kernels::native_expert_set_fp_variant(want.expert_v);
                 changed += " EXPERT_V";
             }
+            if (want.expert_v4_tmax != cur.expert_v4_tmax) {   // which windows take variant 4: baked into the graphs too
+                strata::kernels::native_expert_set_fp_v4_tmax(want.expert_v4_tmax);
+                changed += " EXPERT_V4_TMAX";
+            }
             if (want.shexp_fuse != cur.shexp_fuse) {
                 strata::kernels::shared_expert_set_fp_fuse(want.shexp_fuse);
                 changed += " SHEXP_FUSE";

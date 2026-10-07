@@ -58,11 +58,12 @@ size_t native_expert_scratch_bytes(int64_t cap_entries, int64_t n_ff);
 /// and write row ent_dst[e] of `out` (n_embd floats).  Counts are read on the device.
 /// `grid_groups` (1 .. cap_groups; 0 = cap_groups) groups run side by side, a block row each striding over the rest:
 /// a call that usually has few groups or none (the verify window's PCIe share) launches less for the ones it does
-/// not have.  The results do not depend on it.
+/// not have.  `tokens` = the window tokens behind the call's groups (T; 0 = unknown): the opt-in kernel choices below
+/// (STRATA_FP_EXPERT_V4_TMAX, STRATA_FP_DEF_TILES_T1) read it.  The results depend on neither.
 void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start,
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
-                           int64_t grid_groups = 0);
+                           int64_t grid_groups = 0, int tokens = 0);
 /// true: `native_expert_grouped`'s launches before the group stride (STRATA_GROUPED_V1=1 at startup) - a block row
 /// per possible group, SwiGLU and the q8_1 quantization as two kernels over all cap_entries.  Bitwise the same results
 /// (native_grouped_parity checks it); kept for A/B timing.  Set before graph capture; captured graphs keep theirs.
@@ -87,5 +88,19 @@ bool iq_old_kernels();
 /// 0..4 count as 0.  Set before graph capture; captured graphs keep the kernels they captured.
 void native_expert_set_fp_variant(int v);
 int native_expert_fp_variant();
+/// When variant 4 runs (fp_expert_bench: at T = 1 it beats the default kernels on some pairs, from T = 2 on it loses):
+/// `tmax` > 0 = only for calls of `tokens` <= tmax (0 = every call, the default; a call with tokens 0 = unknown runs it
+/// only when tmax is 0).  The default is the environment's STRATA_FP_EXPERT_V4_TMAX; hot lever EXPERT_V4_TMAX (graphs
+/// recaptured as for EXPERT_V).
+void native_expert_set_fp_v4_tmax(int tmax);
+int native_expert_fp_v4_tmax();
+/// The (device, gate/up / down format) pairs variant 4 runs on: "gu/d,gu/d" for every device, "dev:gu/d,...;dev:..."
+/// per CUDA ordinal (a device without entries of its own takes the device-less ones); "" or nullptr = every pair.
+/// False (table unchanged) on a malformed spec.  The default is the environment's STRATA_FP_EXPERT_V4_PAIRS.
+bool native_expert_set_fp_v4_pairs(const char* spec);
+/// STRATA_FP_DEF_TILES_T1: for calls of tokens == 1, the default kernels' rows in ceil(tiles / k) blocks that each take
+/// k row tiles in turn (1 = the default launch, the default).  Bitwise the default's results (fp_expert_bench "0t<k>").
+void native_expert_set_fp_def_tiles_t1(int k);
+int native_expert_fp_def_tiles_t1();
 
 }  // namespace strata::kernels
