@@ -402,6 +402,7 @@ Verifier::~Verifier() {
     if (qcnt_) cudaFree(qcnt_);
     if (cs_ && cs_ != ext_stream_) cudaStreamDestroy(cs_);   // set_stream: the stage's stream, shared, not ours
     if (sh_cs_) cudaStreamDestroy(sh_cs_);
+    if (samp_cs_) { cudaStreamSynchronize(samp_cs_); cudaStreamDestroy(samp_cs_); }
     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
     if (commit_done_) cudaEventDestroy(commit_done_);
     if (ev_done_) cudaEventDestroy(ev_done_);
@@ -2774,8 +2775,11 @@ bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok
     }
     // Each slot owns a contiguous group. The default commit keeps all its rows; speculative
     // decoding may change the prefix length after comparing the draft with these picks.
+    // (batch_launch_rows with a deferred commit: not staged here - the previous deferred commit of this verifier may
+    // still be queued behind another verifier's window on the shared stream and reads these words when it starts;
+    // batch_commit_async stages them once that commit has run.)
     const int64_t CB = 2 + max_t_;
-    for (int t = 0; t < S;) {
+    for (int t = 0; t < S && !b_defer_;) {
         const int first = t;
         while (t < S && rows[t] == rows[first]) ++t;
         int32_t* c = h_commitb_ + (size_t) rows[first] * CB;
@@ -2811,6 +2815,7 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     const OnDevice on_device(device_);
     const ModelGeometry& g = *g_;
     if (!stage_batch(rows, S, 0, tokens, pos, err)) return false;
+    b_ev_ = false;   // a serial window: the host waits on the stream below (sample_rows on it too)
     const cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, 0)], cs_);
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
@@ -2950,17 +2955,131 @@ bool Verifier::commit_slot_prefixes(const int* keep, std::string& err) {
 }
 
 bool Verifier::sample_rows(int S, std::string& err) {
+    // (batch_launch_rows on a shared stream: the sampling runs on samp_cs_, after the window's event, so the wait below
+    // never waits for the other verifier's window queued behind ours - whose doorbells this thread serves)
+    cudaStream_t s = samp_cs_ != nullptr && b_ev_ ? samp_cs_ : cs_;
     bool any = false;
     for (int t = 0; t < S; ++t) {
         strata::kernels::SamplerParams sp = slot_sp_[(size_t) last_rows_[t]];
         if (sp.greedy || sp.temperature <= 0.0f) continue;
+        if (!any && s != cs_ && cudaStreamWaitEvent(s, ev_done_, 0) != cudaSuccess) {
+            err = "verify batch: the row sampling's wait failed";
+            return false;
+        }
         sp.counter = (uint64_t) last_pos_b_[t];   // Philox(seed, position): the solo window's draw for this position
         sp.penalty_last_n = 0;
         strata::kernels::sample_tokens(head_logits_ + (size_t) t * (size_t) n_vocab_, 1, (int) n_vocab_, nullptr, 0, sp,
-                                       m_out_ + t, cs_);
+                                       m_out_ + t, s);
         any = true;
     }
-    if (any && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "verify batch: the row sampling failed"; return false; }
+    if (any && cudaStreamSynchronize(s) != cudaSuccess) { err = "verify batch: the row sampling failed"; return false; }
+    return true;
+}
+
+bool Verifier::batch_captured(const int* rows, int S, int hbase) const {
+    const std::vector<int> key = bkey(rows, S, hbase);
+    const auto w = exec_bm_.find(key);
+    const auto c = commit_bm_.find(key);
+    return w != exec_bm_.end() && w->second != nullptr && c != commit_bm_.end() && c->second != nullptr;
+}
+
+bool Verifier::batch_launch_rows(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos,
+                                 bool commit_behind, std::string& err) {
+    const OnDevice on_device(device_);
+    if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
+    if (S < 1 || S > 8) { err = "verify: batch rows out of range (init_slots)"; return false; }
+    if (ev_done_ == nullptr && cudaEventCreateWithFlags(&ev_done_, cudaEventDisableTiming) != cudaSuccess) {
+        err = "verify: event create failed";
+        return false;
+    }
+    if (ext_stream_ != nullptr && samp_cs_ == nullptr &&
+        cudaStreamCreateWithFlags(&samp_cs_, cudaStreamNonBlocking) != cudaSuccess) {
+        err = "verify: the sampling stream create failed";
+        return false;
+    }
+    b_defer_ = !commit_behind;
+    const bool staged = stage_batch(rows, S, hbase, tokens, pos, err);
+    b_defer_ = false;
+    if (!staged) return false;
+    cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, hbase)], cs_);
+    if (le == cudaSuccess && commit_behind) le = cudaGraphLaunch(commit_bm_[bkey(rows, S, hbase)], cs_);
+    if (le == cudaSuccess) le = cudaEventRecord(ev_done_, cs_);
+    if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
+    (void) cudaStreamQuery(cs_);   // WDDM: submit now
+    if (commit_behind && ple_stage())   // the host's side of the commit (the hash's last two tokens)
+        for (int t = 0; t < S; ++t) {
+            SessionState& sx = *slots_[(size_t) rows[t]];
+            sx.ple_prev[0] = sx.ple_prev[1];
+            sx.ple_prev[1] = tokens[t];
+        }
+    b_ev_ = true;
+    b_running_ = true;
+    b_k_ = 0;
+    b_steps_ = le_ - lb_;
+    b_last_ = Clock::now();
+    return true;
+}
+
+bool Verifier::batch_commit_async(const int* keep, std::string& err) {
+    const OnDevice on_device(device_);
+    if (!last_batch_ || last_t_ < 1) { err = "verify: commit_slots without a batch window"; return false; }
+    if (b_running_) { err = "verify: batch_commit_async with the window still in flight"; return false; }
+    if (ev_commit_ == nullptr && cudaEventCreateWithFlags(&ev_commit_, cudaEventDisableTiming) != cudaSuccess) {
+        err = "verify: event create failed";
+        return false;
+    }
+    const Clock::time_point t0 = Clock::now();
+    if (b_commit_live_) {   // its graph reads h_commitb_ when it starts: the previous one has (it ran before our window)
+        cudaError_t q;
+        while ((q = cudaEventQuery(ev_commit_)) == cudaErrorNotReady) {
+            _mm_pause();
+            if (ms_since(t0) > 20000.0) { err = "verify: the previous batch commit never finished"; return false; }
+        }
+        if (q != cudaSuccess) { err = std::string("verify: batch commit: ") + cudaGetErrorString(q); return false; }
+    }
+    const int S = last_t_;
+    const int64_t CB = 2 + max_t_;
+    for (int t = 0; t < S;) {
+        const int first = t;
+        while (t < S && last_rows_[t] == last_rows_[first]) ++t;
+        const int n = keep[last_rows_[first]];
+        if (n < 1 || n > t - first) {
+            err = "verify: accepted prefix is outside its slot group";
+            return false;
+        }
+        int32_t* c = h_commitb_ + (size_t) last_rows_[first] * CB;
+        c[0] = n;
+        c[1] = n - 1;
+        for (int j = 0; j < max_t_; ++j)
+            c[2 + j] = j < n ? (int32_t) last_pos_b_[first + j] : -1;
+    }
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    cudaError_t le = cudaGraphLaunch(commit_bm_[bkey(last_rows_, S, row_base_)], cs_);
+    if (le == cudaSuccess) le = cudaEventRecord(ev_commit_, cs_);
+    if (le != cudaSuccess) { err = std::string("verify: batch commit launch: ") + cudaGetErrorString(le); return false; }
+    (void) cudaStreamQuery(cs_);
+    b_commit_live_ = true;
+    if (ple_stage())
+        for (int t = 0; t < S;) {
+            const int first = t;
+            while (t < S && last_rows_[t] == last_rows_[first]) ++t;
+            SessionState& sx = *slots_[(size_t) last_rows_[first]];
+            for (int u = first; u < first + keep[last_rows_[first]]; ++u) {
+                sx.ple_prev[0] = sx.ple_prev[1];
+                sx.ple_prev[1] = last_tokens_[u];
+            }
+        }
+    ms_commit += ms_since(t0);
+    return true;
+}
+
+bool Verifier::batch_sync(std::string& err) {
+    const OnDevice on_device(device_);
+    if (b_running_) { err = "verify: batch_sync with a window in flight (poll it to its end first)"; return false; }
+    if (cs_ != nullptr && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "verify batch: the stream failed"; return false; }
+    if (copy_ != nullptr && cudaStreamSynchronize(copy_) != cudaSuccess) { err = "verify batch: the copy stream failed"; return false; }
+    if (samp_cs_ != nullptr && cudaStreamSynchronize(samp_cs_) != cudaSuccess) { err = "verify batch: the sampling stream failed"; return false; }
+    b_commit_live_ = false;
     return true;
 }
 
@@ -2980,6 +3099,7 @@ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_
             sx.ple_prev[0] = sx.ple_prev[1];
             sx.ple_prev[1] = tokens[t];
         }
+    b_ev_ = false;   // (--batch-groups: the stage's stream is this verifier's own; batch_poll completes on it)
     b_running_ = true;
     b_k_ = 0;
     b_steps_ = le_ - lb_;
@@ -3001,12 +3121,20 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
         _mm_sfence();
         *h_flag_ = 1;
     }
+    // (batch_launch_rows: the window's own event, not the stream - with set_stream the other parity's window may be
+    // queued behind ours on it; the stream query only flushes WDDM then)
+    auto window_query = [&]() -> cudaError_t {
+        if (!b_ev_) return cudaStreamQuery(cs_);
+        const cudaError_t q = cudaEventQuery(ev_done_);
+        if (q == cudaErrorNotReady) (void) cudaStreamQuery(cs_);
+        return q;
+    };
     while (!ar_on() && b_k_ < b_steps_) {
         const uint32_t want = (uint32_t) (b_k_ + 1);
         if (*seq < want) {
             const auto now = Clock::now();
             if (now - b_last_ > std::chrono::milliseconds(2)) {
-                const cudaError_t q = cudaStreamQuery(cs_);
+                const cudaError_t q = window_query();
                 if (q != cudaErrorNotReady && *seq < want) {
                     err = "verify batch: layer " + std::to_string(lb_ + b_k_) + " never rang (" +
                           (q == cudaSuccess ? std::string("graph finished") : std::string(cudaGetErrorString(q))) + ")";
@@ -3043,7 +3171,7 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
         b_last_ = Clock::now();
         ++b_k_;
     }
-    const cudaError_t q = cudaStreamQuery(cs_);
+    const cudaError_t q = window_query();
     if (q == cudaErrorNotReady) return 0;
     if (q != cudaSuccess) { err = std::string("verify batch: ") + cudaGetErrorString(q); b_running_ = false; return -1; }
     const cudaError_t qc = cudaStreamQuery(copy_);   // no host function of this window may raise flag B in the next
