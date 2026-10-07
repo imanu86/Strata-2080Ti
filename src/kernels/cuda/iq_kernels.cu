@@ -2699,10 +2699,251 @@ void s27_launch_ts(bool ts, const NativeExpertLayout& L, int64_t cap_groups, cud
     else s27_launch<TG, TD, true, 4, 4, false>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h, hq, out, nh);
 }
 
+// ---------------------------------------------------------------- STRATA_FP_EXPERT_V (opt-in, default 0 = the kernels above)
+// IQ3_S gate/up + IQ4_NL down at n_embd 2560 / n_ff 640 only (every other case keeps its path).  Every variant gives the
+// bitwise outputs of native_gu_multi_kernel<21, false, true> / native_down_multi_kernel<20, true>: per output row the same
+// lane partial sums, the same __fadd_rn / xor-shuffle tree, the same `acc += apply(w, x)` expressions on the same words;
+// only where the codebook is read from (1) and how many rows a sub-warp keeps in flight (2) change.
+//   1: gate/up with iq3s_grid (512 x u32, 2 KB) staged in shared memory once per block (LDS lookups instead of
+//      L1-cached global ones: shorter dependent chain between the qs loads and the dp4a).
+//   2: gate/up and down, two rows per sub-warp (gate row r + up row r; down rows r and r + n_embd / 2), both rows'
+//      weight loads of a k step before the dp4a work: ~2x the bytes in flight per lane and one activation read for two
+//      rows, at ~1.5-2x the registers (down to 2 blocks / SM at 256 threads on Turing; 40 instead of 80 blocks in x).
+//   3: gate/up with 1 and 2 together, down as 2.
+int g_fp_variant = [] {
+    const char* v = std::getenv("STRATA_FP_EXPERT_V");
+    const int x = v != nullptr ? std::atoi(v) : 0;
+    return x >= 0 && x <= 3 ? x : 0;
+}();
+
+bool fp_pair_ok(const NativeExpertLayout& L) {
+    return !g_old_kernels && !g_no_sub16_gu && L.gu_type == 21 && L.d_type == 20 && L.n_embd == 2560 && L.n_ff == 640;
+}
+
+// acc[q][c] += row q's dot of the k-th (block, part) call with column c, k = 8 * kbx + iqs / 2 (IQ3_S: 8 calls per block).
+// The NR rows' loads come first (row_dot_80_sub16's body for NR rows; STG: the grid from shared memory).
+template<int NR, int NC, bool STG>
+__device__ __forceinline__ void fp_dot80_acc(const uint8_t* const* row, const block_q8_1* x, const int (&off)[NC], int k,
+                                             float (&acc)[NR][NC], const uint32_t* grid) {
+    const int kbx = k / 8, iqs = 2 * (k % 8);
+    Split<21>::W w[NR];
+#pragma unroll
+    for (int q = 0; q < NR; ++q) w[q] = S26IQ3S::load<STG>(row[q], kbx, iqs, grid);
+#pragma unroll
+    for (int q = 0; q < NR; ++q) {
+#pragma unroll
+        for (int c = 0; c < NC; ++c) acc[q][c] += Split<21>::apply(w[q], x + off[c] + kbx * 8, iqs);
+    }
+}
+
+// row_dot_80_sub16's tree for NR rows (t = lane in the 16-lane sub-warp): s = calls t, t+32, t+64; s16 = t+16, t+48;
+// s = s + s16; xor tree 8, 4, 2, 1.  All 16 lanes end with the sums.
+template<int NR, int NC, bool STG>
+__device__ __forceinline__ void fp_row_dot_80(const uint8_t* const* row, const block_q8_1* x, const int (&off)[NC], int t,
+                                              float (&s)[NR][NC], const uint32_t* grid) {
+    float s16[NR][NC];
+#pragma unroll
+    for (int q = 0; q < NR; ++q) {
+#pragma unroll
+        for (int c = 0; c < NC; ++c) { s[q][c] = 0.0f; s16[q][c] = 0.0f; }
+    }
+    fp_dot80_acc<NR, NC, STG>(row, x, off, t, s, grid);
+    fp_dot80_acc<NR, NC, STG>(row, x, off, t + 32, s, grid);
+    fp_dot80_acc<NR, NC, STG>(row, x, off, t + 64, s, grid);
+    fp_dot80_acc<NR, NC, STG>(row, x, off, t + 16, s16, grid);
+    fp_dot80_acc<NR, NC, STG>(row, x, off, t + 48, s16, grid);
+#pragma unroll
+    for (int q = 0; q < NR; ++q) {
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            s[q][c] = __fadd_rn(s[q][c], s16[q][c]);
+#pragma unroll
+            for (int o = 8; o > 0; o >>= 1) s[q][c] += __shfl_xor_sync(0xffffffffu, s[q][c], o);
+        }
+    }
+}
+
+// One chunk of NC entries e .. e + NC - 1 of a group for NR rows: lane t == c stores column c of each row.
+template<int NR, int NC, bool STG>
+__device__ __forceinline__ void fp_gu_chunk(const uint8_t* const* row, const block_q8_1* xq, const int32_t* ent_tok, int e,
+                                            int t, int r, size_t n_ff, float* const* dst, const uint32_t* grid) {
+    int off[NC];
+#pragma unroll
+    for (int c = 0; c < NC; ++c) off[c] = ent_tok[e + c] * 80;
+    float s[NR][NC];
+    fp_row_dot_80<NR, NC, STG>(row, xq, off, t, s, grid);
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        if (t == c) {
+#pragma unroll
+            for (int q = 0; q < NR; ++q) dst[q][(size_t) (e + c) * n_ff + (size_t) r] = s[q][c];
+        }
+    }
+}
+
+// native_gu_multi_kernel<21, false, true>'s launch shape (256 threads, 16-lane sub-warps, grid (rows / 16, groups)).
+// X2: a sub-warp owns gate row r and up row r (grid x = n_ff / 16); otherwise one row of 2 n_ff as in the original.
+template<bool STG, bool X2>
+__global__ void __launch_bounds__(256) fp_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                     const int32_t* __restrict__ grp_start,
+                                                     const int32_t* __restrict__ n_groups,
+                                                     const int32_t* __restrict__ ent_tok,
+                                                     const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                     float* __restrict__ gate, float* __restrict__ up) {
+    constexpr int NR = X2 ? 2 : 1;
+    const int ng = *n_groups;
+    if (blockIdx.y >= ng) return;
+    __shared__ uint32_t s_grid[STG ? 512 : 1];
+    if constexpr (STG) {
+        for (int i = threadIdx.x; i < 512; i += 256) s_grid[i] = iq3s_grid[i];
+        __syncthreads();
+    }
+    const int subwarp = threadIdx.x >> 4, t = threadIdx.x & 15;
+    const int row = blockIdx.x * 16 + subwarp;
+    if (row >= (X2 ? (int) L.n_ff : 2 * (int) L.n_ff)) return;   // whole sub-warp pairs (n_ff % 32 == 0)
+    int r;
+    size_t w_off[NR];
+    float* dst[NR];
+    if constexpr (X2) {
+        r = row;
+        w_off[0] = (size_t) r * L.gu_row;
+        w_off[1] = L.up_off + (size_t) r * L.gu_row;
+        dst[0] = gate;
+        dst[1] = up;
+    } else {
+        const bool is_up = row >= (int) L.n_ff;
+        r = is_up ? row - (int) L.n_ff : row;
+        w_off[0] = (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
+        dst[0] = is_up ? up : gate;
+    }
+    const uint32_t* grid = s_grid;   // read only when STG
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {
+        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* rows[NR];
+        rows[0] = blob + w_off[0];
+        if constexpr (X2) rows[1] = blob + w_off[1];
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += GRP_NC) {
+            const int n = min(GRP_NC, e1 - e);
+            if (n == 1) fp_gu_chunk<NR, 1, STG>(rows, xq, ent_tok, e, t, r, (size_t) L.n_ff, dst, grid);
+            else if (n == 2) fp_gu_chunk<NR, 2, STG>(rows, xq, ent_tok, e, t, r, (size_t) L.n_ff, dst, grid);
+            else if (n == 3) fp_gu_chunk<NR, 3, STG>(rows, xq, ent_tok, e, t, r, (size_t) L.n_ff, dst, grid);
+            else fp_gu_chunk<NR, 4, STG>(rows, xq, ent_tok, e, t, r, (size_t) L.n_ff, dst, grid);
+        }
+    }
+}
+
+// Down, IQ4_NL, hb == 20: acc[q][c] += row q's dot of the call k (block k / 2, part k % 2) with the staged h row c
+// (20 q8_1 blocks each).  Both rows' loads before the dp4a work, as fp_dot80_acc.
+template<int NC>
+__device__ __forceinline__ void fp_dot40_acc(const uint8_t* const* row, const block_q8_1* x, int k, float (&acc)[2][NC]) {
+    const int kbx = k / 2, iqs = 2 * (k % 2);
+    Split<20>::W w[2];
+#pragma unroll
+    for (int q = 0; q < 2; ++q) w[q] = Split<20>::load(row[q], kbx, iqs);
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+#pragma unroll
+        for (int c = 0; c < NC; ++c) acc[q][c] += Split<20>::apply(w[q], x + c * 20 + kbx, iqs);
+    }
+}
+
+// row_dot_40_sub8's tree for two rows (t = lane in the 8-lane sub-warp): s = calls t, t+32; s16 = t+16; s8 = t+8;
+// s24 = t+24; s = s + s16; s = s + (s8 + s24); xor tree 4, 2, 1.
+template<int NC>
+__device__ __forceinline__ void fp_row_dot_40_x2(const uint8_t* const* row, const block_q8_1* x, int t, float (&s)[2][NC]) {
+    float s16[2][NC], s8[2][NC], s24[2][NC];
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+#pragma unroll
+        for (int c = 0; c < NC; ++c) { s[q][c] = 0.0f; s16[q][c] = 0.0f; s8[q][c] = 0.0f; s24[q][c] = 0.0f; }
+    }
+    fp_dot40_acc<NC>(row, x, t, s);
+    fp_dot40_acc<NC>(row, x, t + 32, s);
+    fp_dot40_acc<NC>(row, x, t + 16, s16);
+    fp_dot40_acc<NC>(row, x, t + 8, s8);
+    fp_dot40_acc<NC>(row, x, t + 24, s24);
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+#pragma unroll
+        for (int c = 0; c < NC; ++c) {
+            s[q][c] = __fadd_rn(s[q][c], s16[q][c]);
+            s[q][c] = __fadd_rn(s[q][c], __fadd_rn(s8[q][c], s24[q][c]));
+#pragma unroll
+            for (int o = 4; o > 0; o >>= 1) s[q][c] += __shfl_xor_sync(0xffffffffu, s[q][c], o);
+        }
+    }
+}
+
+template<int NC>
+__device__ __forceinline__ void fp_down_chunk(const uint8_t* const* row, const block_q8_1* s_hq, const int32_t* ent_dst,
+                                              int e, int t, int r, int hrows, size_t n_embd, float* out) {
+    float s[2][NC];
+    fp_row_dot_40_x2<NC>(row, s_hq, t, s);
+#pragma unroll
+    for (int c = 0; c < NC; ++c) {
+        if (t == c) {
+            float* o = out + (size_t) ent_dst[e + c] * n_embd + (size_t) r;
+            o[0] = s[0][c];
+            o[hrows] = s[1][c];
+        }
+    }
+}
+
+// native_down_multi_kernel<20, true>'s launch shape with a sub-warp (8 lanes, 32 per block) owning rows r and
+// r + n_embd / 2; grid x = n_embd / 64.  The h chunk staging and its barriers are the original's.
+__global__ void __launch_bounds__(256) fp_down_x2_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                         const int32_t* __restrict__ grp_start,
+                                                         const int32_t* __restrict__ n_groups,
+                                                         const int32_t* __restrict__ ent_dst,
+                                                         const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                         float* __restrict__ out) {
+    const int ng = *n_groups;
+    if (blockIdx.y >= ng) return;
+    __shared__ uint32_t s_hq_buf[GRP_NC * 20 * 9];
+    const int hrows = (int) (L.n_embd >> 1);
+    const int r = blockIdx.x * 32 + (threadIdx.x >> 3);
+    const int t = threadIdx.x & 7;
+    const bool valid_r = (r < hrows);
+    const int rc = valid_r ? r : 0;
+    const size_t w_off0 = L.down_off + (size_t) rc * L.d_row;
+    const size_t w_off1 = L.down_off + (size_t) (rc + hrows) * L.d_row;
+    const block_q8_1* s_hq = reinterpret_cast<const block_q8_1*>(s_hq_buf);
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {
+        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const uint8_t* const rows[2] = { blob + w_off0, blob + w_off1 };
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += GRP_NC) {
+            const int n = min(GRP_NC, e1 - e);
+            const uint32_t* src = reinterpret_cast<const uint32_t*>(hq + (size_t) e * 20);
+            const int words = n * (20 * 9);
+            __syncthreads();
+            for (int i = threadIdx.x; i < words; i += 256) s_hq_buf[i] = src[i];
+            __syncthreads();
+            if (valid_r) {
+                if (n == 1) fp_down_chunk<1>(rows, s_hq, ent_dst, e, t, r, hrows, (size_t) L.n_embd, out);
+                else if (n == 2) fp_down_chunk<2>(rows, s_hq, ent_dst, e, t, r, hrows, (size_t) L.n_embd, out);
+                else if (n == 3) fp_down_chunk<3>(rows, s_hq, ent_dst, e, t, r, hrows, (size_t) L.n_embd, out);
+                else fp_down_chunk<4>(rows, s_hq, ent_dst, e, t, r, hrows, (size_t) L.n_embd, out);
+            }
+        }
+    }
+}
+
 template<int TG>
 void launch_gu(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
                float* gate, float* up) {
+    if constexpr (TG == 21) {   // STRATA_FP_EXPERT_V: see fp_gu_kernel
+        const int v = g_fp_variant;
+        if (v != 0 && fp_pair_ok(L)) {
+            const dim3 g2((unsigned) (((v >= 2 ? L.n_ff : 2 * L.n_ff) + 15) / 16), grid.y);
+            if (v == 1) fp_gu_kernel<true, false><<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            else if (v == 2) fp_gu_kernel<false, true><<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            else fp_gu_kernel<true, true><<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            return;
+        }
+    }
     if constexpr (!kSplit<TG>) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     else if (g_old_kernels) native_gu_kernel<TG><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     else if constexpr (kStageIqGrid<TG>) {
@@ -2723,6 +2964,13 @@ template<int TD>
 void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                  const int32_t* n_groups, const int32_t* ent_dst, const block_q8_1* hq, const NativeExpertLayout& L,
                  float* out) {
+    if constexpr (TD == 20) {   // STRATA_FP_EXPERT_V >= 2: see fp_down_x2_kernel
+        if (g_fp_variant >= 2 && fp_pair_ok(L)) {
+            const dim3 g2((unsigned) ((L.n_embd / 2 + 31) / 32), grid.y);
+            fp_down_x2_kernel<<<g2, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
+            return;
+        }
+    }
     if constexpr (!kSplit<TD>) native_down_kernel<TD><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
     else if (g_old_kernels) native_down_kernel<TD><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
     else if (g_no_sub16_gu) native_down_multi_kernel<TD, false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
@@ -2733,6 +2981,8 @@ void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, c
 
 void iq_set_old_kernels(bool old) { g_old_kernels = old; }
 bool iq_old_kernels() { return g_old_kernels; }
+void native_expert_set_fp_variant(int v) { g_fp_variant = v >= 0 && v <= 3 ? v : 0; }
+int native_expert_fp_variant() { return g_fp_variant; }
 
 bool iq_supported(int t) noexcept { return is_iq(t); }
 bool embed_type_supported(int t) noexcept { return is_iq(t) || t == 30; }

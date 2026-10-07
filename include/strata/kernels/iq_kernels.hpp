@@ -76,5 +76,12 @@ void native_expert_set_mode(int mode, int phase);
 /// bitwise the same results.  Set before graph capture; captured graphs keep the kernels they captured.
 void iq_set_old_kernels(bool old);
 bool iq_old_kernels();
+/// Opt-in kernel variants of `native_expert_grouped` for IQ3_S gate/up + IQ4_NL down at n_embd 2560 / n_ff 640 (every
+/// other case keeps its kernels): 0 = the default kernels, 1 = gate/up with the IQ3_S codebook in shared memory,
+/// 2 = two rows per sub-warp (gate/up and down), 3 = gate/up 1 + 2, down 2.  All bitwise the same results as 0
+/// (fp_expert_bench checks it).  The default is the environment's STRATA_FP_EXPERT_V (0 when unset); values outside
+/// 0..3 count as 0.  Set before graph capture; captured graphs keep the kernels they captured.
+void native_expert_set_fp_variant(int v);
+int native_expert_fp_variant();
 
 }  // namespace strata::kernels
