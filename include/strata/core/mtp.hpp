@@ -100,6 +100,10 @@ public:
     bool draft_launch(int T, const int32_t* tokens, int64_t p, int a, std::string& err);
     bool draft_wait(int32_t* drafts, float* probs, int* n_drafts, std::string& err);
     bool draft_live() const { return draft_live_; }
+    /// 1: the launched draft has finished on the drafter's stream (draft_wait returns at once); 0: still running;
+    /// -1: an error (`err`).  1 too when nothing is launched.  (STRATA_BATCH_PIPELINE=2: the slot drafts polled beside
+    /// the other group's window.)
+    int draft_poll(std::string& err);
 
     /// The first round: one cell (`cell`) from `R_row` (device) and `token` -> T-1 drafts.
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,

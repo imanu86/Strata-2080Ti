@@ -1499,6 +1499,15 @@ bool MtpDrafter::draft_wait(int32_t* drafts, float* probs, int* n_drafts, std::s
     return true;
 }
 
+int MtpDrafter::draft_poll(std::string& err) {
+    if (!draft_live_) return 1;
+    const OnDevice on_device(device_);
+    const cudaError_t q = cudaStreamQuery(cs_);
+    if (q == cudaErrorNotReady) return 0;
+    if (q != cudaSuccess) { err = std::string("mtp draft: ") + cudaGetErrorString(q); return -1; }
+    return 1;
+}
+
 bool MtpDrafter::neuron_probe_100(const float* R_row, const int32_t* roots, int64_t cell,
                                  std::vector<int32_t>& candidates, double& prediction_ms, std::string& err) {
     const OnDevice on_device(device_);
