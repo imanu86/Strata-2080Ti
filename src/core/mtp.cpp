@@ -130,7 +130,7 @@ MtpDrafter::~MtpDrafter() {
     for (auto& e : prefill_exec_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : prefill_dev_exec_) if (e) cudaGraphExecDestroy(e);
     if (pf_dev_) cudaFree(pf_dev_);
-    if (dense4_) cudaFree(dense4_);
+    if (owns_weights_ && dense4_) cudaFree(dense4_);   // a slot drafter borrows the shared one's
     for (auto& e : round_exec_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : step_exec_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : round_exec_c_) if (e) cudaGraphExecDestroy(e);
@@ -257,6 +257,14 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         dense_ = shared->dense_;
         experts_ = shared->experts_;
         tensors_ = shared->tensors_;
+        // the dhead_type_ bug class (0cc421e): what the shared drafter was SET UP with travels with its weights too, or
+        // a slot drafter runs a different draft layer than the solo one.  --mtp-q4 proj: its Q4_0 copies (borrowed,
+        // never freed here); --mtp-hnorm stream: its per-stream norm.  (Drafts only: the verify window decides.)
+        dense4_ = shared->dense4_;
+        q4_off_ = shared->q4_off_;
+        q4_ = shared->q4_;
+        q4_head_ = shared->q4_head_;
+        hnorm_stream_ = shared->hnorm_stream_;
         owns_weights_ = false;
         owns_draft_head_ = false;
     }
