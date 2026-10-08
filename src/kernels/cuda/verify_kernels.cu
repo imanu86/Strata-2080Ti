@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cfloat>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -670,6 +671,133 @@ void mtp_feature_step(float* residual, int64_t stride, const int32_t* token, con
                       unsigned long long* stats, int j, void* stream) {
     mtp_feature_step_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(residual, stride, token, bank, fixture, meta, mask, stats, j);
     check("mtp_feature_step");
+}
+
+namespace {
+// One block owns the10240-float row. All lanes take the same guard branches.
+__device__ float anchor_sum(float x, float* s) {
+    const int t = threadIdx.x; s[t] = x; __syncthreads();
+    for (int d = blockDim.x / 2; d; d /= 2) {
+        if (t < d) s[t] += s[t + d];
+        __syncthreads();
+    }
+    const float result = s[0]; __syncthreads(); return result;
+}
+__global__ void mtp_anchor_seed_kernel(const float* residual, int64_t stride, int rows, const int32_t* row,
+                                       const int32_t* meta, float* anchor, int32_t* valid,
+                                       unsigned long long* stats) {
+    __shared__ float s[256];
+    const int t = threadIdx.x, r = *row;
+    if (t == 0) *valid = 0;
+    if (!meta[1]) return; // no fixture/token lookup: only the launch's causal fresh classification
+    if (stride != 10240 || r < 0 || r >= rows) { if (t == 0) atomicAdd(stats + 1, 1ULL); return; }
+    float sum = 0;
+    for (int64_t i = t; i < stride; i += blockDim.x) {
+        const float x = residual[(size_t) r * stride + i]; sum += x*x;
+    }
+    const float rms = sqrtf(anchor_sum(sum, s) / (float) stride);
+    if (!isfinite(rms) || rms <= 1e-12f) { if (t == 0) atomicAdd(stats + 1, 1ULL); return; }
+    for (int64_t i = t; i < stride; i += blockDim.x)
+        anchor[i] = residual[(size_t) r * stride + i] / rms;
+    __syncthreads();
+    if (t == 0) { *valid = 1; atomicAdd(stats, 1ULL); }
+}
+
+__global__ void mtp_anchor_step_kernel(float* residual, int64_t stride, const int32_t* meta,
+                                       const float* anchor, const int32_t* valid, unsigned long long* stats) {
+    __shared__ float s[256];
+    const int t = threadIdx.x;
+    if (!meta[1]) { if (t == 0) atomicAdd(stats + 4, 1ULL); return; }
+    if (!meta[0]) { if (t == 0) atomicAdd(stats + 3, 1ULL); return; } // bitwise no-write control
+    if (stride != 10240 || !*valid) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
+    float sum = 0;
+    for (int64_t i = t; i < stride; i += blockDim.x) { const float x = residual[i]; sum += x*x; }
+    const float rms = sqrtf(anchor_sum(sum, s) / (float) stride);
+    if (!isfinite(rms) || rms <= 1e-12f) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
+    sum = 0;
+    for (int64_t i = t; i < stride; i += blockDim.x) {
+        const float z = 0.75f*(residual[i]/rms) + 0.25f*anchor[i]; sum += z*z;
+    }
+    const float zrms = sqrtf(anchor_sum(sum, s) / (float) stride);
+    if (!isfinite(zrms) || zrms <= 1e-12f) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
+    // Validate the scale before any write; finite output is bounded by original RMS*sqrt(stride).
+    const float scale = rms/zrms;
+    if (!isfinite(scale)) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
+    for (int64_t i = t; i < stride; i += blockDim.x)
+        residual[i] = scale*(0.75f*(residual[i]/rms) + 0.25f*anchor[i]);
+    if (t == 0) atomicAdd(stats + 2, 1ULL);
+}
+} // namespace
+
+void mtp_anchor_seed(const float* residual, int64_t stride, int n_rows, const int32_t* row,
+                     const int32_t* meta, float* anchor, int32_t* valid,
+                     unsigned long long* stats, void* stream) {
+    mtp_anchor_seed_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(residual,stride,n_rows,row,meta,anchor,valid,stats);
+    check("mtp_anchor_seed");
+}
+void mtp_anchor_step(float* residual, int64_t stride, const int32_t* meta, const float* anchor,
+                     const int32_t* valid, unsigned long long* stats, void* stream) {
+    mtp_anchor_step_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(residual,stride,meta,anchor,valid,stats);
+    check("mtp_anchor_step");
+}
+
+namespace {
+__device__ __forceinline__ void first_top2_take(float v, int i, float& v1, int& i1, float& v2, int& i2) {
+    if (i == i1 || i == i2) return;
+    if (v > v1 || (v == v1 && i < i1)) {
+        v2 = v1; i2 = i1; v1 = v; i1 = i;
+    } else if (v > v2 || (v == v2 && i < i2)) { v2 = v; i2 = i; }
+}
+
+__global__ void mtp_first_top2_kernel(const float* logits, int nv, int nr, const int32_t* row_dev,
+                                      const int32_t* vocab, const int32_t* picks, MtpFirstTop2* out) {
+    constexpr int NT = 256;
+    __shared__ float v1s[NT], v2s[NT];
+    __shared__ int i1s[NT], i2s[NT], bads[NT];
+    const int row = *row_dev, t = threadIdx.x;
+    if (row < 0 || row >= nr || nv < 1) {
+        if (t == 0) { *out = MtpFirstTop2{}; out->row = row; out->status = 4; }
+        return;
+    }
+    float v1 = -FLT_MAX, v2 = -FLT_MAX;
+    int i1 = nv, i2 = nv, bad = 0;
+    for (int i = t; i < nv; i += NT) {
+        const float v = logits[(size_t) row * nv + i];
+        if (!isfinite(v)) ++bad;
+        else first_top2_take(v, i, v1, i1, v2, i2);
+    }
+    v1s[t] = v1; v2s[t] = v2; i1s[t] = i1; i2s[t] = i2; bads[t] = bad;
+    __syncthreads();
+    for (int d = NT / 2; d > 0; d /= 2) {
+        if (t < d) {
+            if (i1s[t + d] < nv) first_top2_take(v1s[t + d], i1s[t + d], v1s[t], i1s[t], v2s[t], i2s[t]);
+            if (i2s[t + d] < nv) first_top2_take(v2s[t + d], i2s[t + d], v1s[t], i1s[t], v2s[t], i2s[t]);
+            bads[t] += bads[t + d];
+        }
+        __syncthreads();
+    }
+    if (t == 0) {
+        MtpFirstTop2 r{};
+        r.row = row; r.pick = picks[row]; r.nonfinite = bads[0];
+        if (r.nonfinite) r.status = 2;
+        else if (i2s[0] >= nv) r.status = 3;
+        else {
+            r.first = vocab ? vocab[i1s[0]] : i1s[0];
+            r.second = vocab ? vocab[i2s[0]] : i2s[0];
+            r.gap = (double) v1s[0] - (double) v2s[0];
+            r.status = r.first == r.pick && r.first != r.second && r.first >= 0 && r.second >= 0 ? 1 : 5;
+        }
+        *out = r;
+        __threadfence_system(); // publication is consumed only after the existing stream event completes
+    }
+}
+} // namespace
+
+void mtp_first_top2(const float* logits, int n_vocab, int n_rows, const int32_t* row_dev,
+                    const int32_t* vocab, const int32_t* mapped_picks, MtpFirstTop2* out, void* stream) {
+    mtp_first_top2_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(
+        logits, n_vocab, n_rows, row_dev, vocab, mapped_picks, out);
+    check("mtp_first_top2");
 }
 
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream) {

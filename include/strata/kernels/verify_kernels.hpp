@@ -101,9 +101,28 @@ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const 
 /// host memory, read when the kernel runs), else `*tok` is left as it is.
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream);
 // Lab future-residual oracle: no token/logit writes. Sequential on the drafter stream; mask resets at step1.
+// Causal anchor: seed is the selected VERIFIED target input row, before the MTP front overwrites it.
+// meta[0]=alpha-on (fixed0.25), meta[1]=fresh. Stats: seed_valid,seed_invalid,applied,off,excluded,invalid.
+// Both kernels are captured in all hot arms; mode0 and excluded steps never write residual.
+void mtp_anchor_seed(const float* residual, int64_t stride, int n_rows, const int32_t* row,
+                     const int32_t* meta, float* anchor, int32_t* valid,
+                     unsigned long long* stats, void* stream);
+void mtp_anchor_step(float* residual, int64_t stride, const int32_t* meta, const float* anchor,
+                     const int32_t* valid, unsigned long long* stats, void* stream);
 void mtp_feature_step(float* residual, int64_t stride, const int32_t* token, const float* bank,
                       const int32_t* fixture, const int32_t* meta, int32_t* mask,
                       unsigned long long* stats, int j, void* stream);
+// Observational first-head probe: 0=unobserved, 1=valid, 2=nonfinite logits, 3=fewer than two
+// candidates, 4=invalid row, 5=greedy pick mismatch. No writes to logits, picks or the vocabulary map.
+struct MtpFirstTop2 {
+    int32_t status = 0, row = -1, first = -1, second = -1, pick = -1, nonfinite = 0;
+    double gap = 0;
+};
+static_assert(sizeof(MtpFirstTop2) == 32, "first-head probe fixed record");
+// Ties use the lowest SUBSET index, like the existing greedy pick. Any nonfinite logit invalidates the
+// diagnostic; gap is double so subtracting two finite float logits cannot overflow. out may be mapped.
+void mtp_first_top2(const float* logits, int n_vocab, int n_rows, const int32_t* row_dev,
+                    const int32_t* vocab, const int32_t* mapped_picks, MtpFirstTop2* out, void* stream);
 /// Row *row_dev of a, b and c (a_n, b_n, c_n floats a row) copied to their row 0 (the draft layer's rest runs on
 /// row 0).  Graph-capturable: the row is read on the device.
 void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, int64_t b_n, float* c, int64_t c_n,

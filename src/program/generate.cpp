@@ -2212,8 +2212,33 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata lab mtp feature: forbidden key %s\n", name); return 2;
         }
     }
+    const char* lab_anchor_switch = std::getenv("STRATA_LAB_MTP_ANCHOR_SWITCH");
+    const bool lab_anchor = lab_anchor_switch != nullptr;
+    if (lab_anchor) {
+        if (!*lab_anchor_switch || !std::filesystem::path(lab_anchor_switch).is_absolute()) {
+            std::fprintf(stderr, "strata lab mtp anchor: switch requires an absolute path\n"); return 2;
+        }
+        const char* forbidden[] = {"STRATA_FORCE_WINDOWS", "STRATA_CKPT_REREAD", "STRATA_STATE_HASH",
+            "STRATA_PIPELINE_SWITCH", "STRATA_PIPELINE_FORCE_MISS", "STRATA_NEURON_PROBE_CONTROL",
+            "STRATA_CLOSED_ROUTING", "STRATA_MTP_TOP2", "STRATA_MTP_FULL_HEAD", "STRATA_MTP_CATCHUP_ALL"};
+        for (const char* name : forbidden) if (std::getenv(name) != nullptr) {
+            std::fprintf(stderr, "strata lab mtp anchor: forbidden key %s\n", name); return 2;
+        }
+    }
     const char* lab_policy_path = std::getenv("STRATA_LAB_POLICY_TRACE");
     const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
+    const char* lab_top2_env = std::getenv("STRATA_LAB_MTP_TOP2_PROBE");
+    if (lab_top2_env && std::strcmp(lab_top2_env, "0") != 0 && std::strcmp(lab_top2_env, "1") != 0) {
+        std::fprintf(stderr, "strata lab mtp top2: TOP2_PROBE accepts only 0 or 1\n"); return 2;
+    }
+    const bool lab_top2 = lab_top2_env && std::strcmp(lab_top2_env, "1") == 0;
+    if (lab_top2 && (!lab_policy || lab_hq_free || std::getenv("STRATA_MTP_TOP2") != nullptr)) {
+        std::fprintf(stderr, "strata lab mtp top2: requires POLICY_TRACE; FREE and legacy MTP_TOP2 are unsupported\n");
+        return 2;
+    }
+    if (lab_top2)
+        std::fprintf(stderr, "strata lab mtp top2: enabled=1 scope=first_head mapped_bytes=32 "
+                             "observation_only=1 timing=instrumented schema=1\n");
     enum class LabDraftOracle { Off, Quality, Instant };
     LabDraftOracle lab_oracle = LabDraftOracle::Off;
     const char* lab_oracle_env = std::getenv("STRATA_LAB_DRAFT_ORACLE");
@@ -2303,6 +2328,12 @@ int main(int argc, char** argv) {
                         lab_prefix_tokens != 131072 || o.prompt_cache_file.empty() || o.mtp_window != 32768)) {
         std::fprintf(stderr, "strata lab mtp feature: requires original MTP, oracle-off hot SSD131072; "
                              "HQ/FREE/selective modes excluded\n"); return 2;
+    }
+    if (lab_anchor && (!lab_oracle_hot || lab_oracle_on || !lab_policy || lab_feature || lab_hq || lab_hq_free ||
+                       lab_selective || lab_prefix_tokens != 131072 || o.prompt_cache_file.empty() ||
+                       o.mtp_hnorm_stream || !o.mtp_q4.empty() || o.mtp_window != 32768)) {
+        std::fprintf(stderr, "strata lab mtp anchor: requires original pooled MTP, POLICY_TRACE, oracle-off "
+                             "hot SSD131072; FEATURE/HQ/FREE/selective excluded\n"); return 2;
     }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
@@ -4372,6 +4403,8 @@ int main(int argc, char** argv) {
         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
         mtp.set_selective_capture(lab_selective);
         mtp.set_feature_capture(lab_feature);
+        mtp.set_anchor_capture(lab_anchor);
+        mtp.set_first_top2_probe(lab_top2);
         if (lab_hq) mtp.set_hq_pack(lab_hq_pack);
         if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st && !mtp_cross_device ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
         mtp.set_ple_session(&ss);
@@ -9849,6 +9882,16 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata lab selective: selected mode=%d check=%d before GEN\n",
                              selective_request_on ? 8192 : 0, selective_request_check ? 1 : 0);
             }
+            bool anchor_request_on = false;
+            if (lab_anchor) {
+                std::ifstream control(lab_anchor_switch);
+                std::string alpha, extra;
+                if (!(control >> alpha) || (control >> extra) || (alpha != "0" && alpha != "0.25") ||
+                    geni || lab_oracle_on || oracle_prefix_file.empty()) {
+                    std::printf("ERR lab mtp anchor: switch requires0 or0.25; text GEN, oracle-off SSD required\n"); return 1;
+                }
+                anchor_request_on = alpha == "0.25";
+            }
             int feature_request_mode = 0;
             std::string feature_bank_path;
             if (lab_feature) {
@@ -11212,6 +11255,17 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            if (lab_anchor) {
+                const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && incoming_tokens == 131072) ||
+                                                  (read_from == 0 && mtp.first_needed() <= 0));
+                if (!prefix_disk_enabled || !full || !req_imgs.empty() || lab_oracle_on || pl_theta < 0 ||
+                    ((anchor_request_on || max_new != 15) && !incoming_disk) ||
+                    !mtp.anchor_begin(anchor_request_on, err)) {
+                    std::printf("ERR lab mtp anchor: qualified history/SSD required: %s\n", err.c_str()); return 1;
+                }
+                std::fprintf(stderr, "strata lab mtp anchor: history request=%lld source=%s full_until=%lld\n",
+                             (long long) force_k, incoming_disk ? "validated_ssd" : "full_prefill", (long long) (n - 1));
+            }
             if (lab_hq_free && (lab_oracle_on || !std::isfinite(req_spec_min_p) || req_spec_min_p < 0.0 ||
                                 req_spec_min_p > 1.0 || pl_theta < 0.0f || !req_imgs.empty())) {
                 std::printf("ERR lab mtp free: invalid threshold, oracle mode or image request\n"); return 1;
@@ -11373,6 +11427,9 @@ int main(int argc, char** argv) {
                 int32_t root = 0, ids[7] = {}, force_ids[7] = {};
                 float prob[7] = {};
                 double launch_ms = -1, complete_ms = -1, ready_ms[7] = {-1,-1,-1,-1,-1,-1,-1};
+                strata::kernels::MtpFirstTop2 first_top2{};
+                int32_t first_fixture = -1, first_raw = -1;
+                bool first_observed = false, first_label_in_budget = false;
             };
             struct PolicyWindow {
                 int64_t p = 0, chain = -1, b_chain = -1, emitted_before = 0;
@@ -11504,6 +11561,10 @@ int main(int argc, char** argv) {
                     if (!lab_policy || policy_current_chain < 0) return;
                     auto& c = policy_chains[(size_t) policy_current_chain];
                     const int upto = std::min(ready, c.n_out);
+                    if (lab_top2 && upto > 0 && !c.first_observed) {
+                        c.first_top2 = mtp.chain_first_top2();
+                        c.first_observed = true;
+                    }
                     if (upto > c.ready || (complete && c.complete_ms < 0)) {
                         const double now = policy_now();
                         for (int j = c.ready; j < upto; ++j) {
@@ -12714,12 +12775,38 @@ int main(int argc, char** argv) {
             if (lab_nvtx)
                 std::fprintf(stderr, "strata lab nvtx: gen=%lld request=%lld decode_ms=%.6f scope=host_thread\n",
                              (long long) lab_nvtx_gen, (long long) force_k, decode_ms);
+            if (lab_anchor && !mtp.anchor_report(stderr, force_k, err)) {
+                std::printf("ERR %s\n", err.c_str()); return 1;
+            }
             if (lab_feature && !mtp.feature_finish(stderr, force_k, produced_n, finish, err)) {
                 std::printf("ERR %s\n", err.c_str()); return 1;
             }
             if (lab_policy) {
                 // This diagnostic cannot be used as an uninstrumented performance result. All formatting and I/O
                 // are outside decode_ms; timestamps are host observations, not GPU execution durations.
+                int64_t top2_unobserved = 0, top2_invalid = 0, top2_label_censored = 0;
+                if (lab_top2) {
+                    // Local target labels on the actual forced context. They are NOT a replay of free greedy.
+                    // Only verifier rows through the first rejection, within the output budget, were recorded.
+                    std::vector<int32_t> raw_labels((size_t) oracle_requested, -1);
+                    for (size_t wi = 0; wi < policy_nw; ++wi) {
+                        const auto& w = policy_windows[wi];
+                        for (int j = 0; j < w.emitted; ++j) {
+                            const int64_t at = w.emitted_before + j;
+                            if (at >= 0 && at < oracle_requested) raw_labels[(size_t) at] = w.raw_target[j];
+                        }
+                    }
+                    for (size_t ci = 0; ci < policy_nc; ++ci) {
+                        auto& c = policy_chains[ci];
+                        c.first_label_in_budget = c.fixture_base >= 0 && c.fixture_base < oracle_requested;
+                        if (c.first_label_in_budget) {
+                            c.first_fixture = (*forced)[(size_t) c.fixture_base];
+                            c.first_raw = raw_labels[(size_t) c.fixture_base];
+                        } else ++top2_label_censored;
+                        if (!c.first_observed || c.first_top2.status == 0) ++top2_unobserved;
+                        else if (c.first_top2.status != 1 || c.first_top2.first != c.ids[0]) ++top2_invalid;
+                    }
+                }
                 std::FILE* fp = std::fopen(lab_policy_path, "ab");
                 if (fp == nullptr) { std::printf("ERR lab policy trace: cannot append JSONL\n"); return 1; }
                 int64_t nonfinite = 0;
@@ -12745,6 +12832,7 @@ int main(int argc, char** argv) {
                              incoming_disk ? "validated_ssd" : "other", lab_selective && selective_request_on ? 8192 : 0,
                              policy_windows.size(), policy_windows.size() * sizeof(PolicyWindow) + policy_chains.size() * sizeof(PolicyChain));
                 number(req_spec_min_p); std::fputs(",\"theta\":", fp); number(pl_theta);
+                if (lab_top2) std::fputs(",\"mtp_top2_probe\":1", fp);
                 std::fputs(",\"decode_ms\":", fp); number(decode_ms); std::fputs("}\n", fp);
                 for (size_t ci = 0; ci < policy_nc; ++ci) {
                     const auto& c = policy_chains[ci];
@@ -12777,7 +12865,22 @@ int main(int argc, char** argv) {
                         if (index >= 0 && index < oracle_requested) std::fprintf(fp, "%d", (*forced)[(size_t) index]);
                         else std::fputs("null", fp);
                     }
-                    std::fputs("]}\n", fp);
+                    std::fputc(']', fp);
+                    if (lab_top2) {
+                        const auto& r = c.first_top2;
+                        std::fprintf(fp, ",\"first_top2\":{\"observed\":%s,\"status\":%d,\"row\":",
+                                     c.first_observed ? "true" : "false", r.status);
+                        optional_int(r.row); std::fputs(",\"first_id\":", fp); optional_int(r.first);
+                        std::fputs(",\"second_id\":", fp); optional_int(r.second);
+                        std::fputs(",\"pick_id\":", fp); optional_int(r.pick);
+                        std::fprintf(fp, ",\"nonfinite_logits\":%d,\"logit_gap\":", r.nonfinite);
+                        if (c.first_observed && r.status == 1) number(r.gap); else std::fputs("null", fp);
+                        std::fprintf(fp, ",\"label_in_budget\":%s,\"fixture_label\":",
+                                     c.first_label_in_budget ? "true" : "false");
+                        optional_int(c.first_fixture); std::fputs(",\"raw_target_label\":", fp); optional_int(c.first_raw);
+                        std::fputs(",\"label_scope\":\"local_forced_context\"}", fp);
+                    }
+                    std::fputs("}\n", fp);
                 }
                 for (size_t wi = 0; wi < policy_nw; ++wi) {
                     const auto& w = policy_windows[wi];
@@ -12814,8 +12917,12 @@ int main(int argc, char** argv) {
                 for (size_t ci = 0; ci < policy_nc; ++ci)
                     if (policy_chains[ci].complete_ms < 0 || policy_chains[ci].ready != policy_chains[ci].n_out) ++incomplete_chains;
                 const bool valid = !policy_truncated && nonfinite == 0 && incomplete_chains == 0 && pl_ran &&
-                                   produced_n == oracle_requested && policy_windows_seen == dec_windows;
+                                   produced_n == oracle_requested && policy_windows_seen == dec_windows &&
+                                   (!lab_top2 || (top2_unobserved == 0 && top2_invalid == 0));
                 begin_record("end");
+                if (lab_top2)
+                    std::fprintf(fp, ",\"top2_unobserved\":%lld,\"top2_invalid\":%lld,\"top2_label_censored\":%lld",
+                                 (long long) top2_unobserved, (long long) top2_invalid, (long long) top2_label_censored);
                 std::fprintf(fp, ",\"valid\":%s,\"truncated\":%s,\"nonfinite\":%lld,\"incomplete_chains\":%lld,"
                                  "\"windows_seen\":%lld,\"windows_recorded\":%zu,\"chains_seen\":%lld,\"chains_recorded\":%zu}\n",
                              valid ? "true" : "false", policy_truncated ? "true" : "false", (long long) nonfinite,

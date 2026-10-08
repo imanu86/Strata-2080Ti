@@ -24,6 +24,7 @@
 #include "strata/kernels/sampler.hpp"
 #include "strata/kernels/kv_stream.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
@@ -65,6 +66,10 @@ public:
     /// STRATA_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
     static bool top2_env();
     int32_t top2(int j) const { return j >= 0 && j < (int) top2_.size() ? top2_[(size_t) j] : -1; }
+    // Observational lab probe, configured before load/capture and constant across every hot arm.
+    void set_first_top2_probe(bool on) { first_top2_config_ = on; }
+    // Unobserved until an existing first-output or chain-completion event has been consumed.
+    const strata::kernels::MtpFirstTop2& chain_first_top2() const { return first_top2_observed_; }
     int max_t() const { return max_t_; }
     uint64_t vram_bytes() const { return vram_; }
     /// Lab v1: optional private int8 KV pool and a second pre-captured chain graph family. Before load.
@@ -74,6 +79,10 @@ public:
     bool hq_switch(int mode, std::string& err);
     bool hq_report(std::FILE* out, int64_t request, std::string& err) const;
     // Lab-only future-residual oracle. Configure before load: equal allocation and graph nodes in all modes.
+    // Causal residual anchor, configured before allocation/capture; hot switch only at a GEN boundary.
+    void set_anchor_capture(bool on) { anchor_config_ = on; }
+    bool anchor_begin(bool on, std::string& err);
+    bool anchor_report(std::FILE* out, int64_t request, std::string& err);
     void set_feature_capture(bool on) { feature_config_ = on; }
     bool feature_begin(int mode, const std::string& path, const uint8_t* identity,
                        const std::vector<int64_t>& prompt, const std::vector<int32_t>& fixture,
@@ -301,6 +310,16 @@ private:
     // --pipeline-windows 2 (chain_launch)
     bool stage_source_R(int T, std::string& err);   ///< set_source_R's rows into the bound buffer
     bool force_on_ = false, chain_live_ = false;
+    bool anchor_allocate(std::string& err);
+    bool anchor_config_ = false, anchor_on_ = false;
+    float* anchor_ = nullptr;
+    int32_t *anchor_valid_ = nullptr, *anchor_h_meta_ = nullptr, *anchor_m_meta_ = nullptr;
+    unsigned long long* anchor_stats_ = nullptr;
+    uint64_t anchor_bytes_ = 0, anchor_fresh_ = 0, anchor_forced_ = 0;
+    bool first_top2_config_ = false;
+    strata::kernels::MtpFirstTop2 *first_top2_host_ = nullptr, *first_top2_mapped_ = nullptr;
+    strata::kernels::MtpFirstTop2 first_top2_observed_{};
+    void observe_first_top2(); // only after a successful existing readiness event
     bool feature_allocate(std::string& err);
     struct FeatureHeader {
         char magic[8];

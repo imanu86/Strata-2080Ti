@@ -154,12 +154,17 @@ MtpDrafter::~MtpDrafter() {
         if (slot.consumed) cudaEventDestroy(slot.consumed);
         if (slot.host) cudaFreeHost(slot.host);
     }
+    if (anchor_) cudaFree(anchor_);
+    if (anchor_valid_) cudaFree(anchor_valid_);
+    if (anchor_stats_) cudaFree(anchor_stats_);
+    if (anchor_h_meta_) cudaFreeHost(anchor_h_meta_);
     if (feature_bank_) cudaFree(feature_bank_);
     if (feature_fixture_) cudaFree(feature_fixture_);
     if (feature_mask_) cudaFree(feature_mask_);
     if (feature_stats_) cudaFree(feature_stats_);
     if (feature_host_) cudaFreeHost(feature_host_);
     if (feature_h_meta_) cudaFreeHost(feature_h_meta_);
+    if (first_top2_host_) cudaFreeHost(first_top2_host_);
     if (prefill_host_R_) cudaFreeHost(prefill_host_R_);
     if (local_window_R_) cudaFree(local_window_R_);
     if (private_gr_arena_) cudaFree(private_gr_arena_);
@@ -300,6 +305,60 @@ bool MtpDrafter::hq_report(std::FILE* out, int64_t request, std::string& err) co
 }
 
 // Lab selective MTP uses only its OWN authoritative K/V. The target provides logical positions, never values.
+
+bool MtpDrafter::anchor_allocate(std::string& err) {
+    if (!force_on_ || feature_config_ || selective_config_ || !hq_pack_.empty() || hnorm_stream_ ||
+        g_->hc != 4 || g_->n_embd != 2560) {
+        err = "mtp anchor: unsupported geometry or graph configuration"; return false;
+    }
+    if (cudaMalloc((void**) &anchor_, 10240 * sizeof(float)) != cudaSuccess ||
+        cudaMalloc((void**) &anchor_valid_, sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc((void**) &anchor_stats_, 6 * sizeof(unsigned long long)) != cudaSuccess ||
+        cudaHostAlloc((void**) &anchor_h_meta_, 2 * sizeof(int32_t), cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+        cudaHostGetDevicePointer((void**) &anchor_m_meta_, anchor_h_meta_, 0) != cudaSuccess) {
+        err = "mtp anchor: common buffers do not fit"; return false;
+    }
+    std::memset(anchor_h_meta_, 0, 2 * sizeof(int32_t));
+    anchor_bytes_ = 10240 * sizeof(float) + sizeof(int32_t) + 6 * sizeof(unsigned long long);
+    vram_ += anchor_bytes_;
+    std::fprintf(stderr, "strata lab mtp anchor: allocation=retained row_floats=10240 vram_bytes=%llu "
+                         "mapped_bytes=8 graph_gate=all_modes alpha_set=0,0.25 future_inputs=0\n",
+                 (unsigned long long) anchor_bytes_);
+    return true;
+}
+
+bool MtpDrafter::anchor_begin(bool on, std::string& err) {
+    const OnDevice device(device_);
+    if (!anchor_config_ || chain_live_) { err = "mtp anchor: request boundary is not idle"; return false; }
+    if (cudaStreamSynchronize(cs_) != cudaSuccess || (side_ && cudaStreamSynchronize(side_) != cudaSuccess)) {
+        err = "mtp anchor: request drain failed"; return false;
+    }
+    anchor_on_ = on; anchor_fresh_ = anchor_forced_ = 0;
+    anchor_h_meta_[0] = on ? 1 : 0; anchor_h_meta_[1] = 0;
+    if (cudaMemsetAsync(anchor_valid_, 0, sizeof(int32_t), cs_) != cudaSuccess ||
+        cudaMemsetAsync(anchor_stats_, 0, 6 * sizeof(unsigned long long), cs_) != cudaSuccess ||
+        cudaStreamSynchronize(cs_) != cudaSuccess) {
+        err = "mtp anchor: request reset failed"; return false;
+    }
+    return true;
+}
+
+bool MtpDrafter::anchor_report(std::FILE* out, int64_t request, std::string& err) {
+    const OnDevice device(device_);
+    if (!anchor_config_ || chain_live_) { err = "mtp anchor: report while not idle"; return false; }
+    unsigned long long s[6] = {};
+    if (cudaStreamSynchronize(cs_) != cudaSuccess ||
+        cudaMemcpy(s, anchor_stats_, sizeof s, cudaMemcpyDeviceToHost) != cudaSuccess) {
+        err = "mtp anchor: counter read failed"; return false;
+    }
+    std::fprintf(out, "strata lab mtp anchor: request %lld alpha=%s fresh_chains=%llu forced_chains=%llu "
+                     "seed_valid=%llu seed_invalid=%llu applied_steps=%llu off_steps=%llu excluded_steps=%llu "
+                     "invalid_steps=%llu vram_bytes=%llu row_floats=10240 first_head_direct=unchanged future_inputs=0\n",
+                 (long long) request, anchor_on_ ? "0.25" : "0", (unsigned long long) anchor_fresh_,
+                 (unsigned long long) anchor_forced_, s[0], s[1], s[2], s[3], s[4], s[5],
+                 (unsigned long long) anchor_bytes_);
+    return std::ferror(out) == 0;
+}
 
 bool MtpDrafter::feature_allocate(std::string& err) {
     if (!force_on_ || selective_config_ || !hq_pack_.empty() || g_->hc != 4 || g_->n_embd != 2560) {
@@ -926,6 +985,10 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
               mapped(T * 4 + 64, (void**) &h_prob_, (void**) &m_prob_) &&
               (!force_on_ || mapped(64, (void**) &h_force_, (void**) &m_force_));
     if (!ok) { err = "mtp: mapped staging failed"; return false; }
+    if (first_top2_config_ && !mapped(sizeof(strata::kernels::MtpFirstTop2),
+            (void**) &first_top2_host_, (void**) &first_top2_mapped_)) {
+        err = "mtp: first-head probe staging failed"; return false;
+    }
     if (h_force_ != nullptr) for (int j = 0; j < 16; ++j) h_force_[j] = -1;
     auto carve = [&](Bump& b) {
         tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(R2 * 4); pos_ = b.take<int32_t>(R2 * NH); row_ = b.take<int32_t>(4);
@@ -998,6 +1061,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     }
 #endif
     if (selective_config_ && !selective_allocate(err)) return false;
+    if (anchor_config_ && !anchor_allocate(err)) return false;
     if (feature_config_ && !feature_allocate(err)) return false;
     const double files_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_files).count();
     if (shared != nullptr) {
@@ -1758,6 +1822,10 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
                               {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
     copy_from_mapped_multi(in, 7, cs_);
 #endif
+    // At this point Rin contains the unchanged target rows; row_[0] is accepted row a.
+    // Capture the anchor before record_front/rest/mtp_select can overwrite or transform these inputs.
+    if (anchor_config_)
+        mtp_anchor_seed(Rin_, HCN, T, row_, anchor_m_meta_, anchor_, anchor_valid_, anchor_stats_, cs_);
     ok = record_front(T, 0, cs_, err);
     if (ok) {
         if (T > 1) {
@@ -1769,6 +1837,11 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
         ok = record_rest(ra, cs_, err);
         coupled_rec_ = false;
     }
+    // record_rest has selected/mapped its greedy output; row_[1] is the exact row used by mtp_select.
+    // The later recursive steps overwrite head_logits_, so observe it here on the same captured stream.
+    if (ok && first_top2_config_)
+        mtp_first_top2(head_logits_, (int) (dhead_ ? n_dvocab_ : n_vocab_), 1, row_ + 1,
+                       dhead_ ? dvocab_ : nullptr, out_ids_, first_top2_mapped_, cs_);
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
     if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
@@ -1794,6 +1867,8 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
 #endif
     coupled_rec_ = coupled;
     coupled_j_ = j;
+    if (anchor_config_)
+        strata::kernels::mtp_anchor_step(Rin_, HCN, anchor_m_meta_, anchor_, anchor_valid_, anchor_stats_, cs_);
     if (feature_config_)
         strata::kernels::mtp_feature_step(Rin_, HCN, tok_, feature_bank_, feature_fixture_, feature_m_meta_,
                                          feature_mask_, feature_stats_, j, cs_);
@@ -2352,8 +2427,14 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
             err = "mtp feature: chain mask reset failed"; return false;
         }
     }
+    if (anchor_config_) {
+        const bool fresh = force == nullptr && n_force == 0;
+        anchor_h_meta_[1] = fresh ? 1 : 0;
+        if (fresh) ++anchor_fresh_; else ++anchor_forced_;
+    }
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
+    if (first_top2_config_) first_top2_observed_ = {};
     chain_early_ = std::max(0, std::min(n_early, n_out));
     bool ok = cudaGraphLaunch(hq_mode_ ? hq_round_[hq_mode_ - 1][T] : (selective_active_ ? selective_round_[T] : round_exec_[T]), cs_) == cudaSuccess;
     if (ok && chain_early_ >= 1) ok = cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
@@ -2375,6 +2456,15 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     return true;
 }
 
+void MtpDrafter::observe_first_top2() {
+    if (!first_top2_config_ || first_top2_observed_.status != 0) return;
+    const volatile auto& r = *first_top2_host_;
+    first_top2_observed_.row = r.row; first_top2_observed_.first = r.first;
+    first_top2_observed_.second = r.second; first_top2_observed_.pick = r.pick;
+    first_top2_observed_.nonfinite = r.nonfinite; first_top2_observed_.gap = r.gap;
+    first_top2_observed_.status = r.status;
+}
+
 int MtpDrafter::chain_outputs_ready(std::string& err) {
     if (!chain_live_) return chain_n_;
     const OnDevice on_device(device_);
@@ -2386,6 +2476,7 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
         chain_prob_[steps_seen_] = ((volatile float*) h_prob_)[steps_seen_];
         ++steps_seen_;
     }
+    if (steps_seen_ > 0) observe_first_top2();
     return steps_seen_;
 }
 
@@ -2396,6 +2487,7 @@ int MtpDrafter::chain_poll(std::string& err) {
     if (q == cudaErrorNotReady) return 0;
     chain_live_ = false;
     if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
+    observe_first_top2();
     for (int j = 0; j < chain_n_; ++j) {
         chain_tok_[j] = ((volatile int32_t*) h_out_)[j];
         chain_prob_[j] = ((volatile float*) h_prob_)[j];
