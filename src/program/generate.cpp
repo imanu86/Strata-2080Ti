@@ -2429,6 +2429,14 @@ int main(int argc, char** argv) {
     // Independent serial-split SSD benchmark hook. It never enables or weakens oracle/policy guards.
     const char* lab_nonmtp_ssd_switch = std::getenv("STRATA_LAB_NONMTP_SSD_SWITCH");
     const bool lab_nonmtp_ssd = lab_nonmtp_ssd_switch != nullptr && lab_nonmtp_ssd_switch[0] != 0;
+    const char* lab_helper_env = std::getenv("STRATA_LAB_HELPER_SSD");
+    const bool lab_helper_ssd = lab_helper_env != nullptr;
+    if (lab_helper_ssd && (std::strcmp(lab_helper_env, "1") != 0 || !lab_nonmtp_ssd ||
+        !o.layer_split.empty() || o.peer_device >= 1 || o.expert_cache_remote[0] != 2560 ||
+        o.expert_cache_remote[1] != 0 || o.expert_cache_remote[2] != 0 || !o.remote_expert_opt ||
+        o.expert_cache_remote_auto[0] || o.elastic || o.adapt_swaps != 0 || o.adapt_async != 0 || o.pcie_frac != 0.0)) {
+        std::fprintf(stderr, "strata lab helper ssd: strict fixed2560/optON/primary-only state required\n"); return 2;
+    }
     constexpr int64_t lab_nonmtp_ssd_root = 131072;
     if (lab_nonmtp_ssd) {
         const char* fi = std::getenv("STRATA_FORCE_IDS");
@@ -2436,7 +2444,7 @@ int main(int argc, char** argv) {
         const char* tm = std::getenv("STRATA_SPLIT_WAIT_MS");
         char* tm_end = nullptr;
         const int64_t wait_ms = tm == nullptr ? 0 : std::strtoll(tm, &tm_end, 10);
-        if (!o.serve || o.batch != 0 || o.pipeline_windows != 0 || o.layer_split != "16" || o.spec != 4 ||
+        if (!o.serve || o.batch != 0 || o.pipeline_windows != 0 || (lab_helper_ssd ? !o.layer_split.empty() : o.layer_split != "16") || o.spec != 4 ||
             o.spec_min_p != 0.5 || o.mtp.empty() || o.mtp_hnorm_stream || !o.mtp_q4.empty() || o.mtp_window != 32768 ||
             o.suffix_draft != 0 || o.lookup_chain != 0 || o.coupled_draft || !o.spec_oracle.empty() ||
             !o.spec_follow.empty() || o.spec_corrupt != 0 || o.adapt_async != 0 || o.resident_cpu_experts ||
@@ -2446,8 +2454,9 @@ int main(int argc, char** argv) {
             std::getenv("STRATA_MMVQ_IL") != nullptr || std::getenv("STRATA_HC_NORM_RETAIN") != nullptr ||
             std::getenv("STRATA_NEURON_PROBE_CONTROL") != nullptr || std::getenv("STRATA_CLOSED_ROUTING") != nullptr ||
             std::getenv("STRATA_STATE_HASH") != nullptr || std::getenv("STRATA_CKPT_REREAD") != nullptr ||
-            ov == nullptr || std::strcmp(ov, "1") != 0 || tm == nullptr || tm_end == tm || *tm_end != '\0' ||
-            wait_ms <= 0 || wait_ms > 30000 || !std::filesystem::path(lab_nonmtp_ssd_switch).is_absolute()) {
+            (lab_helper_ssd ? (ov != nullptr || tm != nullptr) :
+                (ov == nullptr || std::strcmp(ov, "1") != 0 || tm == nullptr || tm_end == tm || *tm_end != '\0' ||
+                 wait_ms <= 0 || wait_ms > 30000)) || !std::filesystem::path(lab_nonmtp_ssd_switch).is_absolute()) {
             std::fprintf(stderr, "strata lab nonmtp ssd: requires isolated serial pipeline0/split16/spec4/minp0.5/native MTP, bounded overlap and absolute control\n");
             return 2;
         }
@@ -2484,7 +2493,7 @@ int main(int argc, char** argv) {
     // expert caches stay rejected, as before.
     if (!o.prompt_cache_file.empty() && (!o.serve || o.prompt_cache <= 0 || o.prompt_cache_root <= 0 ||
             o.turn_token < 0 || o.peer_device >= 1 ||
-            std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int slots) { return slots > 0; }))) {
+            (!lab_helper_ssd && std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int slots) { return slots > 0; })))) {
         std::fprintf(stderr, "strata: --prompt-cache-file requires --serve, enabled root checkpoints, no peer device "
                              "and no remote expert caches\n");
         return 2;
@@ -7617,6 +7626,28 @@ int main(int argc, char** argv) {
         };
         strata::core::PrefixDigest prefix_identity{};
         std::vector<std::filesystem::path> prefix_cache_assets;   // validate a lab hot-switch destination too
+        // The helper has static weights and temporary rows only; all sequence state is primary+MTP.
+        auto helper_residency = [&]() {
+            std::string bits;
+            bits.reserve((size_t) g.n_layers * (size_t) g.n_expert);
+            for (int64_t l = 0; l < g.n_layers; ++l)
+                for (int32_t e = 0; e < g.n_expert; ++e)
+                    bits.push_back(remote_experts[0].holds(l, e) ? '1' : '0');
+            return bits;
+        };
+        const std::string helper_initial_residency = lab_helper_ssd ? helper_residency() : std::string{};
+        auto helper_quiesce = [&]() -> bool {
+            if (!lab_helper_ssd) return true;
+            if (!mtp.idle(err)) return false;
+            for (int d : {0, remote_dev[0]}) {
+                const strata::core::OnDevice on(d);
+                if (cudaDeviceSynchronize() != cudaSuccess) { err = "helper SSD: device quiescence failed"; return false; }
+            }
+            if (remote_experts[0].resident() != 2560 || helper_residency() != helper_initial_residency) {
+                err = "helper SSD: fixed residency changed"; return false;
+            }
+            return true;
+        };
         bool prefix_disk_enabled = !o.prompt_cache_file.empty();
         if (prefix_disk_enabled) {
             const auto identity_start = Clock::now();
@@ -7675,6 +7706,44 @@ int main(int argc, char** argv) {
                     settings.emplace_back(stage_properties.uuid.bytes, sizeof(stage_properties.uuid.bytes));
 #endif
                 }
+            }
+            if (lab_helper_ssd) {
+                cudaDeviceProp primary_prop{}, helper_prop{};
+                const strata::core::OnDevice on(remote_dev[0]);
+                size_t free_bytes = 0, total_bytes = 0;
+                if (!helper_quiesce() || cudaGetDeviceProperties(&primary_prop, 0) != cudaSuccess ||
+                    cudaGetDeviceProperties(&helper_prop, remote_dev[0]) != cudaSuccess ||
+                    cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess || free_bytes < (1536ull << 20) ||
+                    primary_prop.major != 7 || primary_prop.minor != 5 || helper_prop.major != 8 || helper_prop.minor != 6 ||
+                    !remote_experts[0].optimized_decode() || !use_mtp || mtp.device() != 0 || g.n_layers != 48) {
+                    std::fprintf(stderr, "strata lab helper ssd: startup topology/capacity/quiescence invalid\n"); return 1;
+                }
+                settings.push_back("lab-helper-static-opt1-slots2560-v1");
+                settings.emplace_back(helper_prop.name);
+                settings.push_back(std::to_string(helper_prop.major) + ":" + std::to_string(helper_prop.minor));
+#if defined(STRATA_USE_HIP)
+                settings.emplace_back(helper_prop.gcnArchName);
+                settings.push_back(std::to_string(helper_prop.pciDomainID) + ":" + std::to_string(helper_prop.pciBusID) + ":" + std::to_string(helper_prop.pciDeviceID));
+#else
+                settings.emplace_back(helper_prop.uuid.bytes, sizeof(helper_prop.uuid.bytes));
+                auto uuid_hex = [](const char* bytes) {
+                    static constexpr char hex[] = "0123456789abcdef";
+                    std::string text; text.reserve(32);
+                    for (int i = 0; i < 16; ++i) {
+                        const unsigned char v = (unsigned char) bytes[i];
+                        text.push_back(hex[v >> 4]); text.push_back(hex[v & 15]);
+                    }
+                    return text;
+                };
+                const std::string primary_uuid = uuid_hex(primary_prop.uuid.bytes);
+                const std::string helper_uuid = uuid_hex(helper_prop.uuid.bytes);
+                std::fprintf(stderr, "strata lab helper ssd: devices primary_uuid=%s helper_uuid=%s mtp_device=%d layers=%lld\n",
+                    primary_uuid.c_str(), helper_uuid.c_str(), mtp.device(), (long long) g.n_layers);
+#endif
+                settings.push_back(helper_initial_residency); // full bitset covered by native identity digest
+                settings.push_back(remote_experts[0].zero_copy() ? "helper-zerocopy1" : "helper-zerocopy0");
+                std::fprintf(stderr, "strata lab helper ssd: startup slots=2560 opt=1 zerocopy=%d free_mib=%llu primary_cc=75 helper_cc=86 state=primary_MTP\n",
+                    (int) remote_experts[0].zero_copy(), (unsigned long long) (free_bytes >> 20));
             }
             // Conservative compatibility: all engine options except the cache destination,
             // and all STRATA_/CUDA_ environment overrides. Exact request tokens are checked separately.
@@ -10347,6 +10416,7 @@ int main(int argc, char** argv) {
             // The hot lab requests an actual disk restore, not a RAM checkpoint hit. Clear only session metadata
             // after all prior work is idle; the existing validated prefix-cache path below restores GPU state.
             if (!oracle_prefix_file.empty()) {
+                if (!helper_quiesce()) { std::printf("ERR %s\n", err.c_str()); return 1; }
                 if (pl_prepared) pl_drain();
                 apply_pending(true);
                 for (int k = 0; k < n_stages; ++k) {
@@ -11287,6 +11357,7 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (incomplete windowed draft prefix)\n");
                 if (to == root_at && prefix_disk_enabled && req_imgs.empty() && mtp.first_needed() <= 0 &&
                         to <= int64_t(strata::core::prefix_cache_max_tokens)) {
+                    if (!helper_quiesce()) { std::printf("ERR %s\n", err.c_str()); return 1; }
                     const auto save_start = Clock::now();
                     try {
                         const std::vector<int32_t> prefix(ids.begin(), ids.begin() + to);
@@ -11618,6 +11689,9 @@ int main(int argc, char** argv) {
                 std::printf("ERR lab nonmtp ssd: full fixed prompt/fixture/budget/minp required\n"); return 1;
             }
             const int64_t nonmtp_overlap_before = ver.overlapped_windows;
+            const int64_t helper_decode_entries_before = lab_helper_ssd ? remote_experts[0].computed() : 0;
+            const int64_t helper_decode_launches_before = lab_helper_ssd ? remote_experts[0].launched_layers() : 0;
+            const uint64_t helper_decode_bytes_before = lab_helper_ssd ? remote_experts[0].returned_bytes() : 0;
             int64_t force_windows = 0, force_acc = 0, force_off = 0, force_over = 0;
             // the last forced window's rows: the target's own picks and the forced ids that replaced them
             std::vector<int32_t> force_orig(64, -1), force_val(64, -1);
@@ -13190,7 +13264,7 @@ int main(int argc, char** argv) {
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
             strata::kernels::native_mmvq_il_capture_dump((long long) force_k);
-            if (lab_nonmtp_ssd)
+            if (lab_nonmtp_ssd && !lab_helper_ssd)
                 std::fprintf(stderr, "strata lab nonmtp overlap: request=%lld completed=%lld windows=%lld pipeline=0 wait_ms=%llu\n",
                              (long long) force_k, (long long) (ver.overlapped_windows - nonmtp_overlap_before),
                              (long long) force_windows, (unsigned long long) std::strtoull(std::getenv("STRATA_SPLIT_WAIT_MS"), nullptr, 10));
@@ -13928,6 +14002,13 @@ int main(int argc, char** argv) {
                                      "of %lld windows\n", (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
                              (long long) t2_hit[1], (long long) t2_rej[2], (long long) t2_hit[2], (long long) t2_rej[3],
                              (long long) t2_hit[3], (long long) dec_windows);
+            if (lab_helper_ssd) {
+                if (!helper_quiesce()) { std::printf("ERR %s\n", err.c_str()); return 1; }
+                std::fprintf(stderr, "strata lab helper ssd: request=%lld slots=2560 residency=unchanged opt=1 decode_entries=%lld decode_launches=%lld decode_bytes=%llu\n",
+                    (long long) force_k, (long long) (remote_experts[0].computed() - helper_decode_entries_before),
+                    (long long) (remote_experts[0].launched_layers() - helper_decode_launches_before),
+                    (unsigned long long) (remote_experts[0].returned_bytes() - helper_decode_bytes_before));
+            }
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
                 std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "

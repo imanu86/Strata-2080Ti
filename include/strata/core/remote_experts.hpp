@@ -40,6 +40,7 @@ public:
     /// This helper's cache holds (layer, expert): begin() will take its rows unless the plan gave them away.
     bool holds(int64_t layer, int32_t expert) const { return cache_.slot_of(layer, expert) >= 0; }
     bool optimized_decode() const { return remote_opt_ != nullptr; }
+    bool zero_copy() const { return zero_copy_; } // observational actual-mode identity
     bool finish(float* out, std::string& err);
     int64_t resident() const { return cache_.resident(); }
     int64_t computed() const { return computed_; }

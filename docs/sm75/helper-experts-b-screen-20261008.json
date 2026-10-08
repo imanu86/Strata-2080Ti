@@ -1,0 +1,430 @@
+{
+  "schema": "non-mtp-b-screen-v1",
+  "status": "C5_ARCHITECTURAL_B_ONLY_VALID_EXERCISED",
+  "timestamp": "2026-10-08T09:17:54.922654+00:00",
+  "candidate": "C5-helper-experts-fixed2560-optON",
+  "provenance": {
+    "current_core_main": "9336763791ec3e228ef56ddf5795194114e1799d",
+    "compiled_source_base": "9336763791ec3e228ef56ddf5795194114e1799d+C5-helper-working-tree",
+    "source_sha256": {
+      "src/core/verify.cpp": "ad71def52658d53d869d1958d1704bec4459af03ac986607b0338e164cad43dc",
+      "include/strata/kernels/native_mmvq.hpp": "b29e0c996f86a83e4d0a58c666127e0333c3b117bf4cc68ddfb4b4ed480e1cb3",
+      "include/strata/core/remote_experts.hpp": "49e047335937af0d9b0298a7e158bc024ecbf6b6c673ae1d2e485469eb7dc0c4",
+      "src/program/generate.cpp": "0699f7be4a65475d0f8a3a3fad696513176575acc3c82b3ecc01834db5f4b3f4",
+      "docs/MULTI_GPU.md": "f16abc52029eccc0bb556259cae04bb278edaf34340a773b26d5efc1a3fd71c1",
+      "src/kernels/cuda/native_mmvq.cu": "2103373699824a8b53a81d0b27cf1d25e707e27261d91b8dbdb769bb927c5199",
+      "include/strata/core/verify.hpp": "4d65a45c87a29bee9d40f81e69b71fe2eb27f8a986d6edbf8be554bfdab5172c",
+      "docs/OLDER_GPUS.md": "f0e2599cf0bc9a1ec51151c419c60d16ba76746f09cdf1095ae478f5f0fa6a4d",
+      "include/strata/kernels/verify_kernels.hpp": "f6769c643c013886e8606b63374672566c8b50bebd5a3e13ce1080d3331de635",
+      "src/kernels/cuda/verify_kernels.cu": "6252dd64d1e0660a047ffee4e5ace72e9520b7caf06e8af1be286e59ba41c3f1",
+      "src/kernels/cuda/fused_gr.cu": "6df93cb9ac84fd35893e3ba0ce39289f4ca078908f20af638cf7ad8a8d22f3de",
+      "src/kernels/mmvq_il_parity.cpp": "1407adb98b6c90a501951fd29975c7699506039c57bfb9ddc3ab573143466c7f"
+    },
+    "signed_review_manifest_sha256": "1746215c3699f60760916fb9c1b2ff66c8d85eb771901bf59a915ff4c9b295f5",
+    "bench_sha256": {
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\bench\\c5_contract.py": "dc022fa4fa36947707860150f78ccf048adcf5014575fd9fbfbab14c4c4ee054",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\bench\\c5_validation.py": "348ba01daf327b9e7d600146cb100717eff1c811e6fa68bacde10b09c19cf4bc",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\bench\\minp_contract.py": "d00445c4aea56c45178df077ff15b811364a69ce4a1c404b3f55f23f4524b5c6",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\bench\\run_c5.py": "3fd281942eede325684576909dfaafbb741d8fa7a9517b23b4a2545ff0f271ec",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\bench\\test_c5.py": "832bb6b348d63c8fc32e1e9a6362ef051af514cc1bf74beab561108af92b1108"
+    },
+    "immutable_package": {
+      "path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\build\\c5-helper-v1\\strata.exe",
+      "executable_sha256": "c019d45f57539e6204895b5f53d3ee9cd1c78a8c69f71f77d96a3522a198947f",
+      "build_record_sha256": "03aac131aa738e7d94b1ac07416a4a1b3bd7e9e0710679656386b54b62972446"
+    },
+    "diff_sha256": "4cb80ac5f197163a79784a1cae701f9644b0d655218cfc4e75874a6668f3df9b",
+    "verdict_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-experts\\runs\\DET-nonmtp-C5-01\\verdict.json",
+    "verdict_sha256": "d1253142f4405a64e489782899f5fb323d32eac2ff81ed104cb2b4cd6968674c"
+  },
+  "protocol": {
+    "run": "DET-nonmtp-C5-01",
+    "GEN_total": 4,
+    "warmup": "2ON15 NONRESULT cold candidate-private SSD",
+    "measured_B": 2,
+    "A_performance": 0,
+    "sampling": "greedy seed73 spec4 minp0.5",
+    "FORCE_IDS_tokens": 1024,
+    "FORCE_WINDOWS": false,
+    "architecture": "RTX2080Ti modified22GiB primaryall48/dense/KV/MTP; RTX3060 desktop helper2560 stripe optON zerocopy1; fixed cache, adapt0 async0 elasticOFF pcie_frac0; no layer-split/pipeline2/peer",
+    "other_levers": "IL/HCretain/splitoverlap/resident/oracle/LABMTP ABSENT; sm86 historical IL auto unchanged",
+    "SSD": "Native complete MTP/fullprefix truepromptlookahead131072; new extraactual helperUUID/zerocopy/fullholds identity; private2files, no RAM hit, exactrestore131072 tails176/167, stableprefix payload; no GEN1SAVE substitute"
+  },
+  "startup_qualification": {
+    "slots": 2560,
+    "opt": 1,
+    "zerocopy": 1,
+    "free_mib": 6739,
+    "primary_cc": 75,
+    "helper_cc": 86,
+    "primary_uuid": "3ec189a90fe7a128af2c8df8fb3e15c7",
+    "helper_uuid": "aab7a70bb7959b37f3171423f89733be",
+    "mtp_device": 0,
+    "layers": 48
+  },
+  "actual_capacity": {
+    "primary_initial_slots": 8522,
+    "helper_initial_slots": 2560,
+    "helper_GiB": 4.19,
+    "requests": [
+      {
+        "request": 0,
+        "primary_slots_before": 8522,
+        "primary_slots_after": 8522,
+        "helper_slots": 2560,
+        "events": []
+      },
+      {
+        "request": 1,
+        "primary_slots_before": 8522,
+        "primary_slots_after": 8522,
+        "helper_slots": 2560,
+        "events": []
+      },
+      {
+        "request": 2,
+        "primary_slots_before": 8522,
+        "primary_slots_after": 8522,
+        "helper_slots": 2560,
+        "events": []
+      },
+      {
+        "request": 3,
+        "primary_slots_before": 8522,
+        "primary_slots_after": 8522,
+        "helper_slots": 2560,
+        "events": []
+      }
+    ],
+    "limits": "Fixed architecture; no capacity normalization or paired A."
+  },
+  "capacity_interpretation": {
+    "primary_GiB": 13.8,
+    "helper_GiB": 4.19,
+    "total_expert_slots": 11082,
+    "helper_free_MiB": 6739,
+    "comparison": "Pure configuration inventory: C4 split had about13949 slots4712+9237 before L02 drift; current11082. Different layer formats/placement/state allocations, not equal resident bytes or causal comparison.",
+    "limit": "Helper2560 deliberately conservative; substantial helperVRAM unexercised. No tuning. This result does not reject helper architecture as a family."
+  },
+  "requests": [
+    {
+      "case": "L01",
+      "request_index": 2,
+      "phase": "long",
+      "arm": "B",
+      "tokens": 1024,
+      "decode_ms": 21436.9,
+      "decode_tps": 47.768100798156446,
+      "prompt_ms": 4508.7,
+      "reused": 131072,
+      "windows": 523,
+      "target_rows_verified": 1220,
+      "accepted": 501,
+      "drafts": 697,
+      "raw_target_differs_from_fixture": 27,
+      "raw_label_scope": "Count only on native verified forced prefix; raw IDs not captured. No FREE quality proof.",
+      "wall_GEN_s": 26.061999999990803,
+      "ttft_s": 4.6560000000026776,
+      "SSD_restore": [
+        [
+          "131072",
+          "2419.8",
+          "232.0"
+        ]
+      ],
+      "treatment_exposure": {
+        "helper_decode_entries": 43813,
+        "helper_decode_launches": 16631,
+        "helper_decode_bytes": 439592960,
+        "helper_startup": {
+          "slots": 2560,
+          "opt": 1,
+          "zerocopy": 1,
+          "free_mib": 6739,
+          "primary_cc": 75,
+          "helper_cc": 86,
+          "primary_uuid": "3ec189a90fe7a128af2c8df8fb3e15c7",
+          "helper_uuid": "aab7a70bb7959b37f3171423f89733be",
+          "mtp_device": 0,
+          "layers": 48
+        },
+        "helper_entries": 43977,
+        "helper_layer_launches": 16675,
+        "returned_MiB": 420.9,
+        "full_rows_MiB": 4209.5,
+        "begin_ms": 700.0,
+        "wait_ms": 3749.0,
+        "actual_window_T_histogram": {
+          "1": 197,
+          "2": 112,
+          "3": 57,
+          "4": 157
+        },
+        "IL_capture_calls_cumulative": 0,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "Actual native helper deltas. IL records cover only IL dispatch during capture, not all graph captures; zero IL is no global no-capture proof. Timings overlap GPU/CPU, not exclusive costs.",
+        "new_IL_capture_calls_since_previous_request": 0,
+        "global_graph_captures_during_measured_GEN": "UNKNOWN"
+      },
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "B_only": true,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_calls_delta": 0,
+        "architecture_changed": true,
+        "limit": "IL records are dispatch calls during capture, not distinct graphs or total graph capture coverage. Zero IL cannot qualify absence of new graph captures.",
+        "explicit_window_capture_observed": true
+      },
+      "mean_tokens_per_window": 1.9579349904397705,
+      "forced_ids_exact": true,
+      "cache_KV_CPU_helper_actual_log": [
+        "strata decode timing: 523 windows, avg T 2.33, 1.96 tokens/window, 40.99 ms/window = verify 38.78 (GPU-reach wait 16.02 + per-layer host 21.23 [plan 1.45 actq 0.07 jobs 0.03 CPU 19.59] + stage 0.05) + commit/emit 0.09 + draft 2.11; per layer-window: CPU experts 3.40 (4.48 entries), VRAM hits 17.10, PCIe 0.00",
+        "strata serve: decode expert cache hit rate: 79.2% (429324 hits / 541787 lookups); 43813 more read by the GPU over PCIe or from another GPU (7.5% of all 585600 routed)",
+        "strata serve: KV streaming: 97.38% of 7542300 block reads hit VRAM, 794.9 MiB read from RAM",
+        "strata serve: CUDA1: 43977 expert entries, 16675 active layer launches, 420.9 MiB returned (4209.5 MiB with full rows) in this request; host 700 ms staging+launching, 3749 ms waiting for it in this request"
+      ],
+      "explicit_window_capture_log": [
+        "strata verify: capturing the 2-token window (1108 MiB of VRAM free)",
+        "strata verify: captured the 2-token window (upload no error, sync no error)"
+      ],
+      "gpu_measured_samples": [
+        {
+          "timestamp": 1791450928.6279218,
+          "gpu": {
+            "fields": [
+              "index",
+              "uuid",
+              "name",
+              "memory.used",
+              "memory.total",
+              "utilization.gpu",
+              "clocks.sm",
+              "clocks.mem",
+              "temperature.gpu",
+              "power.draw",
+              "pstate"
+            ],
+            "rows": [
+              "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 7128, 12288, 10, 210, 810, 50, 20.01, P5",
+              "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 20482, 22528, 0, 315, 810, 51, 26.86, P5"
+            ],
+            "rc": 0
+          }
+        },
+        {
+          "timestamp": 1791450934.0,
+          "gpu": null
+        },
+        {
+          "timestamp": 1791450939.0057673,
+          "gpu": null
+        },
+        {
+          "timestamp": 1791450944.0099125,
+          "gpu": {
+            "fields": [
+              "index",
+              "uuid",
+              "name",
+              "memory.used",
+              "memory.total",
+              "utilization.gpu",
+              "clocks.sm",
+              "clocks.mem",
+              "temperature.gpu",
+              "power.draw",
+              "pstate"
+            ],
+            "rows": [
+              "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 7128, 12288, 29, 285, 810, 51, 24.66, P5",
+              "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 20502, 22528, 99, 1860, 7000, 58, 181.27, P0"
+            ],
+            "rc": 0
+          }
+        },
+        {
+          "timestamp": 1791450949.4160235,
+          "gpu": null
+        }
+      ]
+    },
+    {
+      "case": "L02",
+      "request_index": 3,
+      "phase": "long",
+      "arm": "B",
+      "tokens": 1024,
+      "decode_ms": 22834.3,
+      "decode_tps": 44.84481678877829,
+      "prompt_ms": 4268.5,
+      "reused": 131072,
+      "windows": 606,
+      "target_rows_verified": 1200,
+      "accepted": 420,
+      "drafts": 594,
+      "raw_target_differs_from_fixture": 40,
+      "raw_label_scope": "Count only on native verified forced prefix; raw IDs not captured. No FREE quality proof.",
+      "wall_GEN_s": 27.202999999994063,
+      "ttft_s": 4.4060000000026776,
+      "SSD_restore": [
+        [
+          "131072",
+          "2354.3",
+          "209.0"
+        ]
+      ],
+      "treatment_exposure": {
+        "helper_decode_entries": 52692,
+        "helper_decode_launches": 20194,
+        "helper_decode_bytes": 453478400,
+        "helper_startup": {
+          "slots": 2560,
+          "opt": 1,
+          "zerocopy": 1,
+          "free_mib": 6739,
+          "primary_cc": 75,
+          "helper_cc": 86,
+          "primary_uuid": "3ec189a90fe7a128af2c8df8fb3e15c7",
+          "helper_uuid": "aab7a70bb7959b37f3171423f89733be",
+          "mtp_device": 0,
+          "layers": 48
+        },
+        "helper_entries": 52867,
+        "helper_layer_launches": 20239,
+        "returned_MiB": 434.2,
+        "full_rows_MiB": 4342.3,
+        "begin_ms": 826.0,
+        "wait_ms": 4246.0,
+        "actual_window_T_histogram": {
+          "1": 269,
+          "2": 170,
+          "3": 77,
+          "4": 90
+        },
+        "IL_capture_calls_cumulative": 0,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "Actual native helper deltas. IL records cover only IL dispatch during capture, not all graph captures; zero IL is no global no-capture proof. Timings overlap GPU/CPU, not exclusive costs.",
+        "new_IL_capture_calls_since_previous_request": 0,
+        "global_graph_captures_during_measured_GEN": "UNKNOWN"
+      },
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "B_only": true,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_calls_delta": 0,
+        "architecture_changed": true,
+        "limit": "IL records are dispatch calls during capture, not distinct graphs or total graph capture coverage. Zero IL cannot qualify absence of new graph captures.",
+        "explicit_window_capture_observed": false
+      },
+      "mean_tokens_per_window": 1.6897689768976898,
+      "forced_ids_exact": true,
+      "cache_KV_CPU_helper_actual_log": [
+        "strata decode timing: 606 windows, avg T 1.98, 1.69 tokens/window, 37.68 ms/window = verify 35.69 (GPU-reach wait 15.19 + per-layer host 19.04 [plan 1.47 actq 0.06 jobs 0.03 CPU 17.39] + stage 0.06) + commit/emit 0.08 + draft 1.90; per layer-window: CPU experts 2.72 (3.38 entries), VRAM hits 14.61, PCIe 0.00",
+        "strata serve: decode expert cache hit rate: 81.2% (424946 hits / 523308 lookups); 52692 more read by the GPU over PCIe or from another GPU (9.1% of all 576000 routed)",
+        "strata serve: KV streaming: 97.19% of 7419000 block reads hit VRAM, 838.7 MiB read from RAM",
+        "strata serve: CUDA1: 52867 expert entries, 20239 active layer launches, 434.2 MiB returned (4342.3 MiB with full rows) in this request; host 826 ms staging+launching, 4246 ms waiting for it in this request"
+      ],
+      "explicit_window_capture_log": [],
+      "gpu_measured_samples": [
+        {
+          "timestamp": 1791450954.4196708,
+          "gpu": null
+        },
+        {
+          "timestamp": 1791450959.426625,
+          "gpu": {
+            "fields": [
+              "index",
+              "uuid",
+              "name",
+              "memory.used",
+              "memory.total",
+              "utilization.gpu",
+              "clocks.sm",
+              "clocks.mem",
+              "temperature.gpu",
+              "power.draw",
+              "pstate"
+            ],
+            "rows": [
+              "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 7128, 12288, 25, 885, 5001, 52, 27.75, P3",
+              "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 20502, 22528, 99, 1860, 7000, 57, 220.43, P0"
+            ],
+            "rc": 0
+          }
+        },
+        {
+          "timestamp": 1791450964.8466923,
+          "gpu": null
+        },
+        {
+          "timestamp": 1791450969.8515754,
+          "gpu": null
+        },
+        {
+          "timestamp": 1791450974.8568954,
+          "gpu": {
+            "fields": [
+              "index",
+              "uuid",
+              "name",
+              "memory.used",
+              "memory.total",
+              "utilization.gpu",
+              "clocks.sm",
+              "clocks.mem",
+              "temperature.gpu",
+              "power.draw",
+              "pstate"
+            ],
+            "rows": [
+              "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 7128, 12288, 27, 277, 810, 51, 25.17, P5",
+              "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 20502, 22528, 99, 1860, 7000, 57, 174.61, P0"
+            ],
+            "rc": 0
+          }
+        }
+      ]
+    }
+  ],
+  "RAM_available_min_GiB": 25.231670379638672,
+  "validation": {
+    "evidence_PASS": true,
+    "isolation_PASS": true,
+    "Daily_unchanged": true,
+    "remaining_owned": [],
+    "compiler_observations": [],
+    "threads_stopped": true,
+    "owned_PID_birth": {
+      "11404": 1791450645.513868
+    },
+    "prefix_final_sha256": {
+      "L01": "6049cf1e3e3f7be90073ed191906acb5d74e939c9d9321ffc71d3447d917e21c",
+      "L02": "6049cf1e3e3f7be90073ed191906acb5d74e939c9d9321ffc71d3447d917e21c"
+    },
+    "cleanup_actions": [],
+    "performance_comparison": false,
+    "FREE_quality": "UNQUALIFIED"
+  },
+  "performance_qualification": {
+    "clean_causal_gain": false,
+    "B_only": true,
+    "architecture_changed": true,
+    "global_graph_capture_coverage": "UNKNOWN",
+    "IL_capture_records": "Zero observed IL-dispatch capture calls, not absence of graph captures. Primarysm75ILoff gives no coverage.",
+    "explicit_window_capture_observed": "L01 existing native log captures T2 window in long request; no global total or bitexact graphcount inferred."
+  },
+  "limits": [
+    "Single B percase; no pairedA, causal speedup, or FREE outputquality certification.",
+    "Forced1024 exactcoherence only; rawpick replacement counts on verified forced prefix, rawIDs not stored.",
+    "Helper fixed2560/optON/static stripe plus all48primary/adapt0/elasticOFF is architecturalconfiguration, not isolated flag. Underutilizedhelpermemory and fewer resident slots limit exclusion.",
+    "Native request helper counts include prefix tail and decode; dedicated POD deltas isolate decode entries/launches/bytes. Host stage/wait wall timings overlap CPU/GPU, never summed as exclusivecritical cost.",
+    "Original CPUmiss/entries/cachehit/KV logs retained; no new profiling or invented bandwidth evidence.",
+    "IL observer covers only IL dispatch during capture; zero does not establish no new graphs. Global coverageUNKNOWN, no clean timingqualification; explicitnativeL01T2capture reported unadjusted.",
+    "SparseGPU telemetry does not certify sustainedclockstability; desktop3060 apps preserved.",
+    "ROOT reviewed source/runtime/result PASS and approved publication. Experimental source remains defaultoff; no adoption or causal quality claim."
+  ]
+}

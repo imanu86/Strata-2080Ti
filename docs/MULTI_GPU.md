@@ -274,3 +274,15 @@ pipeline).
 
 With a layer split, `--batch N --batch-groups G --trim-stage-weights` decodes several conversations together and
 pipelines them through the cards: see [BATCHING.md](BATCHING.md).
+
+### Lab helper SSD qualification
+
+`STRATA_LAB_HELPER_SSD=1` is default off. It permits only the bounded laboratory
+helper topology: sm75 primary with all target state/MTP, sm86 helper with fixed
+2560 expert slots, remote optimization on, no layer split/peer/batch/adaptation
+or elasticity. The independent SSD switch requires complete native MTP prefixes
+and true prompt lookahead at token131072; GEN1/SAVE is not substituted.
+Primary/helper quiescence failures and residency changes are fatal. Helper UUID,
+actual mapped mode and complete static ownership are covered by prefix identity.
+This changes architecture and placement: B-only measurements are not isolated
+flag gains or FREE quality certification. Native defaults remain restricted.
