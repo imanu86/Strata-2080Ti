@@ -1,0 +1,727 @@
+{
+  "status": "PASS_B_ONLY_HELPER_ELASTIC_WINDOWS_MIN3",
+  "timestamp": "2026-10-08T12:56:37.876757+00:00",
+  "source_base_main": "b7b7903af3d3d8e134c3e71138c2a45b8880723d",
+  "source_status": "Reviewed V4 changes uncommitted pending ROOT result review",
+  "run": "DET-nonmtp-C5-elastic-04",
+  "completed_requests": 4,
+  "evidence_pass": true,
+  "isolation_pass": true,
+  "protocol": "2warmON15 NONRESULT +2B1024 L01/L02, same oneengine/frozen nativeSSD131072/tails176167, greedyseed73/spec4/minp0.5/pipeline0/all48primary2080/MTP0/helper3060autooptON/fixedprimary/noasync/nootherlevers",
+  "quality": "FORCE_IDS rawcounter coherence, not FREE quality. No FORCE_WINDOWS; nativewindows/readiness unforced.",
+  "architecture": "Helper-only real elasticity with unchanged500MiBreserve/192hyst/64chunks/stable5s/grow512/shrink1024 maxstep; minCUDA,NVML,DXGIpositive peractualUUID/LUID; strictAPIerrors, sequential estimates not atomic",
+  "startup": {
+    "initial_headroom_log": "strata remote elastic: INITIAL_HEADROOM policy=windows-min3-v4 device=1 uuid=GPU-aab7a70b-b795-9b37-f317-1423f89733be cuda_free_bytes=11755585536 nvml_free_bytes=8369004544 dxgi_available_bytes=11755585536 effective_free_bytes=8369004544 query_ms=48.672",
+    "helper": {
+      "slots": 4307,
+      "opt": 1,
+      "zerocopy": 1,
+      "free_mib": 573.0,
+      "mapped_bytes": 7583301632,
+      "helper_GiB": 7.053,
+      "primary_slots": 8522,
+      "primary_GiB": 13.796,
+      "primary_free_MiB": 1178.0,
+      "primary_uuid": "3ec189a90fe7a128af2c8df8fb3e15c7",
+      "helper_uuid": "aab7a70bb7959b37f3171423f89733be",
+      "mtp_device": 0,
+      "layers": 48,
+      "smoke_ms": 40.883,
+      "smoke_delta_bytes": 67108864,
+      "saturation": "SATURATED_AT_STARTUP_WITH_POLICY_HEADROOM",
+      "policy_headroom_MiB": 756,
+      "free_above_policy_MiB": 0,
+      "investigate_headroom": false,
+      "startup_settle": {
+        "before_slots": 4307,
+        "after_slots": 4307,
+        "before_mapped": 7583301632,
+        "after_mapped": 7583301632,
+        "before_free_mib": 573,
+        "after_free_mib": 573,
+        "before_total_mib": 12287,
+        "after_total_mib": 12287,
+        "before_status": 0,
+        "after_status": 0,
+        "grows": 0,
+        "shrinks": 0,
+        "settled": 1,
+        "audited": 1,
+        "reserve_mib": 500,
+        "hysteresis_mib": 192,
+        "chunk_mib": 64,
+        "scope": "Startup counters, excludeddecode; doesnotprove cause ofFAIL01"
+      },
+      "headroom": [
+        {
+          "phase": "startup_before",
+          "policy": "windows-min3-v4",
+          "device": "1",
+          "uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+          "cuda_free_bytes": 1100664832,
+          "nvml_free_bytes": 601153536,
+          "nvml_used_bytes": 12283748352,
+          "dxgi_budget_bytes": 9011122176,
+          "dxgi_usage_bytes": 7910457344,
+          "dxgi_available_bytes": 1100664832,
+          "effective_free_bytes": 601153536,
+          "query_ms": "0.030"
+        },
+        {
+          "phase": "startup_after",
+          "policy": "windows-min3-v4",
+          "device": "1",
+          "uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+          "cuda_free_bytes": 1100664832,
+          "nvml_free_bytes": 601153536,
+          "nvml_used_bytes": 12283748352,
+          "dxgi_budget_bytes": 9011122176,
+          "dxgi_usage_bytes": 7910457344,
+          "dxgi_available_bytes": 1100664832,
+          "effective_free_bytes": 601153536,
+          "query_ms": "0.009"
+        },
+        {
+          "phase": "startup_guard",
+          "policy": "windows-min3-v4",
+          "device": "1",
+          "uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+          "cuda_free_bytes": 1037205504,
+          "nvml_free_bytes": 601153536,
+          "nvml_used_bytes": 12283748352,
+          "dxgi_budget_bytes": 8947662848,
+          "dxgi_usage_bytes": 7910457344,
+          "dxgi_available_bytes": 1037205504,
+          "effective_free_bytes": 601153536,
+          "query_ms": "0.025"
+        }
+      ],
+      "scope": "Startup after allbuffers and safety smoke before frozenSSDfingerprint. More slots alone not saturationproof; lifetimefreeextrema are not end-of-requestfree. Excessheadroom retains measurements, no automatic tuning."
+    },
+    "primary": {
+      "slots": 8522,
+      "used_GiB": 13.796,
+      "CUDA_free_MiB_log": 1178,
+      "UUID": "GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7"
+    },
+    "smoke_watchdog": {
+      "events": [
+        {
+          "phase": "begin",
+          "t": 122100.875
+        },
+        {
+          "phase": "pass",
+          "elapsed_s": 0.0
+        }
+      ],
+      "failure": null,
+      "ownership": [
+        {
+          "action": "spawn",
+          "pid": 18288,
+          "birth": 1791463608.1842608
+        }
+      ]
+    },
+    "scope": "Smoke64MiB physicalshrink/regrow byteverify40.883ms; startupsettle0resize; distinct from realdecode policy/adapt."
+  },
+  "requests": [
+    {
+      "case": "L01",
+      "request_index": 0,
+      "phase": "warmup",
+      "arm": "warm",
+      "tokens": 15,
+      "decode_ms": 531.4,
+      "decode_tps": 28.227324049680092,
+      "prompt_ms": 112295.2,
+      "reused": 0,
+      "windows": 6,
+      "target_rows_verified": 18,
+      "accepted": 9,
+      "drafts": 12,
+      "raw_target_differs_from_fixture": 1,
+      "wall_GEN_s": 112.96899999999732,
+      "ttft_s": 112.51600000000326,
+      "warmup_is_performance_result": false,
+      "actual_window_T_histogram": {
+        "1": 2,
+        "2": 0,
+        "3": 0,
+        "4": 4
+      },
+      "tokens_per_window": 2.5,
+      "forced_raw_qualification": "Forced IDs1024 protocol coherence; raw target mismatch counts on verified forced prefix, no FREE quality certification",
+      "SSD_restore": [],
+      "prompt_tail_read": 131248,
+      "final_helper_headroom": {
+        "phase": "request_end",
+        "policy": "windows-min3-v4",
+        "device": "1",
+        "uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+        "cuda_free_bytes": 1087672320,
+        "nvml_free_bytes": 601153536,
+        "nvml_used_bytes": 12283748352,
+        "dxgi_budget_bytes": 8998129664,
+        "dxgi_usage_bytes": 7910457344,
+        "dxgi_available_bytes": 1087672320,
+        "effective_free_bytes": 601153536,
+        "query_ms": "0.106",
+        "CUDA_free_MiB": 1037.28515625,
+        "NVML_free_MiB": 573.3046875,
+        "DXGI_available_MiB": 1037.28515625,
+        "effective_free_MiB": 573.3046875,
+        "mapped_GiB": 7.0625,
+        "resident_slots": 4307,
+        "qualification": "SATURATED_WITH_BOUNDED_POLICY_HEADROOM"
+      },
+      "elastic_decode": {
+        "request": 0.0,
+        "checks": 1.0,
+        "grows": 0.0,
+        "shrinks": 0.0,
+        "copy_bytes": 0.0,
+        "helper_step_ms": 0.194,
+        "wrapper_ms": 0.327,
+        "free_lifetime_min_mib": 573.0,
+        "free_lifetime_max_mib": 573.0,
+        "slots": 4307.0,
+        "mapped_bytes": 7583301632.0,
+        "adapt_rounds": 1.0,
+        "adapt_swaps": 96.0,
+        "wrapper_overhead_ms": 0.133,
+        "natural_resize_exposure": "NOT_EXERCISED_STEADY_ALLOWED",
+        "scope": "Decode deltas; free extrema lifetime; wrapper contains helper_step, both included decode. Smoke separately proves physicalresize. No exclusive GPUtime claim.",
+        "query_ms_in_helper_wrapper_decode": 0.095,
+        "lifetime_policy_raw_minima": {
+          "cuda_lifetime_min_bytes": 740614144,
+          "nvml_lifetime_min_bytes": 601153536,
+          "dxgi_lifetime_min_bytes": 740614144
+        },
+        "end_memory_is_not_lifetime_extrema": true
+      },
+      "helper_actual_work": {
+        "decode_entries": 1372,
+        "decode_active_layer_launches": 266,
+        "decode_returned_bytes": 8437760,
+        "whole_request_entries_including_prompt_tail": 1671,
+        "whole_request_layer_launches": 313,
+        "host_staging_launch_ms": 14.0,
+        "host_wait_ms": 268.0,
+        "note": "Entries are routed expert evaluations, not distinct resident experts. Whole-request helper totals include tail prefill; decode deltas exclude it. Host/GPU waits/helper/policy times overlap and are not exclusive critical path costs."
+      }
+    },
+    {
+      "case": "L02",
+      "request_index": 1,
+      "phase": "warmup",
+      "arm": "warm",
+      "tokens": 15,
+      "decode_ms": 437.1,
+      "decode_tps": 34.317089910775564,
+      "prompt_ms": 106743.2,
+      "reused": 0,
+      "windows": 6,
+      "target_rows_verified": 20,
+      "accepted": 9,
+      "drafts": 14,
+      "raw_target_differs_from_fixture": 0,
+      "wall_GEN_s": 107.28099999998813,
+      "ttft_s": 106.92199999999139,
+      "warmup_is_performance_result": false,
+      "actual_window_T_histogram": {
+        "1": 1,
+        "2": 0,
+        "3": 1,
+        "4": 4
+      },
+      "tokens_per_window": 2.5,
+      "forced_raw_qualification": "Forced IDs1024 protocol coherence; raw target mismatch counts on verified forced prefix, no FREE quality certification",
+      "SSD_restore": [],
+      "prompt_tail_read": 131239,
+      "final_helper_headroom": {
+        "phase": "request_end",
+        "policy": "windows-min3-v4",
+        "device": "1",
+        "uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+        "cuda_free_bytes": 1009229824,
+        "nvml_free_bytes": 592109568,
+        "nvml_used_bytes": 12292792320,
+        "dxgi_budget_bytes": 8919687168,
+        "dxgi_usage_bytes": 7910457344,
+        "dxgi_available_bytes": 1009229824,
+        "effective_free_bytes": 592109568,
+        "query_ms": "0.102",
+        "CUDA_free_MiB": 962.4765625,
+        "NVML_free_MiB": 564.6796875,
+        "DXGI_available_MiB": 962.4765625,
+        "effective_free_MiB": 564.6796875,
+        "mapped_GiB": 7.0625,
+        "resident_slots": 4307,
+        "qualification": "SATURATED_WITH_BOUNDED_POLICY_HEADROOM"
+      },
+      "elastic_decode": {
+        "request": 1.0,
+        "checks": 1.0,
+        "grows": 0.0,
+        "shrinks": 0.0,
+        "copy_bytes": 0.0,
+        "helper_step_ms": 0.172,
+        "wrapper_ms": 0.31,
+        "free_lifetime_min_mib": 564.0,
+        "free_lifetime_max_mib": 573.0,
+        "slots": 4307.0,
+        "mapped_bytes": 7583301632.0,
+        "adapt_rounds": 2.0,
+        "adapt_swaps": 192.0,
+        "wrapper_overhead_ms": 0.138,
+        "natural_resize_exposure": "NOT_EXERCISED_STEADY_ALLOWED",
+        "scope": "Decode deltas; free extrema lifetime; wrapper contains helper_step, both included decode. Smoke separately proves physicalresize. No exclusive GPUtime claim.",
+        "query_ms_in_helper_wrapper_decode": 0.102,
+        "lifetime_policy_raw_minima": {
+          "cuda_lifetime_min_bytes": 740614144,
+          "nvml_lifetime_min_bytes": 592109568,
+          "dxgi_lifetime_min_bytes": 740614144
+        },
+        "end_memory_is_not_lifetime_extrema": true
+      },
+      "helper_actual_work": {
+        "decode_entries": 1917,
+        "decode_active_layer_launches": 280,
+        "decode_returned_bytes": 9615360,
+        "whole_request_entries_including_prompt_tail": 2401,
+        "whole_request_layer_launches": 328,
+        "host_staging_launch_ms": 17.0,
+        "host_wait_ms": 229.0,
+        "note": "Entries are routed expert evaluations, not distinct resident experts. Whole-request helper totals include tail prefill; decode deltas exclude it. Host/GPU waits/helper/policy times overlap and are not exclusive critical path costs."
+      }
+    },
+    {
+      "case": "L01",
+      "request_index": 2,
+      "phase": "long",
+      "arm": "B",
+      "tokens": 1024,
+      "decode_ms": 18413.0,
+      "decode_tps": 55.61288220279151,
+      "prompt_ms": 4591.3,
+      "reused": 131072,
+      "windows": 524,
+      "target_rows_verified": 1208,
+      "accepted": 500,
+      "drafts": 684,
+      "raw_target_differs_from_fixture": 33,
+      "wall_GEN_s": 23.093999999997322,
+      "ttft_s": 4.7189999999973224,
+      "warmup_is_performance_result": null,
+      "actual_window_T_histogram": {
+        "1": 198,
+        "2": 113,
+        "3": 68,
+        "4": 145
+      },
+      "tokens_per_window": 1.9541984732824427,
+      "forced_raw_qualification": "Forced IDs1024 protocol coherence; raw target mismatch counts on verified forced prefix, no FREE quality certification",
+      "SSD_restore": [
+        [
+          "131072",
+          "2490.9",
+          "266.4"
+        ]
+      ],
+      "prompt_tail_read": 176,
+      "final_helper_headroom": {
+        "phase": "request_end",
+        "policy": "windows-min3-v4",
+        "device": "1",
+        "uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+        "cuda_free_bytes": 1253482496,
+        "nvml_free_bytes": 824303616,
+        "nvml_used_bytes": 12060598272,
+        "dxgi_budget_bytes": 8895504384,
+        "dxgi_usage_bytes": 7642021888,
+        "dxgi_available_bytes": 1253482496,
+        "effective_free_bytes": 824303616,
+        "query_ms": "0.103",
+        "CUDA_free_MiB": 1195.4140625,
+        "NVML_free_MiB": 786.1171875,
+        "DXGI_available_MiB": 1195.4140625,
+        "effective_free_MiB": 786.1171875,
+        "mapped_GiB": 6.8125,
+        "resident_slots": 4174,
+        "qualification": "SATURATED_WITH_BOUNDED_POLICY_HEADROOM"
+      },
+      "elastic_decode": {
+        "request": 2.0,
+        "checks": 19.0,
+        "grows": 0.0,
+        "shrinks": 1.0,
+        "copy_bytes": 0.0,
+        "helper_step_ms": 5.135,
+        "wrapper_ms": 8.0,
+        "free_lifetime_min_mib": 460.0,
+        "free_lifetime_max_mib": 805.0,
+        "slots": 4174.0,
+        "mapped_bytes": 7314866176.0,
+        "adapt_rounds": 131.0,
+        "adapt_swaps": 2190.0,
+        "wrapper_overhead_ms": 2.865,
+        "natural_resize_exposure": "EXERCISED",
+        "scope": "Decode deltas; free extrema lifetime; wrapper contains helper_step, both included decode. Smoke separately proves physicalresize. No exclusive GPUtime claim.",
+        "query_ms_in_helper_wrapper_decode": 2.023,
+        "lifetime_policy_raw_minima": {
+          "cuda_lifetime_min_bytes": 668565504,
+          "nvml_lifetime_min_bytes": 483221504,
+          "dxgi_lifetime_min_bytes": 668565504
+        },
+        "end_memory_is_not_lifetime_extrema": true
+      },
+      "helper_actual_work": {
+        "decode_entries": 125697,
+        "decode_active_layer_launches": 23253,
+        "decode_returned_bytes": 569210880,
+        "whole_request_entries_including_prompt_tail": 126209,
+        "whole_request_layer_launches": 23300,
+        "host_staging_launch_ms": 959.0,
+        "host_wait_ms": 4461.0,
+        "note": "Entries are routed expert evaluations, not distinct resident experts. Whole-request helper totals include tail prefill; decode deltas exclude it. Host/GPU waits/helper/policy times overlap and are not exclusive critical path costs."
+      },
+      "target_route_coverage": {
+        "primary_hit_entries": 433925,
+        "helper_entries": 125697,
+        "CPU_fallback_entries": 20218,
+        "all_routed_target_entries": 579840,
+        "GPU_covered_percent": 96.51317604856513,
+        "primary_percent": 74.83529939293598,
+        "helper_percent": 21.677876655629138,
+        "CPU_percent": 3.4868239514348787,
+        "conditional_primary_hit_percent_excluding_helper": 95.54809828622263,
+        "scope": "Main target decode route entries only, excludes MTP experts. CPU fallback=nonhelperlookups-primaryhits under fixed primary/noPCIe/nootherhelper topology. Generic offload counter agrees independently with helper actualdecode count. Not GPU utilization/time share or combined MTPcoverage. Source generate.cpp13950/14037."
+      },
+      "decode_timing_log": "strata decode timing: 524 windows, avg T 2.31, 1.95 tokens/window, 35.14 ms/window = verify 31.55 (GPU-reach wait 15.85 + per-layer host 14.18 [plan 1.95 actq 0.02 jobs 0.06 CPU 12.09] + stage 0.04) + commit/emit 0.10 + draft 2.12; per layer-window: CPU experts 0.72 (0.80 entries), VRAM hits 17.25, PCIe 0.00",
+      "existing_monitor_samples_during_request": [
+        {
+          "UTC": "2026-10-08T12:51:31.943675+00:00",
+          "gpu": {
+            "fields": [
+              "index",
+              "uuid",
+              "name",
+              "memory.used",
+              "memory.total",
+              "utilization.gpu",
+              "clocks.sm",
+              "clocks.mem",
+              "temperature.gpu",
+              "power.draw",
+              "pstate"
+            ],
+            "rows": [
+              "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 11566, 12288, 37, 307, 810, 49, 25.63, P5",
+              "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 20468, 22528, 0, 315, 810, 51, 26.83, P5"
+            ],
+            "rc": 0
+          },
+          "CPU_total_cores": 2.128,
+          "RAM_available_GiB": 24.717601776123047
+        },
+        {
+          "UTC": "2026-10-08T12:51:47.473494+00:00",
+          "gpu": {
+            "fields": [
+              "index",
+              "uuid",
+              "name",
+              "memory.used",
+              "memory.total",
+              "utilization.gpu",
+              "clocks.sm",
+              "clocks.mem",
+              "temperature.gpu",
+              "power.draw",
+              "pstate"
+            ],
+            "rows": [
+              "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 11398, 12288, 47, 457, 5001, 51, 36.73, P3",
+              "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 20488, 22528, 98, 1860, 7000, 58, 189.65, P0"
+            ],
+            "rc": 0
+          },
+          "CPU_total_cores": 4.704,
+          "RAM_available_GiB": 26.736560821533203
+        }
+      ],
+      "existing_timing_breakdown": {
+        "total_ms_per_window": 35.14,
+        "verify_ms_per_window": 31.55,
+        "GPU_reach_wait_ms_per_window": 15.85,
+        "per_layer_host_ms_per_window": 14.18,
+        "host_plan_ms_per_window": 1.95,
+        "activation_quant_ms_per_window": 0.02,
+        "host_jobs_ms_per_window": 0.06,
+        "host_CPU_ms_per_window": 12.09,
+        "stage_ms_per_window": 0.04,
+        "commit_emit_ms_per_window": 0.1,
+        "draft_ms_per_window": 2.12,
+        "scope": "Logged instrumentation components, host waits include dependencies; helper host times are not extra additive costs. Not exclusive GPU kernel or transfer latency profile."
+      }
+    },
+    {
+      "case": "L02",
+      "request_index": 3,
+      "phase": "long",
+      "arm": "B",
+      "tokens": 1024,
+      "decode_ms": 19773.0,
+      "decode_tps": 51.78779143276185,
+      "prompt_ms": 4516.6,
+      "reused": 131072,
+      "windows": 603,
+      "target_rows_verified": 1214,
+      "accepted": 423,
+      "drafts": 611,
+      "raw_target_differs_from_fixture": 34,
+      "wall_GEN_s": 24.389999999999418,
+      "ttft_s": 4.639999999999418,
+      "warmup_is_performance_result": null,
+      "actual_window_T_histogram": {
+        "1": 258,
+        "2": 175,
+        "3": 74,
+        "4": 96
+      },
+      "tokens_per_window": 1.6981757877280266,
+      "forced_raw_qualification": "Forced IDs1024 protocol coherence; raw target mismatch counts on verified forced prefix, no FREE quality certification",
+      "SSD_restore": [
+        [
+          "131072",
+          "2409.7",
+          "202.3"
+        ]
+      ],
+      "prompt_tail_read": 167,
+      "final_helper_headroom": {
+        "phase": "request_end",
+        "policy": "windows-min3-v4",
+        "device": "1",
+        "uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+        "cuda_free_bytes": 1308086272,
+        "nvml_free_bytes": 775413760,
+        "nvml_used_bytes": 12109488128,
+        "dxgi_budget_bytes": 9017217024,
+        "dxgi_usage_bytes": 7709130752,
+        "dxgi_available_bytes": 1308086272,
+        "effective_free_bytes": 775413760,
+        "query_ms": "0.108",
+        "CUDA_free_MiB": 1247.48828125,
+        "NVML_free_MiB": 739.4921875,
+        "DXGI_available_MiB": 1247.48828125,
+        "effective_free_MiB": 739.4921875,
+        "mapped_GiB": 6.875,
+        "resident_slots": 4199,
+        "qualification": "SATURATED_WITH_BOUNDED_POLICY_HEADROOM"
+      },
+      "elastic_decode": {
+        "request": 3.0,
+        "checks": 20.0,
+        "grows": 1.0,
+        "shrinks": 0.0,
+        "copy_bytes": 41036800.0,
+        "helper_step_ms": 15.391,
+        "wrapper_ms": 18.629,
+        "free_lifetime_min_mib": 460.0,
+        "free_lifetime_max_mib": 805.0,
+        "slots": 4199.0,
+        "mapped_bytes": 7381975040.0,
+        "adapt_rounds": 150.0,
+        "adapt_swaps": 948.0,
+        "wrapper_overhead_ms": 3.2380000000000013,
+        "natural_resize_exposure": "EXERCISED",
+        "scope": "Decode deltas; free extrema lifetime; wrapper contains helper_step, both included decode. Smoke separately proves physicalresize. No exclusive GPUtime claim.",
+        "query_ms_in_helper_wrapper_decode": 2.163,
+        "lifetime_policy_raw_minima": {
+          "cuda_lifetime_min_bytes": 668565504,
+          "nvml_lifetime_min_bytes": 483221504,
+          "dxgi_lifetime_min_bytes": 668565504
+        },
+        "end_memory_is_not_lifetime_extrema": true
+      },
+      "helper_actual_work": {
+        "decode_entries": 126406,
+        "decode_active_layer_launches": 27203,
+        "decode_returned_bytes": 574760960,
+        "whole_request_entries_including_prompt_tail": 126834,
+        "whole_request_layer_launches": 27251,
+        "host_staging_launch_ms": 1040.0,
+        "host_wait_ms": 5757.0,
+        "note": "Entries are routed expert evaluations, not distinct resident experts. Whole-request helper totals include tail prefill; decode deltas exclude it. Host/GPU waits/helper/policy times overlap and are not exclusive critical path costs."
+      },
+      "target_route_coverage": {
+        "primary_hit_entries": 441964,
+        "helper_entries": 126406,
+        "CPU_fallback_entries": 14350,
+        "all_routed_target_entries": 582720,
+        "GPU_covered_percent": 97.53741076331686,
+        "primary_percent": 75.8450027457441,
+        "helper_percent": 21.692408017572763,
+        "CPU_percent": 2.462589236683141,
+        "conditional_primary_hit_percent_excluding_helper": 96.85523564913635,
+        "scope": "Main target decode route entries only, excludes MTP experts. CPU fallback=nonhelperlookups-primaryhits under fixed primary/noPCIe/nootherhelper topology. Generic offload counter agrees independently with helper actualdecode count. Not GPU utilization/time share or combined MTPcoverage. Source generate.cpp13950/14037."
+      },
+      "decode_timing_log": "strata decode timing: 603 windows, avg T 2.01, 1.70 tokens/window, 32.79 ms/window = verify 30.10 (GPU-reach wait 15.12 + per-layer host 13.53 [plan 1.82 actq 0.02 jobs 0.05 CPU 11.56] + stage 0.06) + commit/emit 0.09 + draft 1.93; per layer-window: CPU experts 0.45 (0.50 entries), VRAM hits 15.27, PCIe 0.00",
+      "existing_monitor_samples_during_request": [
+        {
+          "UTC": "2026-10-08T12:52:02.869777+00:00",
+          "gpu": {
+            "fields": [
+              "index",
+              "uuid",
+              "name",
+              "memory.used",
+              "memory.total",
+              "utilization.gpu",
+              "clocks.sm",
+              "clocks.mem",
+              "temperature.gpu",
+              "power.draw",
+              "pstate"
+            ],
+            "rows": [
+              "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 11380, 12288, 24, 750, 5001, 52, 37.64, P3",
+              "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 20488, 22528, 98, 1860, 7000, 58, 206.30, P0"
+            ],
+            "rc": 0
+          },
+          "CPU_total_cores": 3.408,
+          "RAM_available_GiB": 27.03803253173828
+        }
+      ],
+      "existing_timing_breakdown": {
+        "total_ms_per_window": 32.79,
+        "verify_ms_per_window": 30.1,
+        "GPU_reach_wait_ms_per_window": 15.12,
+        "per_layer_host_ms_per_window": 13.53,
+        "host_plan_ms_per_window": 1.82,
+        "activation_quant_ms_per_window": 0.02,
+        "host_jobs_ms_per_window": 0.05,
+        "host_CPU_ms_per_window": 11.56,
+        "stage_ms_per_window": 0.06,
+        "commit_emit_ms_per_window": 0.09,
+        "draft_ms_per_window": 1.93,
+        "scope": "Logged instrumentation components, host waits include dependencies; helper host times are not extra additive costs. Not exclusive GPU kernel or transfer latency profile."
+      }
+    }
+  ],
+  "descriptive_old_C5_comparison": {
+    "old_helper_slots": 2560,
+    "old_helper_used_GiB": 4.19,
+    "old_helper_free_MiB": 6739,
+    "old_primary_slots": 8522,
+    "old_primary_used_GiB": 13.8,
+    "old_B_TPS": {
+      "L01": 47.768100798156446,
+      "L02": 44.84481678877829
+    },
+    "new_B_TPS": {
+      "L01": 55.61288220279151,
+      "L02": 51.78779143276185
+    },
+    "scope": "Separate B-only captures, different capacity/placement/adapt/cache/routing. No paired A, no causal speedup estimate, no automatic adoption.",
+    "C1_layer_split_pipeline2_B_TPS": {
+      "L01": 70.12786,
+      "L02": 64.90831
+    },
+    "C1_scope": "Independent sm75IL B-only capture, split16/pipeline2 topology differs. Baseline reference only, no matched control.",
+    "nominal_TPS_differences_percent_vs_old_C5": {
+      "L01": 16.422636180959117,
+      "L02": 15.48222323370252
+    },
+    "nominal_TPS_differences_percent_vs_C1": {
+      "L01": -20.69787641774394,
+      "L02": -20.2139272571388
+    },
+    "percentage_qualification": "Nominal arithmetic between separate B runs; not causal speedup nor free-quality/architecture-equivalence proof."
+  },
+  "qualifications": {
+    "natural_resize": "Bothdirections EXERCISED: L01shrink256MiB; L02grow64MiB/41036800nativebytes",
+    "adaptive_ownership": "Decode131/150rounds2190/948swaps; ownershipdisjoint audited atboundaries",
+    "saturation": "UsefulVRAM budget exercised: startup7.053GiB weights/effective573MiB; endeffective786/739MiB, no blind use of desktop reserve",
+    "global_graph_capture_coverage": "UNKNOWN; IL capture calls0 not proof of no new graph captures",
+    "clean_causal_gain": false,
+    "performance": "B-only architectural screen; decode/helperstep/wrapper/query include resizecost. Host/GPU wait values not additive exclusivecosts.",
+    "CUDA_safety": "Existing52 smallExpertCache tests preserved unchanged, no rerun; engineSmokePASS+naturalresize independent evidence",
+    "previous_failed_attempts": "V1aggregateunknown startupFAIL, V2headroomFAIL, V3diagnostic pinpointsCUDA-onlyWDDM sizing issue, diagnostic01missingserve harnessfault preserved; no modelretry except rootauthorizednewV4policy."
+  },
+  "pins": {
+    "signed_manifest_sha256": "5e4df462d03ceb9d0e809f18158aa667f277ca8d45e8b416f0a467e19e5659d5",
+    "source_pins": {
+      "docs/MULTI_GPU.md": "dfdbcac18c5cfaa7a56991edd55e30eb2dddef01e13473ea8adbaaea7f118a6f",
+      "include/strata/core/expert_cache.hpp": "623d589a34eb0c4e13a322fecb0660246c397303e514857d01f88b32efc52356",
+      "include/strata/core/remote_expert_opt.hpp": "f5f6213f5322a621da047fd4a7c6763b8e735f09a9c2475dd275242578f6b824",
+      "include/strata/core/remote_experts.hpp": "38786f78942b8ad379b9da819fa400ac11f9de7f4cbbf0efb9a8236eaaaccc00",
+      "src/core/expert_cache.cpp": "3f9a8b7397cfad9024fd72eefee9c4a3260da8a0a10494a991cc47a776bfc7b7",
+      "src/core/remote_expert_opt.cu": "e920f026ef84cec306912e747a4741cc55d9f079cc1b5a0b5c487d5d31858773",
+      "src/core/remote_experts.cpp": "1124651a26ed11547e4faff8bf17564e05563fb77f4b5cb852f274765ace7762",
+      "src/program/generate.cpp": "6103ad55c413f7bcf09e1bceedf41fdabd9d106be7411a49790dd426028740aa",
+      "tests/core/expert_cache_elastic_test.cpp": "e50a9571bf7d9091d78a016fea88c1dbf90add0ca138c3faa6d63310317c96af"
+    },
+    "diff_sha256": "6daf2ca3dda719012e752dcf1c598cbcb9799bb9a72ef35c8b912c844a87cefe",
+    "exe_sha256": "f6bd5cca37209c4a7b5c76ef0bafec88eb4c271a6277713e974a9228e1eca88c",
+    "bench_sha256": {
+      "c5_contract.py": "3236b29016d3a683b373fe434ffaf70ccff56dcfe0d36e24a4c1f589c195d67d",
+      "c5_validation.py": "49585c968c459855adcd83ef4a7fbe8f56878ba932163372c4619e3a374b5f29",
+      "guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "L01_prompt_ids.json": "24a4022ffccc27015456781aac7f7c26d9120645478d03e40f21dbe670f399ec",
+      "L02_prompt_ids.json": "b07c37f9f7139811ecead4117d5dae78b3f3d141fa1008065edbade7a6c92447",
+      "minp_contract.py": "d00445c4aea56c45178df077ff15b811364a69ce4a1c404b3f55f23f4524b5c6",
+      "run_c5_elastic.py": "9385cc312eee1a3ba9ee774493ad8ca2377940c9519b7238e4ff7084690303ec",
+      "smoke_watchdog.py": "442cffae4462ed467854a745381cf0859394291e84bb1bb909f8da3a08e6f0e9",
+      "test_c5_elastic.py": "33199ed3832332c5cb1907b5f7f6dc83336472aaf889b476e7a08adc24b40488",
+      "test_headroom_policy_models.py": "749853a04ee41589a5becfcc6932ed1377708068824ce17bebb30e045db42af2",
+      "test_watchdog.py": "815c9718fbaadc03e7ba23e16be8193733d305ba1b8375ed62b2306594548420"
+    },
+    "protocol_sha256": "1d9345f5e14af76a3f0fc4d038655934906aefe5826f08e9c7892ef2e5d62120",
+    "raw_verdict_sha256": "56fea642a096aad1e3849af01ee469ad1e1e892a878f656f87b07bc53c0f18d0",
+    "raw_result_sha256": "409612625dab35de67225d01ce372a8026f778bc06afba77faff31d7e24f87cd",
+    "engine_log_sha256": "304e82bf0db9032cf74a3289971cd2d5269a115cd8a7b58f444d74b29eb845e6",
+    "prefix_final_sha256": {
+      "L01": "458dc89cc07f0048ce3f46c34387b99acd3130a94ba3bac4065de34728de96f3",
+      "L02": "458dc89cc07f0048ce3f46c34387b99acd3130a94ba3bac4065de34728de96f3"
+    },
+    "build_report": "work\\non-mtp-b-screen\\candidates\\C5-helper-saturation-v4\\build\\c5-helper-elastic-v4\\build.json"
+  },
+  "cleanup": {
+    "daily_unchanged": true,
+    "remaining_owned": [],
+    "compiler_guard_clean": true,
+    "threads_stopped": true,
+    "locks": [
+      "closed"
+    ]
+  },
+  "evidence_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C5-helper-saturation-v4\\runs\\DET-nonmtp-C5-elastic-04",
+  "interpretation": {
+    "coverage_vs_latency": "96.51/97.54% target route entries covered by GPU tiers is a count-based coverage, not weighted cost, GPU utilization or MTP coverage. Remaining CPU entries span layer dependencies; logged per-window host CPU12.09/11.56ms and GPU-reach waits15.85/15.12ms remain. Helper processes ~21.7% of targetroute entries with per-layer handoff, host wait4.461/5.757s over whole request; those waits overlap existing verify/host timing. Serial all48primary architecture cannot be assumed equivalent to split16/pipeline2 overlap.",
+    "window_emission": "L01/L02 524/603 windows, 1.954/1.698 output tokens/window: decode18.413/19.773s implies55.613/51.788TPS. High routecoverage alone does not shorten each verify dependency or increase tokens/window.",
+    "no_Daily_promotion": "Opt-in bounded architecture validation only; no Daily/sourceconfig promotion or additionalGPUtests."
+  },
+  "performance_decision": "NO_GO_SINGLE_CHAT_VS_SPLIT16_PIPELINE2",
+  "performance_decision_scope": {
+    "PASS_meaning": "Completed benchmark, evidence/isolation and bounded capacity policy validation only; not performance adoption.",
+    "reference_C1_B_TPS": {
+      "L01": 70.12786,
+      "L02": 64.90831
+    },
+    "candidate_B_TPS": {
+      "L01": 55.61288220279151,
+      "L02": 51.78779143276185
+    },
+    "nominal_difference_percent": {
+      "L01": -20.69787641774394,
+      "L02": -20.2139272571388
+    },
+    "comparison_limit": "Separate B-only captures with differing architecture/cache/workload; nominal comparison, not paired causal estimate. Helper architecture not selected for single-chat throughput; keep split16/pipeline2 reference.",
+    "Daily": "UNCHANGED; opt-in capacity safety fix only"
+  }
+}

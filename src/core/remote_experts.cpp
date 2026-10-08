@@ -11,6 +11,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <memory>
+#include <map>
+#include <cstdio>
+#if defined(_WIN32) && !defined(STRATA_USE_HIP)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dxgi1_4.h>
+#ifdef small
+#undef small
+#endif
+#endif
 
 namespace strata::core {
 namespace {
@@ -62,6 +75,63 @@ bool check(cudaError_t result, const char* what, std::string& err, int device) {
     return false;
 }
 } // namespace
+
+
+bool RemoteExperts::query_headroom(int device, Headroom& out, std::string& err) {
+    const auto start = std::chrono::steady_clock::now();
+    out = {}; DeviceScope scope(device);
+    if (!scope.ok) { err = scope.error(device); return false; }
+    size_t free_b = 0, total_b = 0;
+    if (!check(cudaMemGetInfo(&free_b,&total_b),"helper headroom CUDA",err,device)) return false;
+    out.cuda_free=free_b; out.cuda_total=total_b; out.available=free_b;
+#if defined(_WIN32) && !defined(STRATA_USE_HIP)
+    out.windows=true;
+    cudaDeviceProp prop{};
+    if (!check(cudaGetDeviceProperties(&prop,device),"helper headroom properties",err,device)) return false;
+    const unsigned char* u=(const unsigned char*)prop.uuid.bytes; char uuid[41]{};
+    std::snprintf(uuid,sizeof uuid,"GPU-%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",u[0],u[1],u[2],u[3],u[4],u[5],u[6],u[7],u[8],u[9],u[10],u[11],u[12],u[13],u[14],u[15]);
+    out.uuid=uuid;
+    struct NvMem { unsigned long long total,free,used; };
+    using Init=int(*)(); using ByUuid=int(*)(const char*,void**); using Mem=int(*)(void*,NvMem*);
+    using Factory=HRESULT(WINAPI*)(REFIID,void**);
+    struct Api {
+        HMODULE nv=nullptr,dx=nullptr; ByUuid by=nullptr; Mem mem=nullptr; IDXGIFactory4* factory=nullptr; int status=-1;
+        Api() { nv=LoadLibraryW(L"nvml.dll");dx=LoadLibraryW(L"dxgi.dll");
+            auto init=nv?(Init)(void*)GetProcAddress(nv,"nvmlInit_v2"):nullptr;
+            by=nv?(ByUuid)(void*)GetProcAddress(nv,"nvmlDeviceGetHandleByUUID"):nullptr;
+            mem=nv?(Mem)(void*)GetProcAddress(nv,"nvmlDeviceGetMemoryInfo"):nullptr;
+            auto create=dx?(Factory)(void*)GetProcAddress(dx,"CreateDXGIFactory1"):nullptr;
+            if(init&&by&&mem&&create) {status=init();if(status==0&&FAILED(create(__uuidof(IDXGIFactory4),(void**)&factory)))status=-2;}
+        }
+        ~Api(){if(factory)factory->Release();} // DLLs remain loaded for cached handles through process teardown.
+    };
+    struct Binding { void* nvdev=nullptr; IDXGIAdapter3* adapter=nullptr; LUID luid{};
+        ~Binding(){if(adapter)adapter->Release();}
+    };
+    static Api api;
+    static std::map<std::string,std::unique_ptr<Binding>> bindings; // serialized helper safe points only
+    if(api.status!=0||!api.factory) {err="remote elastic Windows headroom API init failed: "+std::to_string(api.status);return false;}
+    LUID luid{};std::memcpy(&luid,prop.luid,sizeof luid);
+    auto it=bindings.find(out.uuid);
+    if(it==bindings.end()) {
+        auto b=std::make_unique<Binding>();b->luid=luid;
+        const int ns=api.by(uuid,&b->nvdev);
+        const HRESULT ds=api.factory->EnumAdapterByLuid(luid,__uuidof(IDXGIAdapter3),(void**)&b->adapter);
+        if(ns!=0||FAILED(ds)){err="remote elastic Windows UUID/LUID binding failed: "+std::to_string(ns)+":"+std::to_string((long)ds);return false;}
+        it=bindings.emplace(out.uuid,std::move(b)).first;
+    }
+    if(std::memcmp(&it->second->luid,&luid,sizeof luid)!=0){err="remote elastic UUID/LUID changed";return false;}
+    NvMem n{};DXGI_QUERY_VIDEO_MEMORY_INFO d{};
+    const int ns=api.mem(it->second->nvdev,&n);
+    const HRESULT ds=it->second->adapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&d);
+    if(ns!=0||FAILED(ds)||n.free>n.total||n.used>n.total||d.Budget>(uint64_t)INT64_MAX||d.CurrentUsage>(uint64_t)INT64_MAX){err="remote elastic Windows headroom query invalid: "+std::to_string(ns)+":"+std::to_string((long)ds);return false;}
+    out.nvml_free=n.free;out.nvml_total=n.total;out.nvml_used=n.used;out.dxgi_budget=d.Budget;out.dxgi_usage=d.CurrentUsage;
+    out.dxgi_available=(int64_t)d.Budget-(int64_t)d.CurrentUsage;
+    out.available=std::min<uint64_t>(out.cuda_free,std::min<uint64_t>(out.nvml_free,(uint64_t)std::max<int64_t>(0,out.dxgi_available)));
+#endif
+    out.query_ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+    return true;
+}
 
 RemoteExperts::~RemoteExperts() { close(); }
 
@@ -156,6 +226,8 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         sizeof(RemoteMeta) + remote_opt_->metadata_bytes() + strata::kernels::cpu::MAXT * H * sizeof(float) : 512ull << 20;
     size_t free_bytes = 0, total_bytes = 0;
     if (!check(cudaMemGetInfo(&free_bytes, &total_bytes), "free memory", err, device)) { close(); return false; }
+    if (elastic) { Headroom h; if(!query_headroom(device,h,err)){close();return false;} free_bytes=h.available; elastic_stats_.query_ms+=h.query_ms;
+        std::fprintf(stderr,"strata remote elastic: INITIAL_HEADROOM policy=windows-min3-v4 device=%d uuid=%s cuda_free_bytes=%llu nvml_free_bytes=%llu dxgi_available_bytes=%lld effective_free_bytes=%llu query_ms=%.3f\n",device,h.uuid.c_str(),(unsigned long long)h.cuda_free,(unsigned long long)h.nvml_free,(long long)h.dxgi_available,(unsigned long long)h.available,h.query_ms); }
     uint64_t needed = 0;
     std::vector<std::pair<int32_t, int32_t>> selected;
     selected.reserve((size_t) std::min<int64_t>(slots, layers * experts));
@@ -340,7 +412,10 @@ bool RemoteExperts::elastic_step(const std::vector<float>& usage, const std::vec
         (!usage.empty() && usage.size() != excluded.size())) { err = "remote elastic: unhealthy arena/usage geometry"; return false; }
     for (float u : usage) if (!std::isfinite(u) || u < 0) { err = "remote elastic: invalid routing usage"; return false; }
     size_t free_bytes = 0, total = 0;
-    if (!check(cudaMemGetInfo(&free_bytes, &total), "elastic free memory", err, device_)) return false;
+    Headroom headroom; if(!query_headroom(device_,headroom,err))return false;
+    free_bytes=headroom.available; total=headroom.cuda_total; elastic_stats_.query_ms+=headroom.query_ms;
+    elastic_stats_.cuda_free_min=std::min(elastic_stats_.cuda_free_min,headroom.cuda_free);
+    if(headroom.windows){elastic_stats_.nvml_free_min=std::min(elastic_stats_.nvml_free_min,headroom.nvml_free);elastic_stats_.dxgi_available_min=std::min(elastic_stats_.dxgi_available_min,headroom.dxgi_available);}
     ++elastic_stats_.checks;
     elastic_stats_.free_min = std::min<uint64_t>(elastic_stats_.free_min, free_bytes);
     elastic_stats_.free_max = std::max<uint64_t>(elastic_stats_.free_max, free_bytes);
@@ -348,7 +423,8 @@ bool RemoteExperts::elastic_step(const std::vector<float>& usage, const std::vec
     if (free_bytes < reserve) {
         elastic_stable_ms_ = 0;
         if (!check(cudaStreamSynchronize(stream_), "elastic shrink quiescence", err, device_)) return false;
-        const uint64_t give = std::min<uint64_t>(1024ull << 20, reserve + noise - free_bytes);
+        const uint64_t dxgi_deficit = headroom.windows && headroom.dxgi_available < 0 ? (uint64_t)(-headroom.dxgi_available) : 0;
+        const uint64_t give = std::min<uint64_t>(1024ull << 20, reserve + noise - free_bytes + std::min<uint64_t>(dxgi_deficit,1024ull << 20));
         const uint64_t mapped = cache_.elastic_mapped_bytes();
         const uint64_t rounded = (give + cache_.chunk_bytes() - 1) / cache_.chunk_bytes() * cache_.chunk_bytes();
         const int64_t keep = cache_.slots_within((int64_t) (mapped > rounded ? mapped - rounded : 0));

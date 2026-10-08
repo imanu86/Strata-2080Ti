@@ -46,10 +46,21 @@ public:
     uint64_t elastic_mapped_bytes() const { return cache_.elastic_mapped_bytes(); }
     bool elastic_audit(std::string& err) const; // metadata only, at request boundaries
     bool elastic_smoke(ExpertSource& source, std::string& err); // opt-in, before fingerprint
+    struct Headroom {
+        uint64_t cuda_free = 0, cuda_total = 0, nvml_free = 0, nvml_total = 0, nvml_used = 0;
+        uint64_t dxgi_budget = 0, dxgi_usage = 0, available = 0;
+        int64_t dxgi_available = 0;
+        bool windows = false;
+        std::string uuid;
+        double query_ms = 0;
+    };
+    static bool query_headroom(int device, Headroom& out, std::string& err);
     struct ElasticStats {
         uint64_t checks = 0, grows = 0, shrinks = 0, copy_bytes = 0;
         uint64_t free_min = UINT64_MAX, free_max = 0;
-        double ms = 0;
+        double ms = 0, query_ms = 0;
+        uint64_t cuda_free_min = UINT64_MAX, nvml_free_min = UINT64_MAX;
+        int64_t dxgi_available_min = INT64_MAX;
     };
     const ElasticStats& elastic_stats() const { return elastic_stats_; }
     int64_t resident() const { return cache_.resident(); }

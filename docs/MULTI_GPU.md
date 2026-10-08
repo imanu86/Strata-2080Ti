@@ -328,3 +328,7 @@ new auto-elastic mode freezes a versioned initial policy/arena identity rather
 than mutable ownership; primary+MTP sequence snapshots and true prefix lookahead
 remain native. Mutable ownership is audited only when quiescent. General remote
 SSD guards are not removed.
+
+### Helper elasticity on Windows (opt-in capacity sensor)
+
+`STRATA_REMOTE_ELASTIC=1` uses actual CUDA UUID and adapter LUID with cached NVML/DXGI handles. Initial sizing and safe-point resize admission use the minimum of CUDA free memory, NVML whole-card free memory, and nonnegative DXGI process Budget minus CurrentUsage. All API failures are fatal; no silent fallback. Signed DXGI deficit contributes to bounded pressure shrink (at most 1 GiB per check). The existing 500 MiB reserve, 192 MiB hysteresis, 64 MiB chunks, 512 MiB growth ceiling and 5-second stability remain unchanged. Queries are sequential estimates, not atomic snapshots; margins remain necessary. Queries execute at serialized helper safe points; their host cost is included in helper/wrapper decode time. Startup and post-request raw sensor fields are logged outside decode. This is helper-only elasticity; simultaneous primary elasticity remains unsupported. Nonelastic paths are unchanged.

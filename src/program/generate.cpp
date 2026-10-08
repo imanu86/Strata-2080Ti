@@ -7653,6 +7653,55 @@ int main(int argc, char** argv) {
                     bits.push_back(remote_experts[0].holds(l, e) ? '1' : '0');
             return bits;
         };
+        auto helper_headroom_mark = [&](const char* phase, strata::core::RemoteExperts::Headroom& h) -> bool {
+            if (!strata::core::RemoteExperts::query_headroom(remote_dev[0],h,err)) {
+                std::fprintf(stderr,"strata remote elastic: HEADROOM phase=%s failed=%s\n",phase,err.c_str());return false;
+            }
+            std::fprintf(stderr,"strata remote elastic: HEADROOM phase=%s policy=windows-min3-v4 device=%d uuid=%s cuda_free_bytes=%llu nvml_free_bytes=%llu nvml_used_bytes=%llu dxgi_budget_bytes=%llu dxgi_usage_bytes=%llu dxgi_available_bytes=%lld effective_free_bytes=%llu query_ms=%.3f\n",phase,remote_dev[0],h.uuid.c_str(),(unsigned long long)h.cuda_free,(unsigned long long)h.nvml_free,(unsigned long long)h.nvml_used,(unsigned long long)h.dxgi_budget,(unsigned long long)h.dxgi_usage,(long long)h.dxgi_available,(unsigned long long)h.available,h.query_ms);
+            return true;
+        };
+        // First real helper safe point AFTER all verifier/draft/Opt buffers, before smoke and frozen identity.
+        if (remote_elastic) {
+            if (!ver.wait_commit(err) || (use_mtp && !mtp.idle(err))) {
+                std::fprintf(stderr, "strata remote elastic: STARTUP_SETTLE failed=primary_MTP_quiescence error=%s\n", err.c_str()); return 1;
+            }
+            { const strata::core::OnDevice primary_on(0);
+              if (cudaDeviceSynchronize() != cudaSuccess) {
+                  std::fprintf(stderr, "strata remote elastic: STARTUP_SETTLE failed=primary_device_quiescence\n"); return 1;
+              }
+            }
+            const strata::core::OnDevice helper_on(remote_dev[0]);
+            size_t before_free = 0, before_total = 0, after_free = 0, after_total = 0;
+            const cudaError_t before_status = cudaMemGetInfo(&before_free, &before_total);
+            strata::core::RemoteExperts::Headroom before_h;
+            if(!helper_headroom_mark("startup_before",before_h))return 1;
+            before_free=before_h.available;before_total=before_h.cuda_total;
+            const int64_t before_slots = remote_experts[0].resident();
+            const uint64_t before_mapped = remote_experts[0].elastic_mapped_bytes();
+            const auto before_stats = remote_experts[0].elastic_stats();
+            if (before_status != cudaSuccess || !remote_opt->audit_disjoint(host_res, {}, err)) {
+                std::fprintf(stderr, "strata remote elastic: STARTUP_SETTLE failed=before_meminfo_or_ownership before_status=%d error=%s\n", (int) before_status, err.c_str()); return 1;
+            }
+            const bool settled = remote_opt->elastic_step({}, host_res, {}, *srcp, true, err);
+            const cudaError_t after_status = cudaMemGetInfo(&after_free, &after_total);
+            strata::core::RemoteExperts::Headroom after_h;
+            if(!helper_headroom_mark("startup_after",after_h))return 1;
+            after_free=after_h.available;after_total=after_h.cuda_total;
+            const auto& after_stats = remote_experts[0].elastic_stats();
+            const bool audited = settled && remote_experts[0].elastic_audit(err) && remote_opt->audit_disjoint(host_res, {}, err);
+            std::fprintf(stderr, "strata remote elastic: STARTUP_SETTLE before_slots=%lld after_slots=%lld before_mapped=%llu after_mapped=%llu before_free_mib=%llu after_free_mib=%llu before_total_mib=%llu after_total_mib=%llu before_status=%d after_status=%d grows=%llu shrinks=%llu settled=%d audited=%d reserve_mib=500 hysteresis_mib=192 chunk_mib=64 scope=STARTUP_NOT_DECODE error=%s\n",
+                (long long) before_slots, (long long) remote_experts[0].resident(),
+                (unsigned long long) before_mapped, (unsigned long long) remote_experts[0].elastic_mapped_bytes(),
+                (unsigned long long) (before_free >> 20), (unsigned long long) (after_free >> 20),
+                (unsigned long long) (before_total >> 20), (unsigned long long) (after_total >> 20),
+                (int) before_status, (int) after_status,
+                (unsigned long long) (after_stats.grows - before_stats.grows), (unsigned long long) (after_stats.shrinks - before_stats.shrinks),
+                (int) settled, (int) audited, audited ? "none" : err.c_str());
+            if (!settled || !audited || after_status != cudaSuccess || after_free < (500ull << 20)) {
+                std::fprintf(stderr, "strata remote elastic: STARTUP_SETTLE failed=%s\n",
+                    !settled ? "policy" : !audited ? "ownership" : after_status != cudaSuccess ? "after_meminfo" : "helper_headroom_after_one_step"); return 1;
+            }
+        }
         const std::vector<std::pair<int32_t, int32_t>>* helper_pending = nullptr;
         if (remote_elastic_smoke && (!remote_opt->audit_disjoint(host_res, {}, err) ||
             !remote_experts[0].elastic_smoke(*srcp, err) || !remote_opt->audit_disjoint(host_res, {}, err))) {
@@ -7736,16 +7785,43 @@ int main(int argc, char** argv) {
                 cudaDeviceProp primary_prop{}, helper_prop{};
                 const strata::core::OnDevice on(remote_dev[0]);
                 size_t free_bytes = 0, total_bytes = 0;
-                if (!helper_quiesce() || cudaGetDeviceProperties(&primary_prop, 0) != cudaSuccess ||
-                    cudaGetDeviceProperties(&helper_prop, remote_dev[0]) != cudaSuccess ||
-                    cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess || free_bytes < ((remote_elastic ? 500ull : 1536ull) << 20) ||
-                    primary_prop.major != 7 || primary_prop.minor != 5 || helper_prop.major != 8 || helper_prop.minor != 6 ||
-                    !remote_experts[0].optimized_decode() || !use_mtp || mtp.device() != 0 || g.n_layers != 48) {
-                    std::fprintf(stderr, "strata lab helper ssd: startup topology/capacity/quiescence invalid\n"); return 1;
+                const bool quiescent = helper_quiesce();
+                const std::string quiesce_error = quiescent ? "none" : err;
+                const cudaError_t primary_status = cudaGetDeviceProperties(&primary_prop, 0);
+                const cudaError_t helper_status = cudaGetDeviceProperties(&helper_prop, remote_dev[0]);
+                const cudaError_t memory_status = cudaMemGetInfo(&free_bytes, &total_bytes);
+                if(remote_elastic){strata::core::RemoteExperts::Headroom h;if(!helper_headroom_mark("startup_guard",h))return 1;free_bytes=h.available;total_bytes=h.cuda_total;}
+                const uint64_t minimum_free = (remote_elastic ? 500ull : 1536ull) << 20;
+                const bool opt_actual = remote_experts[0].optimized_decode();
+                const int mtp_actual_device = use_mtp ? mtp.device() : -1;
+                std::string failed;
+                if (!quiescent) failed += "quiescence,";
+                if (primary_status != cudaSuccess) failed += "primary_props,";
+                if (helper_status != cudaSuccess) failed += "helper_props,";
+                if (memory_status != cudaSuccess) failed += "helper_meminfo,";
+                if (free_bytes < minimum_free) failed += "helper_headroom,";
+                if (primary_prop.major != 7 || primary_prop.minor != 5) failed += "primary_cc,";
+                if (helper_prop.major != 8 || helper_prop.minor != 6) failed += "helper_cc,";
+                if (!opt_actual) failed += "opt,";
+                if (!use_mtp) failed += "mtp_disabled,";
+                if (mtp_actual_device != 0) failed += "mtp_device,";
+                if (g.n_layers != 48) failed += "layers,";
+                std::fprintf(stderr, "strata lab helper ssd: startup_diagnostic failed=%s quiescent=%d quiesce_error=%s primary_status=%d helper_status=%d memory_status=%d free_mib=%llu total_mib=%llu primary_cc=%d%d helper_cc=%d%d opt=%d use_mtp=%d mtp_device=%d layers=%lld helper_slots=%lld helper_gib=%.3f mapped=%llu primary_slots=%lld primary_gib=%.3f reserve_mib=%llu hysteresis_mib=%d chunk_mib=%d\n",
+                    failed.empty() ? "none" : failed.c_str(), (int) quiescent, quiesce_error.c_str(),
+                    (int) primary_status, (int) helper_status, (int) memory_status,
+                    (unsigned long long) (free_bytes >> 20), (unsigned long long) (total_bytes >> 20),
+                    primary_prop.major, primary_prop.minor, helper_prop.major, helper_prop.minor,
+                    (int) opt_actual, (int) use_mtp, mtp_actual_device, (long long) g.n_layers,
+                    (long long) remote_experts[0].resident(), remote_experts[0].gib(),
+                    (unsigned long long) remote_experts[0].elastic_mapped_bytes(),
+                    (long long) xcache.slots(), xcache.gib(), (unsigned long long) (minimum_free >> 20),
+                    remote_elastic ? 192 : 0, remote_elastic ? 64 : 0);
+                if (!failed.empty()) {
+                    std::fprintf(stderr, "strata lab helper ssd: startup topology/capacity/quiescence invalid: %s\n", failed.c_str()); return 1;
                 }
-                settings.push_back(remote_elastic ? "lab-helper-elastic-opt1-auto-v2" : "lab-helper-static-opt1-slots2560-v1");
+                settings.push_back(remote_elastic ? "lab-helper-elastic-opt1-auto-windows-min3-v4" : "lab-helper-static-opt1-slots2560-v1");
                 if (remote_elastic) {
-                    settings.push_back("reserve500-hysteresis192-chunk64-period1000-stable5000-grow512");
+                    settings.push_back("reserve500-hysteresis192-chunk64-period1000-stable5000-grow512-minCUDA-NVML-DXGI-signed-pressure-v4");
                     // Frozen initial arena geometry/policy; changing ownership is not sequence state.
                     settings.push_back(std::to_string(remote_experts[0].elastic_mapped_bytes()));
                     settings.push_back(std::to_string(remote_experts[0].resident()));
@@ -14075,7 +14151,9 @@ int main(int argc, char** argv) {
                     (unsigned long long) (remote_experts[0].returned_bytes() - helper_decode_bytes_before));
             }
             if (remote_elastic) {
+                strata::core::RemoteExperts::Headroom final_h; if(!helper_headroom_mark("request_end",final_h))return 1;
                 const auto& st = remote_experts[0].elastic_stats();
+                std::fprintf(stderr,"strata remote elastic: SENSOR request=%lld query_ms=%.3f cuda_lifetime_min_bytes=%llu nvml_lifetime_min_bytes=%llu dxgi_lifetime_min_bytes=%lld query_cost_included=1\n",(long long)force_k,st.query_ms-helper_elastic_before.query_ms,(unsigned long long)st.cuda_free_min,(unsigned long long)st.nvml_free_min,(long long)st.dxgi_available_min);
                 std::fprintf(stderr, "strata remote elastic: request=%lld checks=%llu grows=%llu shrinks=%llu copy_bytes=%llu helper_step_ms=%.3f wrapper_ms=%.3f free_lifetime_min_mib=%llu free_lifetime_max_mib=%llu slots=%lld mapped=%llu adapt_rounds=%llu adapt_swaps=%llu scope=decode resize_cost_included=1\n",
                     (long long) force_k, (unsigned long long) (st.checks - helper_elastic_before.checks),
                     (unsigned long long) (st.grows - helper_elastic_before.grows), (unsigned long long) (st.shrinks - helper_elastic_before.shrinks),
