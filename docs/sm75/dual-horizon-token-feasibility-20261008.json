@@ -1,0 +1,200 @@
+{
+  "schema": "strata.dual.horizon.token.feasibility.v1",
+  "timestamp": "2026-10-08T05:55:48.484794+00:00",
+  "status": "CPU_PREFLIGHT_COMPLETE_NO_IMPLEMENTATION",
+  "opening_fact": "Actual observer head is Q5_K, not Q8_0. Canonical packed output.weight Q8_0 is unused by native MTP subset; no Q8_0-based replay or fit is justified.",
+  "publication": {
+    "commit": "6704230ea1c0e2fb7a052890e0003c7ca0313b4c",
+    "main_clean": true,
+    "fit_report_byte_identical_sha256": "330b5256bf5e1266bced11bfe63a0dfb4d3f29744767fde4c1e7c007c16f2989",
+    "fit_guardian_resource_unqualified_preserved": true
+  },
+  "head_asset": {
+    "native_arg": "C:/Users/imanu/Downloads/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+    "header_only_verified": true,
+    "GGUF_data_start": 11024256,
+    "tensor": "output.weight",
+    "tensor_offset": 0,
+    "shape": [
+      2560,
+      248320
+    ],
+    "type_id": 13,
+    "type": "Q5_K",
+    "block_layout": "256 elements/176B: half2 d,dmin;12B scales;32B highbits;128B lowbits;10 blocks per token row=1760B",
+    "source_payload_bytes": 437043200,
+    "full_weight_rehash": false,
+    "runtime_subset": "MtpDrafter gathers unchanged native GGUF rows using draft_vocab IDs; dhead_type=head.type. No adapter/extra bias or conversion to canonical Q8_0.",
+    "canonical_pack_distinction": "packs/iq3_xxs/index.txt:3 output.weight type8 Q8_0 shape2560x248320 is a separate canonical representation, not this observer head"
+  },
+  "vocabulary": {
+    "path": "D:\\ds4_work\\strata\\Strata-data\\mtp\\rt_it48k\\draft_vocab.bin",
+    "bytes": 194168,
+    "count": 48542,
+    "unique": 48542,
+    "min_id": 0,
+    "max_id": 248319,
+    "sha256": "4903e9726f7f607cb3bc0b0e2e6a9702b674eaa4d6118f88b9814bc246e0ba44",
+    "ordering": "little-endian int32 array; subset logit index j maps to exact original token ID ids[j], never numerically sorted/reindexed without explicit inverse",
+    "subset_Q5_K_bytes": 85433920,
+    "dequant_F32_bytes": 497070080
+  },
+  "dataset_sufficiency": {
+    "head_input_complete": true,
+    "native_payload_layout": "chain_slot x4depth x12800float32 little-endian; [0:10240]nativeR, [10240:12800]sample_ complete head-input2560 copied after GR head mixer, before mtp_select; markers prove each depth copy",
+    "head_input_is_not_norm_or_sample_summary": true,
+    "raw_target_ID_exact": true,
+    "proposal_and_confidence": "observer.jsonl chain.ids[depth-1] and prob[depth-1]; dataset node binds chain/depth/slot/state_pos/label_pos/raw exact verifier label",
+    "label_rule": "valid_raw only, includes first divergent proposal as a legitimate negative; descendants after first mismatch censored. Censored/purged/B2 excluded. Original rollout and accepted parent prefix audited independently. Never replace prior proposals by gold to evaluate depth3/4.",
+    "partition": "TRAIN/HOLDOUT whole-chain cutoff purge at512; both cases B1 only; carried cohort kept separately",
+    "counts": {
+      "L01": {
+        "train_past": {
+          "valid_raw": 1130,
+          "target_outside_subset": 7,
+          "first_divergence_negative": 412,
+          "depth_counts": {
+            "1": 506,
+            "2": 313,
+            "3": 191,
+            "4": 120
+          },
+          "cohort_counts": {
+            "self_generated": 776,
+            "policy_carried": 354
+          }
+        },
+        "holdout_future": {
+          "valid_raw": 270,
+          "target_outside_subset": 0,
+          "first_divergence_negative": 108,
+          "depth_counts": {
+            "1": 126,
+            "2": 77,
+            "3": 40,
+            "4": 27
+          },
+          "cohort_counts": {
+            "policy_carried": 83,
+            "self_generated": 187
+          }
+        }
+      },
+      "L02": {
+        "train_past": {
+          "valid_raw": 999,
+          "target_outside_subset": 8,
+          "first_divergence_negative": 465,
+          "depth_counts": {
+            "1": 506,
+            "2": 279,
+            "3": 143,
+            "4": 71
+          },
+          "cohort_counts": {
+            "self_generated": 742,
+            "policy_carried": 257
+          }
+        },
+        "holdout_future": {
+          "valid_raw": 253,
+          "target_outside_subset": 2,
+          "first_divergence_negative": 114,
+          "depth_counts": {
+            "1": 127,
+            "2": 72,
+            "3": 34,
+            "4": 20
+          },
+          "cohort_counts": {
+            "self_generated": 183,
+            "policy_carried": 70
+          }
+        }
+      }
+    },
+    "TRAIN_valid_raw": 2129,
+    "TRAIN_in_subset_label": 2114,
+    "HOLDOUT_valid_raw": 523,
+    "HOLDOUT_in_subset_label": 521,
+    "unsupported_label_rule": "15 TRAIN/2 HOLDOUT target IDs outside48542 must be reported as unreachable under frozen vocabulary and excluded from subset CE, never silently remapped. Holdout eligibility is predetermined by vocabulary, not accuracy.",
+    "self_generated_depth4_holdout": [
+      20,
+      11
+    ]
+  },
+  "native_replay_required": {
+    "route": "mtp.cpp1729 native_quantize_q8_1(sample),1732 native_mmvq(type13,dhead); native_mmvq.cu2634->native_q5_k_mmvq2270. CUDA ncols1/N2560 gives10blocks and generic native_q5_k_mmvq_kernel<false>. NativeHead::run special Q5K convenience is not the MTP record_rest path.",
+    "norm_bias": "sample_ already includes native hyper_connection_mixer GR read with hc_norm/BF16 down/up. No additional final RMS normalization or head bias in record_rest; replay uses raw saved sample_ unchanged. Residual-fit normalization is NOT reused.",
+    "activation_quant": "Q8_1 groups32: warp max(abs)/127, roundf ties-away-from-zero, int8 clip; fp16 finite d and original input sum; clamp finite overflow per q8_1_finite.hpp. Quantize using FLOAT d before fp16 storage. NumPy round-to-even is not equivalent.",
+    "dot_and_reduction": "Q5K scale/min unpack, int32 dot, fp16 scale->float, float32 accumulation and CUDA warp/shared/XOR reduction order/FMA must be represented or validated. Plain dequantized W@float-input is a surrogate, not exact native replay.",
+    "selection": "greedy original argmax/sampling branch, exact subset order/tie rule then dvocab remap; original confidence is softmax over subset48542. No penalties/coupled sampling in qualified FREE observer.",
+    "parity_gate": "Before any fit: native top1 token identity from complete saved head_inputs vs original chain.ids, across case/depth/fresh/carried and first-divergence rows. Compute top1/top2 margin and approximate confidence; compare stored original prob with declared fixed tolerance if policy ever consumes it. Native original top2/logits not saved here, so original margin equality cannot be established from these payloads. Any unexplained top1 mismatch STOP; no selective dropping/tolerance fitting.",
+    "not_yet_done": true,
+    "existing_CPU_tools": "tools/canonical_xcheck.py supports Q5K canonical conversion/dequantization, but no audited CPU exact Q5K\u00d7Q8_1 native-reduction replay found in relevant tools"
+  },
+  "cost_estimates_diagnostic_not_timing": {
+    "full_subset_per_row_FLOPs": 248535040,
+    "all_2129_TRAIN_forward_FLOPs": 529131100160,
+    "gradient_to_hidden_extra_same_order": true,
+    "F32_subset_MiB": 474.04296875,
+    "Q5_subset_MiB": 81.47613525390625,
+    "all_TRAIN_logits_F32_MiB": 394.23339080810547,
+    "batch64_logits_MiB": 11.85107421875,
+    "recommended_memory": "stream vocabulary/row batches, never hold all logits or full248320 F32 head. F32 subset~474MiB plus batch64~12MiB logits; adapter/data/grad scratch additional. Exact vectorized quant emulation needs bounded chunks; full memory actual must be measured on real computing descendant, not venv launcher.",
+    "CPU_seconds": "Not measured; cannot guarantee <=3min for full-vocab epoch from residual-fit timing. BLAS throughput and exact emulation overhead unknown. 4-thread restriction and process-tree guardian required before a future run.",
+    "restricted_ranking_option": "Fixed TRAIN-only candidate set: raw target if eligible, original proposal,32 unique random negatives seed73 excluding duplicates; <=34 candidates/row. Forward upperbound2*2129*34*2560 FLOPs\u22480.371GF vs full-subset0.529TF; ranking trains relative sampled alternatives only. It does NOT establish top1 across48542 or calibrated probabilities; full-subset holdout evaluation still required. Native hard-negative mining adds a full-head replay pass and is not free.",
+    "small_adapter": "Residual delta on saved2560D head input: shared rank32=163840 matrix parameters (+2560bias), or two rank16 heads=163840 total matrix parameters (+5120bias). Frozen Q5K head and straight-through/surrogate derivative through activation quantization would require explicit design, not ordinary differentiable exact integer kernel. No duplicated4B MTP. No claim that low-rank adapter is accurate."
+  },
+  "next_bounded_probe": {
+    "step1": "CPU-only implement bounded exact-reference parity harness, no fit: initially8 deterministic TRAIN rows (first valid self-generated percase/depth), full48542 argmax; include additional fixed first-divergence/carried coverage if first gate passes within a separate ROOT budget. Pin small sources/vocab/args and head tensor header; read only selected head rows needed, no giant rehash.",
+    "step2": "If parity passes, ROOT chooses ONE fixed CE or ranking fit protocol with chronological TRAIN-only and fixed hyperparameters/negative seed. Freeze global vocabulary, labels and cohort handling before fit; baseline identity native top1 is prerequisite.",
+    "step3": "Score original-prefix heldout next-token IDs, separately perdepth/cohort, report unreachable labels/censures and depth4 smallN. This only assesses one-step correction on original prefixes; chain accepted4/4 and TPS require later real adapted rollout after first changed token.",
+    "current_authorization": "Design only; NO implementation/training/probe/model execution now"
+  },
+  "available_runtime": {
+    "numpy": true,
+    "torch": false,
+    "cupy": false,
+    "gguf": false,
+    "threadpoolctl": false,
+    "inspection": "find_spec/metadata only; no CUDA init/install/download"
+  },
+  "evidence": {
+    "source_sha256": {
+      "src/core/mtp.cpp": "c710f0fd76ffee59aef62fd73697049e90e976102535dd551e84bcfbea27e7dd",
+      "src/core/native_head.cpp": "eea3fd32d721c84fcdd8b6910403ac3c6fbbce6835354119e2701a598c6f7723",
+      "src/kernels/cuda/native_mmvq.cu": "51f896ba00dfdab17c934cd75747c372ba96317097151cd650f85e5bd5a85f45",
+      "src/kernels/cuda/verify_kernels.cu": "3d491d40c1eda70e1fec1852952ef3309f5d5258349735c6d7ff4614812dc985",
+      "include/strata/kernels/q8_1_finite.hpp": "6789c75d692ef1cf21a07d8d602e5cf35ad40657b715f8d510cf7ddad1162598",
+      "tools/gguf_reader.py": "5ecf739bb3c2f07bc7f889f7f3a455e3dfdb40068409e10781a1a9b2be289b5e"
+    },
+    "observer_plan_path": "work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\plan.json",
+    "observer_plan_sha256": "635cf09464f25613181e2e668daa0b3d411c66e51d4258297cbbeec879582109",
+    "observer_executable_sha256": "4dd6214df027a45e9f597cb814cbc446a8022921ecb3d85718fb1d0867c33b23",
+    "observer_trace_path": "work\\dual-horizon-probe\\runtime\\observer.jsonl",
+    "observer_trace_sha256": "4fd28324d9abf9910f7269c84b07a82b63c2ee048bffb05d89e4231bc58d629e",
+    "dataset_pins": {
+      "work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\dataset-request-02.json": "40480dc6db8b8b4815c24c6f830bafa20c4ae584752b00bb556c7063cbe875e0",
+      "work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\dataset-request-03.json": "c923fcb1e5b08e6ab3164d80038d8600708d07e591e20d9e67ae8037d6da3dd3"
+    },
+    "source_lines": [
+      "src/core/native_head.cpp:34",
+      "src/core/mtp.cpp:1333",
+      "src/core/mtp.cpp:1378",
+      "src/core/mtp.cpp:1729",
+      "src/core/mtp.cpp:1746",
+      "src/core/mtp.cpp:1756",
+      "src/core/mtp.cpp:1853",
+      "src/core/mtp.cpp:1887",
+      "src/kernels/cuda/verify_kernels.cu:1540",
+      "src/kernels/cuda/native_mmvq.cu:60",
+      "src/kernels/cuda/native_mmvq.cu:153",
+      "src/kernels/cuda/native_mmvq.cu:184",
+      "src/kernels/cuda/native_mmvq.cu:2270",
+      "src/kernels/cuda/native_mmvq.cu:2634",
+      "include/strata/kernels/q8_1_finite.hpp:24"
+    ]
+  },
+  "decision": "CONDITIONAL_FEASIBLE_DATA_SUFFICIENT; NEED_EXACT_NATIVE_PARITY_BEFORE_TOKEN_FIT. Q8_0 hypothesis rejected for actual observer head. No implementation or training authorized by this preflight."
+}
