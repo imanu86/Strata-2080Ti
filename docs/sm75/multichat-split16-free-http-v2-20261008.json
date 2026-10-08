@@ -1,0 +1,476 @@
+{
+  "timestamp_utc": "2026-10-08T15:45:52.814820+00:00",
+  "status": "PARTIAL_B1_VALID_A2_STALLED_AND_INTERRUPTED",
+  "performance_decision": "UNDETERMINED_MATCHED_SERIAL_INCOMPLETE",
+  "purpose": "V2 correction of SSD bench artifact: mandatory native SSD for initial HTTP requests, only exact full RAM state for internal continuations; not a new engine speedup",
+  "B1": {
+    "full_wall_s": 41.85899999999674,
+    "native_completion_tokens": 2048,
+    "aggregate_fullwall_tps": 48.92615685993835,
+    "audit": {
+      "admissions": 3,
+      "initial_ssd_admissions": 2,
+      "exact_RAM_continuations": 1,
+      "provenance": [
+        [
+          "3",
+          "131264",
+          "1024",
+          "0",
+          "131264",
+          "131072",
+          "0",
+          "-1",
+          "0"
+        ],
+        [
+          "3",
+          "131264",
+          "1024",
+          "3",
+          "131267",
+          "131266",
+          "1",
+          "13",
+          "1"
+        ],
+        [
+          "4",
+          "131255",
+          "1024",
+          "0",
+          "131255",
+          "131072",
+          "0",
+          "-1",
+          "0"
+        ]
+      ],
+      "native_group_windows": [
+        [
+          "588",
+          "589"
+        ]
+      ],
+      "SSD": true,
+      "forced": false,
+      "capture_warm_coverage": "UNKNOWN",
+      "capture_call_count_observed": 0,
+      "global_graph_capture_coverage": "UNKNOWN",
+      "steady_token_tps": "UNKNOWN",
+      "token_p95": "UNKNOWN"
+    },
+    "clients": {
+      "L01": {
+        "native_completion_tokens": 1024,
+        "wall_s": 41.796000000002095,
+        "ttft_content_s": 6.25,
+        "finish_reason": "length",
+        "text_sha256": "a7f7b79dc26a726356fcee40409bf48f3405c20f86012f20a153514e4117301b",
+        "native_timings": {
+          "cache_n": 131072,
+          "prompt_n": 192,
+          "prompt_ms": 3.3,
+          "prompt_per_token_ms": 0.017,
+          "prompt_per_second": 58181.8,
+          "predicted_n": 1024,
+          "predicted_ms": 34799.4,
+          "predicted_per_token_ms": 34.084,
+          "predicted_per_second": 29.3,
+          "draft_n": 0,
+          "draft_n_accepted": 0
+        },
+        "steady_token_tps": "UNKNOWN",
+        "native_token_p95": "UNKNOWN"
+      },
+      "L02": {
+        "native_completion_tokens": 1024,
+        "wall_s": 41.812999999994645,
+        "ttft_content_s": 12.219000000011874,
+        "finish_reason": "length",
+        "text_sha256": "6450ae51a15c7a8bf0e023c76d0ef0f4a00e3652f0721d17ffd05c4e7e7ce8a8",
+        "native_timings": {
+          "cache_n": 131072,
+          "prompt_n": 183,
+          "prompt_ms": 5197.3,
+          "prompt_per_token_ms": 28.401,
+          "prompt_per_second": 35.2,
+          "predicted_n": 1024,
+          "predicted_ms": 28891.8,
+          "predicted_per_token_ms": 28.215,
+          "predicted_per_second": 35.4,
+          "draft_n": 0,
+          "draft_n_accepted": 0
+        },
+        "steady_token_tps": "UNKNOWN",
+        "native_token_p95": "UNKNOWN"
+      }
+    }
+  },
+  "A2": {
+    "status": "INCOMPLETE_NOT_COMPARABLE",
+    "L01": {
+      "status": "COMPLETE_1024",
+      "native_prompt_tail": 192,
+      "native_prompt_ms": 5203,
+      "native_decode_ms": 15776,
+      "native_decode_tps": 64.9,
+      "native_drafts_accepted": 553,
+      "native_drafts_total": 872,
+      "scope": "native solo decode timer, not full HTTP wall"
+    },
+    "L02": {
+      "status": "STALLED_THEN_EXTERNAL_GUARD_INTERRUPTED",
+      "last_received_tokens_observed": 691,
+      "heartbeat_observations": [
+        "[strata] answering: 691 of max 1024 tokens, 32.9 tok/s, 26 s",
+        "[strata] answering: 691 of max 1024 tokens, 22.2 tok/s, 36 s",
+        "[strata] answering: 691 of max 1024 tokens, 16.8 tok/s, 46 s",
+        "[strata] answering: 691 of max 1024 tokens, 13.5 tok/s, 57 s",
+        "[strata] answering: 691 of max 1024 tokens, 11.2 tok/s, 67 s",
+        "[strata] answering: 691 of max 1024 tokens, 9.6 tok/s, 77 s",
+        "[strata] answering: 691 of max 1024 tokens, 8.4 tok/s, 87 s",
+        "[strata] answering: 691 of max 1024 tokens, 7.5 tok/s, 97 s",
+        "[strata] answering: 691 of max 1024 tokens, 6.8 tok/s, 107 s",
+        "[strata] answering: 691 of max 1024 tokens, 6.2 tok/s, 117 s",
+        "[strata] answering: 691 of max 1024 tokens, 5.6 tok/s, 128 s",
+        "[strata] answering: 691 of max 1024 tokens, 5.2 tok/s, 138 s"
+      ],
+      "no_completion_usage_or_done": true,
+      "native_last_event": "shrink169\u21922906slots, CUDAfree252MiB,144.33ms; resize returned before print"
+    },
+    "fullwall_tps": "UNKNOWN; incomplete",
+    "do_not_compare_to_V1_A2": true
+  },
+  "B2": {
+    "status": "NOT_RUN"
+  },
+  "warm": {
+    "status": "PASS",
+    "audit": {
+      "admissions": 3,
+      "initial_ssd_admissions": 2,
+      "exact_RAM_continuations": 1,
+      "provenance": [
+        [
+          "1",
+          "131264",
+          "15",
+          "0",
+          "131264",
+          "131072",
+          "0",
+          "-1",
+          "0"
+        ],
+        [
+          "1",
+          "131264",
+          "15",
+          "4",
+          "131268",
+          "131267",
+          "1",
+          "177001",
+          "1"
+        ],
+        [
+          "2",
+          "131255",
+          "15",
+          "0",
+          "131255",
+          "131072",
+          "0",
+          "-1",
+          "0"
+        ]
+      ],
+      "native_group_windows": [
+        [
+          "5",
+          "9"
+        ]
+      ],
+      "SSD": true,
+      "forced": false,
+      "capture_warm_coverage": "UNKNOWN",
+      "capture_call_count_observed": 4,
+      "global_graph_capture_coverage": "UNKNOWN",
+      "steady_token_tps": "UNKNOWN",
+      "token_p95": "UNKNOWN"
+    }
+  },
+  "native_batch_summaries": [
+    "strata batch pipeline: 2 groups, rows per window A 2.00 (5 windows) / B 2.00 (9 windows), ms per window stage 0 15.2 / stage 1 24.6, drafts 1.7 ms per round, overlap 34% (stage 0 busy 50%, stage 1 busy 81% of 426 ms); 22 rows kept = 51.6 rows/s (admissions included)",
+    "strata batch pipeline: 2 groups, rows per window A 2.00 (588 windows) / B 2.00 (589 windows), ms per window stage 0 15.1 / stage 1 24.0, drafts 1.3 ms per round, overlap 62% (stage 0 busy 62%, stage 1 busy 98% of 28874 ms); 2041 rows kept = 70.7 rows/s (admissions included)"
+  ],
+  "native_B1_stage_metrics": {
+    "windows_A": 588,
+    "windows_B": 589,
+    "rows_per_window": 2.0,
+    "stage0_ms_per_window": 15.1,
+    "stage1_ms_per_window": 24.0,
+    "draft_ms_per_round": 1.3,
+    "overlap_percent": 62,
+    "busy0_percent": 62,
+    "busy1_percent": 98,
+    "inner_wall_ms": 28874,
+    "rows_kept": 2041,
+    "inner_rows_per_s": 70.7,
+    "MTP_acceptance_percent": 73,
+    "timer_scope": "native batched inner execution/admissions; not HTTP fullwall, not additive to stage/host timers"
+  },
+  "branch_qualification": {
+    "exact_live": "OBSERVED_WARM_AND_B1_GPU",
+    "exact_slot": "NOT_EXERCISED_GPU; CPU negatives PASS only",
+    "initial_SSD": "two true native restored131072 per warm/B1, checksum/identity/lookahead/fullMTP validation",
+    "prefix_lookahead": 39737
+  },
+  "diagnosis": {
+    "buffering_excluded": "server token count froze691 from elapsed26s through138s while heartbeat remained live",
+    "exact_waitpoint": "UNKNOWN; no stack/event/doorbell trace",
+    "candidates": [
+      {
+        "file": "src/core/verify.cpp",
+        "line": 3724,
+        "fact": "pl_commit_async busy-spins on previous ev_commit with cudaEventQuery and _mm_pause, no wall deadline",
+        "hypothesis": "host can stop serving another in-flight window while waiting for a GPU event; GPU waits on mapped host doorbell may then form a cycle; not localized in this run"
+      },
+      {
+        "file": "src/program/generate.cpp",
+        "line": 13610,
+        "fact": "while chain_live polls chain_poll without wall deadline before verdict; ordinary loop service is paused",
+        "limitation": "chain graph normally needs no host service; no event-state record proves this wait is the observed one"
+      },
+      {
+        "file": "src/core/verify.cpp",
+        "line": 3598,
+        "fact": "service has20s window timeout, only reached if host continues calling service"
+      },
+      {
+        "file": "src/program/generate.cpp",
+        "line": 13177,
+        "fact": "elastic gap requires stage0 verifiers not in_flight; stage1 may remain active; res_put synchronizes legacy stream6263; shrink logs after return13217",
+        "limitation": "time correlation is not proof resize caused stall"
+      },
+      {
+        "file": "src/core/mtp.cpp",
+        "line": 749,
+        "fact": "idle uses cudaStreamSynchronize on own MTP stream; entry checks passed for warm/B1 exact_live; no final waitpoint trace available"
+      },
+      {
+        "file": "src/program/generate.cpp",
+        "line": 10494,
+        "fact": "pb_drain pumps all in-flight batch rounds then batch_sync; B1 native groups completed before A2 initial admissions"
+      }
+    ],
+    "last_monitor_existing_samples": [
+      {
+        "t": 1791473537.355382,
+        "cpu_total_cores": 3.088,
+        "ram_available_gib": 13.495635986328125,
+        "disk_mbs_rw": {
+          "PhysicalDrive0": [
+            0.0,
+            0.0
+          ],
+          "PhysicalDrive1": [
+            0.015468892864278211,
+            0.7555332935815884
+          ]
+        },
+        "engines": [
+          {
+            "pid": 46832,
+            "cpu_percent": 99.7,
+            "rss": 60455182336,
+            "priority": 16384
+          }
+        ],
+        "gpu": {
+          "fields": [
+            "index",
+            "uuid",
+            "name",
+            "memory.used",
+            "memory.total",
+            "utilization.gpu",
+            "clocks.sm",
+            "clocks.mem",
+            "temperature.gpu",
+            "power.draw",
+            "pstate"
+          ],
+          "rows": [
+            "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 11487, 12288, 100, 1935, 7501, 48, 51.97, P0",
+            "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 21627, 22528, 100, 1890, 7000, 44, 93.39, P0"
+          ],
+          "rc": 0
+        },
+        "gpu_process_memory": []
+      },
+      {
+        "t": 1791473553.1893053,
+        "cpu_total_cores": 6.0,
+        "ram_available_gib": 13.583724975585938,
+        "disk_mbs_rw": {
+          "PhysicalDrive0": [
+            0.0,
+            0.0
+          ],
+          "PhysicalDrive1": [
+            0.02678185060436511,
+            1.925046958592547
+          ]
+        },
+        "engines": [
+          {
+            "pid": 46832,
+            "cpu_percent": 99.1,
+            "rss": 60455182336,
+            "priority": 16384
+          }
+        ],
+        "gpu": {
+          "fields": [
+            "index",
+            "uuid",
+            "name",
+            "memory.used",
+            "memory.total",
+            "utilization.gpu",
+            "clocks.sm",
+            "clocks.mem",
+            "temperature.gpu",
+            "power.draw",
+            "pstate"
+          ],
+          "rows": [
+            "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 11476, 12288, 100, 1950, 7501, 50, 53.92, P0",
+            "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 21627, 22528, 100, 1890, 7000, 44, 91.87, P0"
+          ],
+          "rc": 0
+        },
+        "gpu_process_memory": []
+      }
+    ],
+    "GPU100_lowpower_CPU1core": "compatible with spin/wait, not definitive cause",
+    "next_bounded_evidence_if_authorized": "Record entry/exit to host blocking wait and event/doorbell state with fixed timeout; do not disable elastic or alter workload merely to hide stall",
+    "no_new_GPU_profiling_or_run": true,
+    "wait_provenance": "Both pl_commit_async busy-spin and chain_live polling already existed before this port (verified HEAD4fe26e3). Unknown whether newly combined states expose an existing issue or the cause is elsewhere; not identified as a V2-introduced bug."
+  },
+  "isolation": {
+    "error": "RuntimeError(\"foreign compiler active; no exception: {'pid': 45980, 'name': 'dotnet.exe', 'build_command': True}\")",
+    "remaining_owned": [],
+    "daily_unchanged": true,
+    "prefix_unchanged": true,
+    "control_unchanged": true
+  },
+  "foreign_process": {
+    "timestamp_utc": "2026-10-08T15:33:31.743055+00:00",
+    "pid": 45980,
+    "alive": false,
+    "identity": "gone before snapshot; command/birth/parent UNKNOWN"
+  },
+  "previous_attempt": {
+    "status": "external dotnet24112 guard interrupted creation after native save; identity UNKNOWN; no B1",
+    "evidence": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-01",
+    "prefix_bytes_logged_scope": "2120176024 image.bytes() payload; actual serialized file2121219904"
+  },
+  "prefix_reuse": {
+    "prefix": {
+      "path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-01\\prefix-131072.bin",
+      "size": 2121219904,
+      "mtime_ns": 1791472821513647500,
+      "sha256": "f84cced10ccc526fda02a3d34187999c2bdc0581d671a3b07ab28e659a27537e"
+    },
+    "control": {
+      "path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-01\\ssd_control.txt",
+      "size": 124,
+      "mtime_ns": 1791472656331644700,
+      "sha256": "bf69a6374df18f4a34491b1b6304716db88bfd3188d9ed7ff854f30f7fc8cbac"
+    },
+    "native_saved": "engine.log01 saved131072 2120176024bytes",
+    "native_runtime_checksum_proof": "warm must restore131072/fullMTP; native snapshot identity/lookahead/checksum validator unchanged",
+    "original_singleton_immutable": true,
+    "native_log_bytes_scope": "2120176024 is image.bytes() payload (generate.cpp12262); actual serialized file2121219904 includes native container overhead. No file modification."
+  },
+  "provenance": {
+    "base": "4fe26e35e73b4ffbd0ac3361240a4bddf200c2cc",
+    "source_pins": {
+      "CMakeLists.txt": "aff47526dd0e27021faf4ecbfaf6c1d711ee0f37906ec2ea5563951840432014",
+      "src/program/generate.cpp": "034167b9eca763b113bd8a1e10d2c45c338330b833d652d8ea34c42e770284ba",
+      "src/core/verify.cpp": "fc44824b51a2ab1823ac028af9d05888aae2af9b995042d57caa9d7f20067de0",
+      "include/strata/core/verify.hpp": "6f4f2cab5fe63389ef33d7667f29ff6693be7cd2cf24a56c3c153cd2c900a29a",
+      "src/core/mtp.cpp": "3a6a7faad898526c4072ddcf45950f8756a8588a3295b2a573123fdc3a43dad1",
+      "include/strata/core/mtp.hpp": "d1cb05df85d95b7feab9543ad6f71fb69f7d5c049af4dcd77e73e39b4bc9de19",
+      "include/strata/core/batch_rows.hpp": "d44f38911d09ff94775eede69b631f650c2d7184345b1392357b0af2a464ba0c",
+      "tests/core/batch_rows_test.cpp": "d8c35db9e0a02fa43e736d5c3fd1158dbe709c28a0b2ec202b38e2441fc0fae6",
+      "include/strata/core/batch_plan.hpp": "9ebedcb87cce1acbd5ec4cf6c1038d5c0d90132fcb184a86a7ec51a027c43126",
+      "tests/core/batch_plan_test.cpp": "32036041e3165e4eec2f6902447a89b4fe024227c9d11cab3cef04d4ad8a6b66",
+      "include/strata/core/batch_groups.hpp": "744cb75bc3a2ecc29979683433998e47b6cfe59e4d9b749896c2c79b53de9598",
+      "tests/core/batch_groups_test.cpp": "67b5788056984e4fc384a383bd8d7dc2f9fdcdaa669b3a8d98611c38b962ba90",
+      "docs/MULTICHAT_MTP.md": "b4a6d8951c191dcf1555d95df57f6ee2cbf41c95bee09690f8dc23429adfb30a",
+      "serve/server.py": "c9e0461ac5e0703bed144cc37d6bdda6a18d64039d6c93e5b91a8e586dd48e1c"
+    },
+    "source_manifest_sha256": "aa84ffa106a1eb140d67548e0337cdf9ed4dcca8d89376b2ec21c2fb94f597a5",
+    "bench_manifest_sha256": "3efd8902ea7e536e573c58e5e84754698073fdb307f243e18a4d9dced17589f6",
+    "exe_sha256": "b4e02f9438d5d10157c3a43cae99df8bdb5b32092c25b6fdf0ae6c0ee509badf",
+    "build_status": "PASS rc0",
+    "source_unchanged_after_run": true,
+    "run": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02",
+    "V1_bundle": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v1-frozen\\bundle.json"
+  },
+  "limitations": [
+    "B1 FREE generated-prefix benchmark only; no paired serial result, no causal comparison to V1 or forced C1",
+    "SSE content chunks are not tokens: native completion usage defines2048/fullwall, token-p95 and steady token rate UNKNOWN",
+    "HTTP native_timings summarizes last leg: L01 prompt_n192/prompt_ms~3.3 is continuation timing, not initial whole HTTP prompt time; use individual native logs for decomposition",
+    "Adaptive cache placement/VRAM and FREE raw text can differ by phase; no universal long token-quality parity qualification",
+    "Short safety: four64-token requests (two solo, two batched); narrow exact-settings evidence, no new safety run",
+    "HTTP120s is socket-read timeout, not total request deadline; heartbeats can keep stalled stream alive; outer absolute deadline/owned cleanup remains hard bound",
+    "No A2 TPS estimate from incomplete691 tokens; no B2/no split22/no extra training/profiling/test/retry"
+  ],
+  "evidence_paths": {
+    "B1.json": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\B1.json",
+    "warm.json": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\warm.json",
+    "engine.log": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\engine.log",
+    "server.log": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\server.log",
+    "worker.log": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\worker.log",
+    "monitor.json": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\monitor.json",
+    "result.json": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\result.json",
+    "continuation_coverage.json": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\continuation_coverage.json",
+    "prefix-before.json": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\multichat-20261008\\v2\\http\\DET-multichat-B16-v2-02\\prefix-before.json"
+  },
+  "bank": {
+    "hardware": [
+      "RTX3060 12GiB stage0",
+      "RTX2080Ti modified22GiB stage1"
+    ],
+    "device_UUIDs": [
+      "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+      "GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7"
+    ],
+    "layer_split": 16,
+    "pipeline_windows": 2,
+    "batch_slots": 2,
+    "groups": 2,
+    "MTP_drafts": 1,
+    "native_prompt_contexts": {
+      "L01": 131264,
+      "L02": 131255
+    },
+    "native_SSD_root": 131072,
+    "KV": "int8, resident32768",
+    "reserve_mib": {
+      "primary": 2048,
+      "last_stage": 384
+    },
+    "elastic": true,
+    "adaptive_placement": "default enabled",
+    "prefill_borrow": "default enabled",
+    "sampling": "FREE greedy seed73, spec4/minp0.5, no FORCE_IDS/FORCE_WINDOWS",
+    "tokens_per_long_client": 1024,
+    "STRATA_MMVQ_IL": "1"
+  }
+}

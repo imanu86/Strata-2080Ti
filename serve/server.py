@@ -552,6 +552,14 @@ FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed ou
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
 
 
+def lab_multichat_keys(initial_n: int, total: int, emitted: int, request_id: int) -> str:
+    """Internal provenance only: never accepted from public HTTP sampling fields."""
+    if request_id <= 0 or initial_n <= 131073 or not 0 <= emitted < total <= 1024:
+        raise ValueError("invalid lab multichat request provenance")
+    return (f" lab_mc_initial_n={initial_n} lab_mc_total={total}"
+            f" lab_mc_emitted={emitted} lab_mc_id={request_id}")
+
+
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -1171,6 +1179,13 @@ class StrataEngine:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
         btrace("ctl acquired")
+        lab_mc = bool((self.spawn[4] or {}).get("STRATA_LAB_MULTICHAT_SSD_SWITCH",
+                                              os.environ.get("STRATA_LAB_MULTICHAT_SSD_SWITCH")))
+        if lab_mc:
+            self._lab_mc_seq = getattr(self, "_lab_mc_seq", 0) + 1  # control lock held
+        lab_mc_id = getattr(self, "_lab_mc_seq", 0)
+        def leg_keys():
+            return keys + (lab_multichat_keys(len(ids), int(max_new), len(out), lab_mc_id) if lab_mc else "")
         slot, gen0, reserved = None, None, None
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
         stop_sent = False
@@ -1185,7 +1200,7 @@ class StrataEngine:
                 with self.slot_cv:
                     alone = not any(self.slot_busy) and self.waiting == 0
                 if alone and left > 1:
-                    head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
+                    head = f"GENI {left}{leg_keys()} {embeddings}" if embeddings else f"GEN {left}{leg_keys()}"
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
                     phase = "solo"
                     self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
@@ -1255,7 +1270,7 @@ class StrataEngine:
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
-                    head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
+                    head = f"BGENI {slot} {left}{leg_keys()} {embeddings}" if embeddings else f"BGEN {slot} {left}{leg_keys()}"
                     live = {"slot": slot, "state": "reading", "prompt_tokens": len(prompt), "generated": 0,
                             "started": time.time(), "first_token": None}
                     self.slot_live[slot] = live

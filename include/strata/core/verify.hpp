@@ -200,6 +200,26 @@ public:
     /// -1 = an error (err).  Serves every layer that has rung so far.
     int batch_poll(PoolMultiFn pool, void* user, std::string& err);
     bool batch_busy() const { return b_running_; }
+    // ---- lab/multichat-mtp, STRATA_BATCH_PIPELINE=2 (docs/MULTICHAT_MTP.md): the batch windows of two slot GROUPS
+    // overlapped across the two stages, each group on one parity's verifiers (the pipeline's `ver` / `ver_b` per stage,
+    // sharing the stage's stream, each with its own hand-off), with MTP draft rows per slot.
+    /// batch_launch over an explicit row layout (run_slot_rows' `rows`: a slot's current row, then its drafts) at
+    /// hand-off rows [hbase, hbase + S).  `commit_behind` queues the every-row commit right behind the window (as
+    /// batch_launch); false leaves it to batch_commit_async, once the last stage's picks say what each slot keeps.  The
+    /// window's completion is an event recorded after it, so batch_poll of a verifier that shares its stream with
+    /// another one (set_stream) answers for its own window only.
+    bool batch_launch_rows(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos,
+                           bool commit_behind, std::string& err);
+    /// The deferred commit of the last batch_launch_rows window: commit_slot_prefixes' prefixes (`keep` per slot ID),
+    /// queued on the stream without a host wait and WITHOUT chaining to the next stage (the caller drives every
+    /// stage); `ple_prev` of the kept rows advances now (host side).  A second batch_launch_rows on this verifier may
+    /// follow at once: the stream orders it behind the commit.
+    bool batch_commit_async(const int* keep, std::string& err);
+    /// The window and commit graphs of this layout exist (else the next launch captures them, which syncs the stream).
+    bool batch_captured(const int* rows, int S, int hbase) const;
+    /// Waits for everything this verifier's stream holds (its windows and commits, and with a shared stream the other
+    /// verifier's); false with `err` on a failure.  For the drains between the pipelined windows and a request.
+    bool batch_sync(std::string& err);
     /// A slot's sampling (temperature / top_p / top_k / min_p / seed; penalties are not applied in batch windows):
     /// its row is drawn again on the last stage with Philox(seed, position), as a solo window draws it.  Greedy by
     /// default.  Set on the first stage, it reaches the last.
@@ -362,6 +382,11 @@ private:
     bool sample_rows(int S, std::string& err);   ///< the sampled slots' rows of the last batch window
     int32_t* h_commitb_ = nullptr; int32_t* m_commitb_ = nullptr;   // per slot [1, 0, pos, -1 ..], stride 2 + max_t
     int32_t* commitb_ = nullptr;
+    // batch_launch_rows / batch_commit_async (STRATA_BATCH_PIPELINE=2)
+    bool b_defer_ = false;                 ///< stage_batch leaves the commit staging (h_commitb_) to batch_commit_async
+    bool b_ev_ = false;                    ///< the window in flight recorded ev_done_: batch_poll completes on it
+    bool b_commit_live_ = false;           ///< a batch_commit_async graph may still read h_commitb_ (ev_commit_)
+    cudaStream_t samp_cs_ = nullptr;       ///< the slot rows' sampling off the shared stream (sample_rows)
     float* tail_snap_b_ = nullptr;         ///< per (slot, QSA layer) indexer tail snapshot
     void* arena_b_ = nullptr;
     int64_t last_pos_b_[8] = {};

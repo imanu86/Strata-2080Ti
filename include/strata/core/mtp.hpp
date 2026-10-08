@@ -28,6 +28,7 @@
 
 #include <cuda_runtime.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -136,6 +137,18 @@ public:
     /// accepted row) for T-1 drafts at cells p+a+1 ...  `drafts` gets T-1 tokens.
     bool draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
                float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
+
+    /// STRATA_BATCH_MTP_PARALLEL=1 (--batch-mtp, opt-in): draft() in two halves, so the batch slots' drafters run at
+    /// once, each on its own stream, instead of one after the other.  draft_launch queues what draft() with min_p 0
+    /// does (the round and every step, no host wait); draft_wait reads the drafts and probabilities as draft() returns
+    /// them.  Nothing else may use this drafter between the two.
+    bool draft_launch(int T, const int32_t* tokens, int64_t p, int a, std::string& err);
+    bool draft_wait(int32_t* drafts, float* probs, int* n_drafts, std::string& err);
+    bool draft_live() const { return draft_live_; }
+    /// 1: the launched draft has finished on the drafter's stream (draft_wait returns at once); 0: still running;
+    /// -1: an error (`err`).  1 too when nothing is launched.  (STRATA_BATCH_PIPELINE=2: the slot drafts polled beside
+    /// the other group's window.)
+    int draft_poll(std::string& err);
 
     /// The first round: one cell (`cell`) from `R_row` (device) and `token` -> T-1 drafts.
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
@@ -363,6 +376,12 @@ private:
     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
+    // draft_launch / draft_wait
+    bool draft_live_ = false;
+    int dl_steps_ = 0;
+    int32_t dl_ple_prev_[2] = {0, 0};
+    bool dl_do_ple_ = false;
+    std::chrono::steady_clock::time_point dl_t0_{};
     int64_t n_vocab_ = 0;
     uint64_t vram_ = 0;
     cudaStream_t cs_ = nullptr;
