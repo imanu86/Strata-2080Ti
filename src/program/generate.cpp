@@ -2227,6 +2227,9 @@ int main(int argc, char** argv) {
     }
     const char* lab_policy_path = std::getenv("STRATA_LAB_POLICY_TRACE");
     const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
+    const char* lab_broot_switch = std::getenv("STRATA_LAB_MTP_BROOT_SWITCH");
+    const char* lab_broot_trace = std::getenv("STRATA_LAB_MTP_BROOT_TRACE");
+    const bool lab_broot = lab_broot_switch != nullptr;
     const char* lab_shallow_switch = std::getenv("STRATA_LAB_MTP_SHALLOW_SWITCH");
     const char* lab_shallow_trace = std::getenv("STRATA_LAB_MTP_SHALLOW_TRACE");
     const bool lab_shallow = lab_shallow_switch != nullptr;
@@ -2356,6 +2359,25 @@ int main(int argc, char** argv) {
                              "high_rule=original B_rule=original schema=1\n");
     } else if (lab_shallow_trace != nullptr) {
         std::fprintf(stderr, "strata lab shallow: trace without switch forbidden\n"); return 2;
+    }
+    if (lab_broot) {
+        if (!*lab_broot_switch || !std::filesystem::path(lab_broot_switch).is_absolute() ||
+            !lab_broot_trace || !*lab_broot_trace || !std::filesystem::path(lab_broot_trace).is_absolute() ||
+            std::filesystem::path(lab_broot_switch).lexically_normal() == std::filesystem::path(lab_broot_trace).lexically_normal() ||
+            !lab_policy || lab_anchor || lab_feature || lab_hq || lab_hq_free || lab_selective || lab_shallow) {
+            std::fprintf(stderr, "strata lab broot: absolute distinct switch/trace and policy only required\n"); return 2;
+        }
+        const char* forbidden[] = {"STRATA_FORCE_WINDOWS", "STRATA_CKPT_REREAD", "STRATA_STATE_HASH",
+            "STRATA_PIPELINE_SWITCH", "STRATA_PIPELINE_FORCE_MISS", "STRATA_NEURON_PROBE_CONTROL",
+            "STRATA_CLOSED_ROUTING", "STRATA_MTP_TOP2", "STRATA_MTP_FULL_HEAD", "STRATA_MTP_CATCHUP_ALL",
+            "STRATA_MTP_CHAIN_TRIM", "STRATA_SPEC_COUPLED", "STRATA_PL_EARLY_CHAIN"};
+        for (const char* name : forbidden) if (std::getenv(name) != nullptr) {
+            std::fprintf(stderr, "strata lab broot: forbidden key %s\n", name); return 2;
+        }
+        std::fprintf(stderr, "strata lab broot: enabled=1 scope=B_root_fixture_only "
+                             "width_prob_ready_chain=original schema=1\n");
+    } else if (lab_broot_trace != nullptr) {
+        std::fprintf(stderr, "strata lab broot: trace without switch forbidden\n"); return 2;
     }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
@@ -9905,6 +9927,16 @@ int main(int argc, char** argv) {
                              selective_request_on ? 8192 : 0, selective_request_check ? 1 : 0);
             }
             bool anchor_request_on = false;
+            bool broot_request_on = false;
+            if (lab_broot) {
+                std::ifstream control(lab_broot_switch);
+                std::string mode, extra;
+                if (!(control >> mode) || (control >> extra) || (mode != "0" && mode != "1") ||
+                    geni || lab_oracle_on || oracle_prefix_file.empty()) {
+                    std::printf("ERR lab broot: switch requires0/1; text GEN oracle-off SSD required\n"); return 1;
+                }
+                broot_request_on = mode == "1";
+            }
             bool shallow_request_on = false;
             if (lab_shallow) {
                 std::ifstream control(lab_shallow_switch);
@@ -11301,6 +11333,20 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata lab shallow: history request=%lld source=%s full_until=%lld\n",
                              (long long) force_k, incoming_disk ? "validated_ssd" : "full_prefill", (long long) (n - 1));
             }
+            if (lab_broot) {
+                const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && incoming_tokens == 131072) ||
+                                                  (read_from == 0 && mtp.first_needed() <= 0));
+                if ((max_new != 15 && max_new != 1024) || !lab_oracle_hot || !prefix_disk_enabled || !full || !req_imgs.empty() || lab_oracle_on ||
+                    !req_sp.greedy || req_sp.seed != 73 || hist_n != 0 || mtp.coupled() || !use_mtp ||
+                    !pipe || pl_pw != 2 || S_mtp != 4 || req_spec_min_p != 0.5 || pl_theta != 0.1f ||
+                    o.suffix_draft > 0 || o.lookup_chain > 0 || o.mtp_hnorm_stream ||
+                    !o.mtp_q4.empty() || o.mtp_window != 32768 ||
+                    ((broot_request_on || max_new != 15) && !incoming_disk)) {
+                    std::printf("ERR lab broot: qualified original MTP greedy73/spec4/minp.5/pipeline2/SSD required\n"); return 1;
+                }
+                std::fprintf(stderr, "strata lab broot: history request=%lld source=%s full_until=%lld\n",
+                             (long long) force_k, incoming_disk ? "validated_ssd" : "full_prefill", (long long) (n - 1));
+            }
             if (lab_anchor) {
                 const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && incoming_tokens == 131072) ||
                                                   (read_from == 0 && mtp.first_needed() <= 0));
@@ -11395,6 +11441,9 @@ int main(int argc, char** argv) {
                 ++force_win_hit;
                 return true;
             };
+            if (lab_broot && (forced == nullptr || force_win != nullptr)) {
+                std::printf("ERR lab broot: FORCE_IDS only required\n"); return 1;
+            }
             std::vector<int64_t> force_rows(16, 0);   // windows by rows
             int64_t force_windows = 0, force_acc = 0, force_off = 0, force_over = 0;
             // the last forced window's rows: the target's own picks and the forced ids that replaced them
@@ -11497,6 +11546,20 @@ int main(int argc, char** argv) {
             }
             LabNvtxRange lab_nvtx_decode_range(lab_nvtx, "decode", lab_nvtx_gen);
             // Common POD buffers for both0/1, allocated before d0; no I/O in the decision/launch path.
+            struct BrootDecision {
+                int seq = -1, Aseq = -1, AT = 0, T = 0, k = 0, fixture = -1;
+                int64_t chain = -1, pos = 0, index = -1;
+                int32_t original[8] = {}, target[8] = {};
+                float prob[8] = {}, pa = 0, bonus = 0, p_on = 0;
+                bool bounded = false, prestaged = false, launched = false, changed = false;
+                bool verdict = false, Aall = false, reused = false, carried = false, rolled = false;
+                int raw_bonus = -1, forced_bonus = -1;
+            };
+            std::vector<BrootDecision> broot_decisions;
+            size_t broot_nd = 0;
+            int64_t broot_seen = 0;
+            bool broot_truncated = false;
+            if (lab_broot) broot_decisions.resize((size_t) max_new + 8);
             struct ShallowDecision {
                 int64_t chain = -1, p = 0, remaining = 0, context = 0;
                 int seq = 0, k = 0, base_T = 0, proposed_T = 0, final_T = 0, site = 0;
@@ -11582,6 +11645,8 @@ int main(int argc, char** argv) {
                     bool made = false;     // made from a chain (its outcome can be scored even when the gate held it)
                     bool sfx = false;      // a lookup window (the suffix drafter's drafts)
                     bool lookup = false;   // a B taken from the lookup's continuation (pick_lookup, lookup_next)
+                    int64_t broot_record = -1;
+                    int32_t broot_original[8] = {}, broot_target[8] = {};
                     int64_t shallow_decision = -1; // only fresh A owns a decision; B never inherits one
                     int sfx_match = 0;
                     bool selective_stage0_seen = false;
@@ -11821,6 +11886,31 @@ int main(int argc, char** argv) {
                     d.base_T = base_T; d.proposed_T = w.T; d.remaining = remaining; d.context = context;
                     d.p1 = p1; d.token = token; d.eligible = eligible; d.site = site;
                 };
+                auto broot_prepare = [&](PW& w, int k) {
+                    if (!lab_broot) return;
+                    ++broot_seen;
+                    for (int i = 0; i < w.T; ++i) w.broot_original[i] = w.broot_target[i] = w.tok[i];
+                    const int64_t index = w.p - (n - 1) - 1;
+                    const bool bounded = forced != nullptr && index >= 0 && index < max_new &&
+                        index < (int64_t) forced->size() && (*forced)[(size_t) index] >= 0 &&
+                        (*forced)[(size_t) index] < n_vocab;
+                    if (broot_request_on && bounded) w.broot_target[0] = (*forced)[(size_t) index];
+                    if (broot_nd >= broot_decisions.size()) { broot_truncated = true; return; }
+                    w.broot_record = (int64_t) broot_nd;
+                    auto& d = broot_decisions[broot_nd++];
+                    d.seq = w.seq; d.Aseq = A.seq; d.AT = A.T; d.T = w.T; d.k = k;
+                    d.chain = policy_current_chain; d.pos = w.p; d.index = index; d.bounded = bounded;
+                    d.fixture = bounded ? (*forced)[(size_t) index] : -1;
+                    d.pa = w.policy_pa; d.bonus = w.policy_bonus_prob; d.p_on = w.p_on;
+                    for (int i = 0; i < w.T; ++i) {
+                        d.original[i] = w.broot_original[i]; d.target[i] = w.broot_target[i]; d.prob[i] = w.prob[i];
+                    }
+                };
+                auto broot_launch_rows = [&](PW& w) -> const int32_t* {
+                    // Called only after launch gates, predecessor commit and snapshot succeeded.
+                    if (lab_broot) for (int i = 0; i < w.T; ++i) w.tok[i] = w.broot_target[i];
+                    return w.tok;
+                };
                 // B from the chain's outputs: its row 0 is the guess at index `base`, its drafts follow
                 auto make_b = [&](const int32_t* oc, const float* op, int base, int avail, float pa, int agree) {
                     B = PW{};
@@ -11841,6 +11931,7 @@ int main(int argc, char** argv) {
                         B.policy_pa = pa; B.policy_bonus_prob = op[base]; B.policy_agree = agree;
                     }
                     if (force_miss > 0 && ++pl_fm % force_miss == 0) B.tok[0] = B.tok[0] == 0 ? 1 : 0;
+                    broot_prepare(B, avail);
                     B.ready = true;
                     B.made = true;
                 };
@@ -12266,7 +12357,8 @@ int main(int argc, char** argv) {
                                 if (B.ready && B.p_on >= theta && pl_prestage && !V0(B).in_flight() && !doomed) {
                                     int32_t prev[2] = {ss.ple_prev[0], ss.ple_prev[1]};
                                     for (int i = 0; i < A.T; ++i) { prev[0] = prev[1]; prev[1] = A.tok[i]; }
-                                    if (!V0(B).prestage(B.T, B.tok, B.p, prev, err)) return die(err);
+                                    if (!V0(B).prestage(B.T, lab_broot ? B.broot_target : B.tok, B.p, prev, err)) return die(err);
+                                    if (lab_broot && B.broot_record >= 0) broot_decisions[(size_t) B.broot_record].prestaged = true;
                                 }
                                 b_done = true;
                                 if (chain_kind == 1 || chain_kind == 2) {   // lab P3: the chain's latency to B
@@ -12316,10 +12408,14 @@ int main(int argc, char** argv) {
                             undo_ple[0] = ss.ple_prev[0];
                             undo_ple[1] = ss.ple_prev[1];
                             if (!V0(A).pl_commit_async(A.T, err) || !snap_take(B.seq) ||
-                                !V0(B).pl_launch(B.T, B.tok, B.p, err))
+                                !V0(B).pl_launch(B.T, broot_launch_rows(B), B.p, err))
                                 return die(err.empty() ? std::string("the GDN snapshot failed") : err);
                             A.committed = true;
                             B.launched = true;
+                            if (lab_broot && B.broot_record >= 0) {
+                                auto& d = broot_decisions[(size_t) B.broot_record];
+                                d.launched = true; d.changed = B.tok[0] != d.original[0];
+                            }
                             if (lab_policy) B.policy_l0 = policy_now();
                             if (lab_oracle_log) ++oracle_stage0_launches;
                             B.spec = true;
@@ -12413,6 +12509,18 @@ int main(int argc, char** argv) {
                         return v != nullptr && std::atoi(v) != 0;
                     }();
                     const bool on_v = B.launched && a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
+                    if (lab_broot) {
+                        if (A.broot_record >= 0) broot_decisions[(size_t) A.broot_record].carried = true;
+                        if (B.broot_record >= 0) {
+                            auto& d = broot_decisions[(size_t) B.broot_record];
+                            d.verdict = true; d.Aall = a == A.T - 1; d.reused = on_v;
+                            d.rolled = B.launched && !on_v;
+                            if (d.Aall && d.index < max_new) {
+                                d.forced_bonus = outp[(size_t) A.T - 1];
+                                d.raw_bonus = force_orig[(size_t) A.T - 1];
+                            }
+                        }
+                    }
                     bool e_last = false, e_stop = false, e_launched = false;
                     if (pl_early_chain) {
                         bool e_eos = false;
@@ -12459,6 +12567,10 @@ int main(int argc, char** argv) {
                     // the next verdict)
                     const bool last = pl_early_chain ? e_last : (eos || produced_n >= max_new || stop_req.load());
                     const bool on = on_v;
+                    if (lab_broot && B.broot_record >= 0) {
+                        auto& d = broot_decisions[(size_t) B.broot_record];
+                        d.reused = on && !last; d.rolled = B.launched && (!on || last);
+                    }
                     if (B.made) {   // the gate's calibration: would B have been on the path, by its estimate p_on
                         const bool would = a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
                         const int bin = std::min(9, std::max(0, (int) (B.p_on * 10.0f)));
@@ -12859,6 +12971,31 @@ int main(int argc, char** argv) {
             if (lab_nvtx)
                 std::fprintf(stderr, "strata lab nvtx: gen=%lld request=%lld decode_ms=%.6f scope=host_thread\n",
                              (long long) lab_nvtx_gen, (long long) force_k, decode_ms);
+            if (lab_broot) {
+                std::FILE* fp = std::fopen(lab_broot_trace, "ab");
+                if (!fp) { std::printf("ERR lab broot: cannot append trace\n"); return 1; }
+                int64_t launched = 0, changed = 0, prepared_not_launched = 0, invalid = 0;
+                std::fprintf(fp, "{\"schema\":\"strata.broot.v1\",\"type\":\"request\",\"request\":%lld,\"mode\":%d,\"capacity\":%zu,\"buffer_bytes\":%zu,\"requested\":%lld,\"context_tokens\":%lld,\"n_vocab\":%d}\n",
+                    (long long) force_k, broot_request_on ? 1 : 0, broot_decisions.size(), broot_decisions.size()*sizeof(BrootDecision), (long long) max_new, (long long) n, (int) n_vocab);
+                for (size_t j = 0; j < broot_nd; ++j) {
+                    const auto& d = broot_decisions[j];
+                    launched += d.launched; changed += d.changed; prepared_not_launched += !d.launched;
+                    invalid += d.chain < 0 || d.T < 1 || d.T > 4 || !d.verdict;
+                    std::fprintf(fp, "{\"schema\":\"strata.broot.v1\",\"type\":\"decision\",\"request\":%lld,\"seq\":%d,\"Aseq\":%d,\"AT\":%d,\"T\":%d,\"chain\":%lld,\"pos\":%lld,\"index\":%lld,\"kready\":%d,\"fixture\":%d,\"bounded\":%d,\"prestaged\":%d,\"launched\":%d,\"changed\":%d,\"Aall\":%d,\"reused\":%d,\"carried\":%d,\"rolled\":%d,\"raw_bonus\":%d,\"forced_bonus\":%d,\"pa\":%.17g,\"bonus_prob\":%.17g,\"p_on\":%.17g,\"original\":[",
+                        (long long) force_k,d.seq,d.Aseq,d.AT,d.T,(long long)d.chain,(long long)d.pos,(long long)d.index,d.k,d.fixture,d.bounded,d.prestaged,d.launched,d.changed,d.Aall,d.reused,d.carried,d.rolled,d.raw_bonus,d.forced_bonus,(double)d.pa,(double)d.bonus,(double)d.p_on);
+                    for(int i=0;i<d.T;++i) std::fprintf(fp,"%s%d",i?",":"",d.original[i]);
+                    std::fputs("],\"target\":[",fp);
+                    for(int i=0;i<d.T;++i) std::fprintf(fp,"%s%d",i?",":"",d.target[i]);
+                    std::fputs("],\"prob\":[",fp);
+                    for(int i=0;i<d.T-1;++i) std::fprintf(fp,"%s%.17g",i?",":"",(double)d.prob[i]);
+                    std::fputs("]}\n",fp);
+                }
+                const bool valid = !broot_truncated && invalid == 0 && broot_seen == (int64_t)broot_nd;
+                std::fprintf(fp,"{\"schema\":\"strata.broot.v1\",\"type\":\"end\",\"request\":%lld,\"valid\":%s,\"truncated\":%s,\"seen\":%lld,\"recorded\":%zu,\"launched\":%lld,\"changed\":%lld,\"prepared_not_launched\":%lld,\"invalid\":%lld}\n",(long long)force_k,valid?"true":"false",broot_truncated?"true":"false",(long long)broot_seen,broot_nd,(long long)launched,(long long)changed,(long long)prepared_not_launched,(long long)invalid);
+                const bool failed = std::ferror(fp) != 0; const int closed = std::fclose(fp);
+                if (failed || closed != 0 || !valid) { std::printf("ERR lab broot: invalid trace/write\n"); return 1; }
+                std::fprintf(stderr,"strata lab broot: request %lld mode=%d decisions=%zu launched=%lld changed=%lld prepared_not_launched=%lld valid=1\n",(long long)force_k,broot_request_on?1:0,broot_nd,(long long)launched,(long long)changed,(long long)prepared_not_launched);
+            }
             if (lab_shallow) {
                 std::FILE* fp = std::fopen(lab_shallow_trace, "ab");
                 if (!fp) { std::printf("ERR lab shallow: cannot append trace\n"); return 1; }
