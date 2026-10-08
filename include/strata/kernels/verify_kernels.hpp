@@ -41,6 +41,16 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
 /// Spin until *flag >= value (a mapped host flag).  The value is fixed at capture, so several rings can be
 /// outstanding at once (the split verify window keeps two).
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream);
+/// Layer split, overlapped hand-off (STRATA_SPLIT_OVERLAP): dst (mapped) = [a (na) | b (nb) | c (nc)] with volatile
+/// stores, then the LAST block to finish raises *flag = 1 (mapped) after a system fence, so the next stage's GPU can
+/// start (wait_flag_ge(flag, 1)) without the host syncing this stage first.  `counter` is one device word, 0 between
+/// calls (the last block resets it).  Volatile because on RDNA a plain store to mapped memory can sit in the L2.
+/// `drop` (mapped, may be null): a test hook - nonzero leaves the flag down, as if the publish were lost.
+void handoff_publish(float* dst, const float* a, int64_t na, const float* b, int64_t nb, const float* c, int64_t nc,
+                     uint32_t* counter, uint32_t* flag, void* stream, const uint32_t* drop = nullptr);
+/// The reading stage's hand-off wait, bounded: spin until *flag >= value, or after timeout_ns (0: no bound) set
+/// *err = 1 (mapped) and return, so the window's graph completes and the host fails the window cleanly.
+void wait_handoff(const uint32_t* flag, uint32_t value, uint32_t* err, unsigned long long timeout_ns, void* stream);
 /// wait_flag_ge, also writing the GPU's clock (ns, gpu_stamp's) as the kernel starts into *t_in and as it returns
 /// into *t_out (either may be null): the verify window's PCIe-share balance, at no extra launch.
 void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long long* t_in, unsigned long long* t_out,

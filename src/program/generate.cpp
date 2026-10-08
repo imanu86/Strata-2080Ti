@@ -2426,6 +2426,37 @@ int main(int argc, char** argv) {
         o.adapt_swaps != 0 || o.pcie_frac != 0.0)) {
         std::fprintf(stderr, "strata observer: original MTP FREE/SSD131072/fixedcache/pipeline2/spec4 required\n"); return 2;
     }
+    // Independent serial-split SSD benchmark hook. It never enables or weakens oracle/policy guards.
+    const char* lab_nonmtp_ssd_switch = std::getenv("STRATA_LAB_NONMTP_SSD_SWITCH");
+    const bool lab_nonmtp_ssd = lab_nonmtp_ssd_switch != nullptr && lab_nonmtp_ssd_switch[0] != 0;
+    constexpr int64_t lab_nonmtp_ssd_root = 131072;
+    if (lab_nonmtp_ssd) {
+        const char* fi = std::getenv("STRATA_FORCE_IDS");
+        const char* ov = std::getenv("STRATA_SPLIT_OVERLAP");
+        const char* tm = std::getenv("STRATA_SPLIT_WAIT_MS");
+        char* tm_end = nullptr;
+        const int64_t wait_ms = tm == nullptr ? 0 : std::strtoll(tm, &tm_end, 10);
+        if (!o.serve || o.batch != 0 || o.pipeline_windows != 0 || o.layer_split != "16" || o.spec != 4 ||
+            o.spec_min_p != 0.5 || o.mtp.empty() || o.mtp_hnorm_stream || !o.mtp_q4.empty() || o.mtp_window != 32768 ||
+            o.suffix_draft != 0 || o.lookup_chain != 0 || o.coupled_draft || !o.spec_oracle.empty() ||
+            !o.spec_follow.empty() || o.spec_corrupt != 0 || o.adapt_async != 0 || o.resident_cpu_experts ||
+            o.prompt_cache_file.empty() || lab_oracle_env != nullptr || lab_oracle_hot || lab_prefix_tokens != 0 ||
+            lab_policy || lab_observer || lab_anchor || lab_top2 || lab_feature || lab_hq || lab_selective || lab_shallow || lab_broot ||
+            fi == nullptr || fi[0] == 0 || std::getenv("STRATA_FORCE_WINDOWS") != nullptr ||
+            std::getenv("STRATA_MMVQ_IL") != nullptr || std::getenv("STRATA_HC_NORM_RETAIN") != nullptr ||
+            std::getenv("STRATA_NEURON_PROBE_CONTROL") != nullptr || std::getenv("STRATA_CLOSED_ROUTING") != nullptr ||
+            std::getenv("STRATA_STATE_HASH") != nullptr || std::getenv("STRATA_CKPT_REREAD") != nullptr ||
+            ov == nullptr || std::strcmp(ov, "1") != 0 || tm == nullptr || tm_end == tm || *tm_end != '\0' ||
+            wait_ms <= 0 || wait_ms > 30000 || !std::filesystem::path(lab_nonmtp_ssd_switch).is_absolute()) {
+            std::fprintf(stderr, "strata lab nonmtp ssd: requires isolated serial pipeline0/split16/spec4/minp0.5/native MTP, bounded overlap and absolute control\n");
+            return 2;
+        }
+        const auto& fixtures = force_id_lists();
+        if (fixtures.empty() || std::any_of(fixtures.begin(), fixtures.end(),
+                                          [](const std::vector<int32_t>& f) { return f.size() < 1024; })) {
+            std::fprintf(stderr, "strata lab nonmtp ssd: every explicit FORCE_IDS fixture must have1024 IDs\n"); return 2;
+        }
+    }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
                                                      [](int slots) { return slots > 0; }))) {
@@ -7288,11 +7319,38 @@ int main(int argc, char** argv) {
                 }
                 std::memset(hh, 0, hb);
             }
+            // STRATA_SPLIT_OVERLAP=1 (opt-in; measured on 2x RX 7900 XTX only): a ready word per hand-off, raised by the
+            // writing stage's GPU, so the next stage's window is launched early and the host never syncs between
+            // stages (Verifier::set_handoff_flags).  Not for --split-device 0 (both stages on one GPU).
+            const bool overlap_asked = [] {
+                const char* v = std::getenv("STRATA_SPLIT_OVERLAP");
+                return v != nullptr && std::atoi(v) != 0;
+            }();
+            // --pipeline-windows (#859) runs its own overlapped loop with its own hand-offs: the two do not mix
+            const bool overlap = overlap_asked && !split_same && o.pipeline_windows == 0;
+            if (overlap_asked && o.pipeline_windows > 0)
+                std::fprintf(stderr, "strata serve: STRATA_SPLIT_OVERLAP is off beside --pipeline-windows %d "
+                                     "(that loop overlaps the stages itself)\n", o.pipeline_windows);
+            std::vector<uint32_t*> hflag_h((size_t) n_stages - 1, nullptr), hflag_d((size_t) n_stages - 1, nullptr);
+            if (overlap)
+                for (size_t i = 0; i < hflag_h.size(); ++i) {
+                    if (cudaHostAlloc((void**) &hflag_h[i], 64, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+                        cudaHostGetDevicePointer((void**) &hflag_d[i], hflag_h[i], 0) != cudaSuccess) {
+                        std::fprintf(stderr, "strata serve: the layer-split hand-off flag allocation failed\n");
+                        return 1;
+                    }
+                    std::memset(hflag_h[i], 0, 64);
+                }
             split_drive.base = &drive;
             split_drive.n = n_stages;
             for (int st = 0; st < n_stages; ++st) {
                 stage_ver(st).set_stage(st == 0 ? 0 : split_at[(size_t) st - 1], st + 1 < n_stages ? split_at[(size_t) st] : -1,
                                         st == 0 ? nullptr : hand[(size_t) st - 1], st + 1 < n_stages ? hand[(size_t) st] : nullptr);
+                if (overlap)
+                    stage_ver(st).set_handoff_flags(st == 0 ? nullptr : hflag_h[(size_t) st - 1],
+                                                    st == 0 ? nullptr : hflag_d[(size_t) st - 1],
+                                                    st + 1 < n_stages ? hflag_h[(size_t) st] : nullptr,
+                                                    st + 1 < n_stages ? hflag_d[(size_t) st] : nullptr);
                 split_drive.end[st] = st + 1 < n_stages ? split_at[(size_t) st] : g.n_layers;
                 split_drive.cache_base[st] = drive.d.cache_base;
                 split_drive.cache_slot_off[st] = drive.d.cache_slot_off;
@@ -7328,7 +7386,8 @@ int main(int argc, char** argv) {
             for (int st = 1; st < n_stages; ++st)
                 plan_s += ", " + std::to_string(split_at[(size_t) st - 1]) + "-" + std::to_string(split_drive.end[st] - 1) +
                           " (CUDA" + std::to_string(split_same ? 0 : stages[(size_t) st - 1]->dev) + ")";
-            std::fprintf(stderr, "strata serve: layer split: layers %s, one hand-off per window\n", plan_s.c_str());
+            std::fprintf(stderr, "strata serve: layer split: layers %s, one hand-off per window%s\n", plan_s.c_str(),
+                         overlap ? " (overlapped: STRATA_SPLIT_OVERLAP=1)" : "");
         }
         // --pipeline-windows: the odd windows' verifiers and their hand-off (initialized before `ver`, which stays the
         // watchdog's verifier), and the drafter's own row buffer, which either parity's rows are copied into
@@ -9943,6 +10002,28 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
+            if (lab_nonmtp_ssd) {
+                std::ifstream control(lab_nonmtp_ssd_switch);
+                std::string mode, extra;
+                if (!std::getline(control, mode) || mode != "0" || !std::getline(control, oracle_prefix_file) ||
+                    oracle_prefix_file.empty() || !prefix_disk_enabled || geni || (control >> extra)) {
+                    std::printf("ERR lab nonmtp ssd: control requires exactly0 and one prefix path\n"); return 1;
+                }
+                try {
+                    const std::filesystem::path selected(oracle_prefix_file);
+                    if (!selected.is_absolute() || selected.filename().empty()) throw std::runtime_error("absolute file path required");
+                    const auto destination = std::filesystem::weakly_canonical(selected);
+                    for (const auto& path : prefix_cache_assets) {
+                        if (path.empty()) continue;
+                        const auto asset = std::filesystem::canonical(path);
+                        const auto relative = destination.lexically_relative(asset);
+                        if (destination == asset || (std::filesystem::is_directory(asset) && !relative.empty() &&
+                                *relative.begin() != "..")) throw std::runtime_error("prefix overlaps model assets");
+                    }
+                } catch (const std::exception& e) {
+                    std::printf("ERR lab nonmtp ssd: invalid path: %s\n", e.what()); return 1;
+                }
+            }
             if (lab_hq_free && (request_oracle != LabDraftOracle::Off || oracle_prefix_file.empty() || geni)) {
                 std::printf("ERR lab mtp free: text GEN and oracle switch0/off with explicit SSD path required\n"); return 1;
             }
@@ -10121,6 +10202,10 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
+            if (lab_nonmtp_ssd && (n <= lab_nonmtp_ssd_root + 1 || !prefix_disk_enabled)) {
+                std::printf("ERR lab nonmtp ssd: explicit131072 prefix must be shorter than n-1 and cache must be enabled\n");
+                return 1;
+            }
             if (lab_prefix_tokens > 0 && (lab_prefix_tokens >= n - 1 || !prefix_disk_enabled)) {
                 std::printf("ERR lab oracle: explicit prefix must be shorter than this request's n-1 and cache must be enabled\n");
                 return 1;
@@ -10282,8 +10367,13 @@ int main(int argc, char** argv) {
                     o.prompt_cache > 0 ? (size_t) o.conversation_cache_mib * 1024 * 1024 : 0,
                     (size_t) o.conversation_cache_slots);
                 o.prompt_cache_file = oracle_prefix_file;
+                if (lab_nonmtp_ssd)
+                    std::fprintf(stderr, "strata lab nonmtp ssd: prefix switch=%s ram_sessions=cleared prefix_tokens=131072\n",
+                                 o.prompt_cache_file.c_str());
+                else {
                 std::fprintf(stderr, "strata lab oracle: prefix switch=%s ram_sessions=cleared prefix_tokens=%lld\n",
                              o.prompt_cache_file.c_str(), (long long) lab_prefix_tokens);
+                }
             }
             auto kv_quiesce = [&] { cudaDeviceSynchronize(); apply_pending(true); };
             if (kvg.on) {   // the elastic K/V: this prompt's cells (it gives back what it does not need below)
@@ -10363,6 +10453,7 @@ int main(int argc, char** argv) {
                 for (int64_t i = n - 1; i > 0; --i) if (ids[size_t(i)] == o.turn_token) { last_turn = i; break; }
                 for (int64_t i = 1; i < last_turn; ++i) if (ids[size_t(i)] == o.turn_token) { disk_root = i; break; }
                 if (!oracle_prefix_file.empty() && lab_prefix_tokens > 0) disk_root = lab_prefix_tokens;
+                if (lab_nonmtp_ssd) disk_root = lab_nonmtp_ssd_root;
                 if (disk_root >= o.prompt_cache_root && disk_root <= int64_t(strata::core::prefix_cache_max_tokens) &&
                         disk_root > std::max({resume, slot_tokens, incoming ? incoming_tokens : int64_t(0)})) {
                     const auto t0 = Clock::now();
@@ -11098,6 +11189,7 @@ int main(int argc, char** argv) {
             // The lab fixture has no natural turn boundary at 131k. Pin only this explicit text prefix; after
             // a disk restore read_from>0, so it is never republished by the measured request.
             if (!oracle_prefix_file.empty() && lab_prefix_tokens > 0 && read_from == 0) root_at = lab_prefix_tokens;
+            if (lab_nonmtp_ssd && read_from == 0) root_at = lab_nonmtp_ssd_root;
             // a root past the drafter's window (Claude Code's ~40K system turn): its draft K/V are computed in full, or
             // the prefix file below would skip it as incomplete; costs the draft layer's K/V of the extra cells once
             if (use_mtp)
@@ -11516,6 +11608,16 @@ int main(int argc, char** argv) {
                 std::printf("ERR lab broot: FORCE_IDS only required\n"); return 1;
             }
             std::vector<int64_t> force_rows(16, 0);   // windows by rows
+            if (lab_nonmtp_ssd && (at != n - 1 || !req_imgs.empty() ||
+                !((incoming_disk && read_from == incoming_tokens && incoming_tokens == lab_nonmtp_ssd_root) || read_from == 0) ||
+                n <= lab_nonmtp_ssd_root + 1 ||
+                (max_new != 15 && max_new != 1024) || req_spec_min_p != 0.5 ||
+                !req_sp.greedy || req_sp.seed != 73 || hist_n != 0 ||
+                req_sp.penalty_repeat != 1.0f || req_sp.penalty_freq != 0.0f || req_sp.penalty_present != 0.0f ||
+                forced == nullptr || (int64_t) forced->size() < max_new)) {
+                std::printf("ERR lab nonmtp ssd: full fixed prompt/fixture/budget/minp required\n"); return 1;
+            }
+            const int64_t nonmtp_overlap_before = ver.overlapped_windows;
             int64_t force_windows = 0, force_acc = 0, force_off = 0, force_over = 0;
             // the last forced window's rows: the target's own picks and the forced ids that replaced them
             std::vector<int32_t> force_orig(64, -1), force_val(64, -1);
@@ -13088,6 +13190,11 @@ int main(int argc, char** argv) {
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
             strata::kernels::native_mmvq_il_capture_dump((long long) force_k);
+            if (lab_nonmtp_ssd)
+                std::fprintf(stderr, "strata lab nonmtp overlap: request=%lld completed=%lld windows=%lld pipeline=0 wait_ms=%llu\n",
+                             (long long) force_k, (long long) (ver.overlapped_windows - nonmtp_overlap_before),
+                             (long long) force_windows, (unsigned long long) std::strtoull(std::getenv("STRATA_SPLIT_WAIT_MS"), nullptr, 10));
+
             if (lab_observer) {
                 if (!pl_ran || forced || force_win || force_over || force_win_hit || oracle_bypassed_chains || oracle_delivered ||
                     !mtp.observer_finish(lab_observer_trace, force_k, stderr, err)) {
