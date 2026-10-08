@@ -1,0 +1,817 @@
+{
+  "schema": "strata.dual.horizon.fit.proxy.v1",
+  "timestamp": "2026-10-08T05:41:49.027227+00:00",
+  "status": "PASS_NUMERICAL_FIT_RESOURCE_OBSERVATION_UNQUALIFIED",
+  "source_collector_commit": "b4944f90030b6d0aad2945dba93a97b3d86649a4",
+  "data": "Frozen B1 only L01+L02; valid_raw TRAIN/HOLDOUT; purged/censored/B2 never fitted or evaluated",
+  "train_rows": 2129,
+  "holdout_rows": 523,
+  "array_stats": {
+    "shape": [
+      2652,
+      10240
+    ],
+    "native_RMS": {
+      "min": 0.44896282809761195,
+      "max": 1.6114560960268491,
+      "mean": 0.8977360415999165
+    },
+    "normalized_X_finite": true,
+    "normalized_Y_finite": true
+  },
+  "row_counts": {
+    "TRAIN": {
+      "L01": {
+        "self_generated": {
+          "1": 350,
+          "2": 217,
+          "3": 128,
+          "4": 81
+        },
+        "policy_carried": {
+          "1": 156,
+          "2": 96,
+          "3": 63,
+          "4": 39
+        }
+      },
+      "L02": {
+        "self_generated": {
+          "1": 367,
+          "2": 209,
+          "3": 109,
+          "4": 57
+        },
+        "policy_carried": {
+          "1": 139,
+          "2": 70,
+          "3": 34,
+          "4": 14
+        }
+      }
+    },
+    "HOLDOUT": {
+      "L01": {
+        "self_generated": {
+          "1": 86,
+          "2": 54,
+          "3": 27,
+          "4": 20
+        },
+        "policy_carried": {
+          "1": 40,
+          "2": 23,
+          "3": 13,
+          "4": 7
+        }
+      },
+      "L02": {
+        "self_generated": {
+          "1": 96,
+          "2": 53,
+          "3": 23,
+          "4": 11
+        },
+        "policy_carried": {
+          "1": 31,
+          "2": 19,
+          "3": 11,
+          "4": 9
+        }
+      }
+    }
+  },
+  "normalization": "X=nativeR/sqrt(mean(nativeR^2)+1e-8); Y=targetR divided by SAME native RMS. Target RMS is never an input. normalized arrays float32, projection/fit/weights/metrics float64.",
+  "preregistration": {
+    "seed": 73,
+    "lambda_": 1.0,
+    "shared_rank": 32,
+    "dual_rank_per_head": 16,
+    "random_projection": "Rademacher +/-1/sqrt10240, global P32; both dual heads reuse identical first16 columns",
+    "ridge": "delta=Y-X; Z=X@P, mean/std population TRAIN-only perhead; ridge lambda1 on centered delta, unpenalized per-coordinate TRAIN-only bias",
+    "scalar_bias": "Two global scalars alpha,beta on all TRAIN elements: prediction=alpha*X+beta",
+    "grid": false,
+    "holdout_tuning": false
+  },
+  "parameter_costs": {
+    "identity_trainable": 0,
+    "scalar_bias_trainable": 2,
+    "shared32_trainable": 337920,
+    "dual16_16_trainable": 348160,
+    "shared_fixed_projection_constants": 327680,
+    "dual_shared_fixed_projection_constants": 163840,
+    "shared_perrow_approx_FLOPs_projection_and_output": 1310720,
+    "dual_perrow_approx_FLOPs_projection_and_output": 655360,
+    "parameter_parity_claim": false,
+    "limitation": "Dual uses two10240D biases; trainable count3.03% higher but active rank16 vs32 perrow, fixed projection shared. Not a rigorously parameter-matched architecture comparison."
+  },
+  "metrics": {
+    "identity": {
+      "primary_self_generated": {
+        "n": 370,
+        "relative_L2_mean": 1.270273026757144,
+        "cosine_mean": 0.4732222077778396,
+        "relative_L2_median": 1.2159612512188689,
+        "cosine_median": 0.4795311413702331
+      },
+      "all_valid_weighted": {
+        "n": 523,
+        "relative_L2_mean": 1.2804339729176708,
+        "cosine_mean": 0.4700482014218429,
+        "relative_L2_median": 1.2371702709311438,
+        "cosine_median": 0.4783588705078306
+      },
+      "per_group": {
+        "L01:self_generated:depth1": {
+          "n": 86,
+          "relative_L2_mean": 1.1719496984886184,
+          "cosine_mean": 0.5180147091764382,
+          "relative_L2_median": 1.124897350403203,
+          "cosine_median": 0.5415284670173178
+        },
+        "L01:self_generated:depth2": {
+          "n": 54,
+          "relative_L2_mean": 1.3333491493642902,
+          "cosine_mean": 0.44713351397299994,
+          "relative_L2_median": 1.2924945546369553,
+          "cosine_median": 0.46131550291413026
+        },
+        "L01:self_generated:depth3": {
+          "n": 27,
+          "relative_L2_mean": 1.471465376485479,
+          "cosine_mean": 0.4001579089320496,
+          "relative_L2_median": 1.430238594930011,
+          "cosine_median": 0.4199638111255329
+        },
+        "L01:self_generated:depth4": {
+          "n": 20,
+          "relative_L2_mean": 1.52923136919665,
+          "cosine_mean": 0.3913844765970994,
+          "relative_L2_median": 1.5318431524178462,
+          "cosine_median": 0.383499251099209
+        },
+        "L01:policy_carried:depth1": {
+          "n": 40,
+          "relative_L2_mean": 1.195693371046482,
+          "cosine_mean": 0.5403947133944407,
+          "relative_L2_median": 1.1624310481895148,
+          "cosine_median": 0.5563846044136451
+        },
+        "L01:policy_carried:depth2": {
+          "n": 23,
+          "relative_L2_mean": 1.3899792206057422,
+          "cosine_mean": 0.4296730465231412,
+          "relative_L2_median": 1.3987098400158808,
+          "cosine_median": 0.46187237974535883
+        },
+        "L01:policy_carried:depth3": {
+          "n": 13,
+          "relative_L2_mean": 1.5096925240215897,
+          "cosine_mean": 0.38537576789598094,
+          "relative_L2_median": 1.4774219122189292,
+          "cosine_median": 0.41012899148821835
+        },
+        "L01:policy_carried:depth4": {
+          "n": 7,
+          "relative_L2_mean": 1.513237582812564,
+          "cosine_mean": 0.39357033119027757,
+          "relative_L2_median": 1.607420165498321,
+          "cosine_median": 0.3957892309108318
+        },
+        "L02:self_generated:depth1": {
+          "n": 96,
+          "relative_L2_mean": 1.096258539615974,
+          "cosine_mean": 0.5274356012719817,
+          "relative_L2_median": 1.0884556487584147,
+          "cosine_median": 0.5441212484250043
+        },
+        "L02:self_generated:depth2": {
+          "n": 53,
+          "relative_L2_mean": 1.3241308958770013,
+          "cosine_mean": 0.4544100909528313,
+          "relative_L2_median": 1.3462040498091064,
+          "cosine_median": 0.45924058449836674
+        },
+        "L02:self_generated:depth3": {
+          "n": 23,
+          "relative_L2_mean": 1.4645937327855134,
+          "cosine_mean": 0.39780159155154565,
+          "relative_L2_median": 1.4392389607717715,
+          "cosine_median": 0.41463733029832645
+        },
+        "L02:self_generated:depth4": {
+          "n": 11,
+          "relative_L2_mean": 1.6175350978843712,
+          "cosine_mean": 0.3544363556983415,
+          "relative_L2_median": 1.6060107213594492,
+          "cosine_median": 0.37008879663880345
+        },
+        "L02:policy_carried:depth1": {
+          "n": 31,
+          "relative_L2_mean": 1.140968552291525,
+          "cosine_mean": 0.5344551498487152,
+          "relative_L2_median": 1.102937584773901,
+          "cosine_median": 0.5572841931327951
+        },
+        "L02:policy_carried:depth2": {
+          "n": 19,
+          "relative_L2_mean": 1.3139156417438107,
+          "cosine_mean": 0.4119791925600915,
+          "relative_L2_median": 1.206140782561873,
+          "cosine_median": 0.42868003048184133
+        },
+        "L02:policy_carried:depth3": {
+          "n": 11,
+          "relative_L2_mean": 1.4679364059519953,
+          "cosine_mean": 0.38110010142242706,
+          "relative_L2_median": 1.4192835532294554,
+          "cosine_median": 0.4122937892625663
+        },
+        "L02:policy_carried:depth4": {
+          "n": 9,
+          "relative_L2_mean": 1.4631447053774318,
+          "cosine_mean": 0.32133679327056036,
+          "relative_L2_median": 1.4385752174037127,
+          "cosine_median": 0.33306962906483567
+        }
+      },
+      "per_case_primary_self_generated": {
+        "L01": {
+          "n": 187,
+          "relative_L2_mean": 1.3000145491162234,
+          "cosine_mean": 0.4669862450097487
+        },
+        "L02": {
+          "n": 183,
+          "relative_L2_mean": 1.2398814164776475,
+          "cosine_mean": 0.47959447574304703
+        }
+      }
+    },
+    "scalar_bias": {
+      "primary_self_generated": {
+        "n": 370,
+        "relative_L2_mean": 0.8891984020959549,
+        "cosine_mean": 0.4732211352088936,
+        "relative_L2_median": 0.8843605466921944,
+        "cosine_median": 0.4794148150081121
+      },
+      "all_valid_weighted": {
+        "n": 523,
+        "relative_L2_mean": 0.890328182369055,
+        "cosine_mean": 0.47005858854925003,
+        "relative_L2_median": 0.8859982401702415,
+        "cosine_median": 0.47844658497056325
+      },
+      "per_group": {
+        "L01:self_generated:depth1": {
+          "n": 86,
+          "relative_L2_mean": 0.859953404749265,
+          "cosine_mean": 0.518008233600326,
+          "relative_L2_median": 0.8489615342731365,
+          "cosine_median": 0.5416823453233879
+        },
+        "L01:self_generated:depth2": {
+          "n": 54,
+          "relative_L2_mean": 0.9037129022532873,
+          "cosine_mean": 0.44714391126079395,
+          "relative_L2_median": 0.8936828811487376,
+          "cosine_median": 0.4615084885327182
+        },
+        "L01:self_generated:depth3": {
+          "n": 27,
+          "relative_L2_mean": 0.9378861985380714,
+          "cosine_mean": 0.40015477372567054,
+          "relative_L2_median": 0.9368963209895228,
+          "cosine_median": 0.42011775821249137
+        },
+        "L01:self_generated:depth4": {
+          "n": 20,
+          "relative_L2_mean": 0.9478921256407746,
+          "cosine_mean": 0.391403897039207,
+          "relative_L2_median": 0.9471528907157774,
+          "cosine_median": 0.38352031482962895
+        },
+        "L01:policy_carried:depth1": {
+          "n": 40,
+          "relative_L2_mean": 0.8451359801268128,
+          "cosine_mean": 0.5404036200505602,
+          "relative_L2_median": 0.8368856312993511,
+          "cosine_median": 0.5564203483842225
+        },
+        "L01:policy_carried:depth2": {
+          "n": 23,
+          "relative_L2_mean": 0.912407379065272,
+          "cosine_mean": 0.42970653545073134,
+          "relative_L2_median": 0.8983399426708092,
+          "cosine_median": 0.46171751148007384
+        },
+        "L01:policy_carried:depth3": {
+          "n": 13,
+          "relative_L2_mean": 0.9507032409052135,
+          "cosine_mean": 0.3854540949738467,
+          "relative_L2_median": 0.9571083011560584,
+          "cosine_median": 0.4099731695645329
+        },
+        "L01:policy_carried:depth4": {
+          "n": 7,
+          "relative_L2_mean": 0.9399914742289547,
+          "cosine_mean": 0.39362293894735473,
+          "relative_L2_median": 0.9459984461909058,
+          "cosine_median": 0.3958363372088712
+        },
+        "L02:self_generated:depth1": {
+          "n": 96,
+          "relative_L2_mean": 0.8544001782006916,
+          "cosine_mean": 0.5274130074308837,
+          "relative_L2_median": 0.8459290319190612,
+          "cosine_median": 0.5440992395673505
+        },
+        "L02:self_generated:depth2": {
+          "n": 53,
+          "relative_L2_mean": 0.8994267969156206,
+          "cosine_mean": 0.4544100408868001,
+          "relative_L2_median": 0.8922775916243791,
+          "cosine_median": 0.4590767915620439
+        },
+        "L02:self_generated:depth3": {
+          "n": 23,
+          "relative_L2_mean": 0.9366613309920876,
+          "cosine_mean": 0.3978271933689123,
+          "relative_L2_median": 0.9397898852417574,
+          "cosine_median": 0.4145560111384218
+        },
+        "L02:self_generated:depth4": {
+          "n": 11,
+          "relative_L2_mean": 0.9755364923121189,
+          "cosine_mean": 0.3545161427592975,
+          "relative_L2_median": 0.9648513139470211,
+          "cosine_median": 0.37003266962552395
+        },
+        "L02:policy_carried:depth1": {
+          "n": 31,
+          "relative_L2_mean": 0.8484923319621803,
+          "cosine_mean": 0.534473151465005,
+          "relative_L2_median": 0.842303113031233,
+          "cosine_median": 0.5573261080534541
+        },
+        "L02:policy_carried:depth2": {
+          "n": 19,
+          "relative_L2_mean": 0.9215711904090952,
+          "cosine_mean": 0.4120263645923029,
+          "relative_L2_median": 0.9034566300226602,
+          "cosine_median": 0.4286996395697177
+        },
+        "L02:policy_carried:depth3": {
+          "n": 11,
+          "relative_L2_mean": 0.9428102679212149,
+          "cosine_mean": 0.38120350034584605,
+          "relative_L2_median": 0.9262885644950878,
+          "cosine_median": 0.41239915100662417
+        },
+        "L02:policy_carried:depth4": {
+          "n": 9,
+          "relative_L2_mean": 0.9693679303149388,
+          "cosine_mean": 0.32141730364590915,
+          "relative_L2_median": 0.960734825342014,
+          "cosine_median": 0.3330797919821031
+        }
+      },
+      "per_case_primary_self_generated": {
+        "L01": {
+          "n": 187,
+          "relative_L2_mean": 0.8932473764890787,
+          "cosine_mean": 0.46698789373843935
+        },
+        "L02": {
+          "n": 183,
+          "relative_L2_mean": 0.8850609255303039,
+          "cosine_mean": 0.4795906223945492
+        }
+      }
+    },
+    "shared32": {
+      "primary_self_generated": {
+        "n": 370,
+        "relative_L2_mean": 1.0432737374302745,
+        "cosine_mean": 0.6300862218808205,
+        "relative_L2_median": 0.9955000177397026,
+        "cosine_median": 0.6327254301444074
+      },
+      "all_valid_weighted": {
+        "n": 523,
+        "relative_L2_mean": 1.0528719233056132,
+        "cosine_mean": 0.6259759925424649,
+        "relative_L2_median": 1.0123439253045152,
+        "cosine_median": 0.6288969363273723
+      },
+      "per_group": {
+        "L01:self_generated:depth1": {
+          "n": 86,
+          "relative_L2_mean": 0.9644475942107615,
+          "cosine_mean": 0.6711378303894823,
+          "relative_L2_median": 0.9135484882324749,
+          "cosine_median": 0.695383461343267
+        },
+        "L01:self_generated:depth2": {
+          "n": 54,
+          "relative_L2_mean": 1.1058063091288328,
+          "cosine_mean": 0.6003317690409135,
+          "relative_L2_median": 1.0540768444128636,
+          "cosine_median": 0.6123780789415123
+        },
+        "L01:self_generated:depth3": {
+          "n": 27,
+          "relative_L2_mean": 1.2420870031625089,
+          "cosine_mean": 0.55987966374616,
+          "relative_L2_median": 1.183933744647421,
+          "cosine_median": 0.5691281979979929
+        },
+        "L01:self_generated:depth4": {
+          "n": 20,
+          "relative_L2_mean": 1.2640295250899103,
+          "cosine_mean": 0.5570889074951245,
+          "relative_L2_median": 1.2406352285660949,
+          "cosine_median": 0.5495219036148608
+        },
+        "L01:policy_carried:depth1": {
+          "n": 40,
+          "relative_L2_mean": 0.9417101840144049,
+          "cosine_mean": 0.6966428418554417,
+          "relative_L2_median": 0.8664089376783488,
+          "cosine_median": 0.7134344110429421
+        },
+        "L01:policy_carried:depth2": {
+          "n": 23,
+          "relative_L2_mean": 1.153435188113773,
+          "cosine_mean": 0.5876090247152933,
+          "relative_L2_median": 1.1640049286673344,
+          "cosine_median": 0.6001533115318199
+        },
+        "L01:policy_carried:depth3": {
+          "n": 13,
+          "relative_L2_mean": 1.2628020140344622,
+          "cosine_mean": 0.5505885082629921,
+          "relative_L2_median": 1.1490652405392903,
+          "cosine_median": 0.5312975056556055
+        },
+        "L01:policy_carried:depth4": {
+          "n": 7,
+          "relative_L2_mean": 1.2533416424136743,
+          "cosine_mean": 0.5586332732720899,
+          "relative_L2_median": 1.267687517256454,
+          "cosine_median": 0.5543404553652496
+        },
+        "L02:self_generated:depth1": {
+          "n": 96,
+          "relative_L2_mean": 0.8775677039391058,
+          "cosine_mean": 0.6850271976969792,
+          "relative_L2_median": 0.8626132427568038,
+          "cosine_median": 0.695048859541735
+        },
+        "L02:self_generated:depth2": {
+          "n": 53,
+          "relative_L2_mean": 1.0869378442265099,
+          "cosine_mean": 0.6033706034832648,
+          "relative_L2_median": 1.0981704352052961,
+          "cosine_median": 0.6106771475852675
+        },
+        "L02:self_generated:depth3": {
+          "n": 23,
+          "relative_L2_mean": 1.2128100100669936,
+          "cosine_mean": 0.5707851318789029,
+          "relative_L2_median": 1.1414901438582918,
+          "cosine_median": 0.5713492323387
+        },
+        "L02:self_generated:depth4": {
+          "n": 11,
+          "relative_L2_mean": 1.3444976284757404,
+          "cosine_mean": 0.5334811896738338,
+          "relative_L2_median": 1.4017417875016245,
+          "cosine_median": 0.5567534482577905
+        },
+        "L02:policy_carried:depth1": {
+          "n": 31,
+          "relative_L2_mean": 0.9251085341226813,
+          "cosine_mean": 0.6797679686855476,
+          "relative_L2_median": 0.8955267252727842,
+          "cosine_median": 0.690256944062235
+        },
+        "L02:policy_carried:depth2": {
+          "n": 19,
+          "relative_L2_mean": 1.125607426452662,
+          "cosine_mean": 0.5635319521343081,
+          "relative_L2_median": 1.0478358515691892,
+          "cosine_median": 0.5718707535578843
+        },
+        "L02:policy_carried:depth3": {
+          "n": 11,
+          "relative_L2_mean": 1.269127225712798,
+          "cosine_mean": 0.517782542314149,
+          "relative_L2_median": 1.2022388406533575,
+          "cosine_median": 0.5471158389393189
+        },
+        "L02:policy_carried:depth4": {
+          "n": 9,
+          "relative_L2_mean": 1.2475770588725297,
+          "cosine_mean": 0.4810239061725684,
+          "relative_L2_median": 1.2069797086514416,
+          "cosine_median": 0.4907578227848516
+        }
+      },
+      "per_case_primary_self_generated": {
+        "L01": {
+          "n": 187,
+          "relative_L2_mean": 1.077395579584323,
+          "cosine_mean": 0.6224294011377198
+        },
+        "L02": {
+          "n": 183,
+          "relative_L2_mean": 1.008406062660837,
+          "cosine_mean": 0.6379104048259562
+        }
+      }
+    },
+    "dual16_16": {
+      "primary_self_generated": {
+        "n": 370,
+        "relative_L2_mean": 1.0639268895848417,
+        "cosine_mean": 0.6219833078286252,
+        "relative_L2_median": 1.0062989203411565,
+        "cosine_median": 0.6229821015028688
+      },
+      "all_valid_weighted": {
+        "n": 523,
+        "relative_L2_mean": 1.0742393128350232,
+        "cosine_mean": 0.6184977309801395,
+        "relative_L2_median": 1.0298911566377755,
+        "cosine_median": 0.6215892906089672
+      },
+      "per_group": {
+        "L01:self_generated:depth1": {
+          "n": 86,
+          "relative_L2_mean": 0.9690266943225023,
+          "cosine_mean": 0.6681199280522496,
+          "relative_L2_median": 0.9200749919573448,
+          "cosine_median": 0.681221209164826
+        },
+        "L01:self_generated:depth2": {
+          "n": 54,
+          "relative_L2_mean": 1.1319286759552025,
+          "cosine_mean": 0.5909161625898116,
+          "relative_L2_median": 1.0863716365173044,
+          "cosine_median": 0.61118252891632
+        },
+        "L01:self_generated:depth3": {
+          "n": 27,
+          "relative_L2_mean": 1.2584509846000471,
+          "cosine_mean": 0.5429806847514608,
+          "relative_L2_median": 1.2362749907258048,
+          "cosine_median": 0.5555895722076792
+        },
+        "L01:self_generated:depth4": {
+          "n": 20,
+          "relative_L2_mean": 1.2822842961175762,
+          "cosine_mean": 0.5462321818170548,
+          "relative_L2_median": 1.253757515430082,
+          "cosine_median": 0.5326407931566643
+        },
+        "L01:policy_carried:depth1": {
+          "n": 40,
+          "relative_L2_mean": 0.9619204796268777,
+          "cosine_mean": 0.6923405649125262,
+          "relative_L2_median": 0.9023613026752169,
+          "cosine_median": 0.7049685761096363
+        },
+        "L01:policy_carried:depth2": {
+          "n": 23,
+          "relative_L2_mean": 1.1879456347378532,
+          "cosine_mean": 0.5753348808518328,
+          "relative_L2_median": 1.148619132100949,
+          "cosine_median": 0.5878788244755867
+        },
+        "L01:policy_carried:depth3": {
+          "n": 13,
+          "relative_L2_mean": 1.2866980451606111,
+          "cosine_mean": 0.5311836583794368,
+          "relative_L2_median": 1.156448503904559,
+          "cosine_median": 0.5130936306540542
+        },
+        "L01:policy_carried:depth4": {
+          "n": 7,
+          "relative_L2_mean": 1.2937988473871083,
+          "cosine_mean": 0.5333842533002499,
+          "relative_L2_median": 1.3465652202664418,
+          "cosine_median": 0.5313570215349788
+        },
+        "L02:self_generated:depth1": {
+          "n": 96,
+          "relative_L2_mean": 0.8930378434788011,
+          "cosine_mean": 0.6817923076485997,
+          "relative_L2_median": 0.8734727005413199,
+          "cosine_median": 0.6941606734587378
+        },
+        "L02:self_generated:depth2": {
+          "n": 53,
+          "relative_L2_mean": 1.1265246665768869,
+          "cosine_mean": 0.5953320506010676,
+          "relative_L2_median": 1.1047493147605538,
+          "cosine_median": 0.6080619827520027
+        },
+        "L02:self_generated:depth3": {
+          "n": 23,
+          "relative_L2_mean": 1.262167097967548,
+          "cosine_mean": 0.542981142502505,
+          "relative_L2_median": 1.1677922329625665,
+          "cosine_median": 0.5424591026910951
+        },
+        "L02:self_generated:depth4": {
+          "n": 11,
+          "relative_L2_mean": 1.372850806429907,
+          "cosine_mean": 0.51706260781252,
+          "relative_L2_median": 1.4414072214842706,
+          "cosine_median": 0.5385627731353626
+        },
+        "L02:policy_carried:depth1": {
+          "n": 31,
+          "relative_L2_mean": 0.9421593339925598,
+          "cosine_mean": 0.6803599684220182,
+          "relative_L2_median": 0.9005207664399916,
+          "cosine_median": 0.697221826102082
+        },
+        "L02:policy_carried:depth2": {
+          "n": 19,
+          "relative_L2_mean": 1.140545843003012,
+          "cosine_mean": 0.5712309867607528,
+          "relative_L2_median": 1.0305295385842408,
+          "cosine_median": 0.5810044915021435
+        },
+        "L02:policy_carried:depth3": {
+          "n": 11,
+          "relative_L2_mean": 1.3007855726767572,
+          "cosine_mean": 0.5065444181208707,
+          "relative_L2_median": 1.2153104781320498,
+          "cosine_median": 0.5298382813230242
+        },
+        "L02:policy_carried:depth4": {
+          "n": 9,
+          "relative_L2_mean": 1.2672249436901457,
+          "cosine_mean": 0.4731723165586105,
+          "relative_L2_median": 1.231612687964557,
+          "cosine_median": 0.46872754628551533
+        }
+      },
+      "per_case_primary_self_generated": {
+        "L01": {
+          "n": 187,
+          "relative_L2_mean": 1.0913599289832565,
+          "cosine_mean": 0.6147214369891648
+        },
+        "L02": {
+          "n": 183,
+          "relative_L2_mean": 1.035894220909959,
+          "cosine_mean": 0.6294039080853414
+        }
+      }
+    }
+  },
+  "primary_comparison": {
+    "dual_vs_shared_relative_L2_pct": 1.9796484291302763,
+    "dual_minus_shared_cosine": -0.00810291405219532,
+    "scope": "Pooled weighted self-generated original-prefix HOLDOUT only; percase/depth/cohort results also shown"
+  },
+  "evidence": {
+    "pins": {
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\dataset-request-02.json": "40480dc6db8b8b4815c24c6f830bafa20c4ae584752b00bb556c7063cbe875e0",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.2.mtp.f32": "f735d230054a50bc40157d182295cc6e9a8409d5572ff970a0f24a7524ff4687",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.2.target.f32": "a3ab00c3c59661f197ac063be3c808d2f884aa01f3bd5ccf0cb5bac00badf9de",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\dataset-request-03.json": "c923fcb1e5b08e6ab3164d80038d8600708d07e591e20d9e67ae8037d6da3dd3",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.3.mtp.f32": "5ce4c54f5b5325ef73f5ab3511b93960f7e061c3bf8379f08b6666a20a6893d6",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.3.target.f32": "ff3b4a59f61ac4430af14aed4eec2d89680a3eb08c08bc95a7a2093f31d3ddad"
+    },
+    "collector_report_sha256": "67de5352815d42faf318e925b7526fcbfe0611a2e45ab2f34d117e8ea27df439",
+    "model_source_sha256": "3fecfb4d8aa8b3d5ea40e0f2e556ee379bab5dfe3570a0797d1e3bb090acef05",
+    "fit_script_sha256": "04dd66e2968fc8d68c4c397e4312d19b15d48b3a256870eb4c925340bafd0788",
+    "fit_npz_sha256": "8afa47f0a6885786de01f263a0000481961dff8150b6ad005585139d472b2983",
+    "row_index_sha256": "df66b9608949af0f26e8a6932fb98ac40af6823e2ef210c236f20d42c633317e",
+    "CPU_tests": 7,
+    "initial_import_failure": {
+      "file": "work/dual-horizon-fit/fit-01.log",
+      "run": "work/dual-horizon-fit/run-01.json",
+      "fit_started": false,
+      "cause": "threadpoolctl unavailable"
+    },
+    "root_authorized_single_restart": "Removed absent optional threadpoolctl; OMP/OPENBLAS/MKL/NUMEXPR/BLIS=4 before NumPy import. Fixed statistical protocol unchanged."
+  },
+  "resource": {
+    "wall_s": 2.235000000000582,
+    "threadpool_control": "Environment before NumPy import; actual worker threads recorded by guardian run-02.json",
+    "BLAS_threads_requested": 4,
+    "RAM_cap_MiB": 1024,
+    "compute_cap_s": 180,
+    "actual_guardian": {
+      "returncode": 0,
+      "owned_pid": 25740,
+      "owned_birth": 1791438106.6254168,
+      "peak_RSS_bytes": 4931584,
+      "elapsed_s": 2.6569999999919673,
+      "error": null,
+      "CPU_only": true,
+      "max_worker_threads": 3,
+      "thread_cap_requested": 4,
+      "thread_cap_observed": true,
+      "samples": [
+        {
+          "elapsed_s": 0.03199999999196734,
+          "threads": 3,
+          "RSS": 4964352,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 0.28199999999196734,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 0.5469999999913853,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 0.8129999999946449,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 1.062999999994645,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 1.3439999999973224,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 1.610000000000582,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 1.875,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 2.125,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        },
+        {
+          "elapsed_s": 2.4069999999919673,
+          "threads": 3,
+          "RSS": 4931584,
+          "CPU": 0.0
+        }
+      ]
+    },
+    "actual_compute_process_RAM_and_threads_verified": false,
+    "guard_limitation": "Observed PID was Windows venv launcher (CPU0, RSS~5MB), not proven computing descendant. Environment caps set before NumPy import; actual NumPy worker peak RAM/thread count unavailable. No rerun. CPU fit wall2.235s is measured inside computing script."
+  },
+  "limitations": [
+    "Proxy residual regression only; not token acceptance, autoregressive quality, TPS or E2E gain.",
+    "Original self-generated prefixes do not simulate an adapted rollout. First changed token would require a future true rollout.",
+    "Two chronologically contiguous cases, not independent broad evaluation; only20/11 self-generated depth4 HOLDOUT rows.",
+    "No GPU, build, GEN, RL, new4B drafter copy, head fine-tuning or engine patch.",
+    "RMS normalization preserves relative vector error; cosine is residual direction, not next-token correctness.",
+    "Observed PID was Windows venv launcher (CPU0, RSS~5MB), not proven computing descendant. Environment caps set before NumPy import; actual NumPy worker peak RAM/thread count unavailable. No rerun. CPU fit wall2.235s is measured inside computing script."
+  ],
+  "decision": "No evidence dual horizon residual proxy exceeds fixed shared rank32; dual worse in every self-generated percase/depth group. No token accuracy/TPS claim or engine adoption. Resource observation limitation explicit. ROOT decides future bounded CE/rollout probe.",
+  "inventory_no_CUDA_init": {
+    "python": "D:/ds4_work/strata/Strata/.venv/Scripts/python.exe",
+    "torch": false,
+    "cupy": false,
+    "gguf": false,
+    "threadpoolctl": false,
+    "method": "importlib.find_spec and package metadata; no GPU framework import/install/download",
+    "target_packed_head": {
+      "index": "D:/ds4_work/strata/Strata-data/packs/iq3_xxs/index.txt:3",
+      "tensor": "output.weight",
+      "shape": [
+        2560,
+        248320
+      ],
+      "ggml_type": 8,
+      "format": "Q8_0",
+      "runtime_native_head": "NativeHead reads output.weight from GGUF shards, not packed tensor; actual native shard mapping not requalified in this fit. src/core/native_head.cpp:34; mtp.cpp:1270."
+    }
+  }
+}
