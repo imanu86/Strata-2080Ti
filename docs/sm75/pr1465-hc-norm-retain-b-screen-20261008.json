@@ -1,0 +1,415 @@
+{
+  "schema": "non-mtp-b-screen-v1",
+  "status": "C2_B_ONLY_VALID_EXERCISED",
+  "timestamp": "2026-10-08T07:47:12.056036+00:00",
+  "candidate": "C2-HC-norm-retain",
+  "upstream": {
+    "PR": 1465,
+    "head": "e952756edac8be771895cd71745e1cc05b988f38",
+    "author": "W1nge",
+    "diff_sha256": "174c90bdf628091945a586b6331d28f730ed71e20be20c238adab59be0b6e314",
+    "port": "Template<bool retain> only split normalization, strict opt-in 1; original false arithmetic unchanged. Startup selection report separate, outside GEN."
+  },
+  "provenance": {
+    "core_main_base": "acf0faa63e79e879765c5a2115bf362c24d96e11",
+    "source_sha256": {
+      "docs/OLDER_GPUS.md": "f0e2599cf0bc9a1ec51151c419c60d16ba76746f09cdf1095ae478f5f0fa6a4d",
+      "include/strata/kernels/native_mmvq.hpp": "b29e0c996f86a83e4d0a58c666127e0333c3b117bf4cc68ddfb4b4ed480e1cb3",
+      "src/core/verify.cpp": "783985d7518795d1116c76660cb1a38133e2fc8646873f2b2264842442dd9c49",
+      "src/kernels/cuda/native_mmvq.cu": "2103373699824a8b53a81d0b27cf1d25e707e27261d91b8dbdb769bb927c5199",
+      "src/kernels/mmvq_il_parity.cpp": "1407adb98b6c90a501951fd29975c7699506039c57bfb9ddc3ab573143466c7f",
+      "src/program/generate.cpp": "83452bc98cd786fa95dda134dc6d17016f35d685aa3e9748c24beb02d1368ebb",
+      "src/kernels/cuda/fused_gr.cu": "6df93cb9ac84fd35893e3ba0ce39289f4ca078908f20af638cf7ad8a8d22f3de"
+    },
+    "signed_review_manifest_sha256": "4329123e200036b41d6c05ffadbf30d2be63b39ebcc89474a763bc2be282414f",
+    "bench_sha256": {
+      "c2_contract.py": "adef168192df6d20abda2032f02bfcdbd5d633a4b52adad1b75e3f9922d9c855",
+      "c2_validation.py": "d05b6b7ac2d98d936508df76d36588fb66083ec0d47d4afc879096920390e8d0",
+      "guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "hq_quality.py": "97832b81e8e49fd30c36e0bdfe16af35e497eb5f201cea0100bde9469d18d044",
+      "minp_contract.py": "d00445c4aea56c45178df077ff15b811364a69ce4a1c404b3f55f23f4524b5c6",
+      "policy_trace.py": "561b018b83d2bb9bb92368811460e36eeaef733f8166123947309bde830460d2",
+      "quality.py": "4f0d92d070e14e3a0c3e881d7d80182a254af8c4de0bbc76b1a46deb9f1c02de",
+      "run_c2.py": "99964da3fcb212f970bb0badd4e3bafa6bf7eed7a130c64f1f57de3ace26cc85",
+      "telemetry_contract.py": "b9cec40c2b907bd03f92f5b96941d42490fe17b087171a2997794d42eede0b8b",
+      "test_c2.py": "13848badd6e7fca4ad1daee147145a6bb8b4ed0c328263a57c3f246513e31052"
+    },
+    "engine_sha256": "9fd30243b688817cf2542e0ed77cbdb4928155463b5d9b57c9ab2012be2faca3",
+    "build_record": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C2-hc-retain\\build\\c2-hc-retain-v1\\build.json",
+    "build_record_sha256": "6c50b60e5daaf5bd3812550262220f94af8daf29f0726cf77dd66af504b3f6aa",
+    "protocol_sha256": "aa61a92b86669282d6a056c62b36d4531c781f832b257d01b33ebeebf8a20762",
+    "verdict_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\non-mtp-b-screen\\candidates\\C2-hc-retain\\runs\\DET-nonmtp-C2-01\\verdict.json",
+    "verdict_sha256": "dea617cbacd9c703c551118bc4f5692ec65df8f2ba0c2ed56d51adf377fcd8e9",
+    "incremental_build": "43s; exact C1 source archive before C2, fused compile+lib/exe link only; C1 immutable package preserved"
+  },
+  "protocol": {
+    "run": "DET-nonmtp-C2-01",
+    "GEN_total": 4,
+    "warmup": {
+      "count": 2,
+      "tokens_each": 15,
+      "mode": "ON; NONRESULT; cold independent native SSD roots"
+    },
+    "measured_B": 2,
+    "A_performance": 0,
+    "sampling": "greedy seed73 spec4 minp0.5",
+    "FORCE_IDS_tokens": 1024,
+    "FORCE_WINDOWS": false,
+    "pipeline_windows": 2,
+    "layer_split": 16,
+    "stage0_uuid": "GPU-aab7a70b-b795-9b37-f317-1423f89733be",
+    "stage1_uuid": "GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7",
+    "device_note": "RTX2080Ti modified22GiB; RTX3060 also drives desktop, snapshot was not idle; no owner apps terminated.",
+    "treatment": "STRATA_HC_NORM_RETAIN=1, staged HC retain both GPUs. STRATA_MMVQ_IL absent; historical sm86 auto IL preserved, new sm75 IL OFF.",
+    "all_other_LAB_treatments": "OFF/ABSENT; oracle0, capture and policy observational only",
+    "SSD": "Private per-build/env native fingerprint unchanged; exact131072 restore then tails176/167; native prefix payload stable before/after; no incompatible cache borrow."
+  },
+  "numerical_safety": {
+    "status": "PASS",
+    "selection": [
+      [
+        "1",
+        "1",
+        "3",
+        "1",
+        "1",
+        "1"
+      ],
+      [
+        "0",
+        "1",
+        "3",
+        "1",
+        "1",
+        "1"
+      ]
+    ],
+    "tests": "Native startup1..8tokens apply0/1 retained split/staged vs plain, bitwise on both GPUs; reject fallback before GEN",
+    "limits": "Empirical selected-kernel safety; not universal FREE model quality proof; no standalone performance A"
+  },
+  "requests": [
+    {
+      "case": "L01",
+      "tokens": 1024,
+      "decode_ms": 14506.1,
+      "decode_tps": 70.59099275477213,
+      "prompt_ms": 4503.2,
+      "windows": 528,
+      "target_rows_verified": 1241,
+      "drafts": 713,
+      "accepted": 496,
+      "wall_GEN_s": 19.110000000000582,
+      "ttft_s": 4.64100000000326,
+      "arm": "B",
+      "SSD_reused": 131072,
+      "SSD_restore": [
+        [
+          "131072",
+          "2419.6",
+          "234.7"
+        ]
+      ],
+      "mean_tokens_per_window": 1.9393939393939394,
+      "forced_ids_exact": true,
+      "raw_vs_fixture": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 63,
+        "scored_draft_rows": 623,
+        "draft_matches_raw_on_forced_context": 497,
+        "draft_matches_fixture": 496,
+        "draft_matches_raw_but_not_fixture": 4,
+        "draft_matches_fixture_but_not_raw": 3
+      },
+      "actual_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "528",
+        "all_accept": "401",
+        "drafts": "713",
+        "accepted": "496",
+        "chain_launches": "527",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1241",
+        "stage0_launches": "837",
+        "stage1_launches": "528",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 2
+      },
+      "exposure": {
+        "capture_calls_cumulative": 92,
+        "capture_shapes_cumulative": 13,
+        "actual_window_T_histogram": {
+          "1": 187,
+          "2": 120,
+          "3": 70,
+          "4": 151
+        },
+        "HC_retain_startup_selection": [
+          [
+            "1",
+            "1",
+            "3",
+            "1",
+            "1",
+            "1"
+          ],
+          [
+            "0",
+            "1",
+            "3",
+            "1",
+            "1",
+            "1"
+          ]
+        ],
+        "inferred_runtime_exposure_T": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "scope": "Both devices startup retained staged HC selftest1..8/apply0..1 + actual two-stage target windows; inferred exposure, not dynamic norm-kernel counts. C1sm75off; sm86autoIL unchanged.",
+        "measurement": true,
+        "new_capture_calls_since_previous_request": 0,
+        "new_captures_in_measured_GEN": false,
+        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize."
+      },
+      "primary_cache": {
+        "request": 2,
+        "primary_slots_before": 4611,
+        "primary_slots_after": 4699,
+        "events": [
+          "strata elastic: +88 experts (125 MiB) -> 4699 slots, 6.58 GiB; 683 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.11 ms (published once its fills land)"
+        ]
+      },
+      "secondary_cache_slots": 9151,
+      "gpu_measured_samples": [
+        {
+          "timestamp": 1791445509.3821776,
+          "fields": [
+            "index",
+            "uuid",
+            "name",
+            "memory.used",
+            "memory.total",
+            "utilization.gpu",
+            "clocks.sm",
+            "clocks.mem",
+            "temperature.gpu",
+            "power.draw",
+            "pstate"
+          ],
+          "rows": [
+            "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 11419, 12288, 68, 1942, 7501, 56, 112.67, P0",
+            "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 21468, 22528, 82, 1845, 7000, 59, 212.27, P0"
+          ]
+        }
+      ],
+      "cache_KV_actual_log": []
+    },
+    {
+      "case": "L02",
+      "tokens": 1024,
+      "decode_ms": 15953.0,
+      "decode_tps": 64.18855387701372,
+      "prompt_ms": 4448.4,
+      "windows": 618,
+      "target_rows_verified": 1225,
+      "drafts": 607,
+      "accepted": 406,
+      "wall_GEN_s": 20.5,
+      "ttft_s": 4.546999999991385,
+      "arm": "B",
+      "SSD_reused": 131072,
+      "SSD_restore": [
+        [
+          "131072",
+          "2381.4",
+          "207.4"
+        ]
+      ],
+      "mean_tokens_per_window": 1.656957928802589,
+      "forced_ids_exact": true,
+      "raw_vs_fixture": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 76,
+        "scored_draft_rows": 528,
+        "draft_matches_raw_on_forced_context": 408,
+        "draft_matches_fixture": 406,
+        "draft_matches_raw_but_not_fixture": 11,
+        "draft_matches_fixture_but_not_raw": 9
+      },
+      "actual_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "618",
+        "all_accept": "496",
+        "drafts": "607",
+        "accepted": "406",
+        "chain_launches": "617",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1225",
+        "stage0_launches": "1001",
+        "stage1_launches": "618",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 3
+      },
+      "exposure": {
+        "capture_calls_cumulative": 92,
+        "capture_shapes_cumulative": 13,
+        "actual_window_T_histogram": {
+          "1": 277,
+          "2": 170,
+          "3": 76,
+          "4": 95
+        },
+        "HC_retain_startup_selection": [
+          [
+            "1",
+            "1",
+            "3",
+            "1",
+            "1",
+            "1"
+          ],
+          [
+            "0",
+            "1",
+            "3",
+            "1",
+            "1",
+            "1"
+          ]
+        ],
+        "inferred_runtime_exposure_T": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "scope": "Both devices startup retained staged HC selftest1..8/apply0..1 + actual two-stage target windows; inferred exposure, not dynamic norm-kernel counts. C1sm75off; sm86autoIL unchanged.",
+        "measurement": true,
+        "new_capture_calls_since_previous_request": 0,
+        "new_captures_in_measured_GEN": false,
+        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize."
+      },
+      "primary_cache": {
+        "request": 3,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4699,
+        "events": []
+      },
+      "secondary_cache_slots": 9151,
+      "gpu_measured_samples": [
+        {
+          "timestamp": 1791445524.798957,
+          "fields": [
+            "index",
+            "uuid",
+            "name",
+            "memory.used",
+            "memory.total",
+            "utilization.gpu",
+            "clocks.sm",
+            "clocks.mem",
+            "temperature.gpu",
+            "power.draw",
+            "pstate"
+          ],
+          "rows": [
+            "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 11414, 12288, 76, 1942, 7501, 56, 115.40, P0",
+            "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 21468, 22528, 79, 1830, 7000, 59, 216.68, P0"
+          ]
+        }
+      ],
+      "cache_KV_actual_log": []
+    }
+  ],
+  "initial_actual_cache": {
+    "primary_initial_slots": 4434,
+    "secondary_initial_slots": 9151,
+    "requests": [
+      {
+        "request": 0,
+        "primary_slots_before": 4434,
+        "primary_slots_after": 4522,
+        "events": [
+          "strata elastic: +88 experts (127 MiB) -> 4522 slots, 6.34 GiB; 1010 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 24.70 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 1,
+        "primary_slots_before": 4522,
+        "primary_slots_after": 4611,
+        "events": [
+          "strata elastic: +89 experts (126 MiB) -> 4611 slots, 6.46 GiB; 743 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 22.66 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 2,
+        "primary_slots_before": 4611,
+        "primary_slots_after": 4699,
+        "events": [
+          "strata elastic: +88 experts (125 MiB) -> 4699 slots, 6.58 GiB; 683 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.11 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 3,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4699,
+        "events": []
+      }
+    ],
+    "limits": "Common autoelastic policy; capacity observations reported without normalization."
+  },
+  "validation": {
+    "evidence_PASS": true,
+    "isolation_PASS": true,
+    "Daily_unchanged": true,
+    "compiler_observations": [],
+    "remaining_owned": [],
+    "threads_stopped": true,
+    "owned_PID_birth": {
+      "30204": 1791445271.542672
+    },
+    "prefix_final_sha256": {
+      "L01": "1feeb3fcdeae0b776da193bdf33eabb0302b14d45b4d15bc2fa71bae91c9ae49",
+      "L02": "1feeb3fcdeae0b776da193bdf33eabb0302b14d45b4d15bc2fa71bae91c9ae49"
+    },
+    "cleanup_actions": [],
+    "performance_comparison": false,
+    "FREE_quality": "UNQUALIFIED"
+  },
+  "harness_fault_separate_from_measurement": null,
+  "limits": [
+    "B-only one measured request per case: no causal speedup or C1/C2 percentage comparison.",
+    "FORCE_IDS exact1024 proves benchmark coherence; raw labels on forced context do not certify FREE quality.",
+    "Both retained staged selections plus actual pipeline2 windows infer runtime exposure, not exact dynamic norm-kernel counts.",
+    "No new captures in either long GEN. Sparse GPU clock/power/temperature samples do not prove sustained stability.",
+    "Autoelastic actual capacities/path vary; reported without normalization. Original SSD fingerprint preserved."
+  ]
+}

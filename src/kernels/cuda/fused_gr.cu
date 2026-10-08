@@ -572,6 +572,7 @@ constexpr int N_HTILES = D / H_TILE;                  // 8
 static_assert(N % H_TILE == 0, "a staged tile never straddles two streams");
 static_assert(H_TILE % 256 == 0, "a staged tile holds whole rounds of 32 chunks: the plain read's lane order");
 
+template<bool retain>
 __global__ void __launch_bounds__(THREADS) gr_norm_split_kernel(GrMulti m) {
     __shared__ float part[WARPS];
     __shared__ float s_rs;
@@ -592,6 +593,11 @@ __global__ void __launch_bounds__(THREADS) gr_norm_split_kernel(GrMulti m) {
         }
         const float sq = r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w;
         ss += sq;
+        if constexpr (retain) {
+            // PR1465 (W1nge): keep the original product and its two roundings.
+            const float4 g = *reinterpret_cast<const float4*>(a.w_norm + i);
+            *reinterpret_cast<float4*>(xn + i) = make_float4(r.x * g.x, r.y * g.y, r.z * g.z, r.w * g.w);
+        }
     }
     const float v = warp_sum(ss);
     if (lane == 0) part[warp] = v;
@@ -604,18 +610,22 @@ __global__ void __launch_bounds__(THREADS) gr_norm_split_kernel(GrMulti m) {
     }
     __syncthreads();
     const float rs = s_rs;
-    for (int i = t * 4; i < D; i += THREADS * 4) {
-        if (i / N != c) continue;
-        const int d = i - c * N;
-        float4 r = *reinterpret_cast<const float4*>(a.R + i);
-        if (a.apply) {
-            const float4 b = *reinterpret_cast<const float4*>(a.bo_prev + d);
-            r.x = fmaf(b.x, gw, r.x); r.y = fmaf(b.y, gw, r.y);
-            r.z = fmaf(b.z, gw, r.z); r.w = fmaf(b.w, gw, r.w);
+    if constexpr (retain) {
+        for (int d = t; d < N; d += THREADS) xn[c * N + d] *= rs;
+    } else {
+        for (int i = t * 4; i < D; i += THREADS * 4) {
+            if (i / N != c) continue;
+            const int d = i - c * N;
+            float4 r = *reinterpret_cast<const float4*>(a.R + i);
+            if (a.apply) {
+                const float4 b = *reinterpret_cast<const float4*>(a.bo_prev + d);
+                r.x = fmaf(b.x, gw, r.x); r.y = fmaf(b.y, gw, r.y);
+                r.z = fmaf(b.z, gw, r.z); r.w = fmaf(b.w, gw, r.w);
+            }
+            const float4 g = *reinterpret_cast<const float4*>(a.w_norm + i);
+            const float px = r.x * g.x, py = r.y * g.y, pz = r.z * g.z, pw = r.w * g.w;
+            *reinterpret_cast<float4*>(xn + i) = make_float4(px * rs, py * rs, pz * rs, pw * rs);
         }
-        const float4 g = *reinterpret_cast<const float4*>(a.w_norm + i);
-        const float px = r.x * g.x, py = r.y * g.y, pz = r.z * g.z, pw = r.w * g.w;
-        *reinterpret_cast<float4*>(xn + i) = make_float4(px * rs, py * rs, pz * rs, pw * rs);
     }
 }
 
@@ -940,17 +950,30 @@ __global__ void __launch_bounds__(THREADS) gr_up_fast_cuda_kernel(GrMulti m) {
 }
 #endif
 
+// Strict startup opt-in; keep the old specialization as the default capture path.
+bool hc_norm_retain() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_HC_NORM_RETAIN");
+        return v != nullptr && std::strcmp(v, "1") == 0; }();
+    return on;
+}
+
 void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0) {
     const int n_tok = m.T;
 #if defined(STRATA_HIP_GFX906)
     // gfx906: the latency-hidden norm/up (STRATA_GR_FAST=0: off) - the same sums in the same order as the kernels
     // they replace (gr_parity checks the multi-token read against single-token calls bitwise)
     const bool fast = gr_fast();
-    if (variant >= kHcSplit) gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+    if (variant >= kHcSplit) {
+        if (hc_norm_retain()) gr_norm_split_kernel<true><<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+        else gr_norm_split_kernel<false><<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+    }
     else if (fast) gr_norm_fast_kernel<<<n_tok, THREADS, 0, st>>>(m);
     else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
 #else
-    if (variant >= kHcSplit) gr_norm_split_kernel<<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+    if (variant >= kHcSplit) {
+        if (hc_norm_retain()) gr_norm_split_kernel<true><<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+        else gr_norm_split_kernel<false><<<dim3((unsigned) n_tok, HC), THREADS, 0, st>>>(m);
+    }
     else gr_norm_multi_kernel<<<n_tok, THREADS, 0, st>>>(m);
 #endif
     if (stamp_buf) gpu_stamp(stamp_buf, stamp_i0, (void*) st);
@@ -2049,6 +2072,8 @@ void fused_gr_check() {
     if (want >= kHcStaged && okv[kHcStaged]) use = kHcStaged;
     else if (okv[kHcSplit]) use = kHcSplit;
     g_variant[dev].store(use);
+    std::fprintf(stderr, "strata hc norm retain: CUDA%d retain=%d variant=%d selftest=%d split_ok=%d staged_ok=%d scope=startup_selection\n",
+                 dev, hc_norm_retain() ? 1 : 0, use, ran ? 1 : 0, okv[kHcSplit] ? 1 : 0, okv[kHcStaged] ? 1 : 0);
     if (!ran)
         std::fprintf(stderr, "strata hc: CUDA%d: the check of split/staged could not run (%s)\n", dev, why[0].c_str());
     static const char* const name[4] = {"", "plain", "split", "staged"};
