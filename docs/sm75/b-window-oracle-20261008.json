@@ -1,0 +1,1718 @@
+{
+  "schema": "strata.B-window.oracle.execution.v1",
+  "timestamp": "2026-10-08T04:10:07.785970+00:00",
+  "status": "completed_positive_preregistered_diagnostic_performance_gate",
+  "decision": "STOP for ROOT decision: diagnostic coherent B-window headroom observed; no automatic repeat/sweep/adoption",
+  "run": "DET-bwindow-01",
+  "GEN_requests": 14,
+  "evidence_pass": true,
+  "isolation_pass": true,
+  "preregistered_performance_gate": {
+    "each_B_tps_gain_min_pct": 5,
+    "B_tps_spread_max_pct": 3,
+    "no_auto_retry": true
+  },
+  "performance_gate_pass": true,
+  "long_triplets": [
+    {
+      "phase": "long",
+      "case": "L01",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "bwindow_mode": [
+        "2",
+        "0",
+        "2"
+      ],
+      "tps": [
+        92.35542407734766,
+        71.56935377905758,
+        93.21972179739276
+      ],
+      "B_time_reduction_pct": [
+        22.506604788996206,
+        23.225094004668783
+      ],
+      "B_tps_gain_pct": [
+        29.043255528698708,
+        30.250892141868757
+      ],
+      "B_tps_spread_pct": 0.9314800384190298
+    },
+    {
+      "phase": "long",
+      "case": "L02",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "bwindow_mode": [
+        "2",
+        "0",
+        "2"
+      ],
+      "tps": [
+        82.17507142169293,
+        64.63422331629111,
+        82.04865228678568
+      ],
+      "B_time_reduction_pct": [
+        21.345704727639962,
+        21.224515558921926
+      ],
+      "B_tps_gain_pct": [
+        27.13863833338681,
+        26.943046697221227
+      ],
+      "B_tps_spread_pct": 0.15395964974179313
+    }
+  ],
+  "long_counter_comparison": [
+    {
+      "case": "L01",
+      "order": [
+        "B1",
+        "A",
+        "B2"
+      ],
+      "tps": [
+        92.35542407734766,
+        71.56935377905758,
+        93.21972179739276
+      ],
+      "decode_ms": [
+        11087.6,
+        14307.8,
+        10984.8
+      ],
+      "root_changed": [
+        192,
+        0,
+        193
+      ],
+      "changed_windows": [
+        245,
+        0,
+        250
+      ],
+      "changed_rows": [
+        475,
+        0,
+        454
+      ],
+      "full_bounds_skipped": [
+        0,
+        0,
+        0
+      ],
+      "full_bounds_skipped_launched": [
+        0,
+        0,
+        0
+      ],
+      "original_wrong_Aall_launched": [
+        174,
+        234,
+        173
+      ],
+      "recovered_A_B": [
+        173,
+        0,
+        172
+      ],
+      "carried_A": [
+        351,
+        158,
+        376
+      ],
+      "prepared_not_launched": [
+        101,
+        52,
+        90
+      ],
+      "rollback": [
+        22,
+        317,
+        25
+      ],
+      "tokens_per_window": [
+        2.1557894736842105,
+        1.9393939393939394,
+        2.0813008130081303
+      ],
+      "stage0_rows_per1024": [
+        1096.0,
+        1883.0,
+        1118.0
+      ],
+      "stage1_rows_per1024": [
+        1055.0,
+        1247.0,
+        1064.0
+      ],
+      "chain_launches": [
+        474,
+        527,
+        491
+      ],
+      "chain_heads": [
+        2681,
+        3419,
+        2722
+      ]
+    },
+    {
+      "case": "L02",
+      "order": [
+        "B1",
+        "A",
+        "B2"
+      ],
+      "tps": [
+        82.17507142169293,
+        64.63422331629111,
+        82.04865228678568
+      ],
+      "decode_ms": [
+        12461.2,
+        15843.0,
+        12480.4
+      ],
+      "root_changed": [
+        261,
+        0,
+        267
+      ],
+      "changed_windows": [
+        302,
+        0,
+        307
+      ],
+      "changed_rows": [
+        466,
+        0,
+        488
+      ],
+      "full_bounds_skipped": [
+        0,
+        1,
+        1
+      ],
+      "full_bounds_skipped_launched": [
+        0,
+        1,
+        1
+      ],
+      "original_wrong_Aall_launched": [
+        237,
+        296,
+        240
+      ],
+      "recovered_A_B": [
+        236,
+        0,
+        240
+      ],
+      "carried_A": [
+        456,
+        185,
+        455
+      ],
+      "prepared_not_launched": [
+        106,
+        51,
+        110
+      ],
+      "rollback": [
+        28,
+        389,
+        28
+      ],
+      "tokens_per_window": [
+        1.7326565143824026,
+        1.6357827476038338,
+        1.7239057239057238
+      ],
+      "stage0_rows_per1024": [
+        1114.0,
+        1905.0,
+        1143.0
+      ],
+      "stage1_rows_per1024": [
+        1071.0,
+        1230.0,
+        1082.0
+      ],
+      "chain_launches": [
+        590,
+        625,
+        593
+      ],
+      "chain_heads": [
+        3096,
+        3962,
+        3109
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "request": 0,
+      "case": "L01",
+      "phase": "warmup",
+      "arm": "warm",
+      "bwindow_mode": "0",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 227.1,
+      "decode_tps": 66.05019815059445,
+      "prompt_ms": 85564.2,
+      "wall_GEN_s": 85.96899999999732,
+      "ttft_s": 85.78100000000268,
+      "reused": 0,
+      "windows": 6,
+      "tokens_per_window": 2.5,
+      "roots": {
+        "changed_rows": 0,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 5,
+        "launched": 4,
+        "changed": 0,
+        "prepared_not_launched": 1,
+        "prestaged": 4,
+        "prestaged_not_launched": 0,
+        "carried_A": 1,
+        "actual_reused": 1,
+        "rollback": 3,
+        "Aall_launched_scoreable": 4,
+        "Aall_original_wrong_fixture_launched": 3,
+        "Aall_original_wrong_fixture_nonfinal": 2,
+        "recovered_original_wrong_fixture": 0,
+        "original_wrong_fixture_unreused_final": 1,
+        "raw_A_bonus_scoreable": 4,
+        "original_wrong_raw_A_bonus": 2,
+        "new_matches_raw_A_bonus": 2,
+        "new_matches_fixture_A_bonus": 1,
+        "raw_fixture_A_bonus_differ": 1,
+        "A_early_rejection_launched": 0
+      },
+      "work": {
+        "stage0_launches": 9,
+        "stage1_launches": 6,
+        "stage0_input_rows": 20,
+        "stage1_input_rows": 16,
+        "stage0_input_rows_per1024": 1365.3333333333333,
+        "stage1_input_rows_per1024": 1092.2666666666667,
+        "accepted_drafts": 9,
+        "offered_drafts": 10,
+        "chain_launches": 5,
+        "chain_bypasses": 0,
+        "chain_output_heads": 33,
+        "chain_output_width_distribution": {
+          "7": 4,
+          "5": 1
+        },
+        "chain_source_T_distribution": {
+          "1": 2,
+          "4": 2,
+          "2": 1
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 0,
+        "primary_slots_before": 4434,
+        "primary_slots_after": 4522,
+        "events": [
+          "strata elastic: +88 experts (127 MiB) -> 4522 slots, 6.34 GiB; 1010 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 25.05 ms (published once its fills land)"
+        ]
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "0",
+          "decisions": 5,
+          "launched": 4,
+          "changed": 0,
+          "changed_rows": 0,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 1,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 1,
+      "case": "L02",
+      "phase": "warmup",
+      "arm": "warm",
+      "bwindow_mode": "0",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 236.7,
+      "decode_tps": 63.37135614702155,
+      "prompt_ms": 80687.1,
+      "wall_GEN_s": 81.01600000000326,
+      "ttft_s": 80.84399999999732,
+      "reused": 0,
+      "windows": 6,
+      "tokens_per_window": 2.5,
+      "roots": {
+        "changed_rows": 0,
+        "full_bounds_skipped": 1,
+        "full_bounds_skipped_launched": 1,
+        "made": 5,
+        "launched": 5,
+        "changed": 0,
+        "prepared_not_launched": 0,
+        "prestaged": 5,
+        "prestaged_not_launched": 0,
+        "carried_A": 2,
+        "actual_reused": 2,
+        "rollback": 3,
+        "Aall_launched_scoreable": 2,
+        "Aall_original_wrong_fixture_launched": 0,
+        "Aall_original_wrong_fixture_nonfinal": 0,
+        "recovered_original_wrong_fixture": 0,
+        "original_wrong_fixture_unreused_final": 0,
+        "raw_A_bonus_scoreable": 2,
+        "original_wrong_raw_A_bonus": 0,
+        "new_matches_raw_A_bonus": 2,
+        "new_matches_fixture_A_bonus": 2,
+        "raw_fixture_A_bonus_differ": 0,
+        "A_early_rejection_launched": 3
+      },
+      "work": {
+        "stage0_launches": 9,
+        "stage1_launches": 6,
+        "stage0_input_rows": 24,
+        "stage1_input_rows": 18,
+        "stage0_input_rows_per1024": 1638.4,
+        "stage1_input_rows_per1024": 1228.8,
+        "accepted_drafts": 9,
+        "offered_drafts": 12,
+        "chain_launches": 5,
+        "chain_bypasses": 0,
+        "chain_output_heads": 33,
+        "chain_output_width_distribution": {
+          "7": 3,
+          "6": 2
+        },
+        "chain_source_T_distribution": {
+          "1": 1,
+          "4": 2,
+          "3": 2
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 1,
+        "primary_slots_before": 4522,
+        "primary_slots_after": 4611,
+        "events": [
+          "strata elastic: +89 experts (126 MiB) -> 4611 slots, 6.46 GiB; 840 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 23.27 ms (published once its fills land)"
+        ]
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "0",
+          "decisions": 5,
+          "launched": 5,
+          "changed": 0,
+          "changed_rows": 0,
+          "full_bounds_skipped": 1,
+          "full_bounds_skipped_launched": 1,
+          "prepared_not_launched": 0,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 2,
+      "case": "L01",
+      "phase": "smoke",
+      "arm": "B1",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 190.3,
+      "decode_tps": 78.82291119285338,
+      "prompt_ms": 4771.5,
+      "wall_GEN_s": 5.046999999991385,
+      "ttft_s": 4.89100000000326,
+      "reused": 131072,
+      "windows": 5,
+      "tokens_per_window": 3.0,
+      "roots": {
+        "changed_rows": 3,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 4,
+        "launched": 3,
+        "changed": 3,
+        "prepared_not_launched": 1,
+        "prestaged": 3,
+        "prestaged_not_launched": 0,
+        "carried_A": 2,
+        "actual_reused": 2,
+        "rollback": 1,
+        "Aall_launched_scoreable": 3,
+        "Aall_original_wrong_fixture_launched": 1,
+        "Aall_original_wrong_fixture_nonfinal": 0,
+        "recovered_original_wrong_fixture": 0,
+        "original_wrong_fixture_unreused_final": 1,
+        "raw_A_bonus_scoreable": 3,
+        "original_wrong_raw_A_bonus": 1,
+        "new_matches_raw_A_bonus": 3,
+        "new_matches_fixture_A_bonus": 3,
+        "raw_fixture_A_bonus_differ": 0,
+        "A_early_rejection_launched": 0
+      },
+      "work": {
+        "stage0_launches": 6,
+        "stage1_launches": 5,
+        "stage0_input_rows": 16,
+        "stage1_input_rows": 15,
+        "stage0_input_rows_per1024": 1092.2666666666667,
+        "stage1_input_rows_per1024": 1024.0,
+        "accepted_drafts": 10,
+        "offered_drafts": 10,
+        "chain_launches": 4,
+        "chain_bypasses": 0,
+        "chain_output_heads": 26,
+        "chain_output_width_distribution": {
+          "7": 3,
+          "5": 1
+        },
+        "chain_source_T_distribution": {
+          "1": 1,
+          "4": 2,
+          "2": 1
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 2,
+        "primary_slots_before": 4611,
+        "primary_slots_after": 4701,
+        "events": [
+          "strata elastic: +90 experts (126 MiB) -> 4701 slots, 6.59 GiB; 817 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.06 ms (published once its fills land)"
+        ]
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 4,
+          "launched": 3,
+          "changed": 3,
+          "changed_rows": 3,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 1,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 3,
+      "case": "L02",
+      "phase": "smoke",
+      "arm": "B1",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 149.5,
+      "decode_tps": 100.33444816053512,
+      "prompt_ms": 4589.6,
+      "wall_GEN_s": 4.8439999999973224,
+      "ttft_s": 4.7189999999973224,
+      "reused": 131072,
+      "windows": 6,
+      "tokens_per_window": 2.5,
+      "roots": {
+        "changed_rows": 3,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 5,
+        "launched": 4,
+        "changed": 2,
+        "prepared_not_launched": 1,
+        "prestaged": 4,
+        "prestaged_not_launched": 0,
+        "carried_A": 4,
+        "actual_reused": 4,
+        "rollback": 0,
+        "Aall_launched_scoreable": 4,
+        "Aall_original_wrong_fixture_launched": 1,
+        "Aall_original_wrong_fixture_nonfinal": 1,
+        "recovered_original_wrong_fixture": 1,
+        "original_wrong_fixture_unreused_final": 0,
+        "raw_A_bonus_scoreable": 4,
+        "original_wrong_raw_A_bonus": 1,
+        "new_matches_raw_A_bonus": 3,
+        "new_matches_fixture_A_bonus": 4,
+        "raw_fixture_A_bonus_differ": 1,
+        "A_early_rejection_launched": 0
+      },
+      "work": {
+        "stage0_launches": 6,
+        "stage1_launches": 6,
+        "stage0_input_rows": 15,
+        "stage1_input_rows": 15,
+        "stage0_input_rows_per1024": 1024.0,
+        "stage1_input_rows_per1024": 1024.0,
+        "accepted_drafts": 9,
+        "offered_drafts": 9,
+        "chain_launches": 5,
+        "chain_bypasses": 0,
+        "chain_output_heads": 29,
+        "chain_output_width_distribution": {
+          "7": 3,
+          "4": 2
+        },
+        "chain_source_T_distribution": {
+          "1": 3,
+          "4": 2
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 3,
+        "primary_slots_before": 4701,
+        "primary_slots_after": 4701,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 5,
+          "launched": 4,
+          "changed": 2,
+          "changed_rows": 3,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 1,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 4,
+      "case": "L01",
+      "phase": "smoke",
+      "arm": "A",
+      "bwindow_mode": "0",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 209.8,
+      "decode_tps": 71.49666348903718,
+      "prompt_ms": 4455.9,
+      "wall_GEN_s": 4.76600000000326,
+      "ttft_s": 4.610000000000582,
+      "reused": 131072,
+      "windows": 6,
+      "tokens_per_window": 2.5,
+      "roots": {
+        "changed_rows": 0,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 5,
+        "launched": 4,
+        "changed": 0,
+        "prepared_not_launched": 1,
+        "prestaged": 4,
+        "prestaged_not_launched": 0,
+        "carried_A": 1,
+        "actual_reused": 1,
+        "rollback": 3,
+        "Aall_launched_scoreable": 4,
+        "Aall_original_wrong_fixture_launched": 3,
+        "Aall_original_wrong_fixture_nonfinal": 2,
+        "recovered_original_wrong_fixture": 0,
+        "original_wrong_fixture_unreused_final": 1,
+        "raw_A_bonus_scoreable": 4,
+        "original_wrong_raw_A_bonus": 2,
+        "new_matches_raw_A_bonus": 2,
+        "new_matches_fixture_A_bonus": 1,
+        "raw_fixture_A_bonus_differ": 1,
+        "A_early_rejection_launched": 0
+      },
+      "work": {
+        "stage0_launches": 9,
+        "stage1_launches": 6,
+        "stage0_input_rows": 20,
+        "stage1_input_rows": 16,
+        "stage0_input_rows_per1024": 1365.3333333333333,
+        "stage1_input_rows_per1024": 1092.2666666666667,
+        "accepted_drafts": 9,
+        "offered_drafts": 10,
+        "chain_launches": 5,
+        "chain_bypasses": 0,
+        "chain_output_heads": 33,
+        "chain_output_width_distribution": {
+          "7": 4,
+          "5": 1
+        },
+        "chain_source_T_distribution": {
+          "1": 2,
+          "4": 2,
+          "2": 1
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 4,
+        "primary_slots_before": 4701,
+        "primary_slots_after": 4792,
+        "events": [
+          "strata elastic: +91 experts (126 MiB) -> 4792 slots, 6.71 GiB; 648 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 29.20 ms (published once its fills land)"
+        ]
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "0",
+          "decisions": 5,
+          "launched": 4,
+          "changed": 0,
+          "changed_rows": 0,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 1,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 5,
+      "case": "L02",
+      "phase": "smoke",
+      "arm": "A",
+      "bwindow_mode": "0",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 177.3,
+      "decode_tps": 84.60236886632826,
+      "prompt_ms": 4393.9,
+      "wall_GEN_s": 4.6710000000020955,
+      "ttft_s": 4.514999999999418,
+      "reused": 131072,
+      "windows": 6,
+      "tokens_per_window": 2.5,
+      "roots": {
+        "changed_rows": 0,
+        "full_bounds_skipped": 1,
+        "full_bounds_skipped_launched": 1,
+        "made": 5,
+        "launched": 5,
+        "changed": 0,
+        "prepared_not_launched": 0,
+        "prestaged": 5,
+        "prestaged_not_launched": 0,
+        "carried_A": 2,
+        "actual_reused": 2,
+        "rollback": 3,
+        "Aall_launched_scoreable": 3,
+        "Aall_original_wrong_fixture_launched": 1,
+        "Aall_original_wrong_fixture_nonfinal": 1,
+        "recovered_original_wrong_fixture": 0,
+        "original_wrong_fixture_unreused_final": 0,
+        "raw_A_bonus_scoreable": 3,
+        "original_wrong_raw_A_bonus": 1,
+        "new_matches_raw_A_bonus": 2,
+        "new_matches_fixture_A_bonus": 2,
+        "raw_fixture_A_bonus_differ": 1,
+        "A_early_rejection_launched": 2
+      },
+      "work": {
+        "stage0_launches": 9,
+        "stage1_launches": 6,
+        "stage0_input_rows": 20,
+        "stage1_input_rows": 17,
+        "stage0_input_rows_per1024": 1365.3333333333333,
+        "stage1_input_rows_per1024": 1160.5333333333333,
+        "accepted_drafts": 9,
+        "offered_drafts": 11,
+        "chain_launches": 5,
+        "chain_bypasses": 0,
+        "chain_output_heads": 32,
+        "chain_output_width_distribution": {
+          "7": 4,
+          "4": 1
+        },
+        "chain_source_T_distribution": {
+          "1": 2,
+          "4": 3
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 5,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "0",
+          "decisions": 5,
+          "launched": 5,
+          "changed": 0,
+          "changed_rows": 0,
+          "full_bounds_skipped": 1,
+          "full_bounds_skipped_launched": 1,
+          "prepared_not_launched": 0,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 6,
+      "case": "L01",
+      "phase": "smoke",
+      "arm": "B2",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 165.8,
+      "decode_tps": 90.4704463208685,
+      "prompt_ms": 4395.6,
+      "wall_GEN_s": 4.657000000006519,
+      "ttft_s": 4.51600000000326,
+      "reused": 131072,
+      "windows": 7,
+      "tokens_per_window": 2.142857142857143,
+      "roots": {
+        "changed_rows": 4,
+        "full_bounds_skipped": 1,
+        "full_bounds_skipped_launched": 0,
+        "made": 6,
+        "launched": 5,
+        "changed": 3,
+        "prepared_not_launched": 1,
+        "prestaged": 5,
+        "prestaged_not_launched": 0,
+        "carried_A": 5,
+        "actual_reused": 5,
+        "rollback": 0,
+        "Aall_launched_scoreable": 5,
+        "Aall_original_wrong_fixture_launched": 2,
+        "Aall_original_wrong_fixture_nonfinal": 2,
+        "recovered_original_wrong_fixture": 2,
+        "original_wrong_fixture_unreused_final": 0,
+        "raw_A_bonus_scoreable": 5,
+        "original_wrong_raw_A_bonus": 2,
+        "new_matches_raw_A_bonus": 5,
+        "new_matches_fixture_A_bonus": 5,
+        "raw_fixture_A_bonus_differ": 0,
+        "A_early_rejection_launched": 0
+      },
+      "work": {
+        "stage0_launches": 7,
+        "stage1_launches": 7,
+        "stage0_input_rows": 16,
+        "stage1_input_rows": 16,
+        "stage0_input_rows_per1024": 1092.2666666666667,
+        "stage1_input_rows_per1024": 1092.2666666666667,
+        "accepted_drafts": 9,
+        "offered_drafts": 9,
+        "chain_launches": 6,
+        "chain_bypasses": 0,
+        "chain_output_heads": 33,
+        "chain_output_width_distribution": {
+          "7": 2,
+          "4": 2,
+          "5": 1,
+          "6": 1
+        },
+        "chain_source_T_distribution": {
+          "1": 3,
+          "4": 2,
+          "2": 1
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 6,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 6,
+          "launched": 5,
+          "changed": 3,
+          "changed_rows": 4,
+          "full_bounds_skipped": 1,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 1,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 7,
+      "case": "L02",
+      "phase": "smoke",
+      "arm": "B2",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 15,
+      "decode_ms": 186.6,
+      "decode_tps": 80.38585209003216,
+      "prompt_ms": 4416.7,
+      "wall_GEN_s": 4.702999999994063,
+      "ttft_s": 4.530999999988126,
+      "reused": 131072,
+      "windows": 7,
+      "tokens_per_window": 2.142857142857143,
+      "roots": {
+        "changed_rows": 2,
+        "full_bounds_skipped": 1,
+        "full_bounds_skipped_launched": 1,
+        "made": 6,
+        "launched": 5,
+        "changed": 2,
+        "prepared_not_launched": 1,
+        "prestaged": 5,
+        "prestaged_not_launched": 0,
+        "carried_A": 4,
+        "actual_reused": 4,
+        "rollback": 1,
+        "Aall_launched_scoreable": 4,
+        "Aall_original_wrong_fixture_launched": 1,
+        "Aall_original_wrong_fixture_nonfinal": 1,
+        "recovered_original_wrong_fixture": 1,
+        "original_wrong_fixture_unreused_final": 0,
+        "raw_A_bonus_scoreable": 4,
+        "original_wrong_raw_A_bonus": 1,
+        "new_matches_raw_A_bonus": 3,
+        "new_matches_fixture_A_bonus": 4,
+        "raw_fixture_A_bonus_differ": 1,
+        "A_early_rejection_launched": 1
+      },
+      "work": {
+        "stage0_launches": 8,
+        "stage1_launches": 7,
+        "stage0_input_rows": 21,
+        "stage1_input_rows": 18,
+        "stage0_input_rows_per1024": 1433.6,
+        "stage1_input_rows_per1024": 1228.8,
+        "accepted_drafts": 9,
+        "offered_drafts": 11,
+        "chain_launches": 6,
+        "chain_bypasses": 0,
+        "chain_output_heads": 35,
+        "chain_output_width_distribution": {
+          "7": 3,
+          "4": 2,
+          "6": 1
+        },
+        "chain_source_T_distribution": {
+          "1": 3,
+          "4": 2,
+          "3": 1
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 7,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 6,
+          "launched": 5,
+          "changed": 2,
+          "changed_rows": 2,
+          "full_bounds_skipped": 1,
+          "full_bounds_skipped_launched": 1,
+          "prepared_not_launched": 1,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 8,
+      "case": "L01",
+      "phase": "long",
+      "arm": "B1",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 1024,
+      "decode_ms": 11087.6,
+      "decode_tps": 92.35542407734766,
+      "prompt_ms": 4507.4,
+      "wall_GEN_s": 15.703000000008615,
+      "ttft_s": 4.625,
+      "reused": 131072,
+      "windows": 475,
+      "tokens_per_window": 2.1557894736842105,
+      "roots": {
+        "changed_rows": 475,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 474,
+        "launched": 373,
+        "changed": 245,
+        "prepared_not_launched": 101,
+        "prestaged": 373,
+        "prestaged_not_launched": 0,
+        "carried_A": 351,
+        "actual_reused": 351,
+        "rollback": 22,
+        "Aall_launched_scoreable": 352,
+        "Aall_original_wrong_fixture_launched": 174,
+        "Aall_original_wrong_fixture_nonfinal": 173,
+        "recovered_original_wrong_fixture": 173,
+        "original_wrong_fixture_unreused_final": 1,
+        "raw_A_bonus_scoreable": 352,
+        "original_wrong_raw_A_bonus": 175,
+        "new_matches_raw_A_bonus": 319,
+        "new_matches_fixture_A_bonus": 352,
+        "raw_fixture_A_bonus_differ": 33,
+        "A_early_rejection_launched": 21
+      },
+      "work": {
+        "stage0_launches": 497,
+        "stage1_launches": 475,
+        "stage0_input_rows": 1096,
+        "stage1_input_rows": 1055,
+        "stage0_input_rows_per1024": 1096.0,
+        "stage1_input_rows_per1024": 1055.0,
+        "accepted_drafts": 549,
+        "offered_drafts": 580,
+        "chain_launches": 474,
+        "chain_bypasses": 0,
+        "chain_output_heads": 2681,
+        "chain_output_width_distribution": {
+          "7": 208,
+          "4": 148,
+          "5": 75,
+          "6": 43
+        },
+        "chain_source_T_distribution": {
+          "1": 196,
+          "4": 121,
+          "2": 97,
+          "3": 60
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 8,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 474,
+          "launched": 373,
+          "changed": 245,
+          "changed_rows": 475,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 101,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 9,
+      "case": "L02",
+      "phase": "long",
+      "arm": "B1",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 1024,
+      "decode_ms": 12461.2,
+      "decode_tps": 82.17507142169293,
+      "prompt_ms": 4490.6,
+      "wall_GEN_s": 17.062000000005355,
+      "ttft_s": 4.60899999999674,
+      "reused": 131072,
+      "windows": 591,
+      "tokens_per_window": 1.7326565143824026,
+      "roots": {
+        "changed_rows": 466,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 590,
+        "launched": 484,
+        "changed": 302,
+        "prepared_not_launched": 106,
+        "prestaged": 484,
+        "prestaged_not_launched": 0,
+        "carried_A": 456,
+        "actual_reused": 456,
+        "rollback": 28,
+        "Aall_launched_scoreable": 457,
+        "Aall_original_wrong_fixture_launched": 237,
+        "Aall_original_wrong_fixture_nonfinal": 236,
+        "recovered_original_wrong_fixture": 236,
+        "original_wrong_fixture_unreused_final": 1,
+        "raw_A_bonus_scoreable": 457,
+        "original_wrong_raw_A_bonus": 233,
+        "new_matches_raw_A_bonus": 408,
+        "new_matches_fixture_A_bonus": 457,
+        "raw_fixture_A_bonus_differ": 49,
+        "A_early_rejection_launched": 27
+      },
+      "work": {
+        "stage0_launches": 619,
+        "stage1_launches": 591,
+        "stage0_input_rows": 1114,
+        "stage1_input_rows": 1071,
+        "stage0_input_rows_per1024": 1114.0,
+        "stage1_input_rows_per1024": 1071.0,
+        "accepted_drafts": 433,
+        "offered_drafts": 480,
+        "chain_launches": 590,
+        "chain_bypasses": 0,
+        "chain_output_heads": 3096,
+        "chain_output_width_distribution": {
+          "7": 183,
+          "4": 260,
+          "5": 107,
+          "6": 40
+        },
+        "chain_source_T_distribution": {
+          "1": 318,
+          "4": 75,
+          "2": 140,
+          "3": 57
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 9,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 590,
+          "launched": 484,
+          "changed": 302,
+          "changed_rows": 466,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 106,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 10,
+      "case": "L01",
+      "phase": "long",
+      "arm": "A",
+      "bwindow_mode": "0",
+      "global_oracle_mode": "0",
+      "tokens": 1024,
+      "decode_ms": 14307.8,
+      "decode_tps": 71.56935377905758,
+      "prompt_ms": 4452.5,
+      "wall_GEN_s": 18.875,
+      "ttft_s": 4.562000000005355,
+      "reused": 131072,
+      "windows": 528,
+      "tokens_per_window": 1.9393939393939394,
+      "roots": {
+        "changed_rows": 0,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 527,
+        "launched": 475,
+        "changed": 0,
+        "prepared_not_launched": 52,
+        "prestaged": 475,
+        "prestaged_not_launched": 0,
+        "carried_A": 158,
+        "actual_reused": 158,
+        "rollback": 317,
+        "Aall_launched_scoreable": 392,
+        "Aall_original_wrong_fixture_launched": 234,
+        "Aall_original_wrong_fixture_nonfinal": 233,
+        "recovered_original_wrong_fixture": 0,
+        "original_wrong_fixture_unreused_final": 1,
+        "raw_A_bonus_scoreable": 392,
+        "original_wrong_raw_A_bonus": 232,
+        "new_matches_raw_A_bonus": 160,
+        "new_matches_fixture_A_bonus": 158,
+        "raw_fixture_A_bonus_differ": 49,
+        "A_early_rejection_launched": 83
+      },
+      "work": {
+        "stage0_launches": 845,
+        "stage1_launches": 528,
+        "stage0_input_rows": 1883,
+        "stage1_input_rows": 1247,
+        "stage0_input_rows_per1024": 1883.0,
+        "stage1_input_rows_per1024": 1247.0,
+        "accepted_drafts": 496,
+        "offered_drafts": 719,
+        "chain_launches": 527,
+        "chain_bypasses": 0,
+        "chain_output_heads": 3419,
+        "chain_output_width_distribution": {
+          "7": 414,
+          "5": 39,
+          "4": 59,
+          "6": 15
+        },
+        "chain_source_T_distribution": {
+          "1": 183,
+          "4": 153,
+          "2": 122,
+          "3": 69
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 10,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "0",
+          "decisions": 527,
+          "launched": 475,
+          "changed": 0,
+          "changed_rows": 0,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 52,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 11,
+      "case": "L02",
+      "phase": "long",
+      "arm": "A",
+      "bwindow_mode": "0",
+      "global_oracle_mode": "0",
+      "tokens": 1024,
+      "decode_ms": 15843.0,
+      "decode_tps": 64.63422331629111,
+      "prompt_ms": 4479.2,
+      "wall_GEN_s": 20.421999999991385,
+      "ttft_s": 4.5939999999973224,
+      "reused": 131072,
+      "windows": 626,
+      "tokens_per_window": 1.6357827476038338,
+      "roots": {
+        "changed_rows": 0,
+        "full_bounds_skipped": 1,
+        "full_bounds_skipped_launched": 1,
+        "made": 625,
+        "launched": 574,
+        "changed": 0,
+        "prepared_not_launched": 51,
+        "prestaged": 574,
+        "prestaged_not_launched": 0,
+        "carried_A": 185,
+        "actual_reused": 185,
+        "rollback": 389,
+        "Aall_launched_scoreable": 482,
+        "Aall_original_wrong_fixture_launched": 296,
+        "Aall_original_wrong_fixture_nonfinal": 296,
+        "recovered_original_wrong_fixture": 0,
+        "original_wrong_fixture_unreused_final": 0,
+        "raw_A_bonus_scoreable": 482,
+        "original_wrong_raw_A_bonus": 298,
+        "new_matches_raw_A_bonus": 184,
+        "new_matches_fixture_A_bonus": 186,
+        "raw_fixture_A_bonus_differ": 56,
+        "A_early_rejection_launched": 92
+      },
+      "work": {
+        "stage0_launches": 1015,
+        "stage1_launches": 626,
+        "stage0_input_rows": 1905,
+        "stage1_input_rows": 1230,
+        "stage0_input_rows_per1024": 1905.0,
+        "stage1_input_rows_per1024": 1230.0,
+        "accepted_drafts": 398,
+        "offered_drafts": 604,
+        "chain_launches": 625,
+        "chain_bypasses": 0,
+        "chain_output_heads": 3962,
+        "chain_output_width_distribution": {
+          "7": 459,
+          "4": 99,
+          "6": 18,
+          "5": 49
+        },
+        "chain_source_T_distribution": {
+          "1": 279,
+          "4": 89,
+          "3": 79,
+          "2": 178
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 11,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "0",
+          "decisions": 625,
+          "launched": 574,
+          "changed": 0,
+          "changed_rows": 0,
+          "full_bounds_skipped": 1,
+          "full_bounds_skipped_launched": 1,
+          "prepared_not_launched": 51,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 12,
+      "case": "L01",
+      "phase": "long",
+      "arm": "B2",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 1024,
+      "decode_ms": 10984.8,
+      "decode_tps": 93.21972179739276,
+      "prompt_ms": 4513.1,
+      "wall_GEN_s": 15.593999999997322,
+      "ttft_s": 4.625,
+      "reused": 131072,
+      "windows": 492,
+      "tokens_per_window": 2.0813008130081303,
+      "roots": {
+        "changed_rows": 454,
+        "full_bounds_skipped": 0,
+        "full_bounds_skipped_launched": 0,
+        "made": 491,
+        "launched": 401,
+        "changed": 250,
+        "prepared_not_launched": 90,
+        "prestaged": 401,
+        "prestaged_not_launched": 0,
+        "carried_A": 376,
+        "actual_reused": 376,
+        "rollback": 25,
+        "Aall_launched_scoreable": 377,
+        "Aall_original_wrong_fixture_launched": 173,
+        "Aall_original_wrong_fixture_nonfinal": 172,
+        "recovered_original_wrong_fixture": 172,
+        "original_wrong_fixture_unreused_final": 1,
+        "raw_A_bonus_scoreable": 377,
+        "original_wrong_raw_A_bonus": 177,
+        "new_matches_raw_A_bonus": 338,
+        "new_matches_fixture_A_bonus": 377,
+        "raw_fixture_A_bonus_differ": 39,
+        "A_early_rejection_launched": 24
+      },
+      "work": {
+        "stage0_launches": 517,
+        "stage1_launches": 492,
+        "stage0_input_rows": 1118,
+        "stage1_input_rows": 1064,
+        "stage0_input_rows_per1024": 1118.0,
+        "stage1_input_rows_per1024": 1064.0,
+        "accepted_drafts": 532,
+        "offered_drafts": 572,
+        "chain_launches": 491,
+        "chain_bypasses": 0,
+        "chain_output_heads": 2722,
+        "chain_output_width_distribution": {
+          "7": 204,
+          "5": 70,
+          "4": 179,
+          "6": 38
+        },
+        "chain_source_T_distribution": {
+          "1": 224,
+          "4": 128,
+          "2": 90,
+          "3": 49
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 12,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 491,
+          "launched": 401,
+          "changed": 250,
+          "changed_rows": 454,
+          "full_bounds_skipped": 0,
+          "full_bounds_skipped_launched": 0,
+          "prepared_not_launched": 90,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    },
+    {
+      "request": 13,
+      "case": "L02",
+      "phase": "long",
+      "arm": "B2",
+      "bwindow_mode": "2",
+      "global_oracle_mode": "0",
+      "tokens": 1024,
+      "decode_ms": 12480.4,
+      "decode_tps": 82.04865228678568,
+      "prompt_ms": 4548.9,
+      "wall_GEN_s": 17.139999999999418,
+      "ttft_s": 4.6560000000026776,
+      "reused": 131072,
+      "windows": 594,
+      "tokens_per_window": 1.7239057239057238,
+      "roots": {
+        "changed_rows": 488,
+        "full_bounds_skipped": 1,
+        "full_bounds_skipped_launched": 1,
+        "made": 593,
+        "launched": 483,
+        "changed": 307,
+        "prepared_not_launched": 110,
+        "prestaged": 483,
+        "prestaged_not_launched": 0,
+        "carried_A": 455,
+        "actual_reused": 455,
+        "rollback": 28,
+        "Aall_launched_scoreable": 456,
+        "Aall_original_wrong_fixture_launched": 240,
+        "Aall_original_wrong_fixture_nonfinal": 240,
+        "recovered_original_wrong_fixture": 240,
+        "original_wrong_fixture_unreused_final": 0,
+        "raw_A_bonus_scoreable": 456,
+        "original_wrong_raw_A_bonus": 242,
+        "new_matches_raw_A_bonus": 414,
+        "new_matches_fixture_A_bonus": 456,
+        "raw_fixture_A_bonus_differ": 42,
+        "A_early_rejection_launched": 27
+      },
+      "work": {
+        "stage0_launches": 622,
+        "stage1_launches": 594,
+        "stage0_input_rows": 1143,
+        "stage1_input_rows": 1082,
+        "stage0_input_rows_per1024": 1143.0,
+        "stage1_input_rows_per1024": 1082.0,
+        "accepted_drafts": 430,
+        "offered_drafts": 488,
+        "chain_launches": 593,
+        "chain_bypasses": 0,
+        "chain_output_heads": 3109,
+        "chain_output_width_distribution": {
+          "7": 183,
+          "4": 267,
+          "5": 98,
+          "6": 45
+        },
+        "chain_source_T_distribution": {
+          "1": 319,
+          "4": 77,
+          "2": 138,
+          "3": 59
+        },
+        "MTP_VRAM_bytes": 962957512
+      },
+      "capacity": {
+        "request": 13,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      "evidence": {
+        "strict_policy": true,
+        "full_window_audit": {
+          "mode": "2",
+          "decisions": 593,
+          "launched": 483,
+          "changed": 307,
+          "changed_rows": 488,
+          "full_bounds_skipped": 1,
+          "full_bounds_skipped_launched": 1,
+          "prepared_not_launched": 110,
+          "algorithmic_rules_unchanged": true,
+          "total_MTP_work_path_dependent": true
+        },
+        "wire_actual_GEN_verified": true,
+        "output_fixture_equality": true
+      }
+    }
+  ],
+  "build": {
+    "name": "bwindow-v1",
+    "status": "completed",
+    "returncode": 0,
+    "source_base": "d4623e264a208a18e4c48baa965c4afc01b578eb+bwindow-working-tree",
+    "branch": "main",
+    "source_unchanged_during_build": true,
+    "source_sha256": {
+      "src/core/mtp.cpp": "4dcff76b4538875acfd7fe77be4803e00b740280f7fd0599214903a37aa00f42",
+      "include/strata/core/mtp.hpp": "b3b35537aa6ec193c4fec5d4f91fc3d69fd4aa76207ea8d6475217d4bf9ca710",
+      "src/kernels/cuda/verify_kernels.cu": "b97dbc432d41c658838085e5feb20c536c742a4eda8fa406cb93d628a4a7739c",
+      "include/strata/kernels/verify_kernels.hpp": "907e9f9abaa0eb285382e8776e0377f6eaefd159b0e4aa1a692613e2926e2479",
+      "src/program/generate.cpp": "863f793f1c7ee54e2891a8c88aa4939625b1bffedd382b2f8f4a8c24c8fe5e22"
+    },
+    "executable_sha256": "077650907f4383571c6b5137496560afd18d724ea81324752a22ec02c74f48e6",
+    "build_log": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bwindow-v1-build.log",
+    "build_log_sha256": "10aa7d85ac505bd7dcea38453fb8c8488120289719e2678e5bdfd5df1d287262",
+    "daily_updated": false
+  },
+  "pins": {
+    "ROOT_reviewed_manifest_sha256": "3a092e477c76824dfdc1286981b319f2d1d812f6ef08bddbe01a22bba4961c12",
+    "runner_sha256": "9f70ec0c3234f148041bd487846a6af01a01f43b95f3836b57fb7d751c069bd1",
+    "diff_sha256": "b94db692f093d58ee6724cfd0425da0d15d0a9a2a92d61ace586689f04e7e646",
+    "protocol_sha256": "19e71a8461ff91217b6ff41d39444bfd385fd0958f80009f247d3dcb1340870c",
+    "config_sha256": "dd4b32d0bf833817fa4a01c3412b2be1f15ed310b4b22050cf87b0b39e82e138",
+    "source_current_matches_signed": true,
+    "bench_sha256": {
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\bwindow_contract.py": "1b32ef72c72b2639415f4151e82f474dc421c1a21ab6619bab3d3f688ccd1b2d",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\bwindow_validation.py": "0f525697be2206f3f6d4fe80d50b7ad7d98b5210b0b394049634d9eff55edde2",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\hq_quality.py": "7a070003d8c1b6ade7006d142e06d82d6236ca81a3fa037ed71e6dab49e97b5b",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\minp_contract.py": "bd303b45df4407ad40cdb97a78bb216019b74e3ed1d091abf3dd6f512c01bd50",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\policy_trace.py": "a87a3297d96afa9a526b519c84a1541785a73097376a8ce6a3d513aaf1831047",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\quality.py": "fc1e8a2d84d70a93606e41842b1acaee64664b20397fdab87b0a6c7f32e0b71f",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\run_bwindow.py": "9f70ec0c3234f148041bd487846a6af01a01f43b95f3836b57fb7d751c069bd1",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\telemetry_contract.py": "fc94d4383567023f84ed08f3cd43eee1c882a51c177a83cce09583488653c85d",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\test_bwindow.py": "0662447838d7f6b0895b2dea57953efc7e929142b67069266d28502663df5ecd",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\bench\\top2_contract.py": "b2e87f657da42be2a758ce7d9a27fcbae3395554db1c0d1af6141d2200009e97"
+    },
+    "prefix_sha256_unchanged": {
+      "L01": "ece9cb18108eabfc924cd3dbfc2a89dab44a42fcc1d2e78b3017f908e609d7c7",
+      "L02": "ece9cb18108eabfc924cd3dbfc2a89dab44a42fcc1d2e78b3017f908e609d7c7"
+    }
+  },
+  "isolation": {
+    "daily_unchanged": true,
+    "compiler_guard_clean": true,
+    "compiler_observations": [],
+    "threads_stopped": true,
+    "remaining_owned": [],
+    "owned_pid_birth": {
+      "18356": 1791432184.0596073
+    },
+    "cleanup_actions": [],
+    "closed_sentinel_preserved": true,
+    "build_bench_locks_absent": true
+  },
+  "target_capacity": {
+    "primary_initial_slots": 4434,
+    "secondary_initial_slots": 9151,
+    "requests": [
+      {
+        "request": 0,
+        "primary_slots_before": 4434,
+        "primary_slots_after": 4522,
+        "events": [
+          "strata elastic: +88 experts (127 MiB) -> 4522 slots, 6.34 GiB; 1010 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 25.05 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 1,
+        "primary_slots_before": 4522,
+        "primary_slots_after": 4611,
+        "events": [
+          "strata elastic: +89 experts (126 MiB) -> 4611 slots, 6.46 GiB; 840 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 23.27 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 2,
+        "primary_slots_before": 4611,
+        "primary_slots_after": 4701,
+        "events": [
+          "strata elastic: +90 experts (126 MiB) -> 4701 slots, 6.59 GiB; 817 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.06 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 3,
+        "primary_slots_before": 4701,
+        "primary_slots_after": 4701,
+        "events": []
+      },
+      {
+        "request": 4,
+        "primary_slots_before": 4701,
+        "primary_slots_after": 4792,
+        "events": [
+          "strata elastic: +91 experts (126 MiB) -> 4792 slots, 6.71 GiB; 648 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 29.20 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 5,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 6,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 7,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 8,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 9,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 10,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 11,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 12,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      },
+      {
+        "request": 13,
+        "primary_slots_before": 4792,
+        "primary_slots_after": 4792,
+        "events": []
+      }
+    ],
+    "limits": "Common autoelastic policy; capacity observations reported without normalization."
+  },
+  "interpretation": [
+    "The fixture-coherent B input window passes the preregistered diagnostic throughput gate in both cases and both treatment arms. This is measured forced-benchmark headroom, not a deployable drafter result.",
+    "Only B private target inputs are replaced all-or-nothing; original proposals/confidence/width/readiness/gates remain unchanged. More coherent carried B verification changes emissions and path-dependent total MTP work, reported explicitly.",
+    "Compared with the separate partial B-root experiment, fixing only a root while retaining stale tails did not gain throughput; this full-window diagnostic supports investigating coherent B proposals, without assigning its gains to a feasible real predictor.",
+    "GPU0/GPU1 stage rows count launched input rows. They do not measure exclusive GPU cost or establish a causal critical path."
+  ],
+  "limits": [
+    "Diagnostic fixture-forced IDs, original greedy73/minp.5/spec4/pipeline2/nativeSSD131072; no free-generation quality or optimized real drafter claim.",
+    "Full B-window oracle uses fixture future inputs B.p-(n-1)-1+i only, preserves current A inputs and original probability/width/readiness. No shared oc/op mutation. Global oracle OFF, chain bypass0.",
+    "All-or-nothing full bounds: invalid tail skips entire treatment, no shrink/padding. Actual changed rows, bounded skips and carried/rollback counters reported.",
+    "Common preallocated POD trace and TOP2/policy telemetry ON in all arms; dump after decode timer. Private corrected prestage may occur without launch; prepared_not_launched and prestaged subset counted.",
+    "Strict original proposal correlation is overridden only after independent full-window decision audit; actual acceptance/root continuity/rollback/forced KV tail/budget use actual target rows. Original proposals remain in trace.",
+    "Raw A bonus labels are scoreable only when Aall and in budget. Fixture-correct B reuse is not raw quality.",
+    "Stage input rows include launched paths even if doomed experts skip; overlap prevents summing stage costs as exclusive time. No profiler critical-path claim.",
+    "Autoelastic observed without normalization/subtraction. Growth occurred only in warmup/smoke; all six long requests kept primary4792 slots with no elastic events.",
+    "Single repeated forced continuation in one process, no independent-sample confidence interval. Smoke is not performance evidence.",
+    "One immutable build and one14GEN; no retry/rebuild/sweep/profile/export/ZIP. Defaultoff experimental source uncommitted on main pending ROOT."
+  ],
+  "evidence": {
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\runs\\DET-bwindow-01\\result.json": "71385e545431aa1d5ffae420a433ec947bfa8e97978e9933cf03243a6f273df7",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\runs\\DET-bwindow-01\\verdict.json": "d22fc78a2c3b9863709507c85be16c650fe57817e664afde4b7b757d6cff28d3",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\runs\\DET-bwindow-01\\isolation.json": "b369476d348d3c5eee4b9ed89a0b444ed853236de64f2b000b8ce47099bc1203",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\runs\\DET-bwindow-01\\plan.json": "39f4e6cfc946bb5e7ed427ab0f59e6813adcd19596210e5eceffb23665c9e183",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\runs\\DET-bwindow-01\\bwindow_trace.jsonl": "e90241c2402842fdca63a1311615ddde8624eae8e1d9fefbfbdc905b6b01b911",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\runs\\DET-bwindow-01\\policy_trace.jsonl": "1a14b27ae74c62770501779ea2128de8f276e6ea98f98150a51a3c5a01954008",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\b-window-oracle\\build\\bwindow-v1\\build.json": "8b0fbbf1d8888f3f876f611c6b9ce1048f05bff9be56c7214fd575defb27cf37"
+  }
+}

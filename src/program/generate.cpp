@@ -2229,6 +2229,17 @@ int main(int argc, char** argv) {
     const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
     const char* lab_broot_switch = std::getenv("STRATA_LAB_MTP_BROOT_SWITCH");
     const char* lab_broot_trace = std::getenv("STRATA_LAB_MTP_BROOT_TRACE");
+    const char* lab_bwindow_switch = std::getenv("STRATA_LAB_MTP_BWINDOW_SWITCH");
+    const char* lab_bwindow_trace = std::getenv("STRATA_LAB_MTP_BWINDOW_TRACE");
+    const bool lab_bwindow = lab_bwindow_switch != nullptr;
+    if (lab_bwindow) {
+        if (lab_broot_switch != nullptr || lab_broot_trace != nullptr) {
+            std::fprintf(stderr, "strata lab bwindow: BROOT and BWINDOW are exclusive\n"); return 2;
+        }
+        lab_broot_switch = lab_bwindow_switch; lab_broot_trace = lab_bwindow_trace;
+    } else if (lab_bwindow_trace != nullptr) {
+        std::fprintf(stderr, "strata lab bwindow: trace without switch forbidden\n"); return 2;
+    }
     const bool lab_broot = lab_broot_switch != nullptr;
     const char* lab_shallow_switch = std::getenv("STRATA_LAB_MTP_SHALLOW_SWITCH");
     const char* lab_shallow_trace = std::getenv("STRATA_LAB_MTP_SHALLOW_TRACE");
@@ -2376,6 +2387,7 @@ int main(int argc, char** argv) {
         }
         std::fprintf(stderr, "strata lab broot: enabled=1 scope=B_root_fixture_only "
                              "width_prob_ready_chain=original schema=1\n");
+        if (lab_bwindow) std::fprintf(stderr, "strata lab bwindow: enabled=1 scope=B_inputs_fixture_only modes=0/2 all_or_nothing=1 schema=1\n");
     } else if (lab_broot_trace != nullptr) {
         std::fprintf(stderr, "strata lab broot: trace without switch forbidden\n"); return 2;
     }
@@ -9928,14 +9940,16 @@ int main(int argc, char** argv) {
             }
             bool anchor_request_on = false;
             bool broot_request_on = false;
+            int broot_request_mode = 0;
             if (lab_broot) {
                 std::ifstream control(lab_broot_switch);
                 std::string mode, extra;
-                if (!(control >> mode) || (control >> extra) || (mode != "0" && mode != "1") ||
+                if (!(control >> mode) || (control >> extra) || (mode != "0" && mode != (lab_bwindow ? "2" : "1")) ||
                     geni || lab_oracle_on || oracle_prefix_file.empty()) {
                     std::printf("ERR lab broot: switch requires0/1; text GEN oracle-off SSD required\n"); return 1;
                 }
-                broot_request_on = mode == "1";
+                broot_request_mode = mode == "0" ? 0 : (lab_bwindow ? 2 : 1);
+                broot_request_on = broot_request_mode != 0;
             }
             bool shallow_request_on = false;
             if (lab_shallow) {
@@ -11891,10 +11905,17 @@ int main(int argc, char** argv) {
                     ++broot_seen;
                     for (int i = 0; i < w.T; ++i) w.broot_original[i] = w.broot_target[i] = w.tok[i];
                     const int64_t index = w.p - (n - 1) - 1;
-                    const bool bounded = forced != nullptr && index >= 0 && index < max_new &&
+                    bool bounded = forced != nullptr && index >= 0 && index < max_new &&
                         index < (int64_t) forced->size() && (*forced)[(size_t) index] >= 0 &&
                         (*forced)[(size_t) index] < n_vocab;
-                    if (broot_request_on && bounded) w.broot_target[0] = (*forced)[(size_t) index];
+                    if (lab_bwindow && bounded) {
+                        // Validate the entire private input window before copying any fixture token.
+                        bounded = w.T <= max_new - index && w.T <= (int64_t) forced->size() - index;
+                        for (int i = 0; bounded && i < w.T; ++i)
+                            bounded = (*forced)[(size_t) (index + i)] >= 0 && (*forced)[(size_t) (index + i)] < n_vocab;
+                    }
+                    if (broot_request_on && bounded)
+                        for (int i = 0; i < (lab_bwindow ? w.T : 1); ++i) w.broot_target[i] = (*forced)[(size_t) (index + i)];
                     if (broot_nd >= broot_decisions.size()) { broot_truncated = true; return; }
                     w.broot_record = (int64_t) broot_nd;
                     auto& d = broot_decisions[broot_nd++];
@@ -12414,7 +12435,8 @@ int main(int argc, char** argv) {
                             B.launched = true;
                             if (lab_broot && B.broot_record >= 0) {
                                 auto& d = broot_decisions[(size_t) B.broot_record];
-                                d.launched = true; d.changed = B.tok[0] != d.original[0];
+                                d.launched = true; d.changed = false;
+                                for (int i = 0; i < (lab_bwindow ? B.T : 1); ++i) d.changed = d.changed || B.tok[i] != d.original[i];
                             }
                             if (lab_policy) B.policy_l0 = policy_now();
                             if (lab_oracle_log) ++oracle_stage0_launches;
@@ -12976,7 +12998,7 @@ int main(int argc, char** argv) {
                 if (!fp) { std::printf("ERR lab broot: cannot append trace\n"); return 1; }
                 int64_t launched = 0, changed = 0, prepared_not_launched = 0, invalid = 0;
                 std::fprintf(fp, "{\"schema\":\"strata.broot.v1\",\"type\":\"request\",\"request\":%lld,\"mode\":%d,\"capacity\":%zu,\"buffer_bytes\":%zu,\"requested\":%lld,\"context_tokens\":%lld,\"n_vocab\":%d}\n",
-                    (long long) force_k, broot_request_on ? 1 : 0, broot_decisions.size(), broot_decisions.size()*sizeof(BrootDecision), (long long) max_new, (long long) n, (int) n_vocab);
+                    (long long) force_k, broot_request_mode, broot_decisions.size(), broot_decisions.size()*sizeof(BrootDecision), (long long) max_new, (long long) n, (int) n_vocab);
                 for (size_t j = 0; j < broot_nd; ++j) {
                     const auto& d = broot_decisions[j];
                     launched += d.launched; changed += d.changed; prepared_not_launched += !d.launched;
@@ -12994,7 +13016,7 @@ int main(int argc, char** argv) {
                 std::fprintf(fp,"{\"schema\":\"strata.broot.v1\",\"type\":\"end\",\"request\":%lld,\"valid\":%s,\"truncated\":%s,\"seen\":%lld,\"recorded\":%zu,\"launched\":%lld,\"changed\":%lld,\"prepared_not_launched\":%lld,\"invalid\":%lld}\n",(long long)force_k,valid?"true":"false",broot_truncated?"true":"false",(long long)broot_seen,broot_nd,(long long)launched,(long long)changed,(long long)prepared_not_launched,(long long)invalid);
                 const bool failed = std::ferror(fp) != 0; const int closed = std::fclose(fp);
                 if (failed || closed != 0 || !valid) { std::printf("ERR lab broot: invalid trace/write\n"); return 1; }
-                std::fprintf(stderr,"strata lab broot: request %lld mode=%d decisions=%zu launched=%lld changed=%lld prepared_not_launched=%lld valid=1\n",(long long)force_k,broot_request_on?1:0,broot_nd,(long long)launched,(long long)changed,(long long)prepared_not_launched);
+                std::fprintf(stderr,"strata lab broot: request %lld mode=%d decisions=%zu launched=%lld changed=%lld prepared_not_launched=%lld valid=1\n",(long long)force_k,broot_request_mode,broot_nd,(long long)launched,(long long)changed,(long long)prepared_not_launched);
             }
             if (lab_shallow) {
                 std::FILE* fp = std::fopen(lab_shallow_trace, "ab");
