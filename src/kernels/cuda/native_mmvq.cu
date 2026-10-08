@@ -33,6 +33,7 @@
 #include "q8_1_il.cuh"
 #endif
 
+#include <mutex>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -2683,36 +2684,127 @@ int il_rows(int type, int ncols, int n_out) {
     return 0;
 }
 int g_tune_rows = 0;   // native_mmvq_il_tune (tests, benchmarks): rows a warp for every shape (0: the table)
+thread_local int g_last_il_rows = 0;
 }  // namespace
-void native_mmvq_il_tune(int rows) { g_tune_rows = rows; }
+void native_mmvq_il_tune(int rows) {
+    if (rows != 0 && rows != 1 && rows != 2 && rows != 4)
+        throw std::invalid_argument("native_mmvq_il_tune requires rows 0, 1, 2 or 4");
+    g_tune_rows = rows;
+}
+int native_mmvq_il_last_rows() { return g_last_il_rows; }
+namespace {
+struct IlCapture { int device, arch, T, ncols, type, n_in, n_out, rows, exact; unsigned calls; };
+IlCapture il_capture[128]{};
+int il_capture_size = 0, il_capture_overflow = 0;
+std::mutex il_capture_mutex;
+bool il_capture_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_LAB_NONMTP_CAPTURE");
+        return v && std::strcmp(v, "1") == 0; }();
+    return on;
+}
+}
+void native_mmvq_il_capture_record(int T, int ncols, int type, int n_in, int n_out) {
+    if (!il_capture_on()) return;
+    int dev = -1, major = 0, minor = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+    const IlCapture q{dev, major * 10 + minor, T, ncols, type, n_in, n_out,
+                      g_last_il_rows, g_multi_exact ? 1 : 0, 1};
+    std::lock_guard<std::mutex> lock(il_capture_mutex);
+    for (int i = 0; i < il_capture_size; ++i) {
+        IlCapture& e = il_capture[i];
+        if (e.device==q.device && e.T==q.T && e.ncols==q.ncols && e.type==q.type &&
+            e.n_in==q.n_in && e.n_out==q.n_out && e.rows==q.rows && e.exact==q.exact) {
+            ++e.calls; return;
+        }
+    }
+    if (il_capture_size == 128) { ++il_capture_overflow; return; }
+    il_capture[il_capture_size++] = q;
+}
+void native_mmvq_il_capture_dump(long long request) {
+    if (!il_capture_on()) return;
+    std::lock_guard<std::mutex> lock(il_capture_mutex);
+    const char* opt = std::getenv("STRATA_MMVQ_IL");
+    std::fprintf(stderr, "strata lab il capture: request=%lld size=%d overflow=%d IL=%s scope=cumulative_capture_not_execution\n",
+                 request, il_capture_size, il_capture_overflow, opt ? opt : "unset");
+    for (int i = 0; i < il_capture_size; ++i) {
+        const IlCapture& e = il_capture[i];
+        std::fprintf(stderr, "strata lab il shape: request=%lld device=%d arch=%d T=%d ncols=%d type=%d n_in=%d n_out=%d last_rows=%d exact=%d captures=%u\n",
+            request,e.device,e.arch,e.T,e.ncols,e.type,e.n_in,e.n_out,e.rows,e.exact,e.calls);
+    }
+}
+
 
 namespace {
-// sm_80 and newer only (measured on sm_86 and sm_120): Pascal/Volta/Turing keep native_mmvq's kernels unchanged
-bool il_arch_ok() {
-    static int ok[16] = {};   // 0 unknown, 1 yes, -1 no, by device ordinal
+int il_arch() {
+    static int arch[16] = {};
     int dev = 0;
-    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return false;
-    if (ok[dev] == 0) {
-        int major = 0;
-        ok[dev] = (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major >= 8) ? 1 : -1;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16) return -1;
+    if (arch[dev] == 0) {
+        int major = 0, minor = 0;
+        arch[dev] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+                    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) == cudaSuccess
+                        ? 10 * major + minor : -1;
     }
-    return ok[dev] > 0;
+    return arch[dev];
+}
+// Quadro RTX 8000, CUDA 12.4/GCC 13, mmvq_il_parity --sm75-bench: two sweeps of seven
+// alternating A/B pairs, cold-weight rotation, T=2/3/4. Keep only cells where every
+// pair in both sweeps saves >=3%, charging the full interleave launch to each MMVQ.
+// Exact GGUF dense shapes only: no row-class extrapolation to unmeasured reductions.
+struct IlShapeRows { int type, n_in, n_out; uint8_t r[3]; };
+constexpr IlShapeRows kIlRowsSm75[] = {
+    {23, 2560,    640, {0, 0, 2}},
+    {23, 2560,   6144, {2, 4, 2}},
+    {23, 2560,  10240, {2, 2, 2}},
+    {23, 2560,  12288, {2, 4, 2}},
+    {12, 2560,   6144, {2, 2, 2}},
+    {12, 2560,  10240, {2, 2, 2}},
+    {12, 2560,  12288, {4, 2, 2}},
+    {12, 6144,   2560, {4, 2, 2}},
+    {13, 2560,   6144, {2, 2, 2}},
+    {13, 2560,  10240, {2, 4, 4}},
+    {13, 2560,  12288, {4, 2, 4}},
+    {13, 6144,   2560, {0, 4, 4}},
+    {14, 2560,   6144, {0, 2, 4}},
+    {14, 2560,  10240, {2, 2, 4}},
+    {14, 2560,  12288, {2, 4, 4}},
+    {14, 6144,   2560, {0, 2, 2}},
+    {14, 2560, 248320, {2, 4, 2}},
+};
+int il_rows_sm75(int type, int ncols, int n_out, int n_in) {
+    for (const IlShapeRows& e : kIlRowsSm75)
+        if (e.type == type && e.n_out == n_out && (n_in == 0 || e.n_in == n_in))
+            return e.r[ncols - 2];
+    return 0;
+}
+int il_dispatch_rows(int type, int ncols, int n_out, int n_in) {
+    if (ncols < 2 || ncols > 4 || n_out <= 0 || n_in < 0 || n_in % QK != 0 || !g_multi_exact ||
+        (type != 23 && type != 12 && type != 13 && type != 14)) return 0;
+    const int arch = il_arch();
+    if (arch < 80 && arch != 75) return 0;
+    // Tuning must bypass the automatic architecture policy, not silently time the fallback.
+    if (g_tune_rows) return g_tune_rows;
+    if (arch >= 80) return il_rows(type, ncols, n_out);
+    const char* opt = std::getenv("STRATA_MMVQ_IL");
+    if (!opt || std::strcmp(opt, "1") != 0) return 0;
+    return il_rows_sm75(type, ncols, n_out, n_in);
 }
 }  // namespace
 
-bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out) {
-    if (ncols < 2 || ncols > 4 || !g_multi_exact || !il_arch_ok()) return false;
-    return (g_tune_rows ? g_tune_rows : il_rows(ggml_type, ncols, n_out)) != 0 &&
-           (ggml_type == 23 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14);
+bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out, int n_in) {
+    return il_dispatch_rows(ggml_type, ncols, n_out, n_in) != 0;
 }
 
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
                     int n_out, int ncols, void* stream) {
-    if (!native_mmvq_il_supported(ggml_type, ncols, n_out)) {
+    g_last_il_rows = 0;
+    const int r = il_dispatch_rows(ggml_type, ncols, n_out, n_in);
+    if (!r) {
         native_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream);
         return;
     }
-    const int r = g_tune_rows ? g_tune_rows : il_rows(ggml_type, ncols, n_out);
     validate_shape(n_in, ncols, QK);
     validate_pointer(weights);
     validate_pointer(x_il);
@@ -2726,6 +2818,7 @@ void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, cons
     case 14: launch_il_rows<IlQ6K>(r, weights, x_il, y, n_in, n_out, ncols, s); break;
     }
     launch_check();
+    g_last_il_rows = r;
 }
 
 #else  // HIP: no interleaved path
@@ -2733,12 +2826,15 @@ std::size_t native_q8_1_il_bytes(int n_in, int ncols) { return native_q8_1_bytes
 void native_q8_1_interleave(const void*, void*, int, int, void*) {
     throw std::invalid_argument("native_q8_1_interleave is CUDA only");
 }
-bool native_mmvq_il_supported(int, int, int) { return false; }
+bool native_mmvq_il_supported(int, int, int, int) { return false; }
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void*, float* y, int n_in, int n_out,
                     int ncols, void* stream) {
     native_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream);
 }
 void native_mmvq_il_tune(int) {}
+int native_mmvq_il_last_rows() { return 0; }
+void native_mmvq_il_capture_record(int, int, int, int, int) {}
+void native_mmvq_il_capture_dump(long long) {}
 #endif  // !__HIPCC__
 
 } // namespace strata::kernels

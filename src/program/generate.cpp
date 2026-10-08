@@ -46,6 +46,7 @@
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/shared_expert.hpp"
 #include "strata/kernels/native_moe.hpp"
+#include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/native_gdn.hpp"
 #include "strata/kernels/native_router.hpp"
 #include "strata/kernels/native_qsa.hpp"
@@ -13086,6 +13087,7 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            strata::kernels::native_mmvq_il_capture_dump((long long) force_k);
             if (lab_observer) {
                 if (!pl_ran || forced || force_win || force_over || force_win_hit || oracle_bypassed_chains || oracle_delivered ||
                     !mtp.observer_finish(lab_observer_trace, force_k, stderr, err)) {
