@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 
 namespace strata::core {
 namespace {
@@ -91,9 +92,17 @@ bool RemoteExperts::preflight(int device, double& free_gib, std::string& err) {
 void RemoteExperts::close() {
     if (device_ < 0) return;
     DeviceScope scope(device_);
+    if (!scope.ok && cache_.elastic()) {
+        std::fprintf(stderr, "FATAL helper elastic cleanup: device switch failed; bookkeeping retained\n"); return;
+    }
     if (scope.ok) {
-        if (stream_) cudaStreamSynchronize(stream_);
+        if (stream_ && cudaStreamSynchronize(stream_) != cudaSuccess && cache_.elastic()) {
+            std::fprintf(stderr, "FATAL helper elastic cleanup: stream synchronization failed; device/bookkeeping retained\n"); return;
+        }
         cache_.close();
+        if (cache_.elastic()) {
+            std::fprintf(stderr, "FATAL helper elastic cleanup: cache driver state retained on device%d\n", device_); return;
+        }
         if (d_x_) cudaFree(d_x_);
         if (d_out_) cudaFree(d_out_);
         if (d_q8_) cudaFree(d_q8_);
@@ -121,8 +130,9 @@ void RemoteExperts::close() {
 bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
                          const std::vector<std::pair<int32_t, int32_t>>& ranked,
                          const ExpertCache& primary, ExpertSource& source,
-                         std::vector<uint8_t>& claimed, std::string& err, bool auto_size) {
+                         std::vector<uint8_t>& claimed, std::string& err, bool auto_size, bool elastic) {
     close();
+    if (device_ >= 0 || !cache_.elastic_healthy()) { err = "remote experts: previous cleanup failed"; return false; }
     int count = 0;
     if (!check(cudaGetDeviceCount(&count), "cudaGetDeviceCount", err, device)) return false;
     if (device < 1 || device >= count || slots <= 0 || ranked.empty() ||
@@ -135,6 +145,15 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
     device_ = device;
     n_expert_ = experts;
     const auto& lay = strata::kernels::cpu::expert_layout();
+    if (elastic && (!auto_size || !lay.native || !remote_opt_)) {
+        err = "remote elastic requires auto/native/remote-expert-opt"; close(); return false;
+    }
+    const size_t elastic_scratch = std::max<size_t>(
+        (size_t) strata::kernels::moe_hit_grouped_scratch_bytes(CAP, H, FF),
+        strata::kernels::native_expert_scratch_bytes(CAP, FF));
+    const uint64_t reserve = elastic ? ((500ull + 192 + 64) << 20) + elastic_scratch +
+        CAP * (2 * H * sizeof(float) + (H / 32) * (36 + sizeof(float))) +
+        sizeof(RemoteMeta) + remote_opt_->metadata_bytes() + strata::kernels::cpu::MAXT * H * sizeof(float) : 512ull << 20;
     size_t free_bytes = 0, total_bytes = 0;
     if (!check(cudaMemGetInfo(&free_bytes, &total_bytes), "free memory", err, device)) { close(); return false; }
     uint64_t needed = 0;
@@ -146,7 +165,7 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         const size_t index = (size_t) pair.first * (size_t) experts + (size_t) pair.second;
         if (primary.slot_of(pair.first, pair.second) < 0 && !claimed[index] && !picked[index]) {
             const uint64_t bytes = lay.native ? (lay.blob_bytes(pair.first) + 255) / 256 * 256 : lay.max_blob;
-            if (auto_size && needed + bytes + (512ull << 20) > free_bytes) break;
+            if (auto_size && needed + bytes + reserve > free_bytes) break;
             selected.push_back(pair);
             needed += bytes;
             picked[index] = 1;
@@ -164,13 +183,22 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         for (const auto& pair : selected) sizes.push_back((int64_t) lay.blob_bytes(pair.first));
     }
     // Leave room for the CUDA context, staging and later driver allocations, especially under WDDM.
-    if (needed + (512ull << 20) > free_bytes) {
+    if (needed + reserve > free_bytes) {
         err = "CUDA" + std::to_string(device) + " experts: slots leave less than 512 MiB free; reduce --expert-cache-device" + std::to_string(device);
         close(); return false;
     }
-    const bool cache_ok = lay.native ? cache_.open_sized(sizes, layers, experts, err)
-                                     : cache_.open((int64_t) selected.size(), layers, experts,
-                                                   (int64_t) lay.max_blob, err);
+    cache_.set_elastic_strict(elastic);
+    uint64_t va_bytes = 0;
+    if (elastic) {
+        for (int64_t l = 0; l < layers; ++l) va_bytes += ((lay.blob_bytes(l) + 255) / 256 * 256) * experts;
+        elastic_ranked_.clear();
+        for (const auto& p : ranked)
+            if (p.first >= 0 && p.first < layers && p.second >= 0 && p.second < experts) elastic_ranked_.push_back(p);
+        elastic_stats_ = {}; elastic_last_ms_ = elastic_stable_ms_ = 0;
+    }
+    const bool cache_ok = elastic ? cache_.open_sized_elastic(sizes, layers, experts, va_bytes, 64ull << 20, err) :
+                         lay.native ? cache_.open_sized(sizes, layers, experts, err) :
+                         cache_.open((int64_t) selected.size(), layers, experts, (int64_t) lay.max_blob, err);
     if (!cache_ok) { err = "CUDA" + std::to_string(device) + " experts: " + err; close(); return false; }
     for (const auto& pair : selected) {
         const int32_t slot = cache_.admit(pair.first, pair.second);
@@ -233,6 +261,161 @@ bool RemoteExperts::open(int device, int slots, int64_t layers, int64_t experts,
         layers_present_[(size_t) pair.first] = 1;
         claimed[(size_t) pair.first * (size_t) experts + (size_t) pair.second] = 1;
     }
+    return true;
+}
+
+void RemoteExperts::refresh_layers() {
+    std::fill(layers_present_.begin(), layers_present_.end(), 0);
+    for (int32_t l = 0; l < (int32_t) layers_present_.size(); ++l)
+        for (int32_t e = 0; e < n_expert_; ++e)
+            if (holds(l, e)) layers_present_[(size_t) l] = 1;
+}
+
+bool RemoteExperts::elastic_audit(std::string& err) const {
+    if (!cache_.elastic() || !cache_.elastic_healthy() || cache_.resident() != cache_.slots()) {
+        err = "remote elastic: unhealthy mapping or unfilled slots"; return false;
+    }
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    std::vector<uint8_t> seen((size_t) cache_.slots(), 0);
+    for (int32_t l = 0; l < (int32_t) layers_present_.size(); ++l)
+        for (int32_t e = 0; e < n_expert_; ++e) {
+            const int32_t slot = cache_.slot_of(l, e);
+            if (slot < 0) continue;
+            if (slot >= cache_.slots() || seen[(size_t) slot] ||
+                cache_.slot_offset(slot + 1) - cache_.slot_offset(slot) < lay.blob_bytes(l)) {
+                err = "remote elastic: duplicate/out-of-bounds/undersized ownership"; return false;
+            }
+            seen[(size_t) slot] = 1;
+        }
+    if (std::find(seen.begin(), seen.end(), 0) != seen.end()) {
+        err = "remote elastic: missing slot ownership"; return false;
+    }
+    return true;
+}
+
+bool RemoteExperts::elastic_append(const std::vector<std::pair<int32_t, int32_t>>& selected,
+                                  ExpertSource& source, std::string& err, bool verify) {
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    std::vector<int64_t> sizes;
+    for (const auto& p : selected) {
+        if (p.first < 0 || p.first >= (int32_t) layers_present_.size() || p.second < 0 || p.second >= n_expert_ || holds(p.first, p.second)) {
+            err = "remote elastic: invalid growth candidate"; return false;
+        }
+        sizes.push_back((int64_t) lay.blob_bytes(p.first));
+    }
+    const int64_t first = cache_.slots();
+    if (!cache_.elastic_grow(sizes, err)) return false;
+    // No ownership is visible until ALL copies have completed. A failed copy is fatal to the engine.
+    for (size_t i = 0; i < selected.size(); ++i) {
+        const auto& p = selected[i]; const uint8_t* blob = source.blob_stable(p.first, p.second);
+        if (!blob || !cache_.fill_slot((int32_t) first + (int32_t) i, blob, stream_, err, sizes[i])) return false;
+    }
+    if (!check(cudaStreamSynchronize(stream_), "elastic fill synchronization", err, device_)) return false;
+    if (verify)
+        for (size_t i = 0; i < selected.size(); ++i)
+            if (!cache_.verify_slot((int32_t) first + (int32_t) i, source.blob(selected[i].first, selected[i].second), err, sizes[i])) return false;
+    for (size_t i = 0; i < selected.size(); ++i) {
+        if (cache_.admit(selected[i].first, selected[i].second) != first + (int64_t) i) {
+            err = "remote elastic: admission cursor mismatch"; return false;
+        }
+        layers_present_[(size_t) selected[i].first] = 1;
+        elastic_stats_.copy_bytes += (uint64_t) sizes[i];
+    }
+    return true;
+}
+
+bool RemoteExperts::elastic_step(const std::vector<float>& usage, const std::vector<uint8_t>& excluded,
+                                ExpertSource& source, bool request_start, std::string& err) {
+    if (!cache_.elastic()) return true;
+    const auto start = std::chrono::steady_clock::now();
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(start.time_since_epoch()).count();
+    if (!request_start && now - elastic_last_ms_ < 1000) return true;
+    elastic_last_ms_ = now;
+    struct Cost { ElasticStats& stats; std::chrono::steady_clock::time_point start;
+        ~Cost() { stats.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); }
+    } cost{elastic_stats_, start};
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    if (!cache_.elastic_healthy() || excluded.size() != layers_present_.size() * (size_t) n_expert_ ||
+        (!usage.empty() && usage.size() != excluded.size())) { err = "remote elastic: unhealthy arena/usage geometry"; return false; }
+    for (float u : usage) if (!std::isfinite(u) || u < 0) { err = "remote elastic: invalid routing usage"; return false; }
+    size_t free_bytes = 0, total = 0;
+    if (!check(cudaMemGetInfo(&free_bytes, &total), "elastic free memory", err, device_)) return false;
+    ++elastic_stats_.checks;
+    elastic_stats_.free_min = std::min<uint64_t>(elastic_stats_.free_min, free_bytes);
+    elastic_stats_.free_max = std::max<uint64_t>(elastic_stats_.free_max, free_bytes);
+    constexpr uint64_t reserve = 500ull << 20, noise = 192ull << 20;
+    if (free_bytes < reserve) {
+        elastic_stable_ms_ = 0;
+        if (!check(cudaStreamSynchronize(stream_), "elastic shrink quiescence", err, device_)) return false;
+        const uint64_t give = std::min<uint64_t>(1024ull << 20, reserve + noise - free_bytes);
+        const uint64_t mapped = cache_.elastic_mapped_bytes();
+        const uint64_t rounded = (give + cache_.chunk_bytes() - 1) / cache_.chunk_bytes() * cache_.chunk_bytes();
+        const int64_t keep = cache_.slots_within((int64_t) (mapped > rounded ? mapped - rounded : 0));
+        if (keep == cache_.slots()) { err = "remote elastic: pressure shrink made no progress"; return false; }
+        if (!cache_.elastic_shrink(keep, err)) return false;
+        refresh_layers(); ++elastic_stats_.shrinks;
+        return true;
+    }
+    if (free_bytes <= reserve + noise + cache_.chunk_bytes()) { elastic_stable_ms_ = 0; return true; }
+    if (!elastic_stable_ms_) elastic_stable_ms_ = now;
+    if (now - elastic_stable_ms_ < 5000) return true; // request boundaries never bypass post-shrink stability
+    const uint64_t room = std::min<uint64_t>(512ull << 20, free_bytes - reserve - noise - cache_.chunk_bytes());
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    std::vector<std::pair<int32_t, int32_t>> order = elastic_ranked_, selected;
+    if (!usage.empty()) std::stable_sort(order.begin(), order.end(), [&](const auto& a, const auto& b) {
+        return usage[(size_t) a.first * n_expert_ + a.second] > usage[(size_t) b.first * n_expert_ + b.second];
+    });
+    std::vector<uint8_t> picked(excluded.size(), 0);
+    uint64_t wanted = 0;
+    for (const auto& p : order) {
+        const size_t index = (size_t) p.first * n_expert_ + p.second;
+        if (excluded[index] || picked[index] || holds(p.first, p.second)) continue;
+        const uint64_t bytes = (lay.blob_bytes(p.first) + 255) / 256 * 256;
+        if (bytes > room - wanted) continue;
+        wanted += bytes; picked[index] = 1; selected.push_back(p);
+    }
+    if (selected.empty()) return true;
+    if (!check(cudaStreamSynchronize(stream_), "elastic growth quiescence", err, device_)) return false;
+    if (!elastic_append(selected, source, err)) return false;
+    ++elastic_stats_.grows; elastic_stable_ms_ = 0;
+    return true;
+}
+
+bool RemoteExperts::elastic_smoke(ExpertSource& source, std::string& err) {
+    DeviceScope scope(device_);
+    if (!scope.ok) { err = scope.error(device_); return false; }
+    if (!elastic_audit(err) || !check(cudaDeviceSynchronize(), "smoke quiescence", err, device_)) return false;
+    const auto start = std::chrono::steady_clock::now();
+    const uint64_t mapped = cache_.elastic_mapped_bytes();
+    if (mapped <= cache_.chunk_bytes()) { err = "remote elastic smoke: insufficient mapped capacity"; return false; }
+    const int64_t original = cache_.slots(), keep = cache_.slots_within((int64_t) (mapped - cache_.chunk_bytes()));
+    std::vector<std::pair<int32_t, int32_t>> tail((size_t) (original - keep));
+    for (int32_t l = 0; l < (int32_t) layers_present_.size(); ++l)
+        for (int32_t e = 0; e < n_expert_; ++e) {
+            const int32_t slot = cache_.slot_of(l, e);
+            if (slot >= keep) tail[(size_t) (slot - keep)] = {l, e};
+        }
+    std::fprintf(stderr, "strata remote elastic: SMOKE_BEGIN mapped=%llu slots=%lld timeout_ms=5000\n", (unsigned long long) mapped, (long long) original);
+    std::fflush(stderr); // runner must enforce 5s PID+birth watchdog; CUDA calls are not cancellable
+    if (!cache_.elastic_shrink(keep, err)) return false;
+    const uint64_t shrunk = cache_.elastic_mapped_bytes();
+    if (mapped - shrunk < (64ull << 20) || mapped - shrunk > (128ull << 20)) {
+        err = "remote elastic smoke: physical delta outside64..128MiB"; return false;
+    }
+    refresh_layers();
+    if (!elastic_append(tail, source, err, true) || !elastic_audit(err)) return false;
+    if (cache_.slots() != original || cache_.elastic_mapped_bytes() != mapped) {
+        err = "remote elastic smoke: capacity restoration mismatch"; return false;
+    }
+    for (size_t i = 0; i < tail.size(); ++i)
+        if (cache_.slot_of(tail[i].first, tail[i].second) != keep + (int64_t) i) {
+            err = "remote elastic smoke: ownership restoration mismatch"; return false;
+        }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (ms > 5000) { err = "remote elastic smoke: exceeded5s"; return false; }
+    std::fprintf(stderr, "strata remote elastic: SMOKE_PASS before=%llu shrunk=%llu restored=%llu slots=%lld byteverify=1 ms=%.3f scope=SAFETY_NOT_RESULT\n",
+                 (unsigned long long) mapped, (unsigned long long) shrunk, (unsigned long long) cache_.elastic_mapped_bytes(), (long long) original, ms);
     return true;
 }
 

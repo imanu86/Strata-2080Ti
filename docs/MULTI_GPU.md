@@ -286,3 +286,45 @@ Primary/helper quiescence failures and residency changes are fatal. Helper UUID,
 actual mapped mode and complete static ownership are covered by prefix identity.
 This changes architecture and placement: B-only measurements are not isolated
 flag gains or FREE quality certification. Native defaults remain restricted.
+
+### Helper-only elastic cache (opt-in, experimental)
+
+`STRATA_REMOTE_ELASTIC=1` enables real VMM growth/shrink of the native helper cache,
+independently of laboratory SSD support. The first implementation requires serial
+`--serve`, pipeline0, one `--expert-cache-device1 auto` helper with
+`--remote-expert-opt`, no layer split/peer/batch/resident-async tier, and no primary
+`--elastic`. Invalid combinations fail at startup; unsupported VMM never falls
+back to a fixed cache. Leave the environment variable absent or set it to0 for prior behavior.
+
+The helper uses live free VRAM after desktop use, a 500 MiB reserve, 192 MiB
+hysteresis, 64 MiB physical chunks, 1-second checks and 5-second stable growth
+(including request boundaries), at most512MiB per runtime growth. Startup auto
+sizing fills its whole useful budget. This reuses policy constants, not the entire
+primary controller or simultaneous dual-GPU elasticity.
+Startup accounting includes staging, scratch and the optimized sum buffer.
+Growth ranks unclaimed experts by routing usage and the original profile, excludes
+primary authoritative residency/pending copies and every helper, and publishes
+ownership only after native weight copies finish. Pressure removes whole tail
+chunks. Primary elastic remains unsupported alongside helpers in this first port.
+
+Checks run after commit/draft and adaptation have completed, or at request start.
+Full wrapper fences/exclusion cost and helper-step cost are reported separately
+(the former contains the latter); metadata/ranking scans and synchronous refill
+cost are included in decode time;
+no periodic weight hashes/readback or timed logging are added. Request-boundary
+metadata audits and postdecode counters report capacity, free-memory extrema,
+resize cost and adaptation. Placement changes are not a free-quality guarantee.
+
+`STRATA_REMOTE_ELASTIC_SMOKE=1` requests one safety-only shrink/regrow before the
+initial SSD fingerprint: 64--128 MiB physical release, exact original native-byte
+verification and restored ownership/capacity. It adds no GEN. CUDA calls cannot
+be cancelled in-process: the laboratory runner MUST enforce the announced
+SMOKE_BEGIN 5-second deadline using its owned PID/birth watchdog. Any error stops
+before decode. This path and the extended CUDA VMM test still require GPU
+qualification; source preparation is not runtime validation.
+
+The laboratory helper SSD exception keeps its static2560 mode unchanged. Its
+new auto-elastic mode freezes a versioned initial policy/arena identity rather
+than mutable ownership; primary+MTP sequence snapshots and true prefix lookahead
+remain native. Mutable ownership is audited only when quiescent. General remote
+SSD guards are not removed.

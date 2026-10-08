@@ -2429,12 +2429,30 @@ int main(int argc, char** argv) {
     // Independent serial-split SSD benchmark hook. It never enables or weakens oracle/policy guards.
     const char* lab_nonmtp_ssd_switch = std::getenv("STRATA_LAB_NONMTP_SSD_SWITCH");
     const bool lab_nonmtp_ssd = lab_nonmtp_ssd_switch != nullptr && lab_nonmtp_ssd_switch[0] != 0;
+    // Real runtime opt-in, independent of the SSD benchmark exception. First port: one native helper, serial serve.
+    const char* remote_elastic_env = std::getenv("STRATA_REMOTE_ELASTIC");
+    const bool remote_elastic = remote_elastic_env && std::strcmp(remote_elastic_env, "1") == 0;
+    const char* remote_smoke_env = std::getenv("STRATA_REMOTE_ELASTIC_SMOKE");
+    const bool remote_elastic_smoke = remote_smoke_env && std::strcmp(remote_smoke_env, "1") == 0;
+    if ((remote_elastic_env && !remote_elastic && std::strcmp(remote_elastic_env, "0") != 0) ||
+        (remote_smoke_env && !remote_elastic_smoke && std::strcmp(remote_smoke_env, "0") != 0) ||
+        (remote_elastic_smoke && !remote_elastic) || (remote_elastic &&
+        (!o.serve || o.batch != 0 || o.pipeline_windows != 0 || !o.layer_split.empty() || o.peer_device >= 1 ||
+         !o.expert_cache_remote_auto[0] || o.expert_cache_remote[0] <= 0 || o.expert_cache_remote[1] != 0 ||
+         o.expert_cache_remote[2] != 0 || !o.remote_expert_opt || o.elastic || o.adapt_async != 0 || o.resident_cpu_experts))) {
+        std::fprintf(stderr, "strata remote elastic: requires STRATA_REMOTE_ELASTIC=1, serial serve/native auto helper1/optON, no primaryelastic/peer/split/async/resident\n"); return 2;
+    }
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+    if (remote_elastic) { std::fprintf(stderr, "strata remote elastic: CUDA VMM required\n"); return 2; }
+#endif
     const char* lab_helper_env = std::getenv("STRATA_LAB_HELPER_SSD");
     const bool lab_helper_ssd = lab_helper_env != nullptr;
     if (lab_helper_ssd && (std::strcmp(lab_helper_env, "1") != 0 || !lab_nonmtp_ssd ||
-        !o.layer_split.empty() || o.peer_device >= 1 || o.expert_cache_remote[0] != 2560 ||
+        !o.layer_split.empty() || o.peer_device >= 1 ||
+        (remote_elastic ? (!o.expert_cache_remote_auto[0] || !remote_elastic_smoke || o.adapt_every != 4 || o.adapt_swaps != 96 || o.adapt_decay != 0.7f) :
+                         (o.expert_cache_remote[0] != 2560 || o.expert_cache_remote_auto[0] || o.adapt_swaps != 0)) ||
         o.expert_cache_remote[1] != 0 || o.expert_cache_remote[2] != 0 || !o.remote_expert_opt ||
-        o.expert_cache_remote_auto[0] || o.elastic || o.adapt_swaps != 0 || o.adapt_async != 0 || o.pcie_frac != 0.0)) {
+        o.elastic || o.adapt_async != 0 || o.pcie_frac != 0.0)) {
         std::fprintf(stderr, "strata lab helper ssd: strict fixed2560/optON/primary-only state required\n"); return 2;
     }
     constexpr int64_t lab_nonmtp_ssd_root = 131072;
@@ -5495,7 +5513,7 @@ int main(int argc, char** argv) {
             if (remote_opt) remote_opt->attach(remote_experts[(size_t) r]);
             if (!remote_experts[(size_t) r].open(remote_dev[r], o.expert_cache_remote[(size_t) r],
                      g.n_layers, g.n_expert, by_device[(size_t) r], xcache, *srcp, claimed, err,
-                     o.expert_cache_remote_auto[(size_t) r])) {
+                     o.expert_cache_remote_auto[(size_t) r], remote_elastic)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return 1;
             }
@@ -5529,7 +5547,7 @@ int main(int argc, char** argv) {
     // #731 (opt-in, STRATA_DISJOINT_ADAPT=1): the adaptive tiers leave an expert a helper GPU holds out of the primary's
     // promotion candidates (it would sit in both caches).  Asked live, from the helper's own cache (RemoteExperts::holds,
     // #854), so an expert the helper's tier swaps in or out later is followed - never a copy taken at load.
-    const bool disjoint_adapt = [] { const char* v = std::getenv("STRATA_DISJOINT_ADAPT"); return v != nullptr && std::atoi(v) != 0; }();
+    const bool disjoint_adapt = remote_elastic || [] { const char* v = std::getenv("STRATA_DISJOINT_ADAPT"); return v != nullptr && std::atoi(v) != 0; }();
     auto helper_holds = [&](int64_t l, int32_t e) -> bool {
         if (!disjoint_adapt) return false;
         for (int r = 0; r < drive.d.remote_count; ++r)
@@ -7635,7 +7653,12 @@ int main(int argc, char** argv) {
                     bits.push_back(remote_experts[0].holds(l, e) ? '1' : '0');
             return bits;
         };
-        const std::string helper_initial_residency = lab_helper_ssd ? helper_residency() : std::string{};
+        const std::vector<std::pair<int32_t, int32_t>>* helper_pending = nullptr;
+        if (remote_elastic_smoke && (!remote_opt->audit_disjoint(host_res, {}, err) ||
+            !remote_experts[0].elastic_smoke(*srcp, err) || !remote_opt->audit_disjoint(host_res, {}, err))) {
+            std::fprintf(stderr, "strata remote elastic: qualification failed: %s\n", err.c_str()); return 1;
+        }
+        const std::string helper_initial_residency = lab_helper_ssd && !remote_elastic ? helper_residency() : std::string{};
         auto helper_quiesce = [&]() -> bool {
             if (!lab_helper_ssd) return true;
             if (!mtp.idle(err)) return false;
@@ -7643,6 +7666,8 @@ int main(int argc, char** argv) {
                 const strata::core::OnDevice on(d);
                 if (cudaDeviceSynchronize() != cudaSuccess) { err = "helper SSD: device quiescence failed"; return false; }
             }
+            if (remote_elastic) return remote_experts[0].elastic_audit(err) &&
+                remote_opt->audit_disjoint(host_res, helper_pending ? *helper_pending : std::vector<std::pair<int32_t, int32_t>>{}, err);
             if (remote_experts[0].resident() != 2560 || helper_residency() != helper_initial_residency) {
                 err = "helper SSD: fixed residency changed"; return false;
             }
@@ -7713,12 +7738,18 @@ int main(int argc, char** argv) {
                 size_t free_bytes = 0, total_bytes = 0;
                 if (!helper_quiesce() || cudaGetDeviceProperties(&primary_prop, 0) != cudaSuccess ||
                     cudaGetDeviceProperties(&helper_prop, remote_dev[0]) != cudaSuccess ||
-                    cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess || free_bytes < (1536ull << 20) ||
+                    cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess || free_bytes < ((remote_elastic ? 500ull : 1536ull) << 20) ||
                     primary_prop.major != 7 || primary_prop.minor != 5 || helper_prop.major != 8 || helper_prop.minor != 6 ||
                     !remote_experts[0].optimized_decode() || !use_mtp || mtp.device() != 0 || g.n_layers != 48) {
                     std::fprintf(stderr, "strata lab helper ssd: startup topology/capacity/quiescence invalid\n"); return 1;
                 }
-                settings.push_back("lab-helper-static-opt1-slots2560-v1");
+                settings.push_back(remote_elastic ? "lab-helper-elastic-opt1-auto-v2" : "lab-helper-static-opt1-slots2560-v1");
+                if (remote_elastic) {
+                    settings.push_back("reserve500-hysteresis192-chunk64-period1000-stable5000-grow512");
+                    // Frozen initial arena geometry/policy; changing ownership is not sequence state.
+                    settings.push_back(std::to_string(remote_experts[0].elastic_mapped_bytes()));
+                    settings.push_back(std::to_string(remote_experts[0].resident()));
+                }
                 settings.emplace_back(helper_prop.name);
                 settings.push_back(std::to_string(helper_prop.major) + ":" + std::to_string(helper_prop.minor));
 #if defined(STRATA_USE_HIP)
@@ -7742,8 +7773,21 @@ int main(int argc, char** argv) {
 #endif
                 settings.push_back(helper_initial_residency); // full bitset covered by native identity digest
                 settings.push_back(remote_experts[0].zero_copy() ? "helper-zerocopy1" : "helper-zerocopy0");
-                std::fprintf(stderr, "strata lab helper ssd: startup slots=2560 opt=1 zerocopy=%d free_mib=%llu primary_cc=75 helper_cc=86 state=primary_MTP\n",
-                    (int) remote_experts[0].zero_copy(), (unsigned long long) (free_bytes >> 20));
+                if (remote_elastic) {
+                    size_t primary_free = 0, primary_total = 0;
+                    { const strata::core::OnDevice primary_on(0);
+                      if (cudaMemGetInfo(&primary_free, &primary_total) != cudaSuccess) {
+                          std::fprintf(stderr, "strata remote elastic: primary footprint unavailable\n"); return 1;
+                      }
+                    }
+                    std::fprintf(stderr, "strata lab helper ssd: startup slots=%lld opt=1 zerocopy=%d free_mib=%llu primary_cc=75 helper_cc=86 state=primary_MTP elastic=1 mapped=%llu helper_gib=%.3f primary_slots=%lld primary_gib=%.3f primary_free_mib=%llu\n",
+                        (long long) remote_experts[0].resident(), (int) remote_experts[0].zero_copy(), (unsigned long long) (free_bytes >> 20),
+                        (unsigned long long) remote_experts[0].elastic_mapped_bytes(), remote_experts[0].gib(),
+                        (long long) xcache.slots(), xcache.gib(), (unsigned long long) (primary_free >> 20));
+                } else {
+                    std::fprintf(stderr, "strata lab helper ssd: startup slots=2560 opt=1 zerocopy=%d free_mib=%llu primary_cc=75 helper_cc=86 state=primary_MTP\n",
+                        (int) remote_experts[0].zero_copy(), (unsigned long long) (free_bytes >> 20));
+                }
             }
             // Conservative compatibility: all engine options except the cache destination,
             // and all STRATA_/CUDA_ environment overrides. Exact request tokens are checked separately.
@@ -8187,6 +8231,7 @@ int main(int argc, char** argv) {
         }
         // plan v0.3 P6: swaps in flight - (residency index, slot) admitted when adapt_ev has completed
         std::vector<std::pair<int32_t, int32_t>> pending;
+        helper_pending = &pending;
         int pending_age = 0;   // the windows the pending swaps have waited (adapt_lag)
         std::vector<void*> pin_live;   // the swaps' locked arena pages (pin_blob), unlocked once they have landed
         cudaEvent_t adapt_ev = nullptr;
@@ -8611,8 +8656,23 @@ int main(int argc, char** argv) {
         // lab P3 (STRATA_PIPELINE_ELASTIC): with `defer` the step only decides - the same bookkeeping, no device work
         // and no apply_pending - and leaves its action in *defer; the pipelined decode runs it at a gap of stage 0 (el_gap)
         // no window is in flight on either stage
+        double remote_elastic_wrapper_ms = 0; // full fences+exclusion+helper step, distinct from helper-only timer
         struct ElPlan { int kind = 0; int64_t arg = 0; };   // kind 1: shrink to `arg` slots; 2: grow by `arg` bytes
         auto elastic_step = [&](bool request_start, std::string& e, ElPlan* defer = nullptr) -> bool {
+            if (remote_elastic && remote_opt->elastic_due(request_start)) {
+                const auto helper_wrapper_start = Clock::now();
+                if (defer != nullptr) { e = "remote elastic: deferred/pipelined resize unsupported"; return false; }
+                if (!ver.wait_commit(e) || (use_mtp && !mtp.idle(e))) return false;
+                if (!pending.empty() && cudaEventSynchronize(adapt_ev) != cudaSuccess) {
+                    e = "remote elastic: primary pending fence failed"; return false;
+                }
+                apply_pending(true);
+                if ((d_res != nullptr && res_put(d_res) != cudaSuccess) || cudaDeviceSynchronize() != cudaSuccess) {
+                    e = "remote elastic: primary residency publication/quiescence failed"; return false;
+                }
+                if (!remote_opt->elastic_step(drive.d.usage, host_res, pending, *srcp, request_start, e)) return false;
+                remote_elastic_wrapper_ms += std::chrono::duration<double, std::milli>(Clock::now() - helper_wrapper_start).count();
+            }
             if (!el_on) return true;
             if (el_tier_busy && el_tier_busy()) return true;   // lab P3: between the asynchronous tier's rounds only
             const Clock::time_point t = Clock::now();
@@ -11689,6 +11749,10 @@ int main(int argc, char** argv) {
                 std::printf("ERR lab nonmtp ssd: full fixed prompt/fixture/budget/minp required\n"); return 1;
             }
             const int64_t nonmtp_overlap_before = ver.overlapped_windows;
+            const double helper_wrapper_ms_before = remote_elastic_wrapper_ms;
+            const auto helper_elastic_before = remote_experts[0].elastic_stats();
+            const uint64_t helper_adapt_rounds_before = remote_opt ? remote_opt->adapt_rounds() : 0;
+            const uint64_t helper_adapt_swaps_before = remote_opt ? remote_opt->adapt_swaps() : 0;
             const int64_t helper_decode_entries_before = lab_helper_ssd ? remote_experts[0].computed() : 0;
             const int64_t helper_decode_launches_before = lab_helper_ssd ? remote_experts[0].launched_layers() : 0;
             const uint64_t helper_decode_bytes_before = lab_helper_ssd ? remote_experts[0].returned_bytes() : 0;
@@ -14004,10 +14068,23 @@ int main(int argc, char** argv) {
                              (long long) t2_hit[3], (long long) dec_windows);
             if (lab_helper_ssd) {
                 if (!helper_quiesce()) { std::printf("ERR %s\n", err.c_str()); return 1; }
-                std::fprintf(stderr, "strata lab helper ssd: request=%lld slots=2560 residency=unchanged opt=1 decode_entries=%lld decode_launches=%lld decode_bytes=%llu\n",
-                    (long long) force_k, (long long) (remote_experts[0].computed() - helper_decode_entries_before),
+                std::fprintf(stderr, "strata lab helper ssd: request=%lld slots=%lld residency=%s opt=1 decode_entries=%lld decode_launches=%lld decode_bytes=%llu\n",
+                    (long long) force_k, (long long) remote_experts[0].resident(), remote_elastic ? "mutable_audited" : "unchanged",
+                    (long long) (remote_experts[0].computed() - helper_decode_entries_before),
                     (long long) (remote_experts[0].launched_layers() - helper_decode_launches_before),
                     (unsigned long long) (remote_experts[0].returned_bytes() - helper_decode_bytes_before));
+            }
+            if (remote_elastic) {
+                const auto& st = remote_experts[0].elastic_stats();
+                std::fprintf(stderr, "strata remote elastic: request=%lld checks=%llu grows=%llu shrinks=%llu copy_bytes=%llu helper_step_ms=%.3f wrapper_ms=%.3f free_lifetime_min_mib=%llu free_lifetime_max_mib=%llu slots=%lld mapped=%llu adapt_rounds=%llu adapt_swaps=%llu scope=decode resize_cost_included=1\n",
+                    (long long) force_k, (unsigned long long) (st.checks - helper_elastic_before.checks),
+                    (unsigned long long) (st.grows - helper_elastic_before.grows), (unsigned long long) (st.shrinks - helper_elastic_before.shrinks),
+                    (unsigned long long) (st.copy_bytes - helper_elastic_before.copy_bytes), st.ms - helper_elastic_before.ms,
+                    remote_elastic_wrapper_ms - helper_wrapper_ms_before,
+                    (unsigned long long) (st.free_min >> 20), (unsigned long long) (st.free_max >> 20),
+                    (long long) remote_experts[0].resident(), (unsigned long long) remote_experts[0].elastic_mapped_bytes(),
+                    (unsigned long long) (remote_opt->adapt_rounds() - helper_adapt_rounds_before),
+                    (unsigned long long) (remote_opt->adapt_swaps() - helper_adapt_swaps_before));
             }
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
                 std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "

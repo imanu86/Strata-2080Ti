@@ -28,7 +28,7 @@ public:
     bool open(int device, int slots, int64_t layers, int64_t experts,
               const std::vector<std::pair<int32_t, int32_t>>& ranked,
               const ExpertCache& primary, ExpertSource& source,
-              std::vector<uint8_t>& claimed, std::string& err, bool auto_size = false);
+              std::vector<uint8_t>& claimed, std::string& err, bool auto_size = false, bool elastic = false);
     void close();
 
     /// `kind` is the primary verifier's classification (-1 = CPU candidate),
@@ -42,6 +42,16 @@ public:
     bool optimized_decode() const { return remote_opt_ != nullptr; }
     bool zero_copy() const { return zero_copy_; } // observational actual-mode identity
     bool finish(float* out, std::string& err);
+    bool elastic() const { return cache_.elastic(); }
+    uint64_t elastic_mapped_bytes() const { return cache_.elastic_mapped_bytes(); }
+    bool elastic_audit(std::string& err) const; // metadata only, at request boundaries
+    bool elastic_smoke(ExpertSource& source, std::string& err); // opt-in, before fingerprint
+    struct ElasticStats {
+        uint64_t checks = 0, grows = 0, shrinks = 0, copy_bytes = 0;
+        uint64_t free_min = UINT64_MAX, free_max = 0;
+        double ms = 0;
+    };
+    const ElasticStats& elastic_stats() const { return elastic_stats_; }
     int64_t resident() const { return cache_.resident(); }
     int64_t computed() const { return computed_; }
     int64_t launched_layers() const { return launched_layers_; }
@@ -54,6 +64,14 @@ public:
 
 private:
     friend class RemoteExpertOpt;
+    bool elastic_step(const std::vector<float>& usage, const std::vector<uint8_t>& excluded,
+                      ExpertSource& source, bool request_start, std::string& err);
+    bool elastic_append(const std::vector<std::pair<int32_t, int32_t>>& selected,
+                        ExpertSource& source, std::string& err, bool verify = false);
+    void refresh_layers();
+    std::vector<std::pair<int32_t, int32_t>> elastic_ranked_;
+    ElasticStats elastic_stats_;
+    int64_t elastic_last_ms_ = 0, elastic_stable_ms_ = 0;
     RemoteExpertOpt* remote_opt_ = nullptr;
     int device_ = -1;
     int64_t n_expert_ = 0;
