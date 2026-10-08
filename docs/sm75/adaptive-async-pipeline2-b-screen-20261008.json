@@ -132,8 +132,8 @@
         "request": 2
       },
       "exposure": {
-        "capture_calls_cumulative": 92,
-        "capture_shapes_cumulative": 13,
+        "IL_capture_dispatch_calls_cumulative": 92,
+        "IL_captured_dispatch_shapes_cumulative": 13,
         "actual_window_T_histogram": {
           "1": 192,
           "2": 117,
@@ -157,11 +157,10 @@
           3,
           4
         ],
-        "scope": "Async ajob startup+resident RAM qualified, per-request cumulative round/swap deltas audited; actual pipeline2 target windows. C1sm75off, C2retainoff, sm86autoIL unchanged.",
+        "scope": "Async ajob startup+resident RAM qualified, per-request cumulative round/swap deltas audited; actual pipeline2 target windows. C1sm75off, C2retainoff, sm86autoIL unchanged. IL-only records; global graph capture coverage UNKNOWN.",
         "measurement": true,
-        "new_capture_calls_since_previous_request": 0,
-        "new_captures_in_measured_GEN": false,
-        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize.",
+        "new_IL_capture_dispatch_calls_since_previous_request": 0,
+        "capture_timing_limit": "IL-only dispatch records lack timing attribution and global graph coverage; zero IL does not qualify no captures. Do not subtract/normalize or claim clean timing.",
         "async_request": {
           "rounds_cumulative": 135,
           "swaps_cumulative": 3797,
@@ -172,7 +171,11 @@
           "resident_GiB": 17.87,
           "cumulative_mean_round_ms": 35.2,
           "timing_scope": "Cumulative wall start-to-flip overlaps decode; not exclusive cost or per-request mean. A pending round can land before next request, hence deltas are request log boundaries."
-        }
+        },
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": false
       },
       "primary_cache": {
         "request": 2,
@@ -219,7 +222,13 @@
         "strata serve: asynchronous adaptive tier: 135 rounds, 3797 experts swapped in, 35.2 ms per round (start to flip, between windows)",
         "strata serve: expert tiers: GPU 687773 hits this request; since the start RAM 386173 blobs, files 9991 blobs 305206.3 MB read (the GGUF in place)",
         "strata serve: KV streaming: 97.71% of 3935468 block reads hit VRAM, 362.9 MiB read from RAM"
-      ]
+      ],
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
+      }
     },
     {
       "case": "L02",
@@ -279,8 +288,8 @@
         "request": 3
       },
       "exposure": {
-        "capture_calls_cumulative": 92,
-        "capture_shapes_cumulative": 13,
+        "IL_capture_dispatch_calls_cumulative": 92,
+        "IL_captured_dispatch_shapes_cumulative": 13,
         "actual_window_T_histogram": {
           "1": 273,
           "2": 184,
@@ -304,11 +313,10 @@
           3,
           4
         ],
-        "scope": "Async ajob startup+resident RAM qualified, per-request cumulative round/swap deltas audited; actual pipeline2 target windows. C1sm75off, C2retainoff, sm86autoIL unchanged.",
+        "scope": "Async ajob startup+resident RAM qualified, per-request cumulative round/swap deltas audited; actual pipeline2 target windows. C1sm75off, C2retainoff, sm86autoIL unchanged. IL-only records; global graph capture coverage UNKNOWN.",
         "measurement": true,
-        "new_capture_calls_since_previous_request": 0,
-        "new_captures_in_measured_GEN": false,
-        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize.",
+        "new_IL_capture_dispatch_calls_since_previous_request": 0,
+        "capture_timing_limit": "IL-only dispatch records lack timing attribution and global graph coverage; zero IL does not qualify no captures. Do not subtract/normalize or claim clean timing.",
         "async_request": {
           "rounds_cumulative": 289,
           "swaps_cumulative": 5892,
@@ -319,7 +327,11 @@
           "resident_GiB": 17.87,
           "cumulative_mean_round_ms": 29.4,
           "timing_scope": "Cumulative wall start-to-flip overlaps decode; not exclusive cost or per-request mean. A pending round can land before next request, hence deltas are request log boundaries."
-        }
+        },
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": false
       },
       "primary_cache": {
         "request": 3,
@@ -385,7 +397,13 @@
         "strata serve: asynchronous adaptive tier: 289 rounds, 5892 experts swapped in, 29.4 ms per round (start to flip, between windows)",
         "strata serve: expert tiers: GPU 671715 hits this request; since the start RAM 403096 blobs, files 10663 blobs 307001.9 MB read (the GGUF in place)",
         "strata serve: KV streaming: 97.66% of 3824528 block reads hit VRAM, 360.9 MiB read from RAM"
-      ]
+      ],
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
+      }
     }
   ],
   "initial_actual_cache": {
@@ -458,5 +476,18 @@
     "Startup proves ajob plus resident/complement readiness and pinned exchange capacity; actual per-request positive deltas prove async treatment exercised.",
     "Private new prefix SSD fingerprint original, restored exact131072, tails176/167.",
     "Actual autoelastic capacities recorded without normalization. Sparse GPU samples do not prove sustained clock stability; desktop3060 remains active."
-  ]
+  ],
+  "capture_scope_correction": {
+    "previous_report_sha256": "a32dcf34046f855975a66956a8c04dc68fa3dbd6406f48013f6117b71332f196",
+    "original_preserved_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\evidence\\report-capture-scope-correction\\non-mtp-b-screen-C3-20261008.json",
+    "raw_evidence_unchanged": true,
+    "raw_verdict_sha256": "ed7dd7117d01d3ad8f8a1b737e7c21b474a004566226a337a473388c1e27875f",
+    "scope": "Interpretation only; all numeric values/source/runtime pins and raw traces/verdicts unchanged. IL capture-dispatch calls are not distinct graphs. C4 L01 delta7 means7 IL dispatch calls during capture, not7 graphs; zero delta proves no IL record change only."
+  },
+  "performance_qualification": {
+    "clean_causal_gain": false,
+    "clean_timing_qualified": false,
+    "global_graph_capture_coverage": "UNKNOWN",
+    "scope": "B-only; IL counters do not cover total graph capture. No clean causal gain or absence-of-new-graph-captures proof. Actual cache/architecture limits remain."
+  }
 }

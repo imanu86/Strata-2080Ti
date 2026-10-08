@@ -146,8 +146,8 @@
         "request": 2
       },
       "exposure": {
-        "capture_calls_cumulative": 92,
-        "capture_shapes_cumulative": 13,
+        "IL_capture_dispatch_calls_cumulative": 92,
+        "IL_captured_dispatch_shapes_cumulative": 13,
         "actual_window_T_histogram": {
           "1": 187,
           "2": 120,
@@ -178,11 +178,14 @@
           3,
           4
         ],
-        "scope": "Both devices startup retained staged HC selftest1..8/apply0..1 + actual two-stage target windows; inferred exposure, not dynamic norm-kernel counts. C1sm75off; sm86autoIL unchanged.",
+        "scope": "Both devices startup retained staged HC selftest1..8/apply0..1 + actual two-stage target windows; inferred exposure, not dynamic norm-kernel counts. C1sm75off; sm86autoIL unchanged. IL-only records; global graph capture coverage UNKNOWN.",
         "measurement": true,
-        "new_capture_calls_since_previous_request": 0,
-        "new_captures_in_measured_GEN": false,
-        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize."
+        "new_IL_capture_dispatch_calls_since_previous_request": 0,
+        "capture_timing_limit": "IL-only dispatch records lack timing attribution and global graph coverage; zero IL does not qualify no captures. Do not subtract/normalize or claim clean timing.",
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": false
       },
       "primary_cache": {
         "request": 2,
@@ -216,7 +219,13 @@
           ]
         }
       ],
-      "cache_KV_actual_log": []
+      "cache_KV_actual_log": [],
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
+      }
     },
     {
       "case": "L02",
@@ -276,8 +285,8 @@
         "request": 3
       },
       "exposure": {
-        "capture_calls_cumulative": 92,
-        "capture_shapes_cumulative": 13,
+        "IL_capture_dispatch_calls_cumulative": 92,
+        "IL_captured_dispatch_shapes_cumulative": 13,
         "actual_window_T_histogram": {
           "1": 277,
           "2": 170,
@@ -308,11 +317,14 @@
           3,
           4
         ],
-        "scope": "Both devices startup retained staged HC selftest1..8/apply0..1 + actual two-stage target windows; inferred exposure, not dynamic norm-kernel counts. C1sm75off; sm86autoIL unchanged.",
+        "scope": "Both devices startup retained staged HC selftest1..8/apply0..1 + actual two-stage target windows; inferred exposure, not dynamic norm-kernel counts. C1sm75off; sm86autoIL unchanged. IL-only records; global graph capture coverage UNKNOWN.",
         "measurement": true,
-        "new_capture_calls_since_previous_request": 0,
-        "new_captures_in_measured_GEN": false,
-        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize."
+        "new_IL_capture_dispatch_calls_since_previous_request": 0,
+        "capture_timing_limit": "IL-only dispatch records lack timing attribution and global graph coverage; zero IL does not qualify no captures. Do not subtract/normalize or claim clean timing.",
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": false
       },
       "primary_cache": {
         "request": 3,
@@ -343,7 +355,13 @@
           ]
         }
       ],
-      "cache_KV_actual_log": []
+      "cache_KV_actual_log": [],
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
+      }
     }
   ],
   "initial_actual_cache": {
@@ -409,7 +427,20 @@
     "B-only one measured request per case: no causal speedup or C1/C2 percentage comparison.",
     "FORCE_IDS exact1024 proves benchmark coherence; raw labels on forced context do not certify FREE quality.",
     "Both retained staged selections plus actual pipeline2 windows infer runtime exposure, not exact dynamic norm-kernel counts.",
-    "No new captures in either long GEN. Sparse GPU clock/power/temperature samples do not prove sustained stability.",
+    "No new IL-dispatch capture calls observed in either long GEN; total graph capture coverage UNKNOWN. Sparse GPU clock/power/temperature samples do not prove sustained stability.",
     "Autoelastic actual capacities/path vary; reported without normalization. Original SSD fingerprint preserved."
-  ]
+  ],
+  "capture_scope_correction": {
+    "previous_report_sha256": "3deddc979dd89d75f1d4112a493cba470462ef74bd573e6e0a7f45f46f45aff7",
+    "original_preserved_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\evidence\\report-capture-scope-correction\\non-mtp-b-screen-C2-20261008.json",
+    "raw_evidence_unchanged": true,
+    "raw_verdict_sha256": "dea617cbacd9c703c551118bc4f5692ec65df8f2ba0c2ed56d51adf377fcd8e9",
+    "scope": "Interpretation only; all numeric values/source/runtime pins and raw traces/verdicts unchanged. IL capture-dispatch calls are not distinct graphs. C4 L01 delta7 means7 IL dispatch calls during capture, not7 graphs; zero delta proves no IL record change only."
+  },
+  "performance_qualification": {
+    "clean_causal_gain": false,
+    "clean_timing_qualified": false,
+    "global_graph_capture_coverage": "UNKNOWN",
+    "scope": "B-only; IL counters do not cover total graph capture. No clean causal gain or absence-of-new-graph-captures proof. Actual cache/architecture limits remain."
+  }
 }

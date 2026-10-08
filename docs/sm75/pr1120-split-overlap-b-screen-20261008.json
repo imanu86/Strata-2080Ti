@@ -469,10 +469,13 @@
           "3": 60,
           "4": 153
         },
-        "capture_calls_cumulative": 46,
-        "scope": "Actual completed chain_overlap branch count equals native verified windows; no speculative B pipeline2, no policy parser.",
-        "new_capture_calls_since_previous_request": 7,
-        "new_captures_in_measured_GEN": true
+        "IL_capture_dispatch_calls_cumulative": 46,
+        "scope": "Actual completed chain_overlap branch count equals native verified windows; no speculative B pipeline2, no policy parser. IL-only records; global graph capture coverage UNKNOWN.",
+        "new_IL_capture_dispatch_calls_since_previous_request": 7,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": true
       },
       "mean_tokens_per_window": 1.9768339768339769,
       "forced_ids_exact": true,
@@ -529,8 +532,9 @@
       ],
       "performance_qualification": {
         "clean_causal_gain": false,
-        "timing_confounded_by_new_captures": true,
-        "scope": "7 new graph captures during measured GEN; timing placement unrecorded; decode unadjusted."
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
       }
     },
     {
@@ -566,10 +570,13 @@
           "3": 71,
           "4": 95
         },
-        "capture_calls_cumulative": 46,
-        "scope": "Actual completed chain_overlap branch count equals native verified windows; no speculative B pipeline2, no policy parser.",
-        "new_capture_calls_since_previous_request": 0,
-        "new_captures_in_measured_GEN": false
+        "IL_capture_dispatch_calls_cumulative": 46,
+        "scope": "Actual completed chain_overlap branch count equals native verified windows; no speculative B pipeline2, no policy parser. IL-only records; global graph capture coverage UNKNOWN.",
+        "new_IL_capture_dispatch_calls_since_previous_request": 0,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": false
       },
       "mean_tokens_per_window": 1.6925619834710743,
       "forced_ids_exact": true,
@@ -647,8 +654,9 @@
       ],
       "performance_qualification": {
         "clean_causal_gain": false,
-        "timing_confounded_by_new_captures": false,
-        "scope": "No new graph captures; B-only, actual primary cache4712->4598; no clean causal gain."
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
       }
     }
   ],
@@ -712,13 +720,22 @@
     "B-only single long request per case; no causal speedup claim or automatic A.",
     "Architecture pipeline0 differs from previous pipeline2 Bs; future A must use same serial topology.",
     "FORCE_IDS exact1024 coherence only; raw mismatch counts on verified forced prefix, raw IDs not captured; no FREE quality proof.",
-    "L01 has7 new capture calls during measured GEN; timing location not recorded, may include decode. Report unadjusted, no retry. L02 new captures0.",
+    "L01 has7 new IL-dispatch calls during capture in measured GEN, not7 distinct graphs; timing placement unrecorded. L02 IL delta0 is not no-graph-capture proof. Global graph coverage UNKNOWN, timings unadjusted, no retry.",
     "Actual successful chain_overlap counts518/605 equal native windows; host dispatch overlaps, stage1 GPU still waits for causally required stage0 payload.",
     "Actual autoelastic cache drift recorded; sparse GPU samples cannot certify sustained clock stability; desktop3060 remains active.",
     "Local port preserves upstream AR/RAII and adds bounds check before exec[T]; independent lab SSD hook preserves native fingerprint and original oracle guards."
   ],
   "performance_qualification": {
     "clean_causal_gain": false,
-    "scope": "B-only; architecture pipeline0; no paired A. L01 timing confounded by7 new graph capture calls during measured GEN; L02 no new captures but B-only and actual cache drift. No clean causal gain."
+    "clean_timing_qualified": false,
+    "global_graph_capture_coverage": "UNKNOWN",
+    "scope": "B-only; IL counters do not cover total graph capture. No clean causal gain or absence-of-new-graph-captures proof. Actual cache/architecture limits remain."
+  },
+  "capture_scope_correction": {
+    "previous_report_sha256": "e79371a0ba1fc3ed453736f85d3368c7465300b27701a6347649fea349869111",
+    "original_preserved_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\evidence\\report-capture-scope-correction\\non-mtp-b-screen-C4-20261008.json",
+    "raw_evidence_unchanged": true,
+    "raw_verdict_sha256": "49f296d9bf260bc5323b573ed5d0d7ff8512e4d9f86545142c68b06bb17ed87d",
+    "scope": "Interpretation only; all numeric values/source/runtime pins and raw traces/verdicts unchanged. IL capture-dispatch calls are not distinct graphs. C4 L01 delta7 means7 IL dispatch calls during capture, not7 graphs; zero delta proves no IL record change only."
   }
 }

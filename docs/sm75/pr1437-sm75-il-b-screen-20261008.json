@@ -139,8 +139,8 @@
         "invalid_output_ids": "0"
       },
       "exposure": {
-        "capture_calls_cumulative": 360,
-        "capture_shapes_cumulative": 32,
+        "IL_capture_dispatch_calls_cumulative": 360,
+        "IL_captured_dispatch_shapes_cumulative": 32,
         "actual_window_T_histogram": {
           "1": 189,
           "2": 114,
@@ -152,10 +152,13 @@
           3,
           4
         ],
-        "new_capture_calls_since_previous_request": 0,
-        "new_captures_in_measured_GEN": false,
-        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize.",
-        "scope": "Capture dispatch + executed window T; not exact dynamic MMVQ call count. Q5 head excluded."
+        "new_IL_capture_dispatch_calls_since_previous_request": 0,
+        "capture_timing_limit": "IL-only dispatch records lack timing attribution and global graph coverage; zero IL does not qualify no captures. Do not subtract/normalize or claim clean timing.",
+        "scope": "Capture dispatch + executed window T; not exact dynamic MMVQ call count. Q5 head excluded. IL-only records; global graph capture coverage UNKNOWN.",
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": false
       },
       "sm75_eligible_captured_shapes_count": 19,
       "primary_cache": {
@@ -199,7 +202,13 @@
             "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 21468, 22528, 73, 1860, 7000, 58, 214.68, P0"
           ]
         }
-      ]
+      ],
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
+      }
     },
     {
       "case": "L02",
@@ -249,8 +258,8 @@
         "invalid_output_ids": "0"
       },
       "exposure": {
-        "capture_calls_cumulative": 360,
-        "capture_shapes_cumulative": 32,
+        "IL_capture_dispatch_calls_cumulative": 360,
+        "IL_captured_dispatch_shapes_cumulative": 32,
         "actual_window_T_histogram": {
           "1": 273,
           "2": 177,
@@ -262,10 +271,13 @@
           3,
           4
         ],
-        "new_capture_calls_since_previous_request": 0,
-        "new_captures_in_measured_GEN": false,
-        "capture_timing_limit": "No capture timestamp: new long-GEN captures could include timed decode; flag, do not subtract/normalize.",
-        "scope": "Capture dispatch + executed window T; not exact dynamic MMVQ call count. Q5 head excluded."
+        "new_IL_capture_dispatch_calls_since_previous_request": 0,
+        "capture_timing_limit": "IL-only dispatch records lack timing attribution and global graph coverage; zero IL does not qualify no captures. Do not subtract/normalize or claim clean timing.",
+        "scope": "Capture dispatch + executed window T; not exact dynamic MMVQ call count. Q5 head excluded. IL-only records; global graph capture coverage UNKNOWN.",
+        "global_graph_capture_coverage": "UNKNOWN",
+        "clean_timing_qualified": false,
+        "IL_capture_counter_scope": "Only native_mmvq_il_capture_record calls inside IL dispatch during capture; not distinct graphs or all graph captures. Zero delta cannot prove no new graphs.",
+        "new_IL_capture_dispatch_calls_observed": false
       },
       "sm75_eligible_captured_shapes_count": 19,
       "primary_cache": {
@@ -326,7 +338,13 @@
             "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 21468, 22528, 86, 1845, 7000, 61, 228.99, P0"
           ]
         }
-      ]
+      ],
+      "performance_qualification": {
+        "clean_causal_gain": false,
+        "clean_timing_qualified": false,
+        "global_graph_capture_coverage": "UNKNOWN",
+        "scope": "IL-only dispatch capture records; zero does not prove no graph capture; positive calls do not count distinct graphs. Timings remain unadjusted, B-only."
+      }
     }
   ],
   "initial_actual_cache": {
@@ -365,9 +383,22 @@
   "limits": [
     "B-only screening: no A baseline and no causal speedup percentage; timings cannot be ranked causally against historic experiments or other architectures.",
     "SSD isolates model state, not adaptive expert cache/elastic resizing; measured capacities and cache events retained.",
-    "Capture+actual window-T intersection establishes inferred runtime exposure, not exact dynamic kernel count. New captures during measured GEN are flagged, not subtracted.",
+    "Capture+actual window-T intersection establishes inferred runtime exposure, not exact dynamic kernel count. New IL-dispatch capture calls during measured GEN are flagged, not subtracted; distinct/global graph captures UNKNOWN.",
     "GPU telemetry sampling is sparse; do not infer sustained stable clocks from a single sample.",
     "Forced output identity is bench coherence only; raw/fixture differences preserved.",
     "No automated next A/parameter variant/sweep. Next C2 needs distinct review; new sm75 C1 opt-in absent in C2 to preserve original sm86 automatic IL."
-  ]
+  ],
+  "capture_scope_correction": {
+    "previous_report_sha256": "a7423d7f93afce3a9270f6d461b76a5556cc40d19fab45b8ff47f0dd9ce13d7a",
+    "original_preserved_path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\evidence\\report-capture-scope-correction\\non-mtp-b-screen-C1-20261008.json",
+    "raw_evidence_unchanged": true,
+    "raw_verdict_sha256": "48295fb0c15a7419bf4216c3f7b8329083548f5db69d5b5b5bf18243e0b81f56",
+    "scope": "Interpretation only; all numeric values/source/runtime pins and raw traces/verdicts unchanged. IL capture-dispatch calls are not distinct graphs. C4 L01 delta7 means7 IL dispatch calls during capture, not7 graphs; zero delta proves no IL record change only."
+  },
+  "performance_qualification": {
+    "clean_causal_gain": false,
+    "clean_timing_qualified": false,
+    "global_graph_capture_coverage": "UNKNOWN",
+    "scope": "B-only; IL counters do not cover total graph capture. No clean causal gain or absence-of-new-graph-captures proof. Actual cache/architecture limits remain."
+  }
 }
