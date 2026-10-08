@@ -2227,6 +2227,9 @@ int main(int argc, char** argv) {
     }
     const char* lab_policy_path = std::getenv("STRATA_LAB_POLICY_TRACE");
     const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
+    const char* lab_shallow_switch = std::getenv("STRATA_LAB_MTP_SHALLOW_SWITCH");
+    const char* lab_shallow_trace = std::getenv("STRATA_LAB_MTP_SHALLOW_TRACE");
+    const bool lab_shallow = lab_shallow_switch != nullptr;
     const char* lab_top2_env = std::getenv("STRATA_LAB_MTP_TOP2_PROBE");
     if (lab_top2_env && std::strcmp(lab_top2_env, "0") != 0 && std::strcmp(lab_top2_env, "1") != 0) {
         std::fprintf(stderr, "strata lab mtp top2: TOP2_PROBE accepts only 0 or 1\n"); return 2;
@@ -2334,6 +2337,25 @@ int main(int argc, char** argv) {
                        o.mtp_hnorm_stream || !o.mtp_q4.empty() || o.mtp_window != 32768)) {
         std::fprintf(stderr, "strata lab mtp anchor: requires original pooled MTP, POLICY_TRACE, oracle-off "
                              "hot SSD131072; FEATURE/HQ/FREE/selective excluded\n"); return 2;
+    }
+    if (lab_shallow) {
+        if (!*lab_shallow_switch || !std::filesystem::path(lab_shallow_switch).is_absolute() ||
+            !lab_shallow_trace || !*lab_shallow_trace || !std::filesystem::path(lab_shallow_trace).is_absolute() ||
+            std::filesystem::path(lab_shallow_switch).lexically_normal() == std::filesystem::path(lab_shallow_trace).lexically_normal() ||
+            !lab_policy || lab_anchor || lab_feature || lab_hq || lab_hq_free || lab_selective) {
+            std::fprintf(stderr, "strata lab shallow: absolute distinct switch/trace and policy only required\n"); return 2;
+        }
+        const char* forbidden[] = {"STRATA_FORCE_WINDOWS", "STRATA_CKPT_REREAD", "STRATA_STATE_HASH",
+            "STRATA_PIPELINE_SWITCH", "STRATA_PIPELINE_FORCE_MISS", "STRATA_NEURON_PROBE_CONTROL",
+            "STRATA_CLOSED_ROUTING", "STRATA_MTP_TOP2", "STRATA_MTP_FULL_HEAD", "STRATA_MTP_CATCHUP_ALL",
+            "STRATA_MTP_CHAIN_TRIM", "STRATA_SPEC_COUPLED", "STRATA_PL_EARLY_CHAIN"};
+        for (const char* name : forbidden) if (std::getenv(name) != nullptr) {
+            std::fprintf(stderr, "strata lab shallow: forbidden key %s\n", name); return 2;
+        }
+        std::fprintf(stderr, "strata lab shallow: enabled=1 scope=fresh_A_minT2 threshold=0.5 chain_n=7 "
+                             "high_rule=original B_rule=original schema=1\n");
+    } else if (lab_shallow_trace != nullptr) {
+        std::fprintf(stderr, "strata lab shallow: trace without switch forbidden\n"); return 2;
     }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
@@ -9883,6 +9905,16 @@ int main(int argc, char** argv) {
                              selective_request_on ? 8192 : 0, selective_request_check ? 1 : 0);
             }
             bool anchor_request_on = false;
+            bool shallow_request_on = false;
+            if (lab_shallow) {
+                std::ifstream control(lab_shallow_switch);
+                std::string mode, extra;
+                if (!(control >> mode) || (control >> extra) || (mode != "0" && mode != "1") ||
+                    geni || lab_oracle_on || oracle_prefix_file.empty()) {
+                    std::printf("ERR lab shallow: switch requires0/1; text GEN oracle-off SSD required\n"); return 1;
+                }
+                shallow_request_on = mode == "1";
+            }
             if (lab_anchor) {
                 std::ifstream control(lab_anchor_switch);
                 std::string alpha, extra;
@@ -11255,6 +11287,20 @@ int main(int argc, char** argv) {
                     }
                 }
             }
+            if (lab_shallow) {
+                const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && incoming_tokens == 131072) ||
+                                                  (read_from == 0 && mtp.first_needed() <= 0));
+                if (!lab_oracle_hot || !prefix_disk_enabled || !full || !req_imgs.empty() || lab_oracle_on ||
+                    !req_sp.greedy || req_sp.seed != 73 || hist_n != 0 || mtp.coupled() || !use_mtp ||
+                    !pipe || pl_pw != 2 || S_mtp != 4 || req_spec_min_p != 0.5 || pl_theta != 0.1f ||
+                    o.suffix_draft > 0 || o.lookup_chain > 0 || o.mtp_hnorm_stream ||
+                    !o.mtp_q4.empty() || o.mtp_window != 32768 ||
+                    ((shallow_request_on || max_new != 15) && !incoming_disk)) {
+                    std::printf("ERR lab shallow: qualified original MTP greedy73/spec4/minp.5/pipeline2/SSD required\n"); return 1;
+                }
+                std::fprintf(stderr, "strata lab shallow: history request=%lld source=%s full_until=%lld\n",
+                             (long long) force_k, incoming_disk ? "validated_ssd" : "full_prefill", (long long) (n - 1));
+            }
             if (lab_anchor) {
                 const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && incoming_tokens == 131072) ||
                                                   (read_from == 0 && mtp.first_needed() <= 0));
@@ -11450,6 +11496,19 @@ int main(int argc, char** argv) {
                 policy_windows.resize((size_t) max_new + 8);
             }
             LabNvtxRange lab_nvtx_decode_range(lab_nvtx, "decode", lab_nvtx_gen);
+            // Common POD buffers for both0/1, allocated before d0; no I/O in the decision/launch path.
+            struct ShallowDecision {
+                int64_t chain = -1, p = 0, remaining = 0, context = 0;
+                int seq = 0, k = 0, base_T = 0, proposed_T = 0, final_T = 0, site = 0;
+                int32_t token = -1;
+                float p1 = -1;
+                bool eligible = false;
+            };
+            std::vector<ShallowDecision> shallow_decisions;
+            size_t shallow_nd = 0;
+            int64_t shallow_seen = 0;
+            bool shallow_truncated = false;
+            if (lab_shallow) shallow_decisions.resize((size_t) max_new + 8);
             const Clock::time_point d0 = Clock::now();
             auto policy_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - d0).count(); };
             // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
@@ -11523,6 +11582,7 @@ int main(int argc, char** argv) {
                     bool made = false;     // made from a chain (its outcome can be scored even when the gate held it)
                     bool sfx = false;      // a lookup window (the suffix drafter's drafts)
                     bool lookup = false;   // a B taken from the lookup's continuation (pick_lookup, lookup_next)
+                    int64_t shallow_decision = -1; // only fresh A owns a decision; B never inherits one
                     int sfx_match = 0;
                     bool selective_stage0_seen = false;
                     int64_t policy_chain = -1;
@@ -11740,6 +11800,26 @@ int main(int argc, char** argv) {
                         while (T < S_mtp && from + T - 1 < avail && pr[from + T - 1] >= (float) req_spec_min_p) ++T;
                     }
                     return std::max(1, std::min(T, 1 + avail - from));
+                };
+                auto shallow_pick = [&](PW& w, const int32_t* oc, const float* op, int avail, int site) {
+                    if (!lab_shallow) return;
+                    const int base_T = w.T;
+                    const int64_t remaining = max_new - (w.p - (n - 1));
+                    const int64_t context = o.max_context - w.p;
+                    // Guards precede head reads. This rule reads only the already-ready first draft.
+                    const float p1 = avail >= 1 ? op[0] : -1.0f;
+                    const int32_t token = avail >= 1 ? oc[0] : -1;
+                    const bool eligible = chain_kind == 2 && base_T == 1 && avail >= 1 &&
+                        std::isfinite(p1) && p1 >= 0.0f && p1 < (float) req_spec_min_p &&
+                        token >= 0 && token < n_vocab && remaining >= 2 && context >= 2;
+                    if (shallow_request_on && eligible) w.T = 2;
+                    ++shallow_seen;
+                    if (shallow_nd >= shallow_decisions.size()) { shallow_truncated = true; return; }
+                    w.shallow_decision = (int64_t) shallow_nd;
+                    auto& d = shallow_decisions[shallow_nd++];
+                    d.chain = policy_current_chain; d.p = w.p; d.seq = w.seq; d.k = avail;
+                    d.base_T = base_T; d.proposed_T = w.T; d.remaining = remaining; d.context = context;
+                    d.p1 = p1; d.token = token; d.eligible = eligible; d.site = site;
                 };
                 // B from the chain's outputs: its row 0 is the guess at index `base`, its drafts follow
                 auto make_b = [&](const int32_t* oc, const float* op, int base, int avail, float pa, int agree) {
@@ -12120,6 +12200,7 @@ int main(int argc, char** argv) {
                                     if (chain_prob()[j] < (float) req_spec_min_p) { decided = true; break; }
                             if (decided) {
                                 A.T = t_rule(chain_prob(), 0, std::min(k, S_mtp - 1));
+                                shallow_pick(A, chain_tok(), chain_prob(), k, 0);
                                 oracle_bound(A);
                                 for (int i = 1; i < A.T; ++i) {
                                     A.tok[i] = chain_tok()[i - 1];
@@ -12139,6 +12220,7 @@ int main(int argc, char** argv) {
                         const float* op = chain_prob();
                         if (r == 1 && chain_kind == 2 && !early_used) {
                             A.T = t_rule(op, 0, std::min(chain_n, S_mtp - 1));
+                            shallow_pick(A, oc, op, chain_n, 1);
                             oracle_bound(A);
                             for (int i = 1; i < A.T; ++i) {
                                 A.tok[i] = oc[i - 1];
@@ -12210,6 +12292,8 @@ int main(int argc, char** argv) {
                         if (!snap_take(A.seq)) return die("the GDN snapshot failed");
                         if (!V0(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.launched = true;
+                        if (lab_shallow && A.shallow_decision >= 0)
+                            shallow_decisions[(size_t) A.shallow_decision].final_T = A.T;
                         if (lab_policy) A.policy_l0 = policy_now();
                         if (lab_oracle_log) ++oracle_stage0_launches;
                         tre("L0", A.seq, A.T, 0);
@@ -12775,6 +12859,43 @@ int main(int argc, char** argv) {
             if (lab_nvtx)
                 std::fprintf(stderr, "strata lab nvtx: gen=%lld request=%lld decode_ms=%.6f scope=host_thread\n",
                              (long long) lab_nvtx_gen, (long long) force_k, decode_ms);
+            if (lab_shallow) {
+                std::FILE* fp = std::fopen(lab_shallow_trace, "ab");
+                if (!fp) { std::printf("ERR lab shallow: cannot append trace\n"); return 1; }
+                int64_t promoted = 0, invalid = 0;
+                std::fprintf(fp, "{\"schema\":\"strata.shallow.v1\",\"type\":\"request\",\"request\":%lld,"
+                                 "\"mode\":%d,\"capacity\":%zu,\"buffer_bytes\":%zu,\"requested\":%lld,"
+                                 "\"context_tokens\":%lld,\"max_context\":%lld,\"n_vocab\":%d}\n",
+                             (long long) force_k, shallow_request_on ? 1 : 0, shallow_decisions.size(),
+                             shallow_decisions.size() * sizeof(ShallowDecision), (long long) max_new,
+                             (long long) n, (long long) o.max_context, (int) n_vocab);
+                for (size_t j = 0; j < shallow_nd; ++j) {
+                    const auto& d = shallow_decisions[j];
+                    promoted += d.proposed_T != d.base_T;
+                    invalid += !std::isfinite(d.p1) || d.chain < 0 || d.final_T != d.proposed_T;
+                    std::fprintf(fp, "{\"schema\":\"strata.shallow.v1\",\"type\":\"decision\",\"request\":%lld,"
+                                     "\"chain\":%lld,\"pos\":%lld,\"seq\":%d,\"kready\":%d,\"base_T\":%d,"
+                                     "\"proposed_T\":%d,\"final_T\":%d,\"p1\":",
+                                 (long long) force_k, (long long) d.chain, (long long) d.p, d.seq, d.k,
+                                 d.base_T, d.proposed_T, d.final_T);
+                    if (std::isfinite(d.p1)) std::fprintf(fp, "%.17g", (double) d.p1); else std::fputs("null", fp);
+                    std::fprintf(fp, ",\"first_token\":%d,\"remaining\":%lld,\"context_room\":%lld,\"site\":%d,"
+                                     "\"eligible\":%s,\"mode\":%d}\n", d.token, (long long) d.remaining,
+                                 (long long) d.context, d.site, d.eligible ? "true" : "false", shallow_request_on ? 1 : 0);
+                }
+                const bool valid = !shallow_truncated && invalid == 0 && shallow_seen == (int64_t) shallow_nd;
+                std::fprintf(fp, "{\"schema\":\"strata.shallow.v1\",\"type\":\"end\",\"request\":%lld,"
+                                 "\"valid\":%s,\"truncated\":%s,\"seen\":%lld,\"recorded\":%zu,"
+                                 "\"promoted\":%lld,\"invalid\":%lld}\n", (long long) force_k,
+                             valid ? "true" : "false", shallow_truncated ? "true" : "false",
+                             (long long) shallow_seen, shallow_nd, (long long) promoted, (long long) invalid);
+                const bool failed = std::ferror(fp) != 0;
+                const int closed = std::fclose(fp);
+                if (failed || closed != 0 || !valid) { std::printf("ERR lab shallow: invalid trace/write\n"); return 1; }
+                std::fprintf(stderr, "strata lab shallow: request %lld mode=%d decisions=%zu promoted=%lld valid=1\n",
+                             (long long) force_k, shallow_request_on ? 1 : 0, shallow_nd, (long long) promoted);
+            }
+
             if (lab_anchor && !mtp.anchor_report(stderr, force_k, err)) {
                 std::printf("ERR %s\n", err.c_str()); return 1;
             }

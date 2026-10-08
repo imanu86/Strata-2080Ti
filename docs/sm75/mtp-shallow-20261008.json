@@ -1,0 +1,2658 @@
+{
+  "schema": "strata.mtp.shallow.completed.v1",
+  "status": "completed_negative_preregistered_performance_gate",
+  "model": "gpt-6.1-sol",
+  "run": "DET-shallow-01",
+  "evidence_pass": true,
+  "isolation_pass": true,
+  "performance_gate_pass": false,
+  "preregistered_gate": {
+    "each_B_tps_gain_min_pct": 5,
+    "B_tps_spread_max_pct": 3,
+    "no_auto_retry": true
+  },
+  "decision": "STOP: no convincing gain; no automatic repeat/sweep/free-quality/adoption",
+  "start": "2026-10-08T02:47:51Z",
+  "deadline": "2026-10-08T03:17:51Z",
+  "finished": "2026-10-08T02:57:32.834450+00:00",
+  "total_requests": 14,
+  "long_triplets": [
+    {
+      "phase": "long",
+      "case": "L01",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "shallow_mode": [
+        "1",
+        "0",
+        "1"
+      ],
+      "tps": [
+        70.64992410652683,
+        71.57435625017474,
+        72.21642359445966
+      ],
+      "B_time_reduction_pct": [
+        -1.3084687001985122,
+        0.8890877065451318
+      ],
+      "B_tps_gain_pct": [
+        -1.2915689250724616,
+        0.8970633868374378
+      ],
+      "B_tps_spread_pct": 2.192957982255487
+    },
+    {
+      "phase": "long",
+      "case": "L02",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "shallow_mode": [
+        "1",
+        "0",
+        "1"
+      ],
+      "tps": [
+        64.57552940582946,
+        65.23414854783945,
+        65.19178736272481
+      ],
+      "B_time_reduction_pct": [
+        -1.019920623291906,
+        -0.06497932765507908
+      ],
+      "B_tps_gain_pct": [
+        -1.009623267370463,
+        -0.06493713194336559
+      ],
+      "B_tps_spread_pct": 0.9497891645466885
+    }
+  ],
+  "smoke_triplets": [
+    {
+      "phase": "smoke",
+      "case": "L01",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "shallow_mode": [
+        "1",
+        "0",
+        "1"
+      ],
+      "tps": [
+        64.99133448873482,
+        76.80491551459292,
+        78.98894154818325
+      ],
+      "B_time_reduction_pct": [
+        -18.17716333845366,
+        2.7649769585253483
+      ],
+      "B_tps_gain_pct": [
+        -15.381282495667248,
+        2.8436018957346043
+      ],
+      "B_tps_spread_pct": 19.443784169241756
+    },
+    {
+      "phase": "smoke",
+      "case": "L02",
+      "performance_result": false,
+      "instrumented_diagnostic": true,
+      "spec_min_p": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "shallow_mode": [
+        "1",
+        "0",
+        "1"
+      ],
+      "tps": [
+        83.65867261572782,
+        73.60157016683021,
+        77.23995880535531
+      ],
+      "B_time_reduction_pct": [
+        12.021589793915602,
+        4.710500490677146
+      ],
+      "B_tps_gain_pct": [
+        13.664249860568889,
+        4.943357363542766
+      ],
+      "B_tps_spread_pct": 7.978580990629161
+    }
+  ],
+  "requests": [
+    {
+      "request": 0,
+      "case": "L01",
+      "phase": "warmup",
+      "arm": "warm",
+      "shallow_mode": "0",
+      "tokens": 15,
+      "decode_tps": 64.1573994867408,
+      "decode_ms": 233.8,
+      "prompt_ms": 85067.3,
+      "wall_GEN_s": 85.48399999999674,
+      "ttft_s": 85.2960000000021,
+      "reused": 0,
+      "disk_restore": [],
+      "shallow": {
+        "mode": "0",
+        "decisions": 4,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 3,
+          "1": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 1,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "5",
+        "drafts": "10",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "16",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 0
+      },
+      "windows": 6,
+      "target_rows_verified": 16,
+      "drafts": 10,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 1,
+        "scored_draft_rows": 10,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 4,
+          "at_risk": 4,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 2,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 3,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 4,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 3,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 6,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 7,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 4,
+        "correct": 1
+      },
+      "B_ready_at_F0": {
+        "observed": 5,
+        "ready": 4,
+        "censored": 1
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 4,
+        "fresh_first_matches_fixture": 3,
+        "fresh_second_matches_fixture": 1,
+        "fresh_first_matches_local_raw": 3,
+        "fresh_second_matches_local_raw": 1,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 0,
+        "primary_slots_before": 4434,
+        "primary_slots_after": 4522,
+        "events": [
+          "strata elastic: +88 experts (127 MiB) -> 4522 slots, 6.34 GiB; 1097 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 25.77 ms (published once its fills land)"
+        ]
+      }
+    },
+    {
+      "request": 1,
+      "case": "L02",
+      "phase": "warmup",
+      "arm": "warm",
+      "shallow_mode": "0",
+      "tokens": 15,
+      "decode_tps": 67.35518634934891,
+      "decode_ms": 222.7,
+      "prompt_ms": 80268.6,
+      "wall_GEN_s": 80.59399999999732,
+      "ttft_s": 80.42199999999139,
+      "reused": 0,
+      "disk_restore": [],
+      "shallow": {
+        "mode": "0",
+        "decisions": 3,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 2,
+          "3": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "11",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "17",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 1
+      },
+      "windows": 6,
+      "target_rows_verified": 17,
+      "drafts": 11,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 0,
+        "scored_draft_rows": 11,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": null,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 3,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 2,
+          "available": 3,
+          "at_risk": 3,
+          "matches": 2,
+          "prefix_survived": 2
+        },
+        {
+          "depth": 3,
+          "available": 2,
+          "at_risk": 2,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 4,
+          "available": 2,
+          "at_risk": 1,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 2,
+          "at_risk": 1,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 6,
+          "available": 1,
+          "at_risk": 1,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 7,
+          "available": 1,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 3,
+        "correct": 2
+      },
+      "B_ready_at_F0": {
+        "observed": 5,
+        "ready": 4,
+        "censored": 1
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 3,
+        "fresh_first_matches_fixture": 3,
+        "fresh_second_matches_fixture": 0,
+        "fresh_first_matches_local_raw": 3,
+        "fresh_second_matches_local_raw": 0,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 1,
+        "primary_slots_before": 4522,
+        "primary_slots_after": 4611,
+        "events": [
+          "strata elastic: +89 experts (126 MiB) -> 4611 slots, 6.46 GiB; 932 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 23.44 ms (published once its fills land)"
+        ]
+      }
+    },
+    {
+      "request": 2,
+      "case": "L01",
+      "phase": "smoke",
+      "arm": "B1",
+      "shallow_mode": "1",
+      "tokens": 15,
+      "decode_tps": 64.99133448873482,
+      "decode_ms": 230.8,
+      "prompt_ms": 4552.0,
+      "wall_GEN_s": 4.875,
+      "ttft_s": 4.687999999994645,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2396.6",
+          "253.4"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 4,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 3,
+          "3": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 2
+      },
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 1,
+        "scored_draft_rows": 11,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 4,
+          "at_risk": 4,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 2,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 3,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 4,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 3,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 6,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 7,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 3,
+        "correct": 1
+      },
+      "B_ready_at_F0": {
+        "observed": 5,
+        "ready": 4,
+        "censored": 1
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 4,
+        "fresh_first_matches_fixture": 3,
+        "fresh_second_matches_fixture": 1,
+        "fresh_first_matches_local_raw": 3,
+        "fresh_second_matches_local_raw": 1,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 2,
+        "primary_slots_before": 4611,
+        "primary_slots_after": 4699,
+        "events": [
+          "strata elastic: +88 experts (126 MiB) -> 4699 slots, 6.59 GiB; 800 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.82 ms (published once its fills land)"
+        ]
+      }
+    },
+    {
+      "request": 3,
+      "case": "L02",
+      "phase": "smoke",
+      "arm": "B1",
+      "shallow_mode": "1",
+      "tokens": 15,
+      "decode_tps": 83.65867261572782,
+      "decode_ms": 179.3,
+      "prompt_ms": 4487.7,
+      "wall_GEN_s": 4.76600000000326,
+      "ttft_s": 4.610000000000582,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2434.0",
+          "219.5"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 3,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 2,
+          "3": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "11",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "17",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 3
+      },
+      "windows": 6,
+      "target_rows_verified": 17,
+      "drafts": 11,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 1,
+        "scored_draft_rows": 11,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 3,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 2,
+          "available": 3,
+          "at_risk": 3,
+          "matches": 2,
+          "prefix_survived": 2
+        },
+        {
+          "depth": 3,
+          "available": 2,
+          "at_risk": 2,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 4,
+          "available": 2,
+          "at_risk": 1,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 2,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 6,
+          "available": 1,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 7,
+          "available": 1,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 3,
+        "correct": 2
+      },
+      "B_ready_at_F0": {
+        "observed": 5,
+        "ready": 3,
+        "censored": 1
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 3,
+        "fresh_first_matches_fixture": 3,
+        "fresh_second_matches_fixture": 0,
+        "fresh_first_matches_local_raw": 3,
+        "fresh_second_matches_local_raw": 0,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 3,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4699,
+        "events": []
+      }
+    },
+    {
+      "request": 4,
+      "case": "L01",
+      "phase": "smoke",
+      "arm": "A",
+      "shallow_mode": "0",
+      "tokens": 15,
+      "decode_tps": 76.80491551459292,
+      "decode_ms": 195.3,
+      "prompt_ms": 4405.4,
+      "wall_GEN_s": 4.7039999999979045,
+      "ttft_s": 4.531999999991967,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2402.5",
+          "223.6"
+        ]
+      ],
+      "shallow": {
+        "mode": "0",
+        "decisions": 4,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 3,
+          "3": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 4
+      },
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 1,
+        "scored_draft_rows": 11,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 4,
+          "at_risk": 4,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 2,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 3,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 4,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 3,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 6,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 7,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 3,
+        "correct": 1
+      },
+      "B_ready_at_F0": {
+        "observed": 5,
+        "ready": 4,
+        "censored": 1
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 4,
+        "fresh_first_matches_fixture": 3,
+        "fresh_second_matches_fixture": 1,
+        "fresh_first_matches_local_raw": 3,
+        "fresh_second_matches_local_raw": 1,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 4,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4699,
+        "events": []
+      }
+    },
+    {
+      "request": 5,
+      "case": "L02",
+      "phase": "smoke",
+      "arm": "A",
+      "shallow_mode": "0",
+      "tokens": 15,
+      "decode_tps": 73.60157016683021,
+      "decode_ms": 203.8,
+      "prompt_ms": 4383.2,
+      "wall_GEN_s": 4.687999999994645,
+      "ttft_s": 4.531999999991967,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2430.0",
+          "220.5"
+        ]
+      ],
+      "shallow": {
+        "mode": "0",
+        "decisions": 3,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 2,
+          "3": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 5
+      },
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 1,
+        "scored_draft_rows": 12,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 3,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 2,
+          "available": 3,
+          "at_risk": 3,
+          "matches": 2,
+          "prefix_survived": 2
+        },
+        {
+          "depth": 3,
+          "available": 2,
+          "at_risk": 2,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 4,
+          "available": 2,
+          "at_risk": 1,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 2,
+          "at_risk": 1,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 6,
+          "available": 1,
+          "at_risk": 1,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 7,
+          "available": 1,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 2,
+        "correct": 2
+      },
+      "B_ready_at_F0": {
+        "observed": 4,
+        "ready": 3,
+        "censored": 2
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 3,
+        "fresh_first_matches_fixture": 3,
+        "fresh_second_matches_fixture": 0,
+        "fresh_first_matches_local_raw": 3,
+        "fresh_second_matches_local_raw": 0,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 5,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4761,
+        "events": [
+          "strata elastic: +62 experts (87 MiB) -> 4761 slots, 6.67 GiB; 707 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 21.39 ms (published once its fills land)"
+        ]
+      }
+    },
+    {
+      "request": 6,
+      "case": "L01",
+      "phase": "smoke",
+      "arm": "B2",
+      "shallow_mode": "1",
+      "tokens": 15,
+      "decode_tps": 78.98894154818325,
+      "decode_ms": 189.9,
+      "prompt_ms": 4354.9,
+      "wall_GEN_s": 4.64100000000326,
+      "ttft_s": 4.4689999999973224,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2394.1",
+          "215.6"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 4,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 3,
+          "3": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "4",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 6
+      },
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 1,
+        "scored_draft_rows": 11,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 4,
+          "at_risk": 4,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 2,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 3,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 4,
+          "available": 4,
+          "at_risk": 3,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 3,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 6,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 7,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 3,
+        "correct": 1
+      },
+      "B_ready_at_F0": {
+        "observed": 5,
+        "ready": 4,
+        "censored": 1
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 4,
+        "fresh_first_matches_fixture": 3,
+        "fresh_second_matches_fixture": 1,
+        "fresh_first_matches_local_raw": 3,
+        "fresh_second_matches_local_raw": 1,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 6,
+        "primary_slots_before": 4761,
+        "primary_slots_after": 4761,
+        "events": []
+      }
+    },
+    {
+      "request": 7,
+      "case": "L02",
+      "phase": "smoke",
+      "arm": "B2",
+      "shallow_mode": "1",
+      "tokens": 15,
+      "decode_tps": 77.23995880535531,
+      "decode_ms": 194.2,
+      "prompt_ms": 4483.6,
+      "wall_GEN_s": 4.7810000000026776,
+      "ttft_s": 4.60899999999674,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2484.6",
+          "232.8"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 4,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 3,
+          "3": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "15",
+        "produced": "15",
+        "output_ids_ok": "15",
+        "invalid_output_ids": "0",
+        "windows": "6",
+        "all_accept": "3",
+        "drafts": "12",
+        "accepted": "9",
+        "chain_launches": "5",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "18",
+        "stage0_launches": "9",
+        "stage1_launches": "6",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 7
+      },
+      "windows": 6,
+      "target_rows_verified": 18,
+      "drafts": 12,
+      "accepted": 9,
+      "local_target_counts": {
+        "raw_target_rows": 15,
+        "raw_target_differs_from_fixture": 0,
+        "scored_draft_rows": 12,
+        "draft_matches_raw_on_forced_context": 9,
+        "draft_matches_fixture": 9,
+        "draft_matches_raw_but_not_fixture": 0,
+        "draft_matches_fixture_but_not_raw": 0
+      },
+      "first_raw_fixture_divergence_output_index": null,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 4,
+          "at_risk": 4,
+          "matches": 4,
+          "prefix_survived": 4
+        },
+        {
+          "depth": 2,
+          "available": 4,
+          "at_risk": 4,
+          "matches": 3,
+          "prefix_survived": 3
+        },
+        {
+          "depth": 3,
+          "available": 3,
+          "at_risk": 3,
+          "matches": 2,
+          "prefix_survived": 2
+        },
+        {
+          "depth": 4,
+          "available": 3,
+          "at_risk": 2,
+          "matches": 1,
+          "prefix_survived": 1
+        },
+        {
+          "depth": 5,
+          "available": 3,
+          "at_risk": 1,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 6,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        },
+        {
+          "depth": 7,
+          "available": 2,
+          "at_risk": 0,
+          "matches": 0,
+          "prefix_survived": 0
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 2,
+        "correct": 1
+      },
+      "B_ready_at_F0": {
+        "observed": 5,
+        "ready": 4,
+        "censored": 1
+      },
+      "top2": {
+        "observed_chains": 5,
+        "label_censored": 0,
+        "fresh_scoreable": 4,
+        "fresh_first_matches_fixture": 4,
+        "fresh_second_matches_fixture": 0,
+        "fresh_first_matches_local_raw": 4,
+        "fresh_second_matches_local_raw": 0,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 7,
+        "primary_slots_before": 4761,
+        "primary_slots_after": 4704,
+        "events": [
+          "strata elastic: -57 slots (4 moved in, 53 out) -> 4704 slots, 6.59 GiB; 549 MiB free, prompt chunk 8192"
+        ]
+      }
+    },
+    {
+      "request": 8,
+      "case": "L01",
+      "phase": "long",
+      "arm": "B1",
+      "shallow_mode": "1",
+      "tokens": 1024,
+      "decode_tps": 70.64992410652683,
+      "decode_ms": 14494.0,
+      "prompt_ms": 4513.6,
+      "wall_GEN_s": 19.10899999999674,
+      "ttft_s": 4.625,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2422.0",
+          "223.2"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 371,
+        "promoted": 117,
+        "effective_fresh_T": {
+          "4": 115,
+          "2": 208,
+          "3": 47,
+          "1": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 117,
+        "first_matches_fixture": 45,
+        "first_matches_local_raw": 41,
+        "actual_extra_emissions_in_selected_windows": 45,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 117,
+        "first_matches_fixture": 45,
+        "first_matches_local_raw": 41,
+        "actual_extra_emissions_in_selected_windows": 45,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "494",
+        "all_accept": "295",
+        "drafts": "819",
+        "accepted": "530",
+        "chain_launches": "493",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1313",
+        "stage0_launches": "791",
+        "stage1_launches": "494",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 8
+      },
+      "windows": 494,
+      "target_rows_verified": 1313,
+      "drafts": 819,
+      "accepted": 530,
+      "local_target_counts": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 39,
+        "scored_draft_rows": 729,
+        "draft_matches_raw_on_forced_context": 527,
+        "draft_matches_fixture": 530,
+        "draft_matches_raw_but_not_fixture": 5,
+        "draft_matches_fixture_but_not_raw": 8
+      },
+      "first_raw_fixture_divergence_output_index": 113,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 371,
+          "at_risk": 371,
+          "matches": 264,
+          "prefix_survived": 264
+        },
+        {
+          "depth": 2,
+          "available": 370,
+          "at_risk": 264,
+          "matches": 153,
+          "prefix_survived": 153
+        },
+        {
+          "depth": 3,
+          "available": 370,
+          "at_risk": 153,
+          "matches": 83,
+          "prefix_survived": 83
+        },
+        {
+          "depth": 4,
+          "available": 369,
+          "at_risk": 83,
+          "matches": 48,
+          "prefix_survived": 48
+        },
+        {
+          "depth": 5,
+          "available": 368,
+          "at_risk": 48,
+          "matches": 27,
+          "prefix_survived": 27
+        },
+        {
+          "depth": 6,
+          "available": 367,
+          "at_risk": 27,
+          "matches": 15,
+          "prefix_survived": 15
+        },
+        {
+          "depth": 7,
+          "available": 367,
+          "at_risk": 15,
+          "matches": 11,
+          "prefix_survived": 11
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 294,
+        "correct": 126
+      },
+      "B_ready_at_F0": {
+        "observed": 380,
+        "ready": 371,
+        "censored": 114
+      },
+      "top2": {
+        "observed_chains": 493,
+        "label_censored": 0,
+        "fresh_scoreable": 371,
+        "fresh_first_matches_fixture": 264,
+        "fresh_second_matches_fixture": 35,
+        "fresh_first_matches_local_raw": 261,
+        "fresh_second_matches_local_raw": 36,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 8,
+        "primary_slots_before": 4704,
+        "primary_slots_after": 4755,
+        "events": [
+          "strata elastic: +51 experts (71 MiB) -> 4755 slots, 6.66 GiB; 722 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 18.92 ms (published once its fills land)"
+        ]
+      }
+    },
+    {
+      "request": 9,
+      "case": "L02",
+      "phase": "long",
+      "arm": "B1",
+      "shallow_mode": "1",
+      "tokens": 1024,
+      "decode_tps": 64.57552940582946,
+      "decode_ms": 15857.4,
+      "prompt_ms": 4413.3,
+      "wall_GEN_s": 20.375,
+      "ttft_s": 4.5310000000026776,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2386.7",
+          "208.0"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 443,
+        "promoted": 179,
+        "effective_fresh_T": {
+          "4": 67,
+          "3": 57,
+          "2": 319
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 179,
+        "first_matches_fixture": 62,
+        "first_matches_local_raw": 63,
+        "actual_extra_emissions_in_selected_windows": 62,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 179,
+        "first_matches_fixture": 62,
+        "first_matches_local_raw": 63,
+        "actual_extra_emissions_in_selected_windows": 62,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "575",
+        "all_accept": "348",
+        "drafts": "743",
+        "accepted": "449",
+        "chain_launches": "574",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1318",
+        "stage0_launches": "889",
+        "stage1_launches": "575",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 9
+      },
+      "windows": 575,
+      "target_rows_verified": 1318,
+      "drafts": 743,
+      "accepted": 449,
+      "local_target_counts": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 46,
+        "scored_draft_rows": 676,
+        "draft_matches_raw_on_forced_context": 451,
+        "draft_matches_fixture": 449,
+        "draft_matches_raw_but_not_fixture": 8,
+        "draft_matches_fixture_but_not_raw": 6
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 443,
+          "at_risk": 443,
+          "matches": 270,
+          "prefix_survived": 270
+        },
+        {
+          "depth": 2,
+          "available": 443,
+          "at_risk": 270,
+          "matches": 143,
+          "prefix_survived": 143
+        },
+        {
+          "depth": 3,
+          "available": 442,
+          "at_risk": 142,
+          "matches": 72,
+          "prefix_survived": 72
+        },
+        {
+          "depth": 4,
+          "available": 441,
+          "at_risk": 72,
+          "matches": 33,
+          "prefix_survived": 33
+        },
+        {
+          "depth": 5,
+          "available": 441,
+          "at_risk": 33,
+          "matches": 17,
+          "prefix_survived": 17
+        },
+        {
+          "depth": 6,
+          "available": 440,
+          "at_risk": 17,
+          "matches": 6,
+          "prefix_survived": 6
+        },
+        {
+          "depth": 7,
+          "available": 439,
+          "at_risk": 6,
+          "matches": 5,
+          "prefix_survived": 5
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 347,
+        "correct": 145
+      },
+      "B_ready_at_F0": {
+        "observed": 452,
+        "ready": 443,
+        "censored": 123
+      },
+      "top2": {
+        "observed_chains": 574,
+        "label_censored": 0,
+        "fresh_scoreable": 443,
+        "fresh_first_matches_fixture": 270,
+        "fresh_second_matches_fixture": 53,
+        "fresh_first_matches_local_raw": 272,
+        "fresh_second_matches_local_raw": 52,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 9,
+        "primary_slots_before": 4755,
+        "primary_slots_after": 4755,
+        "events": []
+      }
+    },
+    {
+      "request": 10,
+      "case": "L01",
+      "phase": "long",
+      "arm": "A",
+      "shallow_mode": "0",
+      "tokens": 1024,
+      "decode_tps": 71.57435625017474,
+      "decode_ms": 14306.8,
+      "prompt_ms": 4406.3,
+      "wall_GEN_s": 18.797000000005937,
+      "ttft_s": 4.5,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2376.2",
+          "237.3"
+        ]
+      ],
+      "shallow": {
+        "mode": "0",
+        "decisions": 362,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 113,
+          "1": 115,
+          "3": 52,
+          "2": 82
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 114,
+        "first_matches_fixture": 42,
+        "first_matches_local_raw": 40,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "528",
+        "all_accept": "394",
+        "drafts": "730",
+        "accepted": "496",
+        "chain_launches": "527",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1258",
+        "stage0_launches": "838",
+        "stage1_launches": "528",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 10
+      },
+      "windows": 528,
+      "target_rows_verified": 1258,
+      "drafts": 730,
+      "accepted": 496,
+      "local_target_counts": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 57,
+        "scored_draft_rows": 630,
+        "draft_matches_raw_on_forced_context": 500,
+        "draft_matches_fixture": 496,
+        "draft_matches_raw_but_not_fixture": 5,
+        "draft_matches_fixture_but_not_raw": 1
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 362,
+          "at_risk": 362,
+          "matches": 252,
+          "prefix_survived": 252
+        },
+        {
+          "depth": 2,
+          "available": 361,
+          "at_risk": 252,
+          "matches": 149,
+          "prefix_survived": 149
+        },
+        {
+          "depth": 3,
+          "available": 361,
+          "at_risk": 149,
+          "matches": 82,
+          "prefix_survived": 82
+        },
+        {
+          "depth": 4,
+          "available": 360,
+          "at_risk": 82,
+          "matches": 49,
+          "prefix_survived": 49
+        },
+        {
+          "depth": 5,
+          "available": 359,
+          "at_risk": 49,
+          "matches": 27,
+          "prefix_survived": 27
+        },
+        {
+          "depth": 6,
+          "available": 358,
+          "at_risk": 27,
+          "matches": 13,
+          "prefix_survived": 13
+        },
+        {
+          "depth": 7,
+          "available": 358,
+          "at_risk": 13,
+          "matches": 8,
+          "prefix_survived": 8
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 393,
+        "correct": 167
+      },
+      "B_ready_at_F0": {
+        "observed": 381,
+        "ready": 362,
+        "censored": 147
+      },
+      "top2": {
+        "observed_chains": 527,
+        "label_censored": 0,
+        "fresh_scoreable": 362,
+        "fresh_first_matches_fixture": 252,
+        "fresh_second_matches_fixture": 42,
+        "fresh_first_matches_local_raw": 252,
+        "fresh_second_matches_local_raw": 42,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 10,
+        "primary_slots_before": 4755,
+        "primary_slots_after": 4704,
+        "events": [
+          "strata elastic: -51 slots at a gap of stage 0 (51 experts to the CPU) -> 4704 slots, 6.59 GiB; 557 MiB free; 5.79 ms"
+        ]
+      }
+    },
+    {
+      "request": 11,
+      "case": "L02",
+      "phase": "long",
+      "arm": "A",
+      "shallow_mode": "0",
+      "tokens": 1024,
+      "decode_tps": 65.23414854783945,
+      "decode_ms": 15697.3,
+      "prompt_ms": 4418.9,
+      "wall_GEN_s": 20.219000000011874,
+      "ttft_s": 4.532000000006519,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2399.5",
+          "210.8"
+        ]
+      ],
+      "shallow": {
+        "mode": "0",
+        "decisions": 432,
+        "promoted": 0,
+        "effective_fresh_T": {
+          "4": 78,
+          "3": 52,
+          "2": 126,
+          "1": 176
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 176,
+        "first_matches_fixture": 59,
+        "first_matches_local_raw": 60,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 0,
+        "first_matches_fixture": 0,
+        "first_matches_local_raw": 0,
+        "actual_extra_emissions_in_selected_windows": 0,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "622",
+        "all_accept": "500",
+        "drafts": "609",
+        "accepted": "402",
+        "chain_launches": "621",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1231",
+        "stage0_launches": "996",
+        "stage1_launches": "622",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 11
+      },
+      "windows": 622,
+      "target_rows_verified": 1231,
+      "drafts": 609,
+      "accepted": 402,
+      "local_target_counts": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 81,
+        "scored_draft_rows": 524,
+        "draft_matches_raw_on_forced_context": 402,
+        "draft_matches_fixture": 402,
+        "draft_matches_raw_but_not_fixture": 10,
+        "draft_matches_fixture_but_not_raw": 10
+      },
+      "first_raw_fixture_divergence_output_index": 22,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 432,
+          "at_risk": 432,
+          "matches": 263,
+          "prefix_survived": 263
+        },
+        {
+          "depth": 2,
+          "available": 432,
+          "at_risk": 263,
+          "matches": 137,
+          "prefix_survived": 137
+        },
+        {
+          "depth": 3,
+          "available": 431,
+          "at_risk": 136,
+          "matches": 73,
+          "prefix_survived": 73
+        },
+        {
+          "depth": 4,
+          "available": 430,
+          "at_risk": 73,
+          "matches": 32,
+          "prefix_survived": 32
+        },
+        {
+          "depth": 5,
+          "available": 430,
+          "at_risk": 32,
+          "matches": 16,
+          "prefix_survived": 16
+        },
+        {
+          "depth": 6,
+          "available": 429,
+          "at_risk": 16,
+          "matches": 5,
+          "prefix_survived": 5
+        },
+        {
+          "depth": 7,
+          "available": 428,
+          "at_risk": 5,
+          "matches": 4,
+          "prefix_survived": 4
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 499,
+        "correct": 194
+      },
+      "B_ready_at_F0": {
+        "observed": 443,
+        "ready": 432,
+        "censored": 179
+      },
+      "top2": {
+        "observed_chains": 621,
+        "label_censored": 0,
+        "fresh_scoreable": 432,
+        "fresh_first_matches_fixture": 263,
+        "fresh_second_matches_fixture": 46,
+        "fresh_first_matches_local_raw": 265,
+        "fresh_second_matches_local_raw": 47,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 11,
+        "primary_slots_before": 4704,
+        "primary_slots_after": 4754,
+        "events": [
+          "strata elastic: +50 experts (70 MiB) -> 4754 slots, 6.66 GiB; 697 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 19.17 ms (published once its fills land)"
+        ]
+      }
+    },
+    {
+      "request": 12,
+      "case": "L01",
+      "phase": "long",
+      "arm": "B2",
+      "shallow_mode": "1",
+      "tokens": 1024,
+      "decode_tps": 72.21642359445966,
+      "decode_ms": 14179.6,
+      "prompt_ms": 4548.4,
+      "wall_GEN_s": 18.812000000005355,
+      "ttft_s": 4.6560000000026776,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2413.2",
+          "243.2"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 366,
+        "promoted": 113,
+        "effective_fresh_T": {
+          "4": 109,
+          "2": 207,
+          "3": 49,
+          "1": 1
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 113,
+        "first_matches_fixture": 44,
+        "first_matches_local_raw": 43,
+        "actual_extra_emissions_in_selected_windows": 44,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 113,
+        "first_matches_fixture": 44,
+        "first_matches_local_raw": 43,
+        "actual_extra_emissions_in_selected_windows": 44,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "499",
+        "all_accept": "304",
+        "drafts": "813",
+        "accepted": "525",
+        "chain_launches": "498",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1312",
+        "stage0_launches": "785",
+        "stage1_launches": "499",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 12
+      },
+      "windows": 499,
+      "target_rows_verified": 1312,
+      "drafts": 813,
+      "accepted": 525,
+      "local_target_counts": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 45,
+        "scored_draft_rows": 720,
+        "draft_matches_raw_on_forced_context": 525,
+        "draft_matches_fixture": 525,
+        "draft_matches_raw_but_not_fixture": 6,
+        "draft_matches_fixture_but_not_raw": 6
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 366,
+          "at_risk": 366,
+          "matches": 262,
+          "prefix_survived": 262
+        },
+        {
+          "depth": 2,
+          "available": 365,
+          "at_risk": 262,
+          "matches": 155,
+          "prefix_survived": 155
+        },
+        {
+          "depth": 3,
+          "available": 365,
+          "at_risk": 155,
+          "matches": 86,
+          "prefix_survived": 86
+        },
+        {
+          "depth": 4,
+          "available": 364,
+          "at_risk": 86,
+          "matches": 51,
+          "prefix_survived": 51
+        },
+        {
+          "depth": 5,
+          "available": 363,
+          "at_risk": 51,
+          "matches": 24,
+          "prefix_survived": 24
+        },
+        {
+          "depth": 6,
+          "available": 362,
+          "at_risk": 24,
+          "matches": 13,
+          "prefix_survived": 13
+        },
+        {
+          "depth": 7,
+          "available": 362,
+          "at_risk": 13,
+          "matches": 9,
+          "prefix_survived": 9
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 303,
+        "correct": 134
+      },
+      "B_ready_at_F0": {
+        "observed": 376,
+        "ready": 366,
+        "censored": 123
+      },
+      "top2": {
+        "observed_chains": 498,
+        "label_censored": 0,
+        "fresh_scoreable": 366,
+        "fresh_first_matches_fixture": 262,
+        "fresh_second_matches_fixture": 34,
+        "fresh_first_matches_local_raw": 262,
+        "fresh_second_matches_local_raw": 35,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 12,
+        "primary_slots_before": 4754,
+        "primary_slots_after": 4754,
+        "events": []
+      }
+    },
+    {
+      "request": 13,
+      "case": "L02",
+      "phase": "long",
+      "arm": "B2",
+      "shallow_mode": "1",
+      "tokens": 1024,
+      "decode_tps": 65.19178736272481,
+      "decode_ms": 15707.5,
+      "prompt_ms": 4447.7,
+      "wall_GEN_s": 20.25,
+      "ttft_s": 4.546999999991385,
+      "reused": 131072,
+      "disk_restore": [
+        [
+          "131072",
+          "2383.4",
+          "209.9"
+        ]
+      ],
+      "shallow": {
+        "mode": "1",
+        "decisions": 446,
+        "promoted": 174,
+        "effective_fresh_T": {
+          "4": 70,
+          "3": 63,
+          "2": 313
+        },
+        "initial_T1_unchanged": true,
+        "B_gate": "original formula; downstream trajectory allowed to change"
+      },
+      "eligible_cohort": {
+        "n": 174,
+        "first_matches_fixture": 54,
+        "first_matches_local_raw": 55,
+        "actual_extra_emissions_in_selected_windows": 54,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "promoted_cohort": {
+        "n": 174,
+        "first_matches_fixture": 54,
+        "first_matches_local_raw": 55,
+        "actual_extra_emissions_in_selected_windows": 54,
+        "scope": "Selected recorded fresh first-head states under actual forced target context; not general quality."
+      },
+      "oracle_counters": {
+        "mode": "off",
+        "synthetic": "1",
+        "requested": "1024",
+        "produced": "1024",
+        "output_ids_ok": "1024",
+        "invalid_output_ids": "0",
+        "windows": "573",
+        "all_accept": "335",
+        "drafts": "762",
+        "accepted": "453",
+        "chain_launches": "572",
+        "chain_bypasses": "0",
+        "draft_ids_delivered": "0",
+        "padded_outputs": "0",
+        "target_rows": "1335",
+        "stage0_launches": "908",
+        "stage1_launches": "573",
+        "mtp_setup": "retained",
+        "mtp_prefill": "retained",
+        "mtp_vram_bytes": "962957512",
+        "decoded_live_cache": "normal",
+        "mtp_realign_ms": "0",
+        "request": 13
+      },
+      "windows": 573,
+      "target_rows_verified": 1335,
+      "drafts": 762,
+      "accepted": 453,
+      "local_target_counts": {
+        "raw_target_rows": 1024,
+        "raw_target_differs_from_fixture": 49,
+        "scored_draft_rows": 690,
+        "draft_matches_raw_on_forced_context": 450,
+        "draft_matches_fixture": 452,
+        "draft_matches_raw_but_not_fixture": 6,
+        "draft_matches_fixture_but_not_raw": 8
+      },
+      "first_raw_fixture_divergence_output_index": 9,
+      "fresh_reference_prefix": [
+        {
+          "depth": 1,
+          "available": 446,
+          "at_risk": 446,
+          "matches": 270,
+          "prefix_survived": 270
+        },
+        {
+          "depth": 2,
+          "available": 446,
+          "at_risk": 270,
+          "matches": 137,
+          "prefix_survived": 137
+        },
+        {
+          "depth": 3,
+          "available": 445,
+          "at_risk": 136,
+          "matches": 69,
+          "prefix_survived": 69
+        },
+        {
+          "depth": 4,
+          "available": 444,
+          "at_risk": 69,
+          "matches": 28,
+          "prefix_survived": 28
+        },
+        {
+          "depth": 5,
+          "available": 444,
+          "at_risk": 28,
+          "matches": 12,
+          "prefix_survived": 12
+        },
+        {
+          "depth": 6,
+          "available": 443,
+          "at_risk": 12,
+          "matches": 5,
+          "prefix_survived": 5
+        },
+        {
+          "depth": 7,
+          "available": 442,
+          "at_risk": 5,
+          "matches": 3,
+          "prefix_survived": 3
+        }
+      ],
+      "B_root_conditional_Aall": {
+        "scoreable": 333,
+        "correct": 135
+      },
+      "B_ready_at_F0": {
+        "observed": 459,
+        "ready": 447,
+        "censored": 114
+      },
+      "top2": {
+        "observed_chains": 572,
+        "label_censored": 0,
+        "fresh_scoreable": 446,
+        "fresh_first_matches_fixture": 270,
+        "fresh_second_matches_fixture": 62,
+        "fresh_first_matches_local_raw": 271,
+        "fresh_second_matches_local_raw": 60,
+        "limits": "First-head observation only, common to all arms; second proposal is not executed. Raw labels describe the actual forced context, not a free trajectory. Tail is excluded; forced chains remain separately labeled."
+      },
+      "target_capacity": {
+        "request": 13,
+        "primary_slots_before": 4754,
+        "primary_slots_after": 4754,
+        "events": []
+      }
+    }
+  ],
+  "build": {
+    "id": "shallow-v2",
+    "returncode": 0,
+    "source_base": "9dbada9b998100795e19307957b709cb4854507f+shallow-working-tree",
+    "branch": "main",
+    "source_unchanged_during_build": true,
+    "executable_sha256": "2c8d9ee83c9586988013ebe12268cfb3da346056e3d1f8857a1b13f17081de08",
+    "payload_sha256": {
+      "strata.exe": "2c8d9ee83c9586988013ebe12268cfb3da346056e3d1f8857a1b13f17081de08"
+    },
+    "source_sha256": {
+      "src/program/generate.cpp": "ee1cbecefc7a3161e79859aa2847e67bd404810f2ac8f558c27ea8c516a2dd1c",
+      "src/core/mtp.cpp": "4dcff76b4538875acfd7fe77be4803e00b740280f7fd0599214903a37aa00f42",
+      "include/strata/core/mtp.hpp": "b3b35537aa6ec193c4fec5d4f91fc3d69fd4aa76207ea8d6475217d4bf9ca710",
+      "src/kernels/cuda/verify_kernels.cu": "b97dbc432d41c658838085e5feb20c536c742a4eda8fa406cb93d628a4a7739c",
+      "include/strata/kernels/verify_kernels.hpp": "907e9f9abaa0eb285382e8776e0377f6eaefd159b0e4aa1a692613e2926e2479"
+    },
+    "build_record_sha256": "511540d3e433cde93044c852d730989b17a1f605a3a7b3cb28005a81dae5cee8",
+    "build_log_sha256": "57011a3eff6d4eb88c3d8be2fcd94877de5dfb6527e83f9a7481c6e2e2b70e6e"
+  },
+  "earlier_failure": {
+    "report": "outputs/mtp-shallow-build-failure-20261008.json",
+    "preserved": true,
+    "repair": "Exact startup qualification block moved after required definitions, no guard relaxation",
+    "v1_log": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\shallow-v1-build.log"
+  },
+  "runtime_pins": {
+    "protocol_sha256": "75d07f49ebc69e48da609d86b398bd8559e4ec6e2594df784218571fec8c1c09",
+    "config_sha256": "79bbda22ea5e0660302102a75d70e47676c391f6286bfc3056137647ec3b4431",
+    "bench_sha256": {
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\hq_quality.py": "7a070003d8c1b6ade7006d142e06d82d6236ca81a3fa037ed71e6dab49e97b5b",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\minp_contract.py": "bd303b45df4407ad40cdb97a78bb216019b74e3ed1d091abf3dd6f512c01bd50",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\policy_trace.py": "54b68f42465a2903c2effa811d8d21eeaf31344ec38d6c5efc5ffac8fff785dc",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\quality.py": "fc1e8a2d84d70a93606e41842b1acaee64664b20397fdab87b0a6c7f32e0b71f",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\run_shallow.py": "551a7be3a1f6e28707bf389ef72186d9d6c2ca1479205dc8c6ea2039553f9c53",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\shallow_contract.py": "04c1626f392092328c7704fde596e6031123fd78f8ef3025d61e3bdf4c7a91c3",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\shallow_validation.py": "dfd26302e748bc67b08d3fdaeec3b853803c5381f6d10aec7a4eea60a8b4c248",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\telemetry_contract.py": "bdb9ced7bfd10f1902c3ea807be0ba2804599d5863e1158a7a9e40527fd4e4d3",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\test_shallow.py": "492662e85ca9d4731c2d07edae8b1cdd95ded52450ddcbc4c8ca6dd910d227e7",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\top2_contract.py": "b2e87f657da42be2a758ce7d9a27fcbae3395554db1c0d1af6141d2200009e97"
+    },
+    "reviewed_sources": {
+      "schema": "strata.mtp.shallow.candidate.v1",
+      "base_commit": "9dbada9b",
+      "reviewed": true,
+      "review": "ROOT independent static review GO after source-preservation and original-MTP qualification repairs; author14CPU PASS. Single build and DET-shallow-01 authorized; runtime evidence remains pending.",
+      "source_sha256": {
+        "src/program/generate.cpp": "ee1cbecefc7a3161e79859aa2847e67bd404810f2ac8f558c27ea8c516a2dd1c",
+        "src/core/mtp.cpp": "4dcff76b4538875acfd7fe77be4803e00b740280f7fd0599214903a37aa00f42",
+        "include/strata/core/mtp.hpp": "b3b35537aa6ec193c4fec5d4f91fc3d69fd4aa76207ea8d6475217d4bf9ca710",
+        "src/kernels/cuda/verify_kernels.cu": "b97dbc432d41c658838085e5feb20c536c742a4eda8fa406cb93d628a4a7739c",
+        "include/strata/kernels/verify_kernels.hpp": "907e9f9abaa0eb285382e8776e0377f6eaefd159b0e4aa1a692613e2926e2479"
+      },
+      "unchanged_four": {
+        "src/core/mtp.cpp": "4dcff76b4538875acfd7fe77be4803e00b740280f7fd0599214903a37aa00f42",
+        "include/strata/core/mtp.hpp": "b3b35537aa6ec193c4fec5d4f91fc3d69fd4aa76207ea8d6475217d4bf9ca710",
+        "src/kernels/cuda/verify_kernels.cu": "b97dbc432d41c658838085e5feb20c536c742a4eda8fa406cb93d628a4a7739c",
+        "include/strata/kernels/verify_kernels.hpp": "907e9f9abaa0eb285382e8776e0377f6eaefd159b0e4aa1a692613e2926e2479"
+      },
+      "candidate_source": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\engine\\src\\program\\generate.cpp",
+      "cpu_tests": 15,
+      "runtime_status": "NOT_PREPARED_BUILT_OR_RUN",
+      "preregistered_gate": {
+        "each_B_tps_gain_min_pct": 5,
+        "B_tps_spread_max_pct": 3,
+        "no_auto_retry": true
+      },
+      "root_review_repairs": [
+        "Restore3 original comment byte-lines and preserve all unchanged source byte-lines; only additive SHALLOW hunks remain.",
+        "Qualify original MTP: reject hnorm stream/q4 and require mtp_window32768."
+      ],
+      "root_review_utc": "2026-10-08T02:45:09.156126+00:00",
+      "review_addendum": "moved startup qualification after required definitions; root authorized exact repair",
+      "authorized_snapshot": "shallow-v2"
+    },
+    "daily_unchanged": true,
+    "prefix_final_sha256": {
+      "L01": "dd21f7d7023d96ae3c872a4a019f37a11094277b3b20690ce799de2eda4cead8",
+      "L02": "dd21f7d7023d96ae3c872a4a019f37a11094277b3b20690ce799de2eda4cead8"
+    }
+  },
+  "target_capacity": {
+    "primary_initial_slots": 4434,
+    "secondary_initial_slots": 9151,
+    "requests": [
+      {
+        "request": 0,
+        "primary_slots_before": 4434,
+        "primary_slots_after": 4522,
+        "events": [
+          "strata elastic: +88 experts (127 MiB) -> 4522 slots, 6.34 GiB; 1097 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 25.77 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 1,
+        "primary_slots_before": 4522,
+        "primary_slots_after": 4611,
+        "events": [
+          "strata elastic: +89 experts (126 MiB) -> 4611 slots, 6.46 GiB; 932 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 23.44 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 2,
+        "primary_slots_before": 4611,
+        "primary_slots_after": 4699,
+        "events": [
+          "strata elastic: +88 experts (126 MiB) -> 4699 slots, 6.59 GiB; 800 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 30.82 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 3,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4699,
+        "events": []
+      },
+      {
+        "request": 4,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4699,
+        "events": []
+      },
+      {
+        "request": 5,
+        "primary_slots_before": 4699,
+        "primary_slots_after": 4761,
+        "events": [
+          "strata elastic: +62 experts (87 MiB) -> 4761 slots, 6.67 GiB; 707 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 21.39 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 6,
+        "primary_slots_before": 4761,
+        "primary_slots_after": 4761,
+        "events": []
+      },
+      {
+        "request": 7,
+        "primary_slots_before": 4761,
+        "primary_slots_after": 4704,
+        "events": [
+          "strata elastic: -57 slots (4 moved in, 53 out) -> 4704 slots, 6.59 GiB; 549 MiB free, prompt chunk 8192"
+        ]
+      },
+      {
+        "request": 8,
+        "primary_slots_before": 4704,
+        "primary_slots_after": 4755,
+        "events": [
+          "strata elastic: +51 experts (71 MiB) -> 4755 slots, 6.66 GiB; 722 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 18.92 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 9,
+        "primary_slots_before": 4755,
+        "primary_slots_after": 4755,
+        "events": []
+      },
+      {
+        "request": 10,
+        "primary_slots_before": 4755,
+        "primary_slots_after": 4704,
+        "events": [
+          "strata elastic: -51 slots at a gap of stage 0 (51 experts to the CPU) -> 4704 slots, 6.59 GiB; 557 MiB free; 5.79 ms"
+        ]
+      },
+      {
+        "request": 11,
+        "primary_slots_before": 4704,
+        "primary_slots_after": 4754,
+        "events": [
+          "strata elastic: +50 experts (70 MiB) -> 4754 slots, 6.66 GiB; 697 MiB free",
+          "strata elastic: the growth above at a gap of stage 0 took 19.17 ms (published once its fills land)"
+        ]
+      },
+      {
+        "request": 12,
+        "primary_slots_before": 4754,
+        "primary_slots_after": 4754,
+        "events": []
+      },
+      {
+        "request": 13,
+        "primary_slots_before": 4754,
+        "primary_slots_after": 4754,
+        "events": []
+      }
+    ],
+    "limits": "Common autoelastic policy; capacity observations reported without normalization."
+  },
+  "isolation": {
+    "daily_unchanged": true,
+    "owned_processes": {
+      "9452": 1791427786.3176434
+    },
+    "remaining_owned": [],
+    "compiler_observations": [],
+    "compiler_guard_clean": true,
+    "threads_stopped": true,
+    "protocol_sha256": "75d07f49ebc69e48da609d86b398bd8559e4ec6e2594df784218571fec8c1c09",
+    "bench_sha256": {
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\hq_quality.py": "7a070003d8c1b6ade7006d142e06d82d6236ca81a3fa037ed71e6dab49e97b5b",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\minp_contract.py": "bd303b45df4407ad40cdb97a78bb216019b74e3ed1d091abf3dd6f512c01bd50",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\policy_trace.py": "54b68f42465a2903c2effa811d8d21eeaf31344ec38d6c5efc5ffac8fff785dc",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\quality.py": "fc1e8a2d84d70a93606e41842b1acaee64664b20397fdab87b0a6c7f32e0b71f",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\run_shallow.py": "551a7be3a1f6e28707bf389ef72186d9d6c2ca1479205dc8c6ea2039553f9c53",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\shallow_contract.py": "04c1626f392092328c7704fde596e6031123fd78f8ef3025d61e3bdf4c7a91c3",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\shallow_validation.py": "dfd26302e748bc67b08d3fdaeec3b853803c5381f6d10aec7a4eea60a8b4c248",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\telemetry_contract.py": "bdb9ced7bfd10f1902c3ea807be0ba2804599d5863e1158a7a9e40527fd4e4d3",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\test_shallow.py": "492662e85ca9d4731c2d07edae8b1cdd95ded52450ddcbc4c8ca6dd910d227e7",
+      "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\bench\\top2_contract.py": "b2e87f657da42be2a758ce7d9a27fcbae3395554db1c0d1af6141d2200009e97"
+    }
+  },
+  "evidence": {
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\verdict.json": "930b948e4669221669a970bfb468e6039c680a37b70a3401b3db97bf15e1ca86",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\result.json": "b7cf0159bffe20c5c6a02a61b9361d413e84ff621c01a41c80d1aaffa6992da5",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\plan.json": "2b2cee17857d4df30faf9b5e7007a90e25d4ab9a346b548b96c64539ecdd0d18",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\policy_trace.jsonl": "08e62da829e5bf862d9773239f8f01fda248cdb5e255a445460c6ff0a03df0a0",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\shallow_trace.jsonl": "7b7aaf46e22bdc49c3abafc44b56af95d541969c9155af9cf600078b23e5932c",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\force_trace.txt": "0251ed8cafb280e6e6339c788ffd92a222108cc44c854eafaac0f440abcc26ac",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\engine.log": "26a4aec4d317fcc49455f21fab1f497d0b93de359b109facb1cee471b7be97b1",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\mtp-shallow\\runs\\DET-shallow-01\\isolation.json": "5403b71bbc0f56f0068f2aa87fd2048e7f1c2af0d468787f517f65d618cdbeb1"
+  },
+  "limits": [
+    "Instrumented host-observation trace with oracle off and forced IDs; not uninstrumented performance or free-generation quality.",
+    "Expert auto cache and elasticity are retained: capacity/tier drift remains an observed confounder.",
+    "Warmup/smoke are not performance results. Shallow uses only already-ready first draft confidence; target forcing is benchmark control. TOP2 labels are local forced-context observations, not free quality.",
+    "First-head correctness belongs to the selected observed cohort; raw labels remain local forced-prefix labels, not free generation.",
+    "Autoelastic target-cache growth/shrink and paired B drift retained; no subtraction or normalization of overlapped timer categories.",
+    "Root gate requires each B at least+5% in both cases and B spread at most3%; passing spread alone is insufficient.",
+    "Applied experimental source remains main9dbada9b dirty default-off, with no shallow commit/push."
+  ],
+  "source_state": "Only src/program/generate.cpp modified on main9dbada9b; default-off experimental flag."
+}
