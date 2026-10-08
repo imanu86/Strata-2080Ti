@@ -4,6 +4,7 @@
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/core/emulate.hpp"
+#include "strata/kernels/q8_1_finite.hpp"   // #606: q8_1_ds
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/pdl.hpp"
 
@@ -12,7 +13,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cfloat>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -197,10 +197,10 @@ __device__ __forceinline__ void gdn_q8_1_store(GdnQ81* __restrict__ xq, size_t i
     for (int o = 16; o > 0; o >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, o));
 #pragma unroll
     for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
-    const float d = amax / 127.0f;
-    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+    const float d = q8_1_finite(amax / 127.0f);   // #606: as native_quantize_q8_1_kernel - finite blocks bit for bit
+    const int8_t q = q8_1_quant(xi, d, amax);
     xq[idx / 32].qs[idx % 32] = q;
-    if (idx % 32 == 0) xq[idx / 32].ds = make_half2(d, sum);
+    if (idx % 32 == 0) xq[idx / 32].ds = q8_1_ds(d, sum);   // #606: clamped (the QFUSE path bypassed the finite helper)
 }
 
 template <bool ALL_OUT, bool Q>
@@ -645,161 +645,6 @@ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const 
     check("mtp_select");
 }
 
-namespace {
-__global__ void mtp_feature_step_kernel(float* residual, int64_t stride, const int32_t* token,
-                                        const float* bank, const int32_t* fixture, const int32_t* meta,
-                                        int32_t* mask, unsigned long long* stats, int j) {
-    __shared__ int take;
-    __shared__ int at;
-    if (threadIdx.x == 0) {
-        take = 0; at = meta[1] + j;
-        if (j == 1) *mask = meta[3]; // every chain resets; only fresh chains with a verified root qualify
-        if (!meta[3]) ++stats[5];
-        else if (at < 0 || at >= meta[2]) { *mask = 0; ++stats[3]; }
-        else if (!*mask) ++stats[4];
-        else if (*token != fixture[at]) { *mask = 0; ++stats[2]; }
-        else { ++stats[0]; take = meta[0] == 2; stats[1] += take; }
-    }
-    __syncthreads();
-    if (take) for (int64_t i = threadIdx.x; i < stride; i += blockDim.x)
-        residual[i] = bank[(size_t) at * stride + i];
-}
-} // namespace
-
-void mtp_feature_step(float* residual, int64_t stride, const int32_t* token, const float* bank,
-                      const int32_t* fixture, const int32_t* meta, int32_t* mask,
-                      unsigned long long* stats, int j, void* stream) {
-    mtp_feature_step_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(residual, stride, token, bank, fixture, meta, mask, stats, j);
-    check("mtp_feature_step");
-}
-
-namespace {
-// One block owns the10240-float row. All lanes take the same guard branches.
-__device__ float anchor_sum(float x, float* s) {
-    const int t = threadIdx.x; s[t] = x; __syncthreads();
-    for (int d = blockDim.x / 2; d; d /= 2) {
-        if (t < d) s[t] += s[t + d];
-        __syncthreads();
-    }
-    const float result = s[0]; __syncthreads(); return result;
-}
-__global__ void mtp_anchor_seed_kernel(const float* residual, int64_t stride, int rows, const int32_t* row,
-                                       const int32_t* meta, float* anchor, int32_t* valid,
-                                       unsigned long long* stats) {
-    __shared__ float s[256];
-    const int t = threadIdx.x, r = *row;
-    if (t == 0) *valid = 0;
-    if (!meta[1]) return; // no fixture/token lookup: only the launch's causal fresh classification
-    if (stride != 10240 || r < 0 || r >= rows) { if (t == 0) atomicAdd(stats + 1, 1ULL); return; }
-    float sum = 0;
-    for (int64_t i = t; i < stride; i += blockDim.x) {
-        const float x = residual[(size_t) r * stride + i]; sum += x*x;
-    }
-    const float rms = sqrtf(anchor_sum(sum, s) / (float) stride);
-    if (!isfinite(rms) || rms <= 1e-12f) { if (t == 0) atomicAdd(stats + 1, 1ULL); return; }
-    for (int64_t i = t; i < stride; i += blockDim.x)
-        anchor[i] = residual[(size_t) r * stride + i] / rms;
-    __syncthreads();
-    if (t == 0) { *valid = 1; atomicAdd(stats, 1ULL); }
-}
-
-__global__ void mtp_anchor_step_kernel(float* residual, int64_t stride, const int32_t* meta,
-                                       const float* anchor, const int32_t* valid, unsigned long long* stats) {
-    __shared__ float s[256];
-    const int t = threadIdx.x;
-    if (!meta[1]) { if (t == 0) atomicAdd(stats + 4, 1ULL); return; }
-    if (!meta[0]) { if (t == 0) atomicAdd(stats + 3, 1ULL); return; } // bitwise no-write control
-    if (stride != 10240 || !*valid) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
-    float sum = 0;
-    for (int64_t i = t; i < stride; i += blockDim.x) { const float x = residual[i]; sum += x*x; }
-    const float rms = sqrtf(anchor_sum(sum, s) / (float) stride);
-    if (!isfinite(rms) || rms <= 1e-12f) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
-    sum = 0;
-    for (int64_t i = t; i < stride; i += blockDim.x) {
-        const float z = 0.75f*(residual[i]/rms) + 0.25f*anchor[i]; sum += z*z;
-    }
-    const float zrms = sqrtf(anchor_sum(sum, s) / (float) stride);
-    if (!isfinite(zrms) || zrms <= 1e-12f) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
-    // Validate the scale before any write; finite output is bounded by original RMS*sqrt(stride).
-    const float scale = rms/zrms;
-    if (!isfinite(scale)) { if (t == 0) atomicAdd(stats + 5, 1ULL); return; }
-    for (int64_t i = t; i < stride; i += blockDim.x)
-        residual[i] = scale*(0.75f*(residual[i]/rms) + 0.25f*anchor[i]);
-    if (t == 0) atomicAdd(stats + 2, 1ULL);
-}
-} // namespace
-
-void mtp_anchor_seed(const float* residual, int64_t stride, int n_rows, const int32_t* row,
-                     const int32_t* meta, float* anchor, int32_t* valid,
-                     unsigned long long* stats, void* stream) {
-    mtp_anchor_seed_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(residual,stride,n_rows,row,meta,anchor,valid,stats);
-    check("mtp_anchor_seed");
-}
-void mtp_anchor_step(float* residual, int64_t stride, const int32_t* meta, const float* anchor,
-                     const int32_t* valid, unsigned long long* stats, void* stream) {
-    mtp_anchor_step_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(residual,stride,meta,anchor,valid,stats);
-    check("mtp_anchor_step");
-}
-
-namespace {
-__device__ __forceinline__ void first_top2_take(float v, int i, float& v1, int& i1, float& v2, int& i2) {
-    if (i == i1 || i == i2) return;
-    if (v > v1 || (v == v1 && i < i1)) {
-        v2 = v1; i2 = i1; v1 = v; i1 = i;
-    } else if (v > v2 || (v == v2 && i < i2)) { v2 = v; i2 = i; }
-}
-
-__global__ void mtp_first_top2_kernel(const float* logits, int nv, int nr, const int32_t* row_dev,
-                                      const int32_t* vocab, const int32_t* picks, MtpFirstTop2* out) {
-    constexpr int NT = 256;
-    __shared__ float v1s[NT], v2s[NT];
-    __shared__ int i1s[NT], i2s[NT], bads[NT];
-    const int row = *row_dev, t = threadIdx.x;
-    if (row < 0 || row >= nr || nv < 1) {
-        if (t == 0) { *out = MtpFirstTop2{}; out->row = row; out->status = 4; }
-        return;
-    }
-    float v1 = -FLT_MAX, v2 = -FLT_MAX;
-    int i1 = nv, i2 = nv, bad = 0;
-    for (int i = t; i < nv; i += NT) {
-        const float v = logits[(size_t) row * nv + i];
-        if (!isfinite(v)) ++bad;
-        else first_top2_take(v, i, v1, i1, v2, i2);
-    }
-    v1s[t] = v1; v2s[t] = v2; i1s[t] = i1; i2s[t] = i2; bads[t] = bad;
-    __syncthreads();
-    for (int d = NT / 2; d > 0; d /= 2) {
-        if (t < d) {
-            if (i1s[t + d] < nv) first_top2_take(v1s[t + d], i1s[t + d], v1s[t], i1s[t], v2s[t], i2s[t]);
-            if (i2s[t + d] < nv) first_top2_take(v2s[t + d], i2s[t + d], v1s[t], i1s[t], v2s[t], i2s[t]);
-            bads[t] += bads[t + d];
-        }
-        __syncthreads();
-    }
-    if (t == 0) {
-        MtpFirstTop2 r{};
-        r.row = row; r.pick = picks[row]; r.nonfinite = bads[0];
-        if (r.nonfinite) r.status = 2;
-        else if (i2s[0] >= nv) r.status = 3;
-        else {
-            r.first = vocab ? vocab[i1s[0]] : i1s[0];
-            r.second = vocab ? vocab[i2s[0]] : i2s[0];
-            r.gap = (double) v1s[0] - (double) v2s[0];
-            r.status = r.first == r.pick && r.first != r.second && r.first >= 0 && r.second >= 0 ? 1 : 5;
-        }
-        *out = r;
-        __threadfence_system(); // publication is consumed only after the existing stream event completes
-    }
-}
-} // namespace
-
-void mtp_first_top2(const float* logits, int n_vocab, int n_rows, const int32_t* row_dev,
-                    const int32_t* vocab, const int32_t* mapped_picks, MtpFirstTop2* out, void* stream) {
-    mtp_first_top2_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(
-        logits, n_vocab, n_rows, row_dev, vocab, mapped_picks, out);
-    check("mtp_first_top2");
-}
-
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream) {
     force_token_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(tok, force, j);
     check("force_token");
@@ -1126,77 +971,6 @@ __global__ void wait_flag_ge_kernel(const volatile uint32_t* flag, uint32_t valu
     while (*flag < value) strata_spin_pause();
     __threadfence_system();
 }
-__device__ __forceinline__ unsigned long long now_ns() {   // gpu_stamp's clock
-    unsigned long long t;
-#if defined(STRATA_HIP_GFX906)
-    t = wall_clock64() * 40ull;
-#elif defined(__HIPCC__)
-    t = wall_clock64() * 10ull;
-#else
-    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
-#endif
-    return t;
-}
-// wait_flag_ge, with the GPU's clock as it arrives (t_in) and as it leaves (t_out), either may be null
-
-// the GPU's clock in ns (the same sources as gpu_stamp_kernel)
-__device__ __forceinline__ unsigned long long strata_now_ns() {
-    unsigned long long t;
-#if defined(STRATA_HIP_GFX906)
-    t = wall_clock64() * 40ull;
-#elif defined(__HIPCC__)
-    t = wall_clock64() * 10ull;
-#else
-    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
-#endif
-    return t;
-}
-
-// the overlapped split's hand-off wait, bounded: spin until *flag >= value, or give up after timeout_ns (0: never),
-// marking *err = 1 (mapped) so the host fails the window instead of using a stale hand-off.  The window's later
-// kernels still run (on whatever the hand-off buffer holds) so the graph completes and no stream is left hanging.
-__global__ void wait_handoff_kernel(const volatile uint32_t* flag, uint32_t value, uint32_t* err,
-                                    unsigned long long timeout_ns) {
-    const unsigned long long t0 = timeout_ns ? strata_now_ns() : 0ull;
-    while (*flag < value) {
-        strata_spin_pause();
-        if (timeout_ns && strata_now_ns() - t0 > timeout_ns) {
-            *(volatile uint32_t*) err = 1u;
-            __threadfence_system();
-            return;
-        }
-    }
-    __threadfence_system();
-}
-
-__global__ void handoff_publish_kernel(float* dst, const float* __restrict__ a, int64_t na, const float* __restrict__ b,
-                                       int64_t nb, const float* __restrict__ c, int64_t nc, uint32_t* counter,
-                                       uint32_t* flag, const volatile uint32_t* drop) {
-    const int64_t n = na + nb + nc;
-    volatile float* const out = dst;
-    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (int64_t) gridDim.x * blockDim.x)
-        out[i] = i < na ? a[i] : i < na + nb ? b[i - na] : c[i - na - nb];
-    __threadfence_system();   // this thread's stores reach host memory before the block counts itself done
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        const uint32_t prev = atomicAdd(counter, 1u);
-        if (prev == gridDim.x - 1) {   // every block's payload is out: raise the next stage's flag
-            *(volatile uint32_t*) counter = 0u;
-            __threadfence_system();
-            if (drop == nullptr || *drop == 0u) {   // test hook (STRATA_TEST_HANDOFF_DROP): a lost publish
-                *(volatile uint32_t*) flag = 1u;
-                __threadfence_system();
-            }
-        }
-    }
-}
-__global__ void wait_flag_ge_stamped_kernel(const volatile uint32_t* flag, uint32_t value, volatile unsigned long long* t_in,
-                                            volatile unsigned long long* t_out) {
-    if (t_in != nullptr) *t_in = now_ns();
-    while (*flag < value) strata_spin_pause();
-    __threadfence_system();
-    if (t_out != nullptr) *t_out = now_ns();
-}
 }  // namespace
 
 namespace {
@@ -1419,34 +1193,9 @@ void copy_or_zero_from_mapped(float* dst, const float* src, long long n, const u
     check("copy_or_zero_from_mapped");
 }
 
-void wait_handoff(const uint32_t* flag, uint32_t value, uint32_t* err, unsigned long long timeout_ns, void* stream) {
-    wait_handoff_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value, err, timeout_ns);
-    check("wait_handoff");
-}
-
-void handoff_publish(float* dst, const float* a, int64_t na, const float* b, int64_t nb, const float* c, int64_t nc,
-                     uint32_t* counter, uint32_t* flag, void* stream, const uint32_t* drop) {
-    const int64_t n = na + nb + nc;
-    if (n <= 0 || dst == nullptr || counter == nullptr || flag == nullptr) {
-        std::fprintf(stderr, "handoff_publish: invalid arguments\n");
-        std::exit(1);
-    }
-    const int64_t nb256 = (n + 255) / 256;
-    const int blocks = (int) (nb256 < 64 ? nb256 : 64);
-    handoff_publish_kernel<<<blocks, 256, 0, (cudaStream_t) stream>>>(dst, a, na, b, nb, c, nc, counter, flag, drop);
-    check("handoff_publish");
-}
-
-
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream) {
     wait_flag_ge_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value);
     check("wait_flag_ge");
-}
-
-void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long long* t_in, unsigned long long* t_out,
-                          void* stream) {
-    wait_flag_ge_stamped_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value, t_in, t_out);
-    check("wait_flag_ge_stamped");
 }
 
 void embedding_gather_dev(const uint8_t* codes, const float* scales, const float* offsets, const int32_t* tokens,
@@ -1537,9 +1286,7 @@ bool pdl_supported() {
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
     int s = state[dev].load(std::memory_order_relaxed);
     if (s == 0) {
-        // Keep the fork's established default; upstream requires opt-in pending a measured A/B. The architecture
-        // and compiled-code guards below still exclude sm_75 and sm_86.
-        static const bool env_on = [] { const char* v = std::getenv("STRATA_DF_PDL"); return v == nullptr || std::atoi(v) != 0; }();
+        static const bool env_on = [] { const char* v = std::getenv("STRATA_DF_PDL"); return v != nullptr && std::atoi(v) != 0; }();   // opt-in until the A/B says otherwise
         int major = 0;
         cudaFuncAttributes fa{};
         const bool on = env_on && cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
@@ -1606,26 +1353,5 @@ bool pdl_launch_ok(const void* kernel, cudaStream_t stream) {
 #endif
 }
 #endif
-
-namespace {
-__global__ void mtp_observer_copy_kernel(const float* residual, int64_t stride, const float* head_input,
-                                        int64_t n, const int32_t* row, const int32_t* meta,
-                                        float* slab, int32_t* markers, int depth, int cap) {
-    const int slot = meta[1];
-    if (meta[0] != 1 || slot < 0 || slot >= cap || depth < 0 || depth >= 4) return;
-    const int r = *row;
-    if (blockIdx.x == 0 && threadIdx.x == 0) markers[slot * 4 + depth] = r == 0 ? 1 : -1;
-    if (r != 0) return; // round is copied to row0; recursive steps are single-row.
-    const int64_t width = stride + n;
-    float* dst = slab + ((int64_t) slot * 4 + depth) * width;
-    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < width;
-         i += (int64_t) blockDim.x * gridDim.x)
-        dst[i] = i < stride ? residual[(int64_t) r * stride + i] : head_input[(int64_t) r * n + i - stride];
-}
-}
-void mtp_observer_copy(const float* residual, int64_t stride, const float* head_input, int64_t n,
-                       const int32_t* row, const int32_t* meta, float* slab, int32_t* markers, int depth, int cap, void* stream) {
-    mtp_observer_copy_kernel<<<64, 256, 0, (cudaStream_t) stream>>>(residual, stride, head_input, n, row, meta, slab, markers, depth, cap);
-}
 
 }  // namespace strata::kernels

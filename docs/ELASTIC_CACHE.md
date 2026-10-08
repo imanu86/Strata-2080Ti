@@ -1,3 +1,5 @@
+> **ARCHIVIO / NON ATTIVO:** evidenza storica del fork precedente. Questo documento non descrive il runtime corrente; vedere [baseline verificata](DAILY_UPSTREAM_BASELINE_2026-10-08.md).
+
 # Optional elastic expert cache
 
 Add `--elastic` to the engine's arguments to allow a single CUDA GPU's expert

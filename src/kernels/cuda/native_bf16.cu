@@ -74,11 +74,11 @@ __global__ void bf16_f32_mmvf_kernel(const float* __restrict__ x, const uint16_t
 // the same kernel for up to 8 activation rows - the weight row is read ONCE and every
 // token keeps its own accumulator with exactly the single-row kernel's order (pairs, two ordered FMAs, the same warp
 // and block reductions), so each output is bit-identical to a bf16_f32_mmvf_kernel launch of its own.
-// EXACT_T (0.1.40): NT == n_tok, the per-token guards fold away. The activations and outputs are not __restrict__ on
-// CUDA (STRATA_PDL_RESTRICT, pdl.hpp) so that nothing of theirs is loaded before pdl_wait().
 template <int BLOCK_SIZE, int NT, bool EXACT_T = true>
-__global__ void bf16_f32_mmvf_multi_kernel(const float* STRATA_PDL_RESTRICT x, int64_t ldx, const uint16_t* __restrict__ w,
-                                          float* STRATA_PDL_RESTRICT y, int64_t ldy, int n_in, int n_tok) {
+__global__ void bf16_f32_mmvf_multi_kernel(const float* x_, int64_t ldx, const uint16_t* __restrict__ w,
+                                          float* y_, int64_t ldy, int n_in, int n_tok) {
+    const float* STRATA_PDL_RESTRICT x = x_;   // __restrict__ below sm_70 only (pdl.hpp, #1469)
+    float* STRATA_PDL_RESTRICT y = y_;
     const int t = threadIdx.x;
     const uint16_t* row = w + (size_t) blockIdx.x * n_in;
     const uint32_t* weights2 = reinterpret_cast<const uint32_t*>(row);
@@ -107,14 +107,7 @@ __global__ void bf16_f32_mmvf_multi_kernel(const float* STRATA_PDL_RESTRICT x, i
 #pragma unroll
         for (int k = 0; k < NT; ++k) {
             if (EXACT_T || k < n_tok) {
-                // 0.1.40 reads the activations through __ldg; under PDL (sm_90+ code only) they are written by the
-                // kernel this one overlaps, so there the non-coherent read-only path is kept off: same values
-                const float2* xin = reinterpret_cast<const float2*>(x + (size_t) k * ldx) + pair;
-#if !defined(__HIPCC__) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-                const float2 input = *xin;
-#else
-                const float2 input = __ldg(xin);
-#endif
+                const float2 input = __ldg(reinterpret_cast<const float2*>(x + (size_t) k * ldx) + pair);
                 acc[k] = __fmaf_rn(w0, input.x, acc[k]);
                 acc[k] = __fmaf_rn(w1, input.y, acc[k]);
             }

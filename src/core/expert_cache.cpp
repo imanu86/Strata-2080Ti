@@ -621,21 +621,7 @@ bool ExpertCache::map_to(uint64_t end, std::string& err) {
         CUmemGenericAllocationHandle h = 0;
         if (!drv_ok(cuMemCreate(&h, chunk_, &prop, 0), "cuMemCreate", err)) return false;
         const CUdeviceptr at = (CUdeviceptr) va_ + mapped_;
-        if (!drv_ok(cuMemMap(at, chunk_, 0, h, 0), "cuMemMap", err)) {
-            if (elastic_strict_) {
-                std::string cleanup;
-                if (!drv_ok(cuMemRelease(h), "failed-map release", cleanup)) {
-                    orphan_handles_.push_back((unsigned long long) h);
-                    elastic_failed_ = true; err += "; " + cleanup;
-                }
-            } else cuMemRelease(h);
-            return false;
-        }
-        if (elastic_strict_) {
-            handles_.push_back((unsigned long long) h); mapped_ += chunk_;
-            if (!drv_ok(cuMemSetAccess(at, chunk_, &acc, 1), "cuMemSetAccess", err)) return false;
-            continue;
-        }
+        if (!drv_ok(cuMemMap(at, chunk_, 0, h, 0), "cuMemMap", err)) { cuMemRelease(h); return false; }
         if (!drv_ok(cuMemSetAccess(at, chunk_, &acc, 1), "cuMemSetAccess", err)) {
             cuMemUnmap(at, chunk_);
             cuMemRelease(h);
@@ -658,34 +644,9 @@ void ExpertCache::unmap_above(uint64_t keep) {
     }
 }
 
-bool ExpertCache::unmap_above_checked(uint64_t keep, std::string& err) {
-    const uint64_t keep_chunks = chunk_ ? (keep + chunk_ - 1) / chunk_ : 0;
-    while (handles_.size() > keep_chunks) {
-        if (!tail_unmapped_) {
-            const uint64_t at = (handles_.size() - 1) * chunk_;
-            if (!drv_ok(cuMemUnmap((CUdeviceptr) va_ + at, chunk_), "cuMemUnmap", err)) {
-                elastic_failed_ = true; return false;
-            }
-            mapped_ -= chunk_; tail_unmapped_ = true;
-        }
-        if (!drv_ok(cuMemRelease((CUmemGenericAllocationHandle) handles_.back()), "cuMemRelease", err)) {
-            elastic_failed_ = true; return false;
-        }
-        handles_.pop_back(); tail_unmapped_ = false;
-    }
-    while (!orphan_handles_.empty()) {
-        if (!drv_ok(cuMemRelease((CUmemGenericAllocationHandle) orphan_handles_.back()), "orphan release", err)) {
-            elastic_failed_ = true; return false;
-        }
-        orphan_handles_.pop_back();
-    }
-    return true;
-}
-
 bool ExpertCache::open_sized_elastic(const std::vector<int64_t>& slot_bytes, int64_t n_layers, int64_t n_expert,
                                      uint64_t va_bytes, uint64_t chunk_bytes, std::string& err) {
     close();
-    if (elastic_failed_ || elastic_vmm_) { err = "ExpertCache: previous VMM cleanup failed"; return false; }
     if (slot_bytes.empty() || n_layers <= 0 || n_expert <= 0 ||
         n_layers > std::numeric_limits<int64_t>::max() / n_expert ||
         (uint64_t) slot_bytes.size() > (uint64_t) (n_layers * n_expert)) {
@@ -752,14 +713,13 @@ bool ExpertCache::open_sized_elastic(const std::vector<int64_t>& slot_bytes, int
 #else
 bool ExpertCache::map_to(uint64_t, std::string& err) { err = "elastic cache requires CUDA VMM"; return false; }
 void ExpertCache::unmap_above(uint64_t) {}
-bool ExpertCache::unmap_above_checked(uint64_t, std::string& err) { err = "checked elastic cache requires CUDA VMM"; return false; }
 bool ExpertCache::open_sized_elastic(const std::vector<int64_t>&, int64_t, int64_t, uint64_t, uint64_t, std::string& err) {
     close(); err = "elastic cache requires CUDA VMM; using fixed cache"; return false;
 }
 #endif
 
 bool ExpertCache::elastic_grow(const std::vector<int64_t>& slot_bytes, std::string& err) {
-    if (!elastic_vmm_ || elastic_failed_) { err = "ExpertCache: grow needs a healthy elastic arena"; return false; }
+    if (!elastic_vmm_) { err = "ExpertCache: grow needs the elastic arena"; return false; }
     if (slot_bytes.empty()) return true;
     if ((uint64_t) slot_bytes.size() > (uint64_t) (n_layers_ * n_expert_ - slots_)) {
         err = "ExpertCache (elastic): more slots than (layer, expert) pairs";
@@ -776,31 +736,10 @@ bool ExpertCache::elastic_grow(const std::vector<int64_t>& slot_bytes, std::stri
         end += aligned;
         add.push_back(end);
     }
-    if (!map_to(end, err)) {
-        if (elastic_strict_) {
-            std::string cleanup;
-            if (!unmap_above_checked(old_end, cleanup)) err += "; " + cleanup;
-        } else unmap_above(old_end);
-        return false;
-    }
+    if (!map_to(end, err)) { unmap_above(old_end); return false; }
     if (cudaMemset(base_ + old_end, 0, (size_t) (end - old_end)) != cudaSuccess) {
         err = "ExpertCache (elastic): cudaMemset of the new slots failed";
-        if (elastic_strict_) {
-            if (cudaDeviceSynchronize() != cudaSuccess) {
-                elastic_failed_ = true;
-                err += "; rollback quiescence failed, mapping retained"; return false;
-            }
-            std::string cleanup;
-            if (!unmap_above_checked(old_end, cleanup)) err += "; " + cleanup;
-        } else unmap_above(old_end);
-        return false;
-    }
-    // cudaMemset on the default stream is host-asynchronous. The helper fills
-    // immediately on its nonblocking stream: publish slots only after checked ordering.
-    if (elastic_strict_ && cudaStreamSynchronize(nullptr) != cudaSuccess) {
-        elastic_failed_ = true;
-        err = "ExpertCache (strict elastic): default-stream memset fence failed; mapping retained, fatal before decode";
-        // Failed quiescence does not authorize unmapping memory potentially still in use.
+        unmap_above(old_end);
         return false;
     }
     off_.insert(off_.end(), add.begin(), add.end());
@@ -811,69 +750,32 @@ bool ExpertCache::elastic_grow(const std::vector<int64_t>& slot_bytes, std::stri
 }
 
 bool ExpertCache::elastic_shrink(int64_t n_slots, std::string& err) {
-    if (!elastic_vmm_ || elastic_failed_) { err = "ExpertCache: shrink needs a healthy elastic arena"; return false; }
-    if (elastic_strict_ && per_layer_) { err = "ExpertCache: strict helper shrink rejects per-layer admission"; return false; }
+    if (!elastic_vmm_) { err = "ExpertCache: shrink needs the elastic arena"; return false; }
     if (n_slots < 0 || n_slots > slots_) { err = "ExpertCache (elastic): shrink outside 0..slots"; return false; }
     if (n_slots == slots_) return true;
-    if (elastic_strict_) {
-        if (!unmap_above_checked(off_[(size_t) n_slots], err)) return false;
-        if (!elastic_truncate_admission(n_slots, err)) return false;
-    }
     off_.resize((size_t) n_slots + 1);
     slots_ = n_slots;
     live_slots_ = slots_;
-    if (!elastic_strict_) unmap_above(off_.back());
-    return true;
-}
-
-bool ExpertCache::elastic_truncate_admission(int64_t n_slots, std::string& err) {
-    if (!elastic_strict_ || !elastic_vmm_ || per_layer_ || n_slots < 0 || n_slots > slots_) {
-        err = "ExpertCache: helper admission truncate invalid mode/range"; return false;
-    }
-    for (auto& slot : residency_) if (slot >= n_slots) slot = kNotResident;
-    next_free_ = std::min(next_free_, n_slots);
+    unmap_above(off_.back());
     return true;
 }
 
 void ExpertCache::close() {
-    // Retain address/handles on a partial driver failure; no subsequent GEN may use this arena.
-    if (elastic_strict_ && elastic_vmm_) {
-        std::string e;
-        if (cudaDeviceSynchronize() != cudaSuccess) {
-            elastic_failed_ = true;
-            std::fprintf(stderr, "FATAL helper VMM cleanup: device quiescence failed; bookkeeping retained\n"); return;
-        }
-        if (!unmap_above_checked(0, e)) {
-            std::fprintf(stderr, "FATAL helper VMM cleanup: %s; bookkeeping retained\n", e.c_str()); return;
-        }
-#if !defined(STRATA_EC_NO_VMM)
-        if (va_ != 0 && !drv_ok(cuMemAddressFree((CUdeviceptr) va_, va_bytes_), "cuMemAddressFree", e)) {
-            elastic_failed_ = true;
-            std::fprintf(stderr, "FATAL helper VMM cleanup: %s; address retained\n", e.c_str()); return;
-        }
-#endif
-        va_ = 0; elastic_failed_ = false;
-    }
 #if defined(STRATA_USE_HIP)
     if (blocking_staging_) (void) cudaFreeHost(blocking_staging_);
     blocking_staging_ = nullptr;
     blocking_staging_bytes_ = 0;
 #endif
     off_.clear();
-    if (elastic_vmm_) {   // the fork's elastic arena (open_sized_elastic)
+    if (elastic_vmm_) {   // Daily arena: never cudaMalloc'd
         unmap_above(0);
 #if !defined(STRATA_EC_NO_VMM)
         if (va_ != 0) cuMemAddressFree((CUdeviceptr) va_, va_bytes_);
 #endif
-        va_ = 0;
-        va_bytes_ = 0;
-        chunk_ = 0;
-        mapped_ = 0;
-        elastic_vmm_ = false;
-        base_ = nullptr;   // never cudaMalloc'd
+        va_ = 0; va_bytes_ = 0; chunk_ = 0; mapped_ = 0; elastic_vmm_ = false; base_ = nullptr;
     } else if (!segs_.empty()) {
         release_segmented();
-    } else if (vmm_) {   // the elastic K/V's VmmRange (set_vmm)
+    } else if (vmm_) {
         vmm_.reset();   // unmaps and frees every chunk it still holds
         base_ = nullptr;
     } else if (base_ != nullptr) {

@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <chrono>
 
 namespace strata::core {
 namespace {
@@ -134,64 +133,10 @@ bool RemoteExpertOpt::owns(int64_t layer, int32_t expert) const {
     return false;
 }
 
-bool RemoteExpertOpt::audit_disjoint(const std::vector<int32_t>& primary,
-                                    const std::vector<std::pair<int32_t, int32_t>>& pending, std::string& err) const {
-    std::vector<uint8_t> seen(primary.size(), 0);
-    for (size_t i = 0; i < primary.size(); ++i) seen[i] = primary[i] >= 0;
-    for (const auto& p : pending) {
-        if (p.first < 0 || (size_t) p.first >= seen.size()) { err = "remote elastic audit: invalid pending"; return false; }
-        seen[(size_t) p.first] = 1;
-    }
-    for (const auto& p : peers_) {
-        const auto& r = *p.remote;
-        if (seen.size() != r.layers_present_.size() * (size_t) r.n_expert_) { err = "remote elastic audit: geometry mismatch"; return false; }
-        for (int32_t l = 0; l < (int32_t) r.layers_present_.size(); ++l)
-            for (int32_t e = 0; e < r.n_expert_; ++e) if (r.holds(l, e)) {
-                const size_t i = (size_t) l * r.n_expert_ + e;
-                if (seen[i]) { err = "remote elastic audit: duplicate primary/pending/helper ownership"; return false; }
-                seen[i] = 1;
-            }
-    }
-    return true;
-}
-
-bool RemoteExpertOpt::elastic_due(bool request_start) const {
-    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    for (const auto& p : peers_)
-        if (p.remote->elastic() && (request_start || now - p.remote->elastic_last_ms_ >= 1000)) return true;
-    return false;
-}
-
-bool RemoteExpertOpt::elastic_step(const std::vector<float>& usage, const std::vector<int32_t>& primary,
-                                  const std::vector<std::pair<int32_t, int32_t>>& pending,
-                                  ExpertSource& source, bool request_start, std::string& err) {
-    if (active()) { err = "remote elastic: decode callback still active"; return false; }
-    for (auto& peer : peers_) {
-        if (!peer.remote->elastic()) continue;
-        std::vector<uint8_t> excluded(primary.size(), 0);
-        for (size_t i = 0; i < primary.size(); ++i) excluded[i] = primary[i] >= 0;
-        for (const auto& p : pending) {
-            if (p.first < 0 || (size_t) p.first >= excluded.size()) { err = "remote elastic: invalid primarypending"; return false; }
-            excluded[(size_t) p.first] = 1;
-        }
-        // Authoritative primary+pending, then CURRENT ownership of every helper, never xcache.slot_of.
-        for (const auto& other : peers_) {
-            const auto& r = *other.remote;
-            if (excluded.size() != r.layers_present_.size() * (size_t) r.n_expert_) { err = "remote elastic: primary geometry mismatch"; return false; }
-            for (int32_t l = 0; l < (int32_t) r.layers_present_.size(); ++l)
-                for (int32_t e = 0; e < r.n_expert_; ++e)
-                    if (r.holds(l, e)) excluded[(size_t) l * r.n_expert_ + e] = 1;
-        }
-        if (!peer.remote->elastic_step(usage, excluded, source, request_start, err)) return false;
-    }
-    return true;
-}
-
 bool RemoteExpertOpt::adapt(const std::vector<float>& usage, const std::vector<int32_t>& primary,
                      const std::vector<std::pair<int32_t, int32_t>>& pending, int max_swaps,
                      ExpertSource& source) {
     if (max_swaps <= 0) return true;
-    ++adapt_rounds_;
     const auto& lay = strata::kernels::cpu::expert_layout();
     std::vector<uint8_t> resident(primary.size(), 0);
     for (size_t i = 0; i < primary.size(); ++i) resident[i] = primary[i] >= 0;
@@ -234,13 +179,11 @@ bool RemoteExpertOpt::adapt(const std::vector<float>& usage, const std::vector<i
         if (swaps.empty()) continue;
         const OnDevice on(r.device_);
         for (const auto& s : swaps)
-            if (!r.cache_.fill_slot(r.cache_.slot_of(s.layer, s.out),
-                                    r.elastic() ? source.blob_stable(s.layer, s.in) : source.blob(s.layer, s.in),
+            if (!r.cache_.fill_slot(r.cache_.slot_of(s.layer, s.out), source.blob(s.layer, s.in),
                                     r.stream_, err, (int64_t) lay.blob_bytes(s.layer))) return false;
         if (!check(cudaStreamSynchronize(r.stream_), err)) return false;
         for (const auto& s : swaps) {
             r.cache_.replace(s.layer, s.out, s.in);
-            ++adapt_swaps_;
             const size_t base = (size_t) s.layer * r.n_expert_;
             resident[base + s.out] = 0;
             resident[base + s.in] = 1;

@@ -51,10 +51,6 @@ build-vision-cuda12.bat
 /engine-cuda12/
 /build-release*/
 /dist/
-/profiles/local-*.json
-/profiles/*.log
-/cache/
-/.publication/
 *.done
 /third_party/*.zip
 

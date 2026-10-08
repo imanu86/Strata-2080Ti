@@ -1,3 +1,5 @@
+> **ARCHIVIO / NON ATTIVO:** evidenza storica del fork precedente. Questo documento non descrive il runtime corrente; vedere [baseline verificata](../DAILY_UPSTREAM_BASELINE_2026-10-08.md).
+
 # Native IQ model validation
 
 Use `tools/sm75/validate_model.py` for a sequential A/B/A comparison of a

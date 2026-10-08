@@ -11,7 +11,6 @@ int main() {
     constexpr int64_t MiB = 1ll << 20;
     std::string err;
     strata::core::ExpertCache cache;
-    cache.set_elastic_strict(true);
     int checks = 0;
     auto check = [&](bool ok, const char* name) {
         ++checks;
@@ -32,32 +31,16 @@ int main() {
     const auto* offsets = cache.slot_offsets();
     std::vector<std::vector<uint8_t>> initial(3);
     for (int i = 0; i < 3; ++i) {
-        if (!check(cache.admit(i, i) == i, "mixed-size initial admission")) return 1;
         initial[i].assign(i == 2 ? MiB : MiB / 2, (uint8_t) (17 + i));
         if (!check(cache.fill_slot_blocking(i, initial[i].data(), err, (int64_t) initial[i].size()), "fill initial")) return 1;
     }
-    cudaStream_t nonblocking = nullptr;
-    if (!check(cudaStreamCreateWithFlags(&nonblocking, cudaStreamNonBlocking) == cudaSuccess, "nonblocking fill stream")) return 1;
-    std::vector<uint8_t> nonzero(MiB, 0xa7);
     if (!check(cache.elastic_grow({MiB, MiB, MiB}, err), "grow across physical chunks")) return 1;
-    // No other CUDA call/default-stream wait between grow and nonblocking fill below.
-    if (!check(cache.fill_slot(3, nonzero.data(), nonblocking, err, MiB), "immediate nonblocking nonzero fill after grow")) return 1;
-    if (!check(cudaStreamSynchronize(nonblocking) == cudaSuccess, "fill stream synchronization")) return 1;
-    if (!check(cache.verify_slot(3, nonzero.data(), err, MiB), "growth memset cannot overwrite completed nonblocking fill")) return 1;
-    if (!check(cudaStreamDestroy(nonblocking) == cudaSuccess, "fill stream cleanup")) return 1;
     if (!check(cache.slots() == 6 && cache.bytes() == 5 * MiB && cache.elastic_mapped_bytes() == 6 * MiB, "grown geometry")) return 1;
     if (!check(cache.device_slot(0) == base && cache.slot_offsets() == offsets, "stable base and offset table")) return 1;
     for (int i = 0; i < 3; ++i)
         if (!check(cache.verify_slot(i, initial[i].data(), err, (int64_t) initial[i].size()), "existing expert preserved")) return 1;
-    for (int i = 3; i < 6; ++i)
-        if (!check(cache.admit(i % 4, i) == i, "grown admission cursor")) return 1;
-    if (!check(cache.resident() == 6, "all grown slots admitted")) return 1;
-    cache.set_per_layer_admission(true);
-    if (!check(!cache.elastic_shrink(2, err) && cache.slots() == 6, "strict shrink rejects per-layer admission")) return 1;
-    cache.set_per_layer_admission(false);
-    if (!check(!cache.elastic_truncate_admission(-1, err) && !cache.elastic_truncate_admission(7, err), "reject truncate bounds")) return 1;
     std::vector<uint8_t> zeros(MiB, 0);
-    for (int i = 4; i < 6; ++i)
+    for (int i = 3; i < 6; ++i)
         if (!check(cache.verify_slot(i, zeros.data(), err, MiB), "new expert zeroed")) return 1;
     if (!check(!cache.elastic_grow({8 * MiB}, err), "reject growth past address reservation")) return 1;
     if (!check(cache.slots() == 6 && cache.bytes() == 5 * MiB && cache.elastic_mapped_bytes() == 6 * MiB,
@@ -69,18 +52,12 @@ int main() {
     if (!check(cache.elastic_shrink(2, err), "shrink removes whole chunks")) return 1;
     if (!check(cache.slots() == 2 && cache.bytes() == MiB && cache.elastic_mapped_bytes() == 2 * MiB, "shrunk geometry")) return 1;
     if (!check(cache.device_slot(0) == base && cache.slot_offsets() == offsets, "shrink retains pointers")) return 1;
-    if (!check(cache.resident() == 2 && cache.slot_of(0, 0) == 0 && cache.slot_of(1, 1) == 1 &&
-               cache.slot_of(2, 2) == -1 && cache.slot_of(3, 3) == -1 && cache.slot_of(0, 4) == -1 && cache.slot_of(1, 5) == -1,
-               "truncate clears every tail resident and preserves retained ones")) return 1;
     for (int i = 0; i < 2; ++i)
         if (!check(cache.verify_slot(i, initial[i].data(), err, (int64_t) initial[i].size()), "shrink preserves remaining bytes")) return 1;
     if (!check(cache.elastic_grow({MiB}, err), "regrow recycled physical map")) return 1;
     if (!check(cache.verify_slot(2, zeros.data(), err, MiB), "regrown bytes zeroed")) return 1;
-    if (!check(cache.admit(2, 2) == 2 && cache.resident() == 3, "regrow reuses truncated admission cursor")) return 1;
     if (!check(cache.elastic_shrink(0, err) && cache.elastic_mapped_bytes() == 0, "shrink to empty")) return 1;
-    if (!check(cache.resident() == 0 && cache.slot_of(0, 0) == -1 && cache.slot_of(2, 2) == -1, "truncate to empty clears residency")) return 1;
     if (!check(cache.elastic_grow({MiB}, err) && cache.device_slot(0) == base, "grow from empty same address")) return 1;
-    if (!check(cache.admit(3, 7) == 0 && cache.resident() == 1, "grow from empty restarts admission")) return 1;
     if (!check(cache.verify_slot(0, zeros.data(), err, MiB), "grow from empty zeroed")) return 1;
     cache.close();
     if (!check(!cache.elastic() && !cache.valid() && cache.slots() == 0 && cache.elastic_mapped_bytes() == 0, "close resets state")) return 1;

@@ -25,7 +25,6 @@
 
 #include "strata/core/expert_source.hpp"
 #include "strata/core/layer.hpp"
-#include "strata/core/layout.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
 
@@ -41,7 +40,6 @@
 namespace strata::core {
 
 class NativeHead;
-class NeuronTrace;
 class RemoteExpertOpt;
 
 /// The CPU pool for a window: x_f (n_tok, n_embd), ids (n_tok, k) -> out (n_tok * k, n_embd), hit rows zeroed.
@@ -56,16 +54,6 @@ struct VerifyHits {
     int64_t n_slots = 0;                  ///< E-6: how many (for the device copy)
     int64_t blob = 0;
 };
-
-/// Lab measurement, STRATA_EXPERT_USAGE=<csv path>: every routed entry of the decode verify windows (all stages,
-/// serial and pipelined) adds one call and its gate weight ("mass") to its (layer, expert) cell.  The serve loop
-/// writes one CSV per request with each cell's residency on the GPU caches, then resets the counters.
-struct ExpertUsage {   // per cell (layer * 1024 + expert)
-    std::vector<uint32_t> calls, rcalls, flips;   ///< calls; calls when resident at the call; residency changes seen
-    std::vector<double> mass, rmass;              ///< gate weight summed; the part on resident experts
-};
-bool expert_usage_on();
-void expert_usage_take(ExpertUsage& u);   // copy out and reset
 
 class Verifier {
 public:
@@ -144,14 +132,6 @@ public:
     void set_stage(int64_t layer_begin, int64_t layer_end, const float* handoff_in, float* handoff_out) {
         lb_ = layer_begin; le_ = layer_end; hand_in_ = handoff_in; hand_out_ = handoff_out;
     }
-    /// STRATA_SPLIT_OVERLAP=1 (opt-in; stages on DIFFERENT devices only): the hand-off carries a ready flag (one
-    /// mapped word per hand-off buffer: host and device addresses).  The writing stage raises it from the GPU when
-    /// its hand-off is out (handoff_publish); the reading stage's window graph waits on it (wait_flag_ge) - so the
-    /// next stage's graph is launched while this stage is still running, and the host no longer syncs between the
-    /// stages.  Null (the default): the old order - sync, then launch the next stage.  Set before `init`.
-    void set_handoff_flags(uint32_t* in_host, uint32_t* in_dev, uint32_t* out_host, uint32_t* out_dev) {
-        hflag_in_h_ = in_host; hflag_in_d_ = in_dev; hflag_out_h_ = out_host; hflag_out_d_ = out_dev;
-    }
     /// The next stage: `run` and `commit` continue into it (its pool calls get `next_user`); sampling settings
     /// and `final_R` are the last stage's.
     void set_next(Verifier* next, void* next_user) { next_ = next; next_user_ = next_user; }
@@ -200,26 +180,6 @@ public:
     /// -1 = an error (err).  Serves every layer that has rung so far.
     int batch_poll(PoolMultiFn pool, void* user, std::string& err);
     bool batch_busy() const { return b_running_; }
-    // ---- lab/multichat-mtp, STRATA_BATCH_PIPELINE=2 (docs/MULTICHAT_MTP.md): the batch windows of two slot GROUPS
-    // overlapped across the two stages, each group on one parity's verifiers (the pipeline's `ver` / `ver_b` per stage,
-    // sharing the stage's stream, each with its own hand-off), with MTP draft rows per slot.
-    /// batch_launch over an explicit row layout (run_slot_rows' `rows`: a slot's current row, then its drafts) at
-    /// hand-off rows [hbase, hbase + S).  `commit_behind` queues the every-row commit right behind the window (as
-    /// batch_launch); false leaves it to batch_commit_async, once the last stage's picks say what each slot keeps.  The
-    /// window's completion is an event recorded after it, so batch_poll of a verifier that shares its stream with
-    /// another one (set_stream) answers for its own window only.
-    bool batch_launch_rows(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos,
-                           bool commit_behind, std::string& err);
-    /// The deferred commit of the last batch_launch_rows window: commit_slot_prefixes' prefixes (`keep` per slot ID),
-    /// queued on the stream without a host wait and WITHOUT chaining to the next stage (the caller drives every
-    /// stage); `ple_prev` of the kept rows advances now (host side).  A second batch_launch_rows on this verifier may
-    /// follow at once: the stream orders it behind the commit.
-    bool batch_commit_async(const int* keep, std::string& err);
-    /// The window and commit graphs of this layout exist (else the next launch captures them, which syncs the stream).
-    bool batch_captured(const int* rows, int S, int hbase) const;
-    /// Waits for everything this verifier's stream holds (its windows and commits, and with a shared stream the other
-    /// verifier's); false with `err` on a failure.  For the drains between the pipelined windows and a request.
-    bool batch_sync(std::string& err);
     /// A slot's sampling (temperature / top_p / top_k / min_p / seed; penalties are not applied in batch windows):
     /// its row is drawn again on the last stage with Philox(seed, position), as a solo window draws it.  Greedy by
     /// default.  Set on the first stage, it reaches the last.
@@ -233,7 +193,7 @@ public:
     /// the same stream and the drafter reads nothing it writes, so it overlaps the draft. Whoever reads or writes
     /// the session from another stream or the host afterwards (a new request, a checkpoint, a snapshot, the prompt
     /// path, the end of a run) calls wait_commit() first.  STRATA_COMMIT_SYNC=1 keeps the wait.
-    static void set_commit_async(bool on, bool split = false);
+    static void set_commit_async(bool on);
     /// Waits for the last commit graph when commit() did not (an event recorded after it, not the whole device);
     /// false with `err` when it failed.  Free when nothing is pending.
     bool wait_commit(std::string& err);
@@ -289,29 +249,8 @@ public:
                          std::string& err);
 
     /// Token t's residual after the last layer, (hc, n_embd) on the device, valid until the next `run`.
-    // Observation only, after pl_finish. Copy all rows before this parity can be reused.
-    bool observer_copy_R(float* private_dst, int T, std::string& err) const;
     const float* final_R(int t) const;
     const float* final_R_all() const { return next_ ? next_->final_R_all() : R_; }
-    /// Lab selective MTP: logical IDs from this window's LAST QSA, never target K/V. Copy before this verifier
-    /// is prestaged/reused. Caller has observed done() and pl_finish(); commit does not overwrite sel_.
-    const int32_t* final_selection(int row, int64_t expected_pos, int& width) const {
-        width = 0;
-        if (!last_stage() || fl_active_ || last_batch_ || !sel_ || !h_step_ || row < 0 || row >= last_t_ ||
-            expected_pos != last_pos0_ + row || g_ == nullptr || g_->n_layers < 1 ||
-            !is_qsa_layer(*g_, g_->n_layers - 1)) return nullptr;
-        const int count = h_step_[row * strata::kernels::kStepCount + strata::kernels::kStepWidth];
-        if (count < 1 || count > cap_) return nullptr;
-        width = count;
-        return sel_ + (size_t) row * cap_;
-    }
-
-    // Default-off approximation probe, enabled only by STRATA_CLOSED_ROUTING.
-    float* closed_usage_buffer() { return closed_usage_; }
-    bool set_closed_mode(int mode, std::string& err);
-    bool take_closed_usage(std::vector<float>& out, std::string& err);
-    int64_t closed_windows = 0;
-    int64_t closed_pool_calls = 0;
 
     /// The GPU plan the pool writes each layer (VRAM hits + the PCIe share of the misses); give it to the
     /// dispatch (`ExpertDispatch::plan`) before the first `run`.
@@ -326,23 +265,8 @@ public:
     void set_pcie_mode(int mode) { sink_.pcie_mode = mode; }
     /// the pool never plans a PCIe share (--pcie-frac 0): the window skips that path.  Before the first run.
 
-    /// The PCIe count of each layer from measured costs (PcieModel) instead of a fixed share: the spin kernels stamp
-    /// each step's GPU work (the plan's arrival, the PCIe part's start, the wait for the CPU's rows; GPU clock), the host
-    /// times its pool, and after each window *model (the dispatch's) takes the costs. One GPU, no batch slots. Set
-    /// before `init` (the stamps are captured). `paused`: a request's own --pcie-frac holds meanwhile.
-    void set_pcie_balance(PcieModel* model) { bal_ = model; }
-    void pause_pcie_balance(bool paused) {
-        bal_paused_ = paused;
-        if (bal_ != nullptr && m_bal_ != nullptr) bal_->on = !paused;
-    }
-    bool pcie_balance_on() const { return bal_ != nullptr && m_bal_ != nullptr; }
-
     double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;
-    double ms_launch = 0;   ///< fork: host time inside the window graph's cudaGraphLaunch (WDDM submission)
-    /// STRATA_DECODE_TIMING: the PLE gather subset of ms_host, including submit/wait/dequantization.
-    double ms_ple_gather = 0;
     int64_t windows = 0;
-    int64_t overlapped_windows = 0;   ///< successful PR1120 chain_overlap path; host-only exposure counter
     /// STRATA_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
     /// window), as one line; empty when off.
     std::string profile_report();
@@ -382,11 +306,6 @@ private:
     bool sample_rows(int S, std::string& err);   ///< the sampled slots' rows of the last batch window
     int32_t* h_commitb_ = nullptr; int32_t* m_commitb_ = nullptr;   // per slot [1, 0, pos, -1 ..], stride 2 + max_t
     int32_t* commitb_ = nullptr;
-    // batch_launch_rows / batch_commit_async (STRATA_BATCH_PIPELINE=2)
-    bool b_defer_ = false;                 ///< stage_batch leaves the commit staging (h_commitb_) to batch_commit_async
-    bool b_ev_ = false;                    ///< the window in flight recorded ev_done_: batch_poll completes on it
-    bool b_commit_live_ = false;           ///< a batch_commit_async graph may still read h_commitb_ (ev_commit_)
-    cudaStream_t samp_cs_ = nullptr;       ///< the slot rows' sampling off the shared stream (sample_rows)
     float* tail_snap_b_ = nullptr;         ///< per (slot, QSA layer) indexer tail snapshot
     void* arena_b_ = nullptr;
     int64_t last_pos_b_[8] = {};
@@ -424,29 +343,8 @@ private:
     int32_t* d_spec_ = nullptr;          ///< device: kVerifyMaxT draft ids, then kVerifyMaxT q rows
     int hist_len_ = 0;
     bool head_sampling_ = true;          ///< set_head_sampling
-    NeuronTrace* neuron_trace_ = nullptr; ///< optional pinned snapshots, owned until all graphs are destroyed
     int device_ = -1;                    ///< the device `init` ran on: run/commit switch to it (layer split)
     std::atomic<bool> released_{false};  ///< #267: release_gpu_waits ran (maybe on the watchdog thread): no more windows
-    bool closed_available_ = false;
-    int closed_mode_ = 0;
-    int32_t *closed_mode_d_ = nullptr, *closed_ids_ = nullptr;
-    float* closed_usage_ = nullptr;
-    int routed_keep_ = 0;                 ///< lab-only STRATA_ROUTED_KEEP: decode weights ranked >= keep zeroed (0: off)
-    bool routed_keep_renorm_ = false;     ///< STRATA_ROUTED_KEEP_RENORM=1: renormalize the kept weights
-    float routed_min_w_ = 0.0f;           ///< STRATA_ROUTED_MIN_W: also drop weights below it (beyond min_keep)
-    int routed_min_keep_ = 10;            ///< STRATA_ROUTED_MIN_KEEP (default 4 with MIN_W): never dropped by MIN_W
-    bool routed_keep_skip_ = false;       ///< STRATA_ROUTED_KEEP_SKIP=1: the host plan skips zeroed experts
-    float routed_miss_w_ = 0.0f;          ///< STRATA_ROUTED_MISS_W: below it (beyond min_keep) drop only non-resident experts
-    bool la_probe_ = false;               ///< lab STRATA_LOOKAHEAD_PROBE=1: router(l+1) on layer l's input vs real routing
-    int32_t* la_pred_ = nullptr;          ///< [max_t, 20] predicted ids for the next layer
-    float* la_logits_ = nullptr;          ///< [max_t, n_expert]
-    unsigned long long* la_cnt_ = nullptr;   ///< [n_layers, 5] cumulative counters (see routed_lookahead_compare)
-    int64_t la_windows_ = 0;
-    /// Lab STRATA_PREFETCH_NEXT=P: the lookahead prediction (la_pred_) also copied to mapped host memory before the
-    /// doorbell, so the pool copies up to P of the next layer's predicted non-resident experts one layer ahead.
-    int pf_cap_ = 0;
-    uint8_t* pf_staging_ = nullptr;       ///< [2 parities, pf_cap_] blobs of the largest layer
-    int32_t* h_pred_ = nullptr; int32_t* m_pred_ = nullptr;   ///< mapped [max_t, 20]
     bool all_resident_ = false;           ///< 100% of experts in [lb_, le_) resident in VRAM: zero-doorbell graph
     /// #871: the zero-doorbell graph plans from the device residency table alone, so it is only right while every
     /// expert of the stage is in VRAM.  A prompt loan, a VRAM shrink or an adaptive swap marks some -1 for a while:
@@ -464,21 +362,6 @@ private:
     int64_t lb_ = 0, le_ = -1;           ///< set_stage: the layers this verifier runs (-1: to the last)
     const float* hand_in_ = nullptr;
     float* hand_out_ = nullptr;
-    uint32_t* hflag_in_h_ = nullptr;     ///< set_handoff_flags: the incoming hand-off's ready word (host / device)
-    uint32_t* hflag_in_d_ = nullptr;
-    uint32_t* hflag_out_h_ = nullptr;    ///< ... and the outgoing one's
-    uint32_t* hflag_out_d_ = nullptr;
-    uint32_t* hcount_d_ = nullptr;       ///< handoff_publish's block counter (device memory)
-    uint32_t* herr_h_ = nullptr;         ///< the bounded hand-off wait gave up (mapped; the reading stage's)
-    uint32_t* herr_d_ = nullptr;
-    uint32_t* hdrop_h_ = nullptr;        ///< STRATA_TEST_HANDOFF_DROP: the writing stage withholds its flag (mapped)
-    uint32_t* hdrop_d_ = nullptr;
-    bool handoff_failed(std::string& err) const;   ///< the bounded hand-off wait timed out in the last window
-    int prelaunched_ = 0;                ///< prelaunch ran for a window of this size: run skips staging + launch
-    /// The overlapped split: stage this window's inputs and launch its graph now (the graph waits on the hand-off
-    /// flag); `run` then only serves the host side.  Called on a helper thread while the previous stage runs.
-    bool prelaunch(int T, const int32_t* tokens, int64_t pos0, std::string& err);
-    bool chain_overlap() const;          ///< this stage hands off through a flag to a next stage that waits on it
     Verifier* next_ = nullptr;
     void* next_user_ = nullptr;
     bool ple_stage() const { return lb_ <= 1 && 1 < le_; }   ///< holds layer 1, where the PLE block runs
@@ -540,24 +423,12 @@ private:
     uint32_t* h_flag_ = nullptr; uint32_t* m_flag_ = nullptr;
     uint32_t* h_flagA_ = nullptr; uint32_t* m_flagA_ = nullptr;  // the GPU plan is in place
     uint32_t* h_flagB_ = nullptr; uint32_t* m_flagB_ = nullptr;  // the PCIe share's DMA copies have landed
-    // set_pcie_balance: per step (layer x group, stride 2 groups) the GPU's clock as the plan arrives, as the PCIe
-    // part starts and as it waits for the CPU rows (4 words a step); the pool's ms, its experts, the PCIe ones, and
-    // whether the step had a plan
-    unsigned long long* h_bal_ = nullptr; unsigned long long* m_bal_ = nullptr;
-    std::vector<double> bal_p_;
-    std::vector<int32_t> bal_nc_, bal_np_;
-    std::vector<char> bal_ok_;
-    PcieModel* bal_ = nullptr;
-    bool bal_paused_ = false;
-    void pcie_balance_window(int64_t steps, int G);
     cudaEvent_t commit_done_ = nullptr;   // recorded after an async commit (set_commit_async); see wait_commit
     bool commit_pending_ = false;
     cudaStream_t copy_ = nullptr;                                 // the copy engine's stream (DMA of missed experts)
     struct FlagSet { uint32_t* flag; uint32_t value; };
     FlagSet flag_sets_[2 * 64 * 2] = {};                          // host-function arguments, one per (layer, group)
     static void fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes);
-    /// Lab STRATA_PREFETCH_NEXT: the next layer's predicted blobs, copied by the copy engine behind this layer's fetch.
-    static void prefetch_dma(void* ctx, const uint8_t* const* src, const unsigned long long* dst, int n, size_t bytes);
     static void raise_flag(uint32_t* flag, uint32_t value);
     int32_t* h_plan_ = nullptr;  int32_t* m_plan_ = nullptr;     // counts | start | dst | tok | ptr (as int32 pairs)
     int64_t plan_i32_ = 0;                                        // int32 words in the plan block

@@ -1,3 +1,5 @@
+> **ARCHIVIO / NON ATTIVO:** evidenza storica del fork precedente. Questo documento non descrive il runtime corrente; vedere [baseline verificata](DAILY_UPSTREAM_BASELINE_2026-10-08.md).
+
 # Experimental two-card MTP batching
 
 This opt-in port restores the necessary local historical `be4f623` integration

@@ -1,3 +1,5 @@
+> **ARCHIVIO / NON ATTIVO:** evidenza storica del fork precedente. Questo documento non descrive il runtime corrente; vedere [baseline verificata](../DAILY_UPSTREAM_BASELINE_2026-10-08.md).
+
 # Current Daily package, 4 October 2026
 
 Release `v0.1.38-sm75-20261004-r1` packages the exact operational Daily engine:

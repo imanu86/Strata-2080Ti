@@ -1,3 +1,5 @@
+> **ARCHIVIO / NON ATTIVO:** evidenza storica del fork precedente. Questo documento non descrive il runtime corrente; vedere [baseline verificata](../DAILY_UPSTREAM_BASELINE_2026-10-08.md).
+
 # Turn-local neuron pruning pilot, October 4, 2026
 
 **Masks learned from earlier tokens do not pass the local error screen, even

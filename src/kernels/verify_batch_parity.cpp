@@ -1,12 +1,10 @@
-// src/kernels/verify_batch_parity.cpp - the verify window's one-launch forms against the per-token launches they
+// src/kernels/verify_batch_parity.cpp - the verify window's one-launch forms (the hyper-connection write, the PLE post-ops) against the per-token launches they
 // replace, bitwise.
 //
 //     build/verify_batch_parity
 //
-// 1. kv_append_q4_step_multi (STRATA_DF_KVAPP) against n kv_append_q4_step calls: the whole K and V pools and the
-//    host copies (KV streaming), with a non-resident page among the window's cells.
-// 2. native_gr_post_multi against n native_gr_post calls (the hyper-connection write before the PLE block).
-// 3. native_ple_postops_batch_snap (STRATA_DF_PLE) against the per-token loop of the verify window: per token
+// 1. native_gr_post_multi against n native_gr_post calls (the hyper-connection write before the PLE block).
+// 2. native_ple_postops_batch_snap (STRATA_DF_PLE) against the per-token loop of the verify window: per token
 //    native_ple_postops, ple_history_advance and a copy of the history (the commit's snapshot); the results, the final
 //    history and every snapshot, for windows of 2..8 tokens.
 // GPU, synthetic, no model.
@@ -73,54 +71,7 @@ void report(const char* what, bool ok) {
     if (!ok) ++g_fail;
 }
 
-// ---- 1. Q4_0 K/V append
-void kv_append(cudaStream_t s) {
-    k::QsaShapes sh = k::qsa_real_shapes();
-    sh.page_size = 64;
-    const int H = (int) sh.n_head_kv, D = (int) sh.head_dim, P = (int) sh.page_size, pages = 4;
-    std::vector<int32_t> table(pages);
-    for (int i = 0; i < pages; ++i) table[i] = (i * 3 + 1) % pages;
-    table[2] = -1;   // a block that is not resident: only the host copy is written
-    int32_t* d_table = upload(table);
-    const size_t pool = (size_t) pages * H * P * k::kv_q4_bytes_per_head(D);
-    std::mt19937 rng(11);
-    std::normal_distribution<float> nd(0.f, 2.f);
-    for (int n : {2, 3, 4, 8}) {
-        for (int base : {5, 60, 2 * 64 + 61}) {   // inside a page, across a page boundary, into the missing page
-            std::vector<float> kv((size_t) n * H * D), vv(kv.size());
-            for (auto& x : kv) x = nd(rng);
-            for (auto& x : vv) x = nd(rng);
-            float* d_k = upload(kv);
-            float* d_v = upload(vv);
-            std::vector<int32_t> steps((size_t) n * k::kStepCount);
-            for (int t = 0; t < n; ++t) k::qsa_step_fill(steps.data() + (size_t) t * k::kStepCount, base + t, sh);
-            int32_t* d_steps = upload(steps);
-            uint8_t *pk[2], *pv[2], *hk[2], *hv[2];
-            for (int i = 0; i < 2; ++i) {
-                pk[i] = dalloc<uint8_t>(pool, 0x5a); pv[i] = dalloc<uint8_t>(pool, 0x5a);
-                hk[i] = dalloc<uint8_t>(pool, 0x5a); hv[i] = dalloc<uint8_t>(pool, 0x5a);
-            }
-            k::KvHostPools host0{}, host1{};
-            host0.k_q4 = hk[0]; host0.v_q4 = hv[0];
-            host1.k_q4 = hk[1]; host1.v_q4 = hv[1];
-            for (int t = 0; t < n; ++t)
-                k::kv_append_q4_step(pk[0], pv[0], d_table, d_steps + (size_t) t * k::kStepCount, d_k + (size_t) t * H * D,
-                                     d_v + (size_t) t * H * D, sh, s, &host0);
-            k::kv_append_q4_step_multi(pk[1], pv[1], d_table, d_steps, d_k, d_v, n, sh, s, &host1);
-            ck(cudaStreamSynchronize(s), "kv append");
-            const bool ok = read(pk[0], pool) == read(pk[1], pool) && read(pv[0], pool) == read(pv[1], pool) &&
-                            read(hk[0], pool) == read(hk[1], pool) && read(hv[0], pool) == read(hv[1], pool);
-            char what[128];
-            std::snprintf(what, sizeof what, "kv_append_q4_step_multi, %d tokens from cell %d", n, base);
-            report(what, ok);
-            for (int i = 0; i < 2; ++i) { cudaFree(pk[i]); cudaFree(pv[i]); cudaFree(hk[i]); cudaFree(hv[i]); }
-            cudaFree(d_k); cudaFree(d_v); cudaFree(d_steps);
-        }
-    }
-    cudaFree(d_table);
-}
-
-// ---- 2. the hyper-connection write
+// ---- 1. the hyper-connection write
 void gr_post(cudaStream_t s) {
     const int N = 2560, HC = 4;
     std::mt19937 rng(12);
@@ -146,7 +97,7 @@ void gr_post(cudaStream_t s) {
     }
 }
 
-// ---- 3. the PLE post-ops of a window, with the commit's history snapshots
+// ---- 2. the PLE post-ops of a window, with the commit's history snapshots
 void ple(cudaStream_t s) {
     constexpr int N = k::NG_N_EMBD, D = k::NG_HC_DIM, HS = k::NG_HIST * k::NG_HC_DIM;
     std::mt19937 rng(13);
@@ -215,7 +166,6 @@ int main() {
     std::printf("verify_batch_parity: %s (sm_%d%d)\n", prop.name, prop.major, prop.minor);
     cudaStream_t s = nullptr;
     ck(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), "stream");
-    kv_append(s);
     gr_post(s);
     ple(s);
     std::printf("verify_batch_parity: %s\n", g_fail ? "FAIL" : "PASS");

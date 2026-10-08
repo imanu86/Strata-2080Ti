@@ -65,6 +65,8 @@ number per card after the first, not a count of layers per card. With 4 cards an
 (or `[24, 36, 42]`) puts layers 0-23 on the first card, 24-35 on the second, 36-41 on the third and 42-47 on the last.
 The server checks it before the start and says what is wrong (0.1.39, #644).
 
+**Card order with `"auto"`** (NVIDIA, #1352): the faster card (multiprocessors x max clock) goes **last** - the last stage runs the head, the draft layer and the verify, and a prompt chunk waits on it (a 4070 Ti SUPER + 5060 Ti read a 6K prompt in 50 s one way round and 15 s the other). Equal cards keep your order; a manual split keeps it too. `"gpu_order": "as_given"` keeps the order you wrote under `"auto"` as well. The engine log line `layer split: card order ...` says when it changed.
+
 **Skip the split when the first card holds everything** (opt-in, 0.1.31): `"split_skip_if_fits": true` in the config
 (engine flag `--split-skip-if-fits`, with `--layer-split auto`) runs on the first card alone when it holds every
 profiled expert plus the context's KV, the draft layer and the reserve, and says so in the log; otherwise the split
@@ -149,34 +151,6 @@ Prompts are read in chunks that flow through the cards in turn; while a later ca
 already reads chunk c+1. Conversation checkpoints save and restore every card's state; the adaptive expert swaps copy
 into the card that owns the layer.
 
-## Overlapped hand-off (`STRATA_SPLIT_OVERLAP=1`, opt-in)
-
-By default each verify window runs the stages one after another: the host syncs stage 1, then stages and launches
-stage 2's graph, and so on. `STRATA_SPLIT_OVERLAP=1` (stages on different cards only) gives the hand-off a ready
-flag: the earlier stage's GPU writes the hand-off with volatile stores and raises the flag (`handoff_publish`), the
-next stage's graph is staged and launched on a helper thread while the earlier stage is still running and waits for
-the flag on its GPU (`wait_flag_ge`), and the host goes straight from serving one stage's layers to the next, syncing
-the earlier stage only once the chain is done. It takes one stream sync and one graph launch per window off the
-critical path. Batch windows (several conversations) keep the serial order. It is off beside `--pipeline-windows`, whose loop overlaps the stages its own way.
-
-Measured on 2x RX 7900 XTX (gfx1100, ROCm, Linux), Ryzen 9 9900X, 52 GB RAM, Swift 1.5 IQ3_XXS, 128K context, 8-bit
-KV, layers 0-25 / 26-47; 512-token greedy answers, median of 8 runs:
-
-| | serial (default) | `STRATA_SPLIT_OVERLAP=1` | one card |
-|---|---|---|---|
-| decode, code prompt | 53 tok/s | 70.1 tok/s | ~70 tok/s |
-| decode, prose prompt | 45 tok/s | 55.9 tok/s | ~68 tok/s |
-
-Greedy output is byte-identical with the flag at 0 and 1; the quiz set scored the same (47/51). Not measured on
-NVIDIA yet, where a sync and a graph launch cost less.
-
-The reading stage's wait for the flag is bounded on the GPU: `STRATA_SPLIT_WAIT_MS` (default 30000, 0 = no bound).
-If the flag does not arrive in time, the wait marks an error word and returns, the window's graph completes, and the
-host fails that window with an error naming the setting (the server then restarts the engine) instead of using a
-stale hand-off. Normally the host's own per-layer wait (20 s, #267) ends a stalled window first and releases every
-GPU wait, the hand-off's included. Test hook: `STRATA_TEST_HANDOFF_DROP=N` withholds the flag in the first stage's
-N-th window, as if the publish were lost.
-
 ## Limits (for now)
 
 - **Works across cards** (bench/results/2026-09-29-layer-split-limits):
@@ -252,7 +226,7 @@ Two cards, exactly two stages, `--serve`. In the config:
   rounds them differently, and a near-tie can flip (a serial run given the same caches through `--vram-reserve-mib`
   matches it exactly).
 - **Off, with one line in the log saying why**, with `--batch` slots, `--peer-device`, the helper caches
-  (`--expert-cache-device1..3`, `--remote-expert-opt`), a split into three or more stages or onto one GPU
+  (`--expert-cache-device1..3`, which `--remote-expert-opt` builds on), a split into three or more stages or onto one GPU
   (`--split-device 0`), or no draft layer. A request with repetition penalties (`penalty_last_n`) or coupled
   draft sampling decodes serially.
 - **With the resident RAM mode's asynchronous swaps** (`--adapt-async 1`, [DETAILS.md](DETAILS.md)) a round's steps
@@ -267,68 +241,37 @@ Two cards, exactly two stages, `--serve`. In the config:
   (`--mmap-experts` on that 32 GB PC) the file reads dominate and it measured no faster.
 
 The `STRATA_PIPELINE_*` tuning and test variables (THETA, FORCE_MISS, SWITCH, LOG, TRACE and the like) are read only with
-`STRATA_PIPELINE_DEBUG=1`. `--pipeline-windows` and `--adapt-async 1` exclude each other (the engine says so and keeps the
-pipeline).
+`STRATA_PIPELINE_DEBUG=1`. `--pipeline-windows` and `--adapt-async 1` combine: the engine turns the asynchronous tier
+off beside `--pipeline-windows 2` only when `STRATA_PIPELINE_ADAPT_ASYNC=0` is set. What switches either one off is
+printed once at start ("is off: ..."). `--remote-expert-opt` does something only with a helper cache
+(`--expert-cache-device1..3`); on a plain layer split it is inert, and setup no longer writes it there (#1447).
+
+Measured on 2x RTX 3090 (sm_86, 250 W limits; GPU0 PCIe 4.0 x16, GPU1 x4, no NVLink; Ryzen 7 9800X3D, 32 GB RAM),
+Qwen3.8-Flash-Next GSQ-RCO IQ3_S, `--resident-experts`, KV int8, `--spec 4 --mtp`, `"layer_split": "29"` for the
+`--pipeline-windows` rows (without `--remote-expert-opt`); the others are setup's config (`auto`). Decode is the mean of
+runs 2-6 of 1,500-token coding replies at temperature 0.6, prefill one cold 19.9K-token prompt; one run per arm unless
+noted (reported by adambenhassen, #1447; not repeated on our boxes):
+
+| Arm | Decode tok/s | Prefill tok/s |
+|---|---:|---:|
+| setup defaults (two runs) | 137.0 / 136.9 | 1798 |
+| `--adapt-async 1` (two runs) | 145.2 / 143.7 | 1800 / 1797 |
+| `--adapt-async 1`, no `--remote-expert-opt` | 145.0 | 1807 |
+| `STRATA_ADAPT_LAG=2` | 142.8 | 1800 |
+| `STRATA_EXCHANGE_ROTATE=1` | 139.6 | 1800 |
+| `STRATA_PF_FUSED=1` | 137.2 | 1913 |
+| `--pipeline-windows 2` | 136.7 | 2097 |
+| `STRATA_SPEC_COUPLED=1` | 137.6 | 1804 |
+| `STRATA_SPEC_PROB=1` | 137.2 | 1788 |
+| `STRATA_SPEC_COUPLED=1` + `STRATA_SPEC_GUMBEL=1` | 136.5 | 1805 |
+| async + lag 2 + rotate + pf_fused | 145.0 | 1829 |
+| pw2 + lag 2 + rotate + pf_fused | 135.9 | 2296 |
+| pw2 + async + lag 2 + rotate + pf_fused | 142.0 | 2302 |
+
+The last row keeps most of the asynchronous tier's decode gain and the pipeline's +28% prefill; no stalls in any arm.
+These are opt-in settings on one rig, not defaults.
 
 ## Several conversations at once
 
 With a layer split, `--batch N --batch-groups G --trim-stage-weights` decodes several conversations together and
 pipelines them through the cards: see [BATCHING.md](BATCHING.md).
-
-### Lab helper SSD qualification
-
-`STRATA_LAB_HELPER_SSD=1` is default off. It permits only the bounded laboratory
-helper topology: sm75 primary with all target state/MTP, sm86 helper with fixed
-2560 expert slots, remote optimization on, no layer split/peer/batch/adaptation
-or elasticity. The independent SSD switch requires complete native MTP prefixes
-and true prompt lookahead at token131072; GEN1/SAVE is not substituted.
-Primary/helper quiescence failures and residency changes are fatal. Helper UUID,
-actual mapped mode and complete static ownership are covered by prefix identity.
-This changes architecture and placement: B-only measurements are not isolated
-flag gains or FREE quality certification. Native defaults remain restricted.
-
-### Helper-only elastic cache (opt-in, experimental)
-
-`STRATA_REMOTE_ELASTIC=1` enables real VMM growth/shrink of the native helper cache,
-independently of laboratory SSD support. The first implementation requires serial
-`--serve`, pipeline0, one `--expert-cache-device1 auto` helper with
-`--remote-expert-opt`, no layer split/peer/batch/resident-async tier, and no primary
-`--elastic`. Invalid combinations fail at startup; unsupported VMM never falls
-back to a fixed cache. Leave the environment variable absent or set it to0 for prior behavior.
-
-The helper uses live free VRAM after desktop use, a 500 MiB reserve, 192 MiB
-hysteresis, 64 MiB physical chunks, 1-second checks and 5-second stable growth
-(including request boundaries), at most512MiB per runtime growth. Startup auto
-sizing fills its whole useful budget. This reuses policy constants, not the entire
-primary controller or simultaneous dual-GPU elasticity.
-Startup accounting includes staging, scratch and the optimized sum buffer.
-Growth ranks unclaimed experts by routing usage and the original profile, excludes
-primary authoritative residency/pending copies and every helper, and publishes
-ownership only after native weight copies finish. Pressure removes whole tail
-chunks. Primary elastic remains unsupported alongside helpers in this first port.
-
-Checks run after commit/draft and adaptation have completed, or at request start.
-Full wrapper fences/exclusion cost and helper-step cost are reported separately
-(the former contains the latter); metadata/ranking scans and synchronous refill
-cost are included in decode time;
-no periodic weight hashes/readback or timed logging are added. Request-boundary
-metadata audits and postdecode counters report capacity, free-memory extrema,
-resize cost and adaptation. Placement changes are not a free-quality guarantee.
-
-`STRATA_REMOTE_ELASTIC_SMOKE=1` requests one safety-only shrink/regrow before the
-initial SSD fingerprint: 64--128 MiB physical release, exact original native-byte
-verification and restored ownership/capacity. It adds no GEN. CUDA calls cannot
-be cancelled in-process: the laboratory runner MUST enforce the announced
-SMOKE_BEGIN 5-second deadline using its owned PID/birth watchdog. Any error stops
-before decode. This path and the extended CUDA VMM test still require GPU
-qualification; source preparation is not runtime validation.
-
-The laboratory helper SSD exception keeps its static2560 mode unchanged. Its
-new auto-elastic mode freezes a versioned initial policy/arena identity rather
-than mutable ownership; primary+MTP sequence snapshots and true prefix lookahead
-remain native. Mutable ownership is audited only when quiescent. General remote
-SSD guards are not removed.
-
-### Helper elasticity on Windows (opt-in capacity sensor)
-
-`STRATA_REMOTE_ELASTIC=1` uses actual CUDA UUID and adapter LUID with cached NVML/DXGI handles. Initial sizing and safe-point resize admission use the minimum of CUDA free memory, NVML whole-card free memory, and nonnegative DXGI process Budget minus CurrentUsage. All API failures are fatal; no silent fallback. Signed DXGI deficit contributes to bounded pressure shrink (at most 1 GiB per check). The existing 500 MiB reserve, 192 MiB hysteresis, 64 MiB chunks, 512 MiB growth ceiling and 5-second stability remain unchanged. Queries are sequential estimates, not atomic snapshots; margins remain necessary. Queries execute at serialized helper safe points; their host cost is included in helper/wrapper decode time. Startup and post-request raw sensor fields are logged outside decode. This is helper-only elasticity; simultaneous primary elasticity remains unsupported. Nonelastic paths are unchanged.

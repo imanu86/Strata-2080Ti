@@ -22,7 +22,6 @@
 // initializer at namespace scope (#391, 016ea2e), the switches are read on first use.
 #include "strata/kernels/cpu/iq_avx2.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"   // g_gate_side (lab gate-first probe, read by gu_rows)
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -257,9 +256,6 @@ template <> struct Fmt32<18> {   // IQ3_XXS: d, qs[64] grid bytes, 8 x u32 (4 x 
     }
 };
 
-// IQ3_S (PR #930): the table-driven scalar decode (hi_spread / scale_vecs / sgn_vec_at), bitwise 0.1.39's.  The
-// gathered form is upstream's Fmt32<121> below, picked per thread by iq256_variant() (kIq256Gather) as its own
-// instantiation, so no gather test sits in this decode's inner loop.
 template <> struct Fmt32<21> {   // IQ3_S: d, qs[64], qh[8], signs[32], scales[4]
     static constexpr int bytes = 110;
     static constexpr float K = 1.0f;
@@ -455,10 +451,6 @@ void q8k_quant_avx2(const float* x, void* vy, int64_t k) {
         }
         y[i].d = 1 / iscale;
     }
-}
-
-bool iq256_supported(int type) noexcept {
-    return type == 16 || type == 17 || type == 18 || type == 21 || type == 22 || type == 23;
 }
 
 int iq256_variant() noexcept {

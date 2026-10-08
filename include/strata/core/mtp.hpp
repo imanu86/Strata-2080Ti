@@ -22,15 +22,10 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
-#include "strata/kernels/kv_stream.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
-#include <chrono>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -67,45 +62,8 @@ public:
     /// STRATA_MTP_TOP2=1 (diagnostic): draft j's runner-up token in the last draft() (-1 = unknown)
     static bool top2_env();
     int32_t top2(int j) const { return j >= 0 && j < (int) top2_.size() ? top2_[(size_t) j] : -1; }
-    // Observational lab probe, configured before load/capture and constant across every hot arm.
-    void set_first_top2_probe(bool on) { first_top2_config_ = on; }
-    // Unobserved until an existing first-output or chain-completion event has been consumed.
-    const strata::kernels::MtpFirstTop2& chain_first_top2() const { return first_top2_observed_; }
     int max_t() const { return max_t_; }
     uint64_t vram_bytes() const { return vram_; }
-    /// Lab v1: optional private int8 KV pool and a second pre-captured chain graph family. Before load.
-    void set_selective_capture(bool on) { selective_config_ = on; }
-    /// Lab-only equal-allocation comparison. Configure before load; switch only at an idle GEN boundary.
-    void set_hq_pack(const std::string& dir) { hq_pack_ = dir; }
-    bool hq_switch(int mode, std::string& err);
-    bool hq_report(std::FILE* out, int64_t request, std::string& err) const;
-    // Lab-only future-residual oracle. Configure before load: equal allocation and graph nodes in all modes.
-    // Causal residual anchor, configured before allocation/capture; hot switch only at a GEN boundary.
-    void set_anchor_capture(bool on) { anchor_config_ = on; }
-    bool anchor_begin(bool on, std::string& err);
-    bool anchor_report(std::FILE* out, int64_t request, std::string& err);
-    // Observational FREE collector: private slabs, equal allocation before expert cache sizing.
-    void set_observer_capture(bool on) { observer_config_ = on; }
-    bool observer_begin(bool on, std::string& err);
-    void observer_source_window(int64_t seq) { observer_window_ = seq; }
-    int observer_last_slot() const { return observer_h_meta_ ? observer_h_meta_[1] : -1; }
-    float* observer_target_slot(int seq) const;
-    bool observer_finish(const std::string& path, int64_t request, std::FILE* out, std::string& err);
-    void set_feature_capture(bool on) { feature_config_ = on; }
-    bool feature_begin(int mode, const std::string& path, const uint8_t* identity,
-                       const std::vector<int64_t>& prompt, const std::vector<int32_t>& fixture,
-                       int64_t requested, std::string& err);
-    bool feature_record(const float* R, int64_t pos, const int32_t* input, int keep, std::string& err);
-    bool feature_finish(std::FILE* out, int64_t request, int64_t produced, const char* finish, std::string& err);
-    /// After an idle, completed prefill/validated SSD restore. `full_until` is exclusive and -1 means unproven.
-    bool selective_begin_request(uint64_t epoch, int64_t full_until, bool on, std::string& err);
-    /// Once per verdict, while the old MTP chain is idle and the verifier's selection is still stable.
-    /// Bad metadata selects the exact original dense graphs; CUDA failures return false.
-    bool selective_source(const int32_t* ids, int width, int64_t pos, int source_device, uint64_t epoch,
-                           std::string& err);
-    /// Untimed diagnostic AFTER decode: compare private codes/scales with the authoritative MTP host copy.
-    bool selective_check(std::string& err);
-    bool selective_report(std::FILE* out, int64_t request, std::string& err) const;
     /// The draft layer's K/V state (read-only: --serve's STRATA_STATE_HASH check hashes it)
     const QsaState& kv_state() const { return st_; }
     /// KV streaming: refill the ring of the drafter's window from its host copy for a sequence that continues at
@@ -113,18 +71,14 @@ public:
     void kv_restore(int64_t upto);
     /// The VRAM bind() will allocate for a native head of `head_row_bytes` per vocabulary row: the draft logits and
     /// the draft head over rt/draft_vocab.bin's subset.  The expert cache is sized before bind(), so it reserves this.
-    uint64_t bind_bytes(uint64_t head_row_bytes, int64_t n_vocab, int source_device = -1) const;
-    /// The embedding weights must be local to the drafter (or its mapped native embedding). `source_device`
-    /// owns the native head and every residual pointer passed to draft/prefill/set_source_R; -1 keeps them local.
-    /// CUDA cross-device drafting copies the head subset unchanged and stages residual windows through pinned RAM.
-    /// The caller must complete the source producer before passing residuals; the source rows may be reused on return.
+    uint64_t bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const;
+    /// The main model's embedding and head, and the verify window's final residuals (T rows, hc*n_embd each).
     bool bind(const WeightTable& wt, const NativeHead* head, const float* window_R, std::string& err,
-              const MtpDrafter* shared = nullptr, int source_device = -1);
+              const MtpDrafter* shared = nullptr);
 
     /// Prompt cells [cell0, cell0 + n): residual rows `R_rows` (device, hc*n_embd each) and `next_tokens` (host,
-    /// the token at position cell+1). Runs in batches of up to max_t rows. `sync` false: returns without waiting
-    /// for the drafter's stream (the caller orders on it: `stream()`). Cross-device async calls require
-    /// prepare_prefill(), n <= max_t and a free pinned staging slot; the source copy itself completes on return.
+    /// the token at position cell+1).  Runs in batches of up to max_t rows.  `sync` false: returns without waiting
+    /// for the drafter's stream (the caller orders on it: `stream()`).
     bool prefill(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0, std::string& err,
                  bool sync = true);
     /// --pipeline-windows: capture the prefill graphs and size its input records for windows of up to max_t rows now,
@@ -138,27 +92,9 @@ public:
     bool draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
                float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
 
-    /// STRATA_BATCH_MTP_PARALLEL=1 (--batch-mtp, opt-in): draft() in two halves, so the batch slots' drafters run at
-    /// once, each on its own stream, instead of one after the other.  draft_launch queues what draft() with min_p 0
-    /// does (the round and every step, no host wait); draft_wait reads the drafts and probabilities as draft() returns
-    /// them.  Nothing else may use this drafter between the two.
-    bool draft_launch(int T, const int32_t* tokens, int64_t p, int a, std::string& err);
-    bool draft_wait(int32_t* drafts, float* probs, int* n_drafts, std::string& err);
-    bool draft_live() const { return draft_live_; }
-    /// 1: the launched draft has finished on the drafter's stream (draft_wait returns at once); 0: still running;
-    /// -1: an error (`err`).  1 too when nothing is launched.  (STRATA_BATCH_PIPELINE=2: the slot drafts polled beside
-    /// the other group's window.)
-    int draft_poll(std::string& err);
-
     /// The first round: one cell (`cell`) from `R_row` (device) and `token` -> T-1 drafts.
     bool draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
                      float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
-
-    // Offline neuron-cache probe only: ten distinct roots, nine greedy MTP steps each.
-    // Writes speculative MTP cells at/after cell; caller must end the request immediately.
-    // Short prefixes ensure branches never overwrite resident prefix KV through ring wrap.
-    bool neuron_probe_100(const float* R_row, const int32_t* roots, int64_t cell,
-                          std::vector<int32_t>& candidates, double& prediction_ms, std::string& err);
 
     /// COUPLED DRAFT SAMPLING (core/coupled_draft.hpp; STRATA_SPEC_COUPLED=1, set up by bind()): the request's
     /// sampling.  A sampled request (temperature > 0, not greedy) then drafts by SAMPLING with the target's chain and
@@ -182,7 +118,7 @@ public:
     /// Before `load`: the round/step graphs get the forcing kernel (a no-op while its token is -1), and the drafter's
     /// stream the highest priority (STRATA_MTP_PRIORITY=0: the default priority).
     void set_force_capture(bool on) { force_on_ = on; }
-    /// The source-device rows the next round reads (null: the bound `window_R`), staged before the round.
+    /// The rows the next round reads (null: the bound `window_R`), copied into the bound buffer before the round.
     void set_source_R(const float* rows) { src_R_ = rows; }
     /// Capture the round graphs for T = 1..max_t and every step graph now (a capture syncs the drafter's stream).
     bool prepare_chain(std::string& err);
@@ -217,48 +153,12 @@ public:
     /// (a saved prefix must serve later prompts of any length)
     void set_full_prefix(bool on) { full_prefix_ = on; }
     int device() const { return device_; }
-    bool idle(std::string& err);
+    bool idle(std::string& err) {
+        if (cs_ && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp: its stream failed"; return false; }
+        return true;
+    }
 
 private:
-    static constexpr int kObserverChains = 1280, kObserverWindows = 640, kObserverDepth = 4;
-    bool observer_allocate(std::string& err);
-    bool observer_config_ = false, observer_on_ = false;
-    int32_t *observer_h_meta_ = nullptr, *observer_m_meta_ = nullptr;
-    float *observer_native_ = nullptr, *observer_target_ = nullptr, *observer_host_ = nullptr;
-    int32_t *observer_markers_ = nullptr, *observer_host_markers_ = nullptr;
-    uint64_t observer_bytes_ = 0;
-    int64_t observer_window_ = -1, observer_chains_ = 0, observer_overflow_ = 0;
-    static constexpr int kSelectiveRecent = 8192, kSelectiveProxy = 2051, kSelectiveCap = 10304;
-    static constexpr int kSelectiveSlots = 3072;
-    bool selective_allocate(std::string& err);
-    bool selective_stage(int T, int64_t p, int a, int n_out, std::string& err);
-    void selective_fallback(int reason);
-    bool selective_config_ = false, selective_on_ = false, selective_record_ = false;
-    bool selective_active_ = false, selective_source_ok_ = false, selective_reset_ = true;
-    bool selective_supported_ = false, selective_last_valid_ = false;
-    uint64_t selective_epoch_ = 0, selective_bytes_ = 0;
-    int64_t selective_full_until_ = -1, selective_source_pos_ = -1;
-    int selective_proxy_width_ = 0, selective_last_n_ = 0, selective_source_reason_ = 3;
-    int64_t selective_last_pos_ = -1;
-    void* selective_arena_ = nullptr;
-    strata::kernels::QsaAttnPools selective_pools_;
-    strata::kernels::KvStreamMap selective_map_;
-    int32_t *selective_h_ids_ = nullptr, *selective_m_ids_ = nullptr, *selective_d_ids_ = nullptr;
-    int32_t *selective_h_proxy_ = nullptr, *selective_m_proxy_ = nullptr;
-    int32_t selective_widths_[8] = {};
-    cudaGraphExec_t selective_round_[9] = {}, selective_step_[9] = {};
-    int64_t selective_chains_ = 0, selective_dense_ = 0, selective_resets_ = 0, selective_ids_ = 0;
-    int64_t selective_far8192_ = 0, selective_far32768_ = 0, selective_max_union_ = 0;
-    int64_t selective_mirror_cells_ = 0, selective_check_cells_ = 0, selective_check_distant_ = 0;
-    int64_t selective_fallbacks_[8] = {};
-    double selective_source_ms_ = 0;
-    bool prefill_impl(const float* R_rows, const int32_t* next_tokens, int64_t n, int64_t cell0,
-                      std::string& err, bool sync, cudaMemcpyKind residual_kind);
-    bool cross_device() const { return source_device_ >= 0 && source_device_ != device_; }
-    bool acquire_source_slot(bool wait, int& slot, std::string& err);
-    bool read_source_rows(float* host, const float* rows, int64_t n, std::string& err);
-    bool finish_source_slot(int slot, std::string& err);
-    bool stage_remote_rows(float* local, const float* rows, int n, std::string& err);
     bool record_forward(int T, int step_row0, cudaStream_t cs, std::string& err);
     /// The layer's front for T rows at step rows [row0, +T): the embedding, the fc projections, the attention
     /// hyper-connection read (R_, inj_, mixed_) and the K/V appended.
@@ -296,21 +196,6 @@ private:
     const float* window_R_ = nullptr;
     int max_t_ = 0;
     int device_ = -1;   ///< the device `load` ran on: the public calls switch to it (layer split)
-    int source_device_ = -1;   ///< head and residual input owner, fixed by the first bind
-    const float* bound_source_R_ = nullptr;
-    float* local_window_R_ = nullptr;   ///< stable graph input when the residual source is another device
-    cudaStream_t source_cs_ = nullptr; ///< D2H only, on source_device_; each source copy completes before return
-    struct SourceSlot {
-        float* host = nullptr;
-        cudaEvent_t consumed = nullptr;   ///< on device_, after the last H2D read of host
-        bool live = false;
-    };
-    SourceSlot source_slots_[2];
-    float* prefill_host_R_ = nullptr;   ///< large prompt chunks, reused only by synchronous prefill
-    int64_t prefill_host_cap_ = 0;
-    void* private_gr_arena_ = nullptr;
-    strata::kernels::GrWorkspace private_gr_;
-    bool source_already_staged_ = false;   ///< draft_first filled local_window_R_ itself
     int max_drafts_ = 1 << 30;
     bool hnorm_stream_ = false;
     bool q4_ = false, q4_head_ = false;
@@ -321,15 +206,6 @@ private:
     std::string vocab_file() const { return dvocab_path_.empty() ? rt_dir_ + "/draft_vocab.bin" : dvocab_path_; }
     /// a projection's weights for the draft layer's own pass: the Q4_0 copy under --mtp-q4, else the Q8_0 original
     const void* wq(const char* name, int& type) const;
-    bool hq_validate(const ModelGeometry& g, const MtpDrafter* shared, std::string& err);
-    std::string hq_pack_, hq_sha_[3];
-    int hq_mode_ = 0, hq_record_mode_ = 0;
-    uint64_t hq_upload_bytes_ = 0;
-    double hq_upload_ms_ = 0.0;
-    int64_t hq_chains_[3] = {};
-    cudaGraphExec_t hq_round_[2][9] = {}, hq_step_[2][9] = {};
-    uint8_t* hq_xq_ = nullptr; // private: shared_expert concurrently consumes xq_
-    void* hq_scratch_ = nullptr; // both carved from the ordinary arena before expert-cache sizing
     bool make_q4_dense(const std::vector<uint8_t>& blob, std::string& err);
     bool make_q4_head(std::string& err);
     void record_top2(int j);
@@ -338,37 +214,6 @@ private:
     // --pipeline-windows 2 (chain_launch)
     bool stage_source_R(int T, std::string& err);   ///< set_source_R's rows into the bound buffer
     bool force_on_ = false, chain_live_ = false;
-    bool anchor_allocate(std::string& err);
-    bool anchor_config_ = false, anchor_on_ = false;
-    float* anchor_ = nullptr;
-    int32_t *anchor_valid_ = nullptr, *anchor_h_meta_ = nullptr, *anchor_m_meta_ = nullptr;
-    unsigned long long* anchor_stats_ = nullptr;
-    uint64_t anchor_bytes_ = 0, anchor_fresh_ = 0, anchor_forced_ = 0;
-    bool first_top2_config_ = false;
-    strata::kernels::MtpFirstTop2 *first_top2_host_ = nullptr, *first_top2_mapped_ = nullptr;
-    strata::kernels::MtpFirstTop2 first_top2_observed_{};
-    void observe_first_top2(); // only after a successful existing readiness event
-    bool feature_allocate(std::string& err);
-    struct FeatureHeader {
-        char magic[8];
-        uint32_t version, hc, n_embd, rows;
-        int64_t prompt_tokens, first_pos;
-        uint8_t identity[32], prompt[32], fixture[32], payload[32];
-    };
-    static_assert(sizeof(FeatureHeader) == 168, "feature bank v1 header layout");
-    bool feature_config_ = false;
-    int feature_mode_ = 0, feature_bank_rows_ = 0, feature_captured_ = 0;
-    int32_t feature_prompt_last_ = -1;
-    int64_t feature_requested_ = 0, feature_fresh_ = 0, feature_forced_ = 0, feature_root_mismatch_ = 0;
-    uint64_t feature_bytes_ = 0;
-    double feature_load_ms_ = 0;
-    FeatureHeader feature_header_{};
-    std::string feature_path_;
-    float *feature_bank_ = nullptr, *feature_host_ = nullptr;
-    int32_t *feature_fixture_ = nullptr, *feature_mask_ = nullptr;
-    int32_t *feature_h_meta_ = nullptr, *feature_m_meta_ = nullptr;
-    int32_t feature_ids_[1024] = {};
-    unsigned long long* feature_stats_ = nullptr;
     const float* src_R_ = nullptr;
     int32_t *h_force_ = nullptr, *m_force_ = nullptr;   ///< the forced tokens (mapped), -1 = the step's own pick
     cudaEvent_t ev_chain_ = nullptr;
@@ -376,12 +221,6 @@ private:
     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
-    // draft_launch / draft_wait
-    bool draft_live_ = false;
-    int dl_steps_ = 0;
-    int32_t dl_ple_prev_[2] = {0, 0};
-    bool dl_do_ple_ = false;
-    std::chrono::steady_clock::time_point dl_t0_{};
     int64_t n_vocab_ = 0;
     uint64_t vram_ = 0;
     cudaStream_t cs_ = nullptr;

@@ -41,20 +41,6 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
 /// Spin until *flag >= value (a mapped host flag).  The value is fixed at capture, so several rings can be
 /// outstanding at once (the split verify window keeps two).
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream);
-/// Layer split, overlapped hand-off (STRATA_SPLIT_OVERLAP): dst (mapped) = [a (na) | b (nb) | c (nc)] with volatile
-/// stores, then the LAST block to finish raises *flag = 1 (mapped) after a system fence, so the next stage's GPU can
-/// start (wait_flag_ge(flag, 1)) without the host syncing this stage first.  `counter` is one device word, 0 between
-/// calls (the last block resets it).  Volatile because on RDNA a plain store to mapped memory can sit in the L2.
-/// `drop` (mapped, may be null): a test hook - nonzero leaves the flag down, as if the publish were lost.
-void handoff_publish(float* dst, const float* a, int64_t na, const float* b, int64_t nb, const float* c, int64_t nc,
-                     uint32_t* counter, uint32_t* flag, void* stream, const uint32_t* drop = nullptr);
-/// The reading stage's hand-off wait, bounded: spin until *flag >= value, or after timeout_ns (0: no bound) set
-/// *err = 1 (mapped) and return, so the window's graph completes and the host fails the window cleanly.
-void wait_handoff(const uint32_t* flag, uint32_t value, uint32_t* err, unsigned long long timeout_ns, void* stream);
-/// wait_flag_ge, also writing the GPU's clock (ns, gpu_stamp's) as the kernel starts into *t_in and as it returns
-/// into *t_out (either may be null): the verify window's PCIe-share balance, at no extra launch.
-void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long long* t_in, unsigned long long* t_out,
-                          void* stream);
 /// the GPU's %globaltimer (ns) into buf[i] (a one-thread kernel: the verify window's stage profiler).  Inside a PDL
 /// stretch (pdl.hpp) the stamp passes the early launch on, so a profiled window keeps the chain it measures.
 void gpu_stamp(unsigned long long* buf, int i, void* stream);
@@ -109,40 +95,7 @@ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const 
                 float* out_p = nullptr);
 /// --pipeline-windows, the drafter's chain teacher forced: `*tok = force[j]` when force[j] >= 0 (`force` is mapped
 /// host memory, read when the kernel runs), else `*tok` is left as it is.
-// Destination-only snapshot of the same selected native residual/head input as mtp_select.
-// meta may change ONLY after the full chain event completed; no partial-readiness reuse.
-#if defined(STRATA_USE_HIP)
-// CUDA-only lab collector; startup rejects enabling it on HIP, while ordinary HIP linking stays unchanged.
-inline void mtp_observer_copy(const float*, int64_t, const float*, int64_t,
-                              const int32_t*, const int32_t*, float*, int32_t*, int, int, void*) {}
-#else
-void mtp_observer_copy(const float* residual, int64_t stride, const float* head_input, int64_t n,
-                       const int32_t* row, const int32_t* meta, float* slab, int32_t* markers, int depth, int cap, void* stream);
-#endif
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream);
-// Lab future-residual oracle: no token/logit writes. Sequential on the drafter stream; mask resets at step1.
-// Causal anchor: seed is the selected VERIFIED target input row, before the MTP front overwrites it.
-// meta[0]=alpha-on (fixed0.25), meta[1]=fresh. Stats: seed_valid,seed_invalid,applied,off,excluded,invalid.
-// Both kernels are captured in all hot arms; mode0 and excluded steps never write residual.
-void mtp_anchor_seed(const float* residual, int64_t stride, int n_rows, const int32_t* row,
-                     const int32_t* meta, float* anchor, int32_t* valid,
-                     unsigned long long* stats, void* stream);
-void mtp_anchor_step(float* residual, int64_t stride, const int32_t* meta, const float* anchor,
-                     const int32_t* valid, unsigned long long* stats, void* stream);
-void mtp_feature_step(float* residual, int64_t stride, const int32_t* token, const float* bank,
-                      const int32_t* fixture, const int32_t* meta, int32_t* mask,
-                      unsigned long long* stats, int j, void* stream);
-// Observational first-head probe: 0=unobserved, 1=valid, 2=nonfinite logits, 3=fewer than two
-// candidates, 4=invalid row, 5=greedy pick mismatch. No writes to logits, picks or the vocabulary map.
-struct MtpFirstTop2 {
-    int32_t status = 0, row = -1, first = -1, second = -1, pick = -1, nonfinite = 0;
-    double gap = 0;
-};
-static_assert(sizeof(MtpFirstTop2) == 32, "first-head probe fixed record");
-// Ties use the lowest SUBSET index, like the existing greedy pick. Any nonfinite logit invalidates the
-// diagnostic; gap is double so subtracting two finite float logits cannot overflow. out may be mapped.
-void mtp_first_top2(const float* logits, int n_vocab, int n_rows, const int32_t* row_dev,
-                    const int32_t* vocab, const int32_t* mapped_picks, MtpFirstTop2* out, void* stream);
 /// Row *row_dev of a, b and c (a_n, b_n, c_n floats a row) copied to their row 0 (the draft layer's rest runs on
 /// row 0).  Graph-capturable: the row is read on the device.
 void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, int64_t b_n, float* c, int64_t c_n,

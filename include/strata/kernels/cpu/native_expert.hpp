@@ -49,12 +49,4 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
 void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const* hq, int nt, float* const* out,
                       int r0, int r1);
 
-/// Lab-only gate-first probe (STRATA_GATE_KEEP=fraction, off when unset): neurons kept per (token, expert) out of
-/// n_ff, 0 = off.  While g_gate_side is set on a thread the gate/up row kernels also store |silu(gate)| per row;
-/// gate_keep_mask then zeroes h where |silu(gate)| is below the keep-th largest (ties kept).  Quality probe: the
-/// rows are still computed.
-int gate_keep_count(int n_ff);
-extern thread_local float* const* g_gate_side;
-void gate_keep_mask(float* h, const float* side, int n_ff, int keep);
-
 }  // namespace strata::kernels::cpu

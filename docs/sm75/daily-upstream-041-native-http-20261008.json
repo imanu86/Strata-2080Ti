@@ -1,0 +1,331 @@
+{
+  "status": "COMPLETED_QUALIFIED_NO_MULTICHAT_GAIN",
+  "timestamp_UTC": "2026-10-08T17:32:33.488507+00:00",
+  "upstream": "fb58e0dbc8399662c0e47c76578c6e878b14f6cf",
+  "Daily_source": "be4cf1c0a4448ff0ec5a357cd5c61ffdf15041ca",
+  "candidate_patch_sha256": "075191b56dc1a727155c52ff3a97b34daca1fc3ea753865663cb09212ef6dc41",
+  "candidate_manifest_sha256": "fc1349cfe91a73e278c7515442dc1a473a30b3305066dc304a2121eb05a96b6b",
+  "exe_sha256": "202cbfaea24effc628d6c275e229a187b567c3501dd6d7c657443ae441aef7b9",
+  "source_and_binary_pin_evidence": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\daily-upstream-041-20261008\\build\\daily-upstream-041\\build.json",
+  "final_runner_review_sha256": "8ee2bd1c59a16c7656b4406a0ea60f60e903a1a7fa1801af73768b302903b000",
+  "hardware": [
+    "RTX3060 12GB stage0 layers0..15",
+    "RTX2080Ti modified22GB stage1 layers16..47"
+  ],
+  "protocol": {
+    "native_contexts": [
+      131264,
+      131255
+    ],
+    "SSD_root_tokens": 131159,
+    "minimum_context_root": 131072,
+    "SSD_creation_excluded_from_performance": true,
+    "native_identity_fullMTP_lookahead": "authentic native write/read validation; no LAB",
+    "normal_RAM_continuations": true,
+    "FREE": true,
+    "greedy_seed": 73,
+    "budget_each": 1024,
+    "KV": "int8 resident32768",
+    "reserves_MiB": [
+      1393,
+      384
+    ],
+    "single": "batch0/pipeline2/MTP/physicalelastic ON",
+    "multi": "batch2/groupsauto2x1/pipeline0/batchMTP OFF/globalMTP ON for serial return; physicalelastic OFF, native adaptive placement retained",
+    "multi_same_measured_PID_birth": true
+  },
+  "build_and_safety": {
+    "build": "PASS CUDA75;86",
+    "CPU_SSD_native_checks": 244,
+    "CPU_SSD_portable_checks": 244,
+    "GPU_VMM_checks": 35,
+    "B6_GPU_both_cards": "PASS 0 mismatches mode1 reps50",
+    "component_tests_not_speed_measurements": true
+  },
+  "S1": {
+    "full_wall_s": 34.375,
+    "native_completion_tokens": 2048,
+    "aggregate_fullwall_tps": 59.57818181818182,
+    "clients": {
+      "L01": {
+        "native_completion_tokens": 1024,
+        "wall_s": 17.280999999988126,
+        "ttft_content_s": 1.25,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131159,
+          "prompt_n": 105,
+          "prompt_ms": 1094.9,
+          "prompt_per_token_ms": 10.428,
+          "prompt_per_second": 95.9,
+          "predicted_n": 1024,
+          "predicted_ms": 16040.9,
+          "predicted_per_token_ms": 15.665,
+          "predicted_per_second": 63.8,
+          "draft_n": 909,
+          "draft_n_accepted": 572
+        },
+        "text_sha256": "fa088e0be1586980d9e0c3c027042bd8600670680783011fc11a0af5a772feff",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.9925093632958801,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      },
+      "L02": {
+        "native_completion_tokens": 1024,
+        "wall_s": 17.094000000011874,
+        "ttft_content_s": 1.3280000000086147,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131159,
+          "prompt_n": 96,
+          "prompt_ms": 1139.4,
+          "prompt_per_token_ms": 11.869,
+          "prompt_per_second": 84.3,
+          "predicted_n": 1024,
+          "predicted_ms": 15783.6,
+          "predicted_per_token_ms": 15.414,
+          "predicted_per_second": 64.9,
+          "draft_n": 828,
+          "draft_n_accepted": 547
+        },
+        "text_sha256": "76a7f399d67d37cee2a5c65a40f8d0f3fbf2ed5bba98b207a51b4aa8a38f6877",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.9879101899827288,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      }
+    }
+  },
+  "B1": {
+    "full_wall_s": 38.203000000008615,
+    "native_completion_tokens": 2048,
+    "aggregate_fullwall_tps": 53.60835536474984,
+    "clients": {
+      "L01": {
+        "native_completion_tokens": 1024,
+        "wall_s": 38.171999999991385,
+        "ttft_content_s": 0.9059999999881256,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131257,
+          "prompt_n": 7,
+          "prompt_ms": 3.2,
+          "prompt_per_token_ms": 0.457,
+          "prompt_per_second": 2187.5,
+          "predicted_n": 1024,
+          "predicted_ms": 36578.1,
+          "predicted_per_token_ms": 35.756,
+          "predicted_per_second": 28.0,
+          "draft_n": 0,
+          "draft_n_accepted": 0
+        },
+        "text_sha256": "d5423cdbd68775f3dfa6025fe7ce555045a012cf5d6e00bfd47d78045c19ff6b",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.9982876712328768,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      },
+      "L02": {
+        "native_completion_tokens": 1024,
+        "wall_s": 38.15600000001723,
+        "ttft_content_s": 2.3280000000086147,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131248,
+          "prompt_n": 7,
+          "prompt_ms": 701.2,
+          "prompt_per_token_ms": 100.171,
+          "prompt_per_second": 10.0,
+          "predicted_n": 1024,
+          "predicted_ms": 35231.7,
+          "predicted_per_token_ms": 34.406,
+          "predicted_per_second": 29.1,
+          "draft_n": 0,
+          "draft_n_accepted": 0
+        },
+        "text_sha256": "e171ad4f588d5fb38f309e4461afdcb4787aad456868e4c0dab86f68a4bdb281",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.98014440433213,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      }
+    }
+  },
+  "A2": {
+    "full_wall_s": 33.73499999998603,
+    "native_completion_tokens": 2048,
+    "aggregate_fullwall_tps": 60.70846302062689,
+    "clients": {
+      "L01": {
+        "native_completion_tokens": 1024,
+        "wall_s": 16.203999999997905,
+        "ttft_content_s": 0.8289999999979045,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131257,
+          "prompt_n": 7,
+          "prompt_ms": 657.9,
+          "prompt_per_token_ms": 93.986,
+          "prompt_per_second": 10.6,
+          "predicted_n": 1024,
+          "predicted_ms": 15392.3,
+          "predicted_per_token_ms": 15.032,
+          "predicted_per_second": 66.5,
+          "draft_n": 828,
+          "draft_n_accepted": 599
+        },
+        "text_sha256": "ad47984b6b5a036ccd23a957462dc4fc7df908d31ccc67713efaaa68fb0a0157",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.992818671454219,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      },
+      "L02": {
+        "native_completion_tokens": 1024,
+        "wall_s": 17.530999999988126,
+        "ttft_content_s": 0.8429999999934807,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131248,
+          "prompt_n": 7,
+          "prompt_ms": 685.2,
+          "prompt_per_token_ms": 97.886,
+          "prompt_per_second": 10.2,
+          "predicted_n": 1024,
+          "predicted_ms": 16708.8,
+          "predicted_per_token_ms": 16.317,
+          "predicted_per_second": 61.3,
+          "draft_n": 856,
+          "draft_n_accepted": 561
+        },
+        "text_sha256": "aa994c0d6d9dfc6b2630ea5eaecb5d10102ee79d06263bb1ec07078abf1ea37c",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.9694244604316546,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      }
+    }
+  },
+  "B2": {
+    "full_wall_s": 33.60999999998603,
+    "native_completion_tokens": 2048,
+    "aggregate_fullwall_tps": 60.934245760215745,
+    "clients": {
+      "L01": {
+        "native_completion_tokens": 1024,
+        "wall_s": 33.578999999997905,
+        "ttft_content_s": 1.0,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131257,
+          "prompt_n": 7,
+          "prompt_ms": 3.2,
+          "prompt_per_token_ms": 0.457,
+          "prompt_per_second": 2187.5,
+          "predicted_n": 1024,
+          "predicted_ms": 31885.2,
+          "predicted_per_token_ms": 31.168,
+          "predicted_per_second": 32.1,
+          "draft_n": 0,
+          "draft_n_accepted": 0
+        },
+        "text_sha256": "d019dcb89f250e39b131d16bee6539de9ccc04332e5fbec74c31551092ef541d",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.988929889298893,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      },
+      "L02": {
+        "native_completion_tokens": 1024,
+        "wall_s": 33.562999999994645,
+        "ttft_content_s": 2.4070000000065193,
+        "finish_reason": "length",
+        "native_timings": {
+          "cache_n": 131248,
+          "prompt_n": 7,
+          "prompt_ms": 681.7,
+          "prompt_per_token_ms": 97.386,
+          "prompt_per_second": 10.3,
+          "predicted_n": 1024,
+          "predicted_ms": 30554.8,
+          "predicted_per_token_ms": 29.839,
+          "predicted_per_second": 33.5,
+          "draft_n": 0,
+          "draft_n_accepted": 0
+        },
+        "text_sha256": "0c87d27444fd3eaecc65bcf7b795422d13c1b2ae6ea2f8b7c831ddbd841665c8",
+        "nonprintable_share": 0.0,
+        "distinct_word4": 0.980836236933798,
+        "text_sample_checks": {
+          "nonempty": true,
+          "UTF8_decode": "PASS",
+          "replacement_characters": 0,
+          "nonprintable_count": 0
+        }
+      }
+    }
+  },
+  "multi_B1_vs_A2_wall_percent": -11.695416590376606,
+  "multi_B2_vs_A2_wall_percent": 0.3719131210950577,
+  "decision": "NO_CONVINCING_MULTI_CHAT_THROUGHPUT_GAIN_IN_THIS_BAB; no tuning/sweep",
+  "evidence_qualifications": [
+    "S1 raw worker FAILED due solely to missing DECODE_TIMING-gated summary; separate ROOT-approved posthoc audit PASS using startuppl2 + runtime stage0gap; raw result preserved",
+    "single native decode63.8/64.9tok/s; multi fullwall is different denominator",
+    "B native summaries2045groupsteps/rows: B1 36602ms55.9rows/s, B2 31906ms64.1rows/s; admissions included, not HTTPusage2048 nor independent stage cost",
+    "native HTTP timings may cover final continuation leg; client fullwall/TTFT/usage are comparison denominator",
+    "target-only batch exact-slot MTP history remains UNQUALIFIED_UPSTREAM; no qualityFREE equivalence claim",
+    "batch content and order/adaptive cache state can differ; no randomized causal speedup claim",
+    "graphcapture/windowcounts/stagebusy/per-tokenp95 UNKNOWN; no new instrumentation/profiler",
+    "responses sampled readable and relevant, metrics and hashes preserved; not a general quality benchmark",
+    "historical forced70tok/s is descriptive only; dedicated FREE single different output/path"
+  ],
+  "harness_repairs": [
+    "VS active interference before GEN preserved attempt01; resumed only after30sCPU/RWstable",
+    "native root131159 vs old LAB131072 expectation corrected; no extra creation aftersuccessfulwrite",
+    "S1 windows summary gated by DECODE_TIMING, fixed audit posthoc without rerun"
+  ],
+  "isolation": {
+    "remaining_owned": [],
+    "Daily_unchanged": true,
+    "Daily_unchanged_since_prepare": true,
+    "locks": [
+      "closed"
+    ],
+    "core_merge_unchanged": true,
+    "no_commit_push_or_promotion": true
+  },
+  "evidence_paths": [
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\daily-upstream-041-20261008\\bench-plan\\runner\\runs\\single",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\daily-upstream-041-20261008\\bench-plan\\runner\\runs\\multi",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\daily-upstream-041-20261008\\gpu-safety.json"
+  ]
+}

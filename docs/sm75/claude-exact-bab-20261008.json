@@ -1,0 +1,433 @@
+{
+  "status": "COMPLETE_PROTOCOL_EVIDENCE_PASS",
+  "timestamp_UTC": "2026-10-08T18:06:19.257194+00:00",
+  "decision": "NO_CONVINCING_PERFORMANCE_GAIN; no promotion or tuning",
+  "protocol": "Original Claude run_long.main immutable; 3 fresh processes B-A-B, L01 full prefill, L02 RAM prefix reuse, no HTTP/SSD/warmups",
+  "prompt_tokens": {
+    "L01": 131248,
+    "L02": 131239
+  },
+  "tokens_per_case": 1024,
+  "sampling": {
+    "temperature": 0,
+    "seed": 73
+  },
+  "effective_env": {
+    "STRATA_WATCHDOG_S": "240",
+    "STRATA_PARALLEL_INTERMEDIATE_QUANT": "0",
+    "STRATA_PREFILL_EXACT_SMALL": "1",
+    "STRATA_QSA_PREFILL_MULTI": "1",
+    "STRATA_IQ_MT_MIN": "1",
+    "STRATA_NO_LARGEPAGES": "1",
+    "STRATA_ARENA_PIN_GIB": "8",
+    "STRATA_DECODE_TIMING": "1",
+    "CUDA_VISIBLE_DEVICES": "1,0",
+    "STRATA_POOL_SPIN_US": "100"
+  },
+  "executables": {
+    "daily": {
+      "path": "C:\\Users\\imanu\\source\\repos\\moe-aggressive-commit\\docs\\porto\\strata_adattivo\\corse_2080ti\\20261004_routed_keep\\build-main-be4cf1c\\strata.exe",
+      "sha256": "eccd5db37302f033343156397f5f0132059776ca64f470b1056b2cece996732c"
+    },
+    "candidate": {
+      "path": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\daily-upstream-041-20261008\\candidate-export\\build-sm7586\\strata.exe",
+      "sha256": "202cbfaea24effc628d6c275e229a187b567c3501dd6d7c657443ae441aef7b9"
+    }
+  },
+  "protocol_pins": {
+    "review": "6ffaa7088381ac23025213ede6838a79dca1ee3f50295b8dc00327b839558b3d",
+    "adapter": "42852c60f7382bebbe289688f2991505ee1919cf26b6dd11ec1a2bd116f57169",
+    "guardian": "ee93f013ece050a5beadb07d44177d01556746e60dc803220f4535fe3e144648",
+    "original_run_long": "400b167fbaf7112e35a28cc72c7c5d1a8c0bfd9bcbec31c9b5ad9948096c5a04",
+    "frozen_config": "d7335bb03f16f0530a1d4734889e1442d314f1599481a9a5243a9f9e46725de5",
+    "protocol": "7910cd5ac20185d6c860cd81d1dd15843bca02db5004085bcea8b00c7ea35ad6"
+  },
+  "arms": [
+    {
+      "arm": "B1",
+      "name": "DET-claude-exact-B1",
+      "binary": "candidate",
+      "executable_sha256": "202cbfaea24effc628d6c275e229a187b567c3501dd6d7c657443ae441aef7b9",
+      "startup_s": 58.59299999999348,
+      "requests": [
+        {
+          "case": "L01",
+          "last_native": {
+            "generated": 1024,
+            "prompt_tokens": 131248,
+            "prompt_ms": 76293.7,
+            "decode_ms": 15872.1,
+            "finish": "length",
+            "drafts_accepted": 491,
+            "drafts_offered": 733,
+            "reused": 0,
+            "hits": 671067,
+            "lookups": 700284,
+            "ram_blobs": 0,
+            "file_blobs": 0,
+            "file_mb": 0.0,
+            "prompt_read": 131248
+          },
+          "decode_tps": 64.51572255719155,
+          "ttft_s": 76.48499999998603,
+          "windows": {
+            "count": 533,
+            "speculative": 469,
+            "on_path": 173,
+            "rolled_back": 296,
+            "below_gate": 63
+          },
+          "output_ids_sha256": "f4182635615240ee1349b7f354456fd0e92dadab3c99b6bb2f122ae4c7762021",
+          "text_sha256": "0c797b5128f410b0d7c65a47f4f0351924a17151925b9f4ecd2dbb9d93cb1bea",
+          "text_replacement_characters": 0,
+          "text_nonprintable_characters": 0
+        },
+        {
+          "case": "L02",
+          "last_native": {
+            "generated": 1024,
+            "prompt_tokens": 131239,
+            "prompt_ms": 1698.1,
+            "decode_ms": 17574.4,
+            "finish": "length",
+            "drafts_accepted": 372,
+            "drafts_offered": 561,
+            "reused": 131072,
+            "hits": 670194,
+            "lookups": 687986,
+            "ram_blobs": 0,
+            "file_blobs": 0,
+            "file_mb": 0.0,
+            "prompt_read": 167
+          },
+          "decode_tps": 58.2665695557174,
+          "ttft_s": 1.7809999999881256,
+          "windows": {
+            "count": 652,
+            "speculative": 588,
+            "on_path": 168,
+            "rolled_back": 420,
+            "below_gate": 63
+          },
+          "output_ids_sha256": "5ac93417a484410331b12422d0b770ecbcbb8fc00fb414927ae0d7eabc60ee68",
+          "text_sha256": "fa05dde0158c0192ac3959d43f793cdf296fd76032cfd8297cf38faad9175c2b",
+          "text_replacement_characters": 0,
+          "text_nonprintable_characters": 0
+        }
+      ],
+      "total_decode_ms": 33446.5,
+      "total_decode_tps": 61.232116962910915,
+      "elastic_events": [
+        "strata elastic: on - keeps 500 MiB of VRAM free, grows after 5000 ms of room, checks every 1000 ms (4434 slots now, 6.22 GiB, chunks of 64 MiB)",
+        "strata elastic: -247 slots (0 moved in, 247 out) -> 4187 slots, 5.87 GiB; 595 MiB free, prompt chunk 8192",
+        "strata elastic: -66 slots at a gap of stage 0 (66 experts to the CPU) -> 4121 slots, 5.78 GiB; 532 MiB free; 5.49 ms",
+        "strata elastic: -102 slots at a gap of stage 0 (102 experts to the CPU) -> 4019 slots, 5.63 GiB; 545 MiB free; 2.97 ms",
+        "strata elastic: -193 slots at a gap of stage 0 (193 experts to the CPU) -> 3826 slots, 5.36 GiB; 936 MiB free; 4.35 ms",
+        "strata elastic: -90 slots at a gap of stage 0 (90 experts to the CPU) -> 3736 slots, 5.23 GiB; 562 MiB free; 2.97 ms",
+        "strata elastic: -60 slots at a gap of stage 0 (60 experts to the CPU) -> 3676 slots, 5.14 GiB; 983 MiB free; 3.12 ms"
+      ],
+      "decode_timing_lines": [
+        "strata decode timing: 533 windows, avg T 2.38, 1.92 tokens/window, 29.78 ms/window = verify 29.78 (GPU-reach wait 14.39 + per-layer host 2.41 [plan 0.14 actq 0.06 jobs 0.01 CPU 3.88] + stage 0.48) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 1.01 (1.14 entries), VRAM hits 26.23, PCIe 0.01",
+        "strata decode timing: 652 windows, avg T 1.86, 1.57 tokens/window, 26.95 ms/window = verify 26.95 (GPU-reach wait 14.26 + per-layer host 1.69 [plan 0.10 actq 0.03 jobs 0.01 CPU 1.96] + stage 0.44) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.51 (0.57 entries), VRAM hits 21.41, PCIe 0.01"
+      ],
+      "raw_evidence": {
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B1\\plan.json": "929e887610a2c893f87fabeb2657455cd3d8cf2bb8c96ed47124aa11420bd557",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B1\\result.json": "66a0e9adb63507c1933660fb547d9c08606efb99ec866bba410a81c54d144c52",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B1\\engine.log": "3d7d3c7684a8660fa5b7e90360526302fd9c1520768757e142cb5e3561daddc6",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B1\\isolation.json": "337d1d57521618dec856cb16939271f6bec83787741248e7a0de2875eec53a4e",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B1\\ambiente.json": "fc2611832f416b36a94982703a6910e2f0488774cca568fc352a4244009e2c45"
+      }
+    },
+    {
+      "arm": "A",
+      "name": "DET-claude-exact-A",
+      "binary": "daily",
+      "executable_sha256": "eccd5db37302f033343156397f5f0132059776ca64f470b1056b2cece996732c",
+      "startup_s": 60.28100000001723,
+      "requests": [
+        {
+          "case": "L01",
+          "last_native": {
+            "generated": 1024,
+            "prompt_tokens": 131248,
+            "prompt_ms": 76760.2,
+            "decode_ms": 15860.1,
+            "finish": "length",
+            "drafts_accepted": 496,
+            "drafts_offered": 693,
+            "reused": 0,
+            "hits": 650650,
+            "lookups": 683834,
+            "ram_blobs": 0,
+            "file_blobs": 0,
+            "file_mb": 0.0,
+            "prompt_read": 131248
+          },
+          "decode_tps": 64.56453616307589,
+          "ttft_s": 76.95300000000861,
+          "windows": {
+            "count": 528,
+            "speculative": 479,
+            "on_path": 167,
+            "rolled_back": 312,
+            "below_gate": 48
+          },
+          "output_ids_sha256": "6575907bcaa164e7ac2013047ce27f1c0784ca75c1b146f1eba9e98f811b26f4",
+          "text_sha256": "b79d9c3710ec56a6a4b56f3cfe062c1e383526059d2fff937ebf882f346b393d",
+          "text_replacement_characters": 0,
+          "text_nonprintable_characters": 0
+        },
+        {
+          "case": "L02",
+          "last_native": {
+            "generated": 1024,
+            "prompt_tokens": 131239,
+            "prompt_ms": 1735.6,
+            "decode_ms": 17078.2,
+            "finish": "length",
+            "drafts_accepted": 384,
+            "drafts_offered": 578,
+            "reused": 131072,
+            "hits": 666888,
+            "lookups": 688404,
+            "ram_blobs": 0,
+            "file_blobs": 0,
+            "file_mb": 0.0,
+            "prompt_read": 167
+          },
+          "decode_tps": 59.959480507313415,
+          "ttft_s": 1.827999999979511,
+          "windows": {
+            "count": 641,
+            "speculative": 565,
+            "on_path": 181,
+            "rolled_back": 384,
+            "below_gate": 75
+          },
+          "output_ids_sha256": "ab203eea91ac2d9d02cbe5279f16b875944f401eae9f7d4766602172455ad3c3",
+          "text_sha256": "8525893a893fe6a280abb2252ce39a8c85297df1c0eb58b9e590e5b59617dcd6",
+          "text_replacement_characters": 0,
+          "text_nonprintable_characters": 0
+        }
+      ],
+      "total_decode_ms": 32938.3,
+      "total_decode_tps": 62.17685794348827,
+      "elastic_events": [
+        "strata elastic: on - keeps 500 MiB of VRAM free, grows after 5000 ms of room, checks every 1000 ms (3645 slots now, 5.10 GiB, chunks of 64 MiB)",
+        "strata elastic: +67 experts (96 MiB) -> 3712 slots, 5.19 GiB; 735 MiB free",
+        "strata elastic: -141 slots at a gap of stage 0 (141 experts to the CPU) -> 3571 slots, 4.99 GiB; 614 MiB free; 7.07 ms",
+        "strata elastic: +90 experts (126 MiB) -> 3661 slots, 5.11 GiB; 616 MiB free",
+        "strata elastic: -116 slots at a gap of stage 0 (116 experts to the CPU) -> 3545 slots, 4.95 GiB; 527 MiB free; 3.46 ms"
+      ],
+      "decode_timing_lines": [
+        "strata decode timing: 528 windows, avg T 2.31, 1.94 tokens/window, 30.04 ms/window = verify 30.04 (GPU-reach wait 14.31 + per-layer host 3.93 [plan 0.16 actq 0.36 jobs 0.01 CPU 5.98] + stage 0.48) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 1.14 (1.31 entries), VRAM hits 25.67, PCIe 0.02",
+        "strata decode timing: 641 windows, avg T 1.90, 1.60 tokens/window, 26.64 ms/window = verify 26.64 (GPU-reach wait 13.56 + per-layer host 2.29 [plan 0.13 actq 0.16 jobs 0.01 CPU 2.89] + stage 0.46) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.62 (0.70 entries), VRAM hits 21.67, PCIe 0.01"
+      ],
+      "raw_evidence": {
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-A\\plan.json": "4e93e444d70f06f2d97a57be917b67c1884cad9708bbdb8ecce76d4cd055cf89",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-A\\result.json": "da266dfd07b30845abdbb2f37dcbdbaa9a952371211d254694632d03553fa172",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-A\\engine.log": "af7a5d4b187ffa9312aaaf90a9a0fcb44825b47e43ad53ea39bb42f83586db16",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-A\\isolation.json": "8eb0397ccc5212e1b4827dac93ac6777f2ef1bbfcc7063a1920a2a7e7a0257de",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-A\\ambiente.json": "ba12b0c851882476d4697d91e89d9e68190e561c3ad16ff9a227508d726ca465"
+      }
+    },
+    {
+      "arm": "B2",
+      "name": "DET-claude-exact-B2",
+      "binary": "candidate",
+      "executable_sha256": "202cbfaea24effc628d6c275e229a187b567c3501dd6d7c657443ae441aef7b9",
+      "startup_s": 61.453999999997905,
+      "requests": [
+        {
+          "case": "L01",
+          "last_native": {
+            "generated": 1024,
+            "prompt_tokens": 131248,
+            "prompt_ms": 76866.1,
+            "decode_ms": 15146.4,
+            "finish": "length",
+            "drafts_accepted": 496,
+            "drafts_offered": 677,
+            "reused": 0,
+            "hits": 644091,
+            "lookups": 669821,
+            "ram_blobs": 0,
+            "file_blobs": 0,
+            "file_mb": 0.0,
+            "prompt_read": 131248
+          },
+          "decode_tps": 67.60682406380394,
+          "ttft_s": 77.06200000000536,
+          "windows": {
+            "count": 528,
+            "speculative": 483,
+            "on_path": 192,
+            "rolled_back": 291,
+            "below_gate": 44
+          },
+          "output_ids_sha256": "48ef95e2011cf4a990a39b8a533e2677b549556bb06e2e2a854548215f7d702d",
+          "text_sha256": "5f75cb56f0f1e839b24b07827e699741a168dff5d5f341d2ac49682fbfdae8ac",
+          "text_replacement_characters": 0,
+          "text_nonprintable_characters": 0
+        },
+        {
+          "case": "L02",
+          "last_native": {
+            "generated": 1024,
+            "prompt_tokens": 131239,
+            "prompt_ms": 1754.0,
+            "decode_ms": 17487.5,
+            "finish": "length",
+            "drafts_accepted": 387,
+            "drafts_offered": 595,
+            "reused": 131072,
+            "hits": 679656,
+            "lookups": 695268,
+            "ram_blobs": 0,
+            "file_blobs": 0,
+            "file_mb": 0.0,
+            "prompt_read": 167
+          },
+          "decode_tps": 58.556111508220155,
+          "ttft_s": 1.8440000000118744,
+          "windows": {
+            "count": 637,
+            "speculative": 570,
+            "on_path": 173,
+            "rolled_back": 397,
+            "below_gate": 66
+          },
+          "output_ids_sha256": "c23e98080d840b8fff2efd9915df61dc4bdff48cdcd95819bd809606c4420fa1",
+          "text_sha256": "d18adddef7a0f1722bba1b9c34652201df6bfea5f8bfb5df0a36acda642e1643",
+          "text_replacement_characters": 0,
+          "text_nonprintable_characters": 0
+        }
+      ],
+      "total_decode_ms": 32633.9,
+      "total_decode_tps": 62.756826490244805,
+      "elastic_events": [
+        "strata elastic: on - keeps 500 MiB of VRAM free, grows after 5000 ms of room, checks every 1000 ms (4434 slots now, 6.22 GiB, chunks of 64 MiB)",
+        "strata elastic: -237 slots (0 moved in, 237 out) -> 4197 slots, 5.88 GiB; 545 MiB free, prompt chunk 8192",
+        "strata elastic: -134 slots at a gap of stage 0 (134 experts to the CPU) -> 4063 slots, 5.70 GiB; 562 MiB free; 3.13 ms",
+        "strata elastic: -58 slots at a gap of stage 0 (58 experts to the CPU) -> 4005 slots, 5.61 GiB; 609 MiB free; 3.55 ms",
+        "strata elastic: -91 slots at a gap of stage 0 (91 experts to the CPU) -> 3914 slots, 5.48 GiB; 559 MiB free; 3.06 ms",
+        "strata elastic: -136 slots at a gap of stage 0 (136 experts to the CPU) -> 3778 slots, 5.29 GiB; 560 MiB free; 3.70 ms",
+        "strata elastic: -70 slots at a gap of stage 0 (70 experts to the CPU) -> 3708 slots, 5.19 GiB; 526 MiB free; 3.36 ms"
+      ],
+      "decode_timing_lines": [
+        "strata decode timing: 528 windows, avg T 2.28, 1.94 tokens/window, 28.69 ms/window = verify 28.69 (GPU-reach wait 14.12 + per-layer host 2.35 [plan 0.15 actq 0.06 jobs 0.01 CPU 3.76] + stage 0.51) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.88 (1.02 entries), VRAM hits 25.41, PCIe 0.01",
+        "strata decode timing: 637 windows, avg T 1.93, 1.61 tokens/window, 27.45 ms/window = verify 27.45 (GPU-reach wait 14.19 + per-layer host 1.72 [plan 0.13 actq 0.04 jobs 0.01 CPU 2.05] + stage 0.52) + commit/emit 0.00 + draft 0.00; per layer-window: CPU experts 0.46 (0.51 entries), VRAM hits 22.23, PCIe 0.00"
+      ],
+      "raw_evidence": {
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B2\\plan.json": "45079d044a7c873ab591b9294c29e81d683ea9e25da8b17c293ca54b86f1da29",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B2\\result.json": "cfa3f8c2a7b4fb4179f663be21a815c59f24878ecbc617b62ea2f6ef2e286d1d",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B2\\engine.log": "700a69253e9d3fe9993b79db41d0ba32bd7eaaaca15bc4f6c2168b4141c25c78",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B2\\isolation.json": "21c5b436c41bdaebb6ce74dc47ee42be58b024df351b41b94845e164ff70566f",
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck\\runs\\DET-claude-exact-B2\\ambiente.json": "336119e84df7c8ef10c883a32d4e06b47b7cf0683971420fe6f4e3b431e25aa8"
+      }
+    }
+  ],
+  "comparison": {
+    "A_total_decode_ms": 32938.3,
+    "mean_B_total_decode_ms": 33040.2,
+    "mean_B_time_change_pct": 0.30936630002154075,
+    "mean_B_time_reduction_pct": -0.30936630002154075,
+    "mean_B_throughput_gain_pct": -0.30841217668172716,
+    "mean_B_total_decode_tps": 61.98509694251246,
+    "A_total_decode_tps": 62.17685794348827,
+    "by_case": {
+      "L01": {
+        "A_decode_ms": 15860.1,
+        "mean_B_decode_ms": 15509.25,
+        "mean_B_time_change_pct": -2.2121550305483573,
+        "mean_B_throughput_gain_pct": 2.2621983654915745,
+        "mean_B_decode_tps": 66.0251140448442
+      },
+      "L02": {
+        "A_decode_ms": 17078.2,
+        "mean_B_decode_ms": 17530.95,
+        "mean_B_time_change_pct": 2.6510405077818433,
+        "mean_B_throughput_gain_pct": -2.5825753880993285,
+        "mean_B_decode_tps": 58.41098172089932
+      }
+    }
+  },
+  "output_parity": [
+    {
+      "left": "B1",
+      "right": "A",
+      "case": "L01",
+      "exact_ID_parity": false,
+      "first_divergence_zero_based": 9,
+      "first_left_token_ID": 79091,
+      "first_right_token_ID": 328
+    },
+    {
+      "left": "B1",
+      "right": "A",
+      "case": "L02",
+      "exact_ID_parity": false,
+      "first_divergence_zero_based": 22,
+      "first_left_token_ID": 15862,
+      "first_right_token_ID": 29712
+    },
+    {
+      "left": "B2",
+      "right": "A",
+      "case": "L01",
+      "exact_ID_parity": false,
+      "first_divergence_zero_based": 161,
+      "first_left_token_ID": 6009,
+      "first_right_token_ID": 11312
+    },
+    {
+      "left": "B2",
+      "right": "A",
+      "case": "L02",
+      "exact_ID_parity": false,
+      "first_divergence_zero_based": 22,
+      "first_left_token_ID": 15862,
+      "first_right_token_ID": 29712
+    },
+    {
+      "left": "B1",
+      "right": "B2",
+      "case": "L01",
+      "exact_ID_parity": false,
+      "first_divergence_zero_based": 9,
+      "first_left_token_ID": 79091,
+      "first_right_token_ID": 328
+    },
+    {
+      "left": "B1",
+      "right": "B2",
+      "case": "L02",
+      "exact_ID_parity": false,
+      "first_divergence_zero_based": 133,
+      "first_left_token_ID": 6009,
+      "first_right_token_ID": 19954
+    }
+  ],
+  "historical_Daily_FREE_decode_tps": [
+    70.140349,
+    60.926632
+  ],
+  "limits": [
+    "Same input IDs/args/env/driver does not imply equal dynamic cache allocation or FREE generated paths.",
+    "Today original Daily A measures64.56/59.96; historical70.14/60.93 is not reproduced on L01; cause not isolated.",
+    "No exact FREE output parity or general quality qualification; first divergence reported without forcing.",
+    "Decode timing components overlap/nest; do not sum as independent costs.",
+    "FORCE_IDS and FORCE_WINDOWS absent from candidate; deterministic forced comparison unsupported.",
+    "One B-A-B triplet only; no statistically rigorous equivalence/regression claim."
+  ],
+  "isolation": {
+    "owned_remaining": [],
+    "foreign_compile_interference_events": [],
+    "Daily_unchanged": true,
+    "core_staged_unmodified_by_this_benchmark": true,
+    "no_build_commit_push": true,
+    "six_GEN_complete": true
+  },
+  "raw_directory": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\claude-exact-recheck",
+  "guardian_evidence_sha256": "113421484381bcd060dde1e91905daac452eedc50024ca6e5359575dc71514fd"
+}

@@ -1,3 +1,5 @@
+> **ARCHIVIO / NON ATTIVO:** evidenza storica del fork precedente. Questo documento non descrive il runtime corrente; vedere [baseline verificata](../DAILY_UPSTREAM_BASELINE_2026-10-08.md).
+
 # Native IQ quality regression, 2 October 2026
 
 The declared overall gate is **FAIL** because one answer oracle failed.

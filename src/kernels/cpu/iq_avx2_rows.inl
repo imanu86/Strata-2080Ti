@@ -162,8 +162,6 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const voi
         row_dot_any<TY, NT>(blob + (size_t) r * gu_row, nb, y, g);
         row_dot_any<TY, NT>(blob + up_off + (size_t) r * gu_row, nb, y, u);
         for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
-        if (g_gate_side != nullptr)   // fork lab gate-first probe (STRATA_GATE_KEEP)
-            for (int t = 0; t < NT; ++t) g_gate_side[t][r] = std::fabs(g[t] / (1.f + std::exp(-g[t])));
     }
 }
 

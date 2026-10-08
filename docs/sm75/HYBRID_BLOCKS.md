@@ -1,3 +1,5 @@
+> **ARCHIVIO / NON ATTIVO:** evidenza storica del fork precedente. Questo documento non descrive il runtime corrente; vedere [baseline verificata](../DAILY_UPSTREAM_BASELINE_2026-10-08.md).
+
 # Physical GPU/CPU expert blocks — research, 4 October 2026
 
 The offline `hybrid_expert_probe` partitions each 640-neuron expert into ten

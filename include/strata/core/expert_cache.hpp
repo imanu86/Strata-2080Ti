@@ -116,10 +116,6 @@ public:
     bool elastic_shrink(int64_t n_slots, std::string& err);
     uint64_t elastic_mapped_bytes() const { return mapped_; }
     uint64_t chunk_bytes() const { return chunk_; }
-    // Opt-in helper path: checked driver accounting, fatal on partial VMM failure.
-    void set_elastic_strict(bool on) { elastic_strict_ = on; }
-    bool elastic_healthy() const { return !elastic_failed_; }
-    bool elastic_truncate_admission(int64_t n_slots, std::string& err);
 
     bool valid() const { return base_ != nullptr; }
     /// The slots usable now: all of them, unless `shrink` gave the tail's VRAM back (#533) - then the ones wholly
@@ -267,11 +263,6 @@ private:
     // the elastic arena (CUdeviceptr and CUmemGenericAllocationHandle are both unsigned long long)
     bool map_to(uint64_t end, std::string& err);   ///< maps chunks until `end` bytes are backed
     void unmap_above(uint64_t keep);               ///< releases every chunk wholly above `keep` bytes
-    bool unmap_above_checked(uint64_t keep, std::string& err);
-    bool elastic_strict_ = false;
-    bool elastic_failed_ = false;
-    bool tail_unmapped_ = false; // handle retained until cuMemRelease succeeds
-    std::vector<unsigned long long> orphan_handles_; // failed-map handles not yet released
     bool elastic_vmm_ = false;
     unsigned long long va_ = 0;
     uint64_t va_bytes_ = 0;

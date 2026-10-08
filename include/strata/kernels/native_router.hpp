@@ -15,24 +15,9 @@ bool native_router_enabled();
 // Requires a nonnull ordered CUDA stream. No allocation or synchronization.
 void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream);
 /// n_tok rows at once (logits [n,512], ids/weights [n,10]); each row exactly as the single call.
-// Lab-only: keep original router IDs, then restrict to resident experts (mode 1)
-// or drop nonresident contributions without renormalizing (mode 2). Mode 0 is exact.
-// Caller must guarantee >=10 resident experts; mode/residency remain device data.
-void closed_router_apply(float* logits, int32_t* ids, float* weights, int32_t* original_ids,
-                         const int32_t* resident, const int32_t* mode, int n_tok, void* stream);
-// Lab-only probe (STRATA_ROUTED_KEEP / STRATA_ROUTED_MIN_W): in each [n_tok,10] row keep the
-// weights ranked < keep (by weight, ties by slot) that are also >= min_w unless ranked < min_keep;
-// zero the rest, optionally renormalizing the kept ones. Zeroed experts are skipped only when the
-// verifier's host plan drops them too (STRATA_ROUTED_KEEP_SKIP).
-void routed_rank_keep(float* weights, int n_tok, int keep, bool renorm, float min_w, int min_keep, void* stream);
-// Lab-only lookahead probe (STRATA_LOOKAHEAD_PROBE): top-20 ids of each [n_tok,512] logits row (ties by id),
-// and per window rows the overlap of the real top-10 ids with them: cnt += {tokens, hit@10, hit@20,
-// non-resident ids, non-resident ids hit@20}.  res = this layer's residency (slot or -1), may be null.
-void routed_lookahead_top20(const float* logits, int32_t* pred, int n_tok, void* stream);
-void routed_lookahead_compare(const int32_t* ids, const int32_t* pred, const int32_t* res, unsigned long long* cnt,
-                              int n_tok, void* stream);
-// Accumulate only committed rows of [layers,stride,10], into [layers,512].
-void closed_router_count(const int32_t* ids, float* counts, int layers, int stride,
-                         const int32_t* keep_device, int keep_host, void* stream);
 void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream);
+/// STRATA_ROUTE_RESIDENT: swap non-resident tail-rank experts for resident ones within `margin` logits (see the .cu).
+/// `stats` is nullptr or 4 device uint64 counters: tail entries seen, swaps, non-resident before, non-resident after.
+void native_route_resident(const float* logits, int32_t* ids, float* weights, const int32_t* res_layer, int n_tok, float margin,
+                           int rank_lo, int rank_hi, unsigned long long* stats, void* stream);
 }
