@@ -63,6 +63,7 @@
 #include "strata/program/logits_selection.hpp"
 #include "strata/program/conv_cache.hpp"
 #include "strata/program/message_boundary.hpp"
+#include "strata/program/prefix_root.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/draft_source.hpp"
 #include "strata/spec/suffix_drafter.hpp"
@@ -9768,12 +9769,12 @@ int main(int argc, char** argv) {
             int64_t incoming_tokens = parked.tokens;
             bool incoming_live = parked.live, incoming_disk = false;
             double disk_read_ms = 0;
-            // Only the same first-turn boundary as the ordinary root checkpoint is eligible.
+            // Only the same first eligible turn boundary as the ordinary root checkpoint is eligible.
             // Do not replace a longer in-RAM match or read a disk image for a vision request.
             if (prefix_disk_enabled && req_imgs.empty() && std::getenv("STRATA_CKPT_REREAD") == nullptr) {
                 int64_t disk_root = -1, last_turn = -1;
                 for (int64_t i = n - 1; i > 0; --i) if (ids[size_t(i)] == o.turn_token) { last_turn = i; break; }
-                for (int64_t i = 1; i < last_turn; ++i) if (ids[size_t(i)] == o.turn_token) { disk_root = i; break; }
+                disk_root = strata::program::prefix_root_boundary(ids, last_turn, o.turn_token, o.prompt_cache_root, true);
                 if (disk_root >= o.prompt_cache_root && disk_root <= int64_t(strata::core::prefix_cache_max_tokens) &&
                         disk_root > std::max({resume, slot_tokens, incoming ? incoming_tokens : int64_t(0)})) {
                     const auto t0 = Clock::now();
@@ -10490,20 +10491,16 @@ int main(int argc, char** argv) {
                         if (ids[(size_t) i + 1] == o.tail_role_token) turn_at = i;
                         break;
                     }
-            // A prompt read from token 0 also stops at its FIRST turn boundary: the end of the system prompt (with
-            // the tools), which every new chat of the same client shares.  That checkpoint becomes the chain's root,
-            // which the retention policy pins (conv_cache.hpp), so the next new chat reads only what comes after it.
-            // (PR #65, code-martin.)  Only for a system prompt of --prompt-cache-root tokens or more: a small one
-            // is cheaper to read again than the extra part costs (~0.3 s).
+            // A prompt read from token 0 also stops at its first turn boundary, if at or beyond --prompt-cache-root.
+            // Only the disk cache skips short earlier turns; ordinary RAM retention keeps its original root policy.
+            // The disk root is selected by the same helper at restore; never choose the current turn.
+            // The retention policy pins it (conv_cache.hpp); exact prefix and lookahead checks decide later reuse.
             const int64_t last_turn = turn_at;   // ckpt=0 drops the split there, the root is still looked for before it
             if (!req_ckpt) turn_at = -1;
             int64_t root_at = -1;
             if (o.prompt_cache > 0 && o.turn_token >= 0 && o.prompt_cache_root > 0 && (read_from == 0 || resumed_from0))
-                for (int64_t i = 1; i < last_turn; ++i)
-                    if (ids[(size_t) i] == o.turn_token) {
-                        if (i >= o.prompt_cache_root) root_at = i;
-                        break;
-                    }
+                root_at = strata::program::prefix_root_boundary(ids, last_turn, o.turn_token, o.prompt_cache_root,
+                                                               prefix_disk_enabled);
             // a root past the drafter's window (Claude Code's ~40K system turn): its draft K/V are computed in full, or
             // the prefix file below would skip it as incomplete; costs the draft layer's K/V of the extra cells once
             if (use_mtp)
