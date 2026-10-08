@@ -814,6 +814,18 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     return true;
 }
 
+bool Verifier::observer_copy_R(float* private_dst, int T, std::string& err) const {
+    const OnDevice device(device_);
+    if (!private_dst || fl_active_ || !last_stage() || T < 1 || T > 4 || T != last_t_ || !g_) {
+        err = "verifier observer: copy requires completed exact final window"; return false;
+    }
+    if (cudaMemcpyAsync(private_dst, R_, (size_t) T * g_->hc * g_->n_embd * sizeof(float),
+                        cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+        err = "verifier observer: private residual copy failed"; return false;
+    }
+    return true;
+}
+
 const float* Verifier::final_R(int t) const { return R_ + (size_t) t * (size_t) (g_->hc * g_->n_embd); }
 
 // ================================ THE WINDOW, AS CAPTURED ================================

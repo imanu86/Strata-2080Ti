@@ -2186,6 +2186,32 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata lab nvtx: ranges=on schema=1 request=strata.request decode=strata.decode "
                              "gen_index=accepted_command_ordinal scope=host_thread\n");
 
+    const char* lab_observer_switch = std::getenv("STRATA_LAB_DUAL_HORIZON_SWITCH");
+    const char* lab_observer_trace = std::getenv("STRATA_LAB_DUAL_HORIZON_TRACE");
+#if defined(STRATA_USE_HIP)
+    if (lab_observer_switch) { std::fprintf(stderr, "strata observer: CUDA-only collector unsupported on HIP\n"); return 2; }
+#endif
+    const bool lab_observer = lab_observer_switch != nullptr;
+    if (lab_observer) {
+        if (!*lab_observer_switch || !std::filesystem::path(lab_observer_switch).is_absolute() ||
+            !lab_observer_trace || !*lab_observer_trace || !std::filesystem::path(lab_observer_trace).is_absolute() ||
+            std::filesystem::path(lab_observer_switch).lexically_normal() == std::filesystem::path(lab_observer_trace).lexically_normal()) {
+            std::fprintf(stderr, "strata observer: absolute distinct switch/trace required\n"); return 2;
+        }
+        const char* forbidden[] = {"STRATA_FORCE_IDS", "STRATA_FORCE_WINDOWS", "STRATA_FORCE_TRACE",
+            "STRATA_LAB_POLICY_TRACE", "STRATA_LAB_MTP_FEATURE_SWITCH", "STRATA_LAB_MTP_ANCHOR_SWITCH",
+            "STRATA_LAB_MTP_HQ_SWITCH", "STRATA_LAB_MTP_HQ_PACK", "STRATA_LAB_MTP_HQ_FREE",
+            "STRATA_LAB_MTP_SELECTIVE_SWITCH", "STRATA_LAB_MTP_SHALLOW_SWITCH", "STRATA_LAB_MTP_BROOT_SWITCH",
+            "STRATA_LAB_MTP_BWINDOW_SWITCH", "STRATA_CKPT_REREAD", "STRATA_STATE_HASH", "STRATA_PIPELINE_SWITCH",
+            "STRATA_PIPELINE_FORCE_MISS", "STRATA_PIPELINE_TRACE", "STRATA_NEURON_PROBE_CONTROL", "STRATA_CLOSED_ROUTING",
+            "STRATA_MTP_TOP2", "STRATA_MTP_FULL_HEAD", "STRATA_MTP_CATCHUP_ALL", "STRATA_MTP_CHAIN_TRIM",
+            "STRATA_SPEC_COUPLED", "STRATA_PL_EARLY_CHAIN"};
+        for (const char* name : forbidden) if (std::getenv(name) != nullptr) {
+            std::fprintf(stderr, "strata observer: forbidden environment key %s (must be absent)\n", name); return 2;
+        }
+    } else if (lab_observer_trace != nullptr) {
+        std::fprintf(stderr, "strata observer: trace without switch forbidden\n"); return 2;
+    }
     // A separate, explicit laboratory mode: real target outputs, no external continuation or token oracle.
     const char* lab_hq_free_env = std::getenv("STRATA_LAB_MTP_HQ_FREE");
     if (lab_hq_free_env != nullptr && std::strcmp(lab_hq_free_env, "0") != 0 && std::strcmp(lab_hq_free_env, "1") != 0) {
@@ -2227,6 +2253,7 @@ int main(int argc, char** argv) {
     }
     const char* lab_policy_path = std::getenv("STRATA_LAB_POLICY_TRACE");
     const bool lab_policy = lab_policy_path != nullptr && lab_policy_path[0] != 0;
+    const bool lab_meta = lab_policy || lab_observer;
     const char* lab_broot_switch = std::getenv("STRATA_LAB_MTP_BROOT_SWITCH");
     const char* lab_broot_trace = std::getenv("STRATA_LAB_MTP_BROOT_TRACE");
     const char* lab_bwindow_switch = std::getenv("STRATA_LAB_MTP_BWINDOW_SWITCH");
@@ -2296,7 +2323,7 @@ int main(int argc, char** argv) {
         if (!o.serve || o.batch != 0 || o.pipeline_windows != 2 || o.spec != 4 || o.mtp.empty() ||
             (o.mtp_max_t != 0 && o.mtp_max_t != 4) || o.suffix_draft != 0 || o.lookup_chain != 0 ||
             o.coupled_draft || !o.spec_oracle.empty() || !o.spec_follow.empty() || o.spec_corrupt != 0 ||
-            (!lab_hq_free && (fi == nullptr || fi[0] == 0)) || fw != nullptr ||
+            (!(lab_hq_free || lab_observer) && (fi == nullptr || fi[0] == 0)) || fw != nullptr ||
             std::getenv("STRATA_NEURON_PROBE_CONTROL") != nullptr ||
             std::getenv("STRATA_CLOSED_ROUTING") != nullptr ||
             ((lab_oracle_instant || lab_oracle_hot) && std::getenv("STRATA_STATE_HASH") != nullptr)) {
@@ -2305,7 +2332,7 @@ int main(int argc, char** argv) {
                                  "FORCE_WINDOWS, coupled/other oracle/probe modes and instant/hot STATE_HASH are unsupported\n");
             return 2;
         }
-        if (!lab_hq_free) {
+        if (!lab_hq_free && !lab_observer) {
         const auto& fixtures = force_id_lists();
         if (fixtures.empty() || std::any_of(fixtures.begin(), fixtures.end(),
                                           [](const std::vector<int32_t>& f) { return f.empty(); })) {
@@ -2390,6 +2417,13 @@ int main(int argc, char** argv) {
         if (lab_bwindow) std::fprintf(stderr, "strata lab bwindow: enabled=1 scope=B_inputs_fixture_only modes=0/2 all_or_nothing=1 schema=1\n");
     } else if (lab_broot_trace != nullptr) {
         std::fprintf(stderr, "strata lab broot: trace without switch forbidden\n"); return 2;
+    }
+    if (lab_observer && (!lab_oracle_hot || lab_oracle_on || lab_prefix_tokens != 131072 ||
+        !o.serve || o.batch != 0 || o.pipeline_windows != 2 || o.spec != 4 || o.mtp.empty() ||
+        o.mtp_hnorm_stream || !o.mtp_q4.empty() || o.mtp_window != 32768 ||
+        o.suffix_draft > 0 || o.lookup_chain > 0 || o.coupled_draft || o.elastic ||
+        o.adapt_swaps != 0 || o.pcie_frac != 0.0)) {
+        std::fprintf(stderr, "strata observer: original MTP FREE/SSD131072/fixedcache/pipeline2/spec4 required\n"); return 2;
     }
     strata::core::set_coupled_draft(o.coupled_draft);
     if (o.elastic && (o.peer_device >= 1 || std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),
@@ -4458,6 +4492,7 @@ int main(int argc, char** argv) {
         const int mtp_t = o.pipeline_windows >= 2 ? strata::kernels::kVerifyMaxT : o.spec;
         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
         mtp.set_selective_capture(lab_selective);
+        mtp.set_observer_capture(lab_observer);
         mtp.set_feature_capture(lab_feature);
         mtp.set_anchor_capture(lab_anchor);
         mtp.set_first_top2_probe(lab_top2);
@@ -11306,6 +11341,27 @@ int main(int argc, char** argv) {
             // lab bench: STRATA_FORCE_IDS - this request's forced ids (see force_id_lists), its windows' rows and acceptance
             static int64_t force_req = 0;
             const int64_t force_k = force_req++;
+            bool observer_request_on = false;
+            if (lab_observer) {
+                std::ifstream control(lab_observer_switch);
+                int mode = -1; std::string extra;
+                if (!(control >> mode) || (mode != 0 && mode != 1) || (control >> extra)) {
+                    std::printf("ERR observer: control must contain exactly 0 or 1\n"); return 1;
+                }
+                std::fprintf(stderr, "strata observer: history request=%lld source=%s full_until=%lld\n",
+                    (long long) force_k,incoming_disk ? "validated_ssd" : "full_prefill",(long long)(n-1));
+                observer_request_on = mode == 1;
+                const bool full = at == n - 1 && ((incoming_disk && read_from == incoming_tokens && incoming_tokens == 131072) ||
+                                                   (read_from == 0 && mtp.first_needed() <= 0));
+                if (!prefix_disk_enabled || !full || !req_imgs.empty() || lab_oracle_on ||
+                    !req_sp.greedy || req_sp.seed != 73 || hist_n != 0 || mtp.coupled() || !use_mtp ||
+                    !pipe || pl_pw != 2 || S_mtp != 4 || req_spec_min_p != 0.5 || pl_theta != 0.1f ||
+                    cancelled || pl_force_miss != 0 || (max_new != 15 && max_new != 2560) ||
+                    n - 1 + max_new > o.max_context || ((observer_request_on || max_new != 15) && !incoming_disk) ||
+                    !mtp.observer_begin(observer_request_on, err)) {
+                    std::printf("ERR observer: qualified native FREE greedy73 SSD request required: %s\n", err.c_str()); return 1;
+                }
+            }
             const long long oracle_requested = max_new;
             if (lab_policy && (lab_oracle_on || !std::isfinite(req_spec_min_p) || req_spec_min_p < 0.0 ||
                                req_spec_min_p > 1.0 || !std::isfinite(pl_theta))) {
@@ -11314,7 +11370,7 @@ int main(int argc, char** argv) {
             }
             if (lab_oracle_on || lab_oracle_hot || lab_policy) {
                 const auto& fixtures = force_id_lists();
-                if (max_new <= 0 || (!lab_hq_free && (force_k >= (int64_t) fixtures.size() ||
+                if (max_new <= 0 || (!(lab_hq_free || lab_observer) && (force_k >= (int64_t) fixtures.size() ||
                     (int64_t) fixtures[(size_t) force_k].size() < max_new)) ||
                     !req_sp.greedy || hist_n != 0 || mtp.coupled() || !pipe || pl_pw != 2 ||
                     S_mtp != 4 || pl_force_miss != 0 || cancelled ||
@@ -11324,7 +11380,7 @@ int main(int argc, char** argv) {
                                 "requires greedy, no penalties, pipeline2, spec4, no forced misses and sufficient context\n");
                     return 1;
                 }
-                for (int64_t i = 0; !lab_hq_free && i < max_new; ++i) {
+                for (int64_t i = 0; !(lab_hq_free || lab_observer) && i < max_new; ++i) {
                     const int32_t id = fixtures[(size_t) force_k][(size_t) i];
                     if (id < 0 || id >= n_vocab ||
                         std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) id) != o.eos_ids.end()) {
@@ -11436,7 +11492,7 @@ int main(int argc, char** argv) {
             const std::map<int64_t, std::vector<int32_t>>* force_win =
                 force_k < (int64_t) force_window_lists().size() && !force_window_lists()[(size_t) force_k].empty()
                     ? &force_window_lists()[(size_t) force_k] : nullptr;
-            if (lab_hq_free && (forced != nullptr || force_win != nullptr)) {
+            if ((lab_hq_free || lab_observer) && (forced != nullptr || force_win != nullptr)) {
                 std::printf("ERR lab mtp free: external forcing unexpectedly active\n"); return 1;
             }
             int64_t force_win_hit = 0, force_win_miss = 0;
@@ -11531,6 +11587,9 @@ int main(int argc, char** argv) {
             // Truncation is an invalid experiment, never an invitation to allocate within the measured loop.
             // A chain's forced inputs differ from its own predictions: retain both for conditional calibration.
             struct PolicyChain {
+                int64_t source_window = -1, parent_chain = -1, source_seq = -1, carried_seq = -1;
+                int native_slot = -1;
+                int32_t carried_rows[8] = {};
                 int64_t id = -1, p = 0, fixture_base = 0;
                 int T = 0, accepted = 0, n_force = 0, n_out = 0, ready = 0, kind = 0, agree = -1;
                 int32_t root = 0, ids[7] = {}, force_ids[7] = {};
@@ -11541,6 +11600,8 @@ int main(int argc, char** argv) {
                 bool first_observed = false, first_label_in_budget = false;
             };
             struct PolicyWindow {
+                int ordinal = -1, chain_base = -1, b_chain_base = -1;
+                int32_t b_rows[4] = {};
                 int64_t p = 0, chain = -1, b_chain = -1, emitted_before = 0;
                 int seq = 0, T = 0, a = 0, emitted = 0, b_T = 0, b_root_match = -1, b_f0_ready = -1, agree = -1;
                 bool spec = false, prev_rollback = false, b_made = false, b_ready = false, b_launched = false;
@@ -11553,10 +11614,14 @@ int main(int argc, char** argv) {
             size_t policy_nc = 0, policy_nw = 0;
             int64_t policy_chains_seen = 0, policy_windows_seen = 0, policy_current_chain = -1;
             bool policy_truncated = false;
+            int64_t observer_source_window = -1, observer_parent_chain = -1, observer_source_seq = -1, observer_carried_seq = -1;
+            int32_t observer_carried_root = -1;
+            int observer_target_device = -1;
+            int64_t observer_frontier = -1;
             double policy_last_verdict = 0;
-            if (lab_policy) {
-                policy_chains.resize((size_t) max_new + 8);
-                policy_windows.resize((size_t) max_new + 8);
+            if (lab_meta) {
+                policy_chains.resize(lab_observer ? 1280 : (size_t) max_new + 8);
+                policy_windows.resize(lab_observer ? 640 : (size_t) max_new + 8);
             }
             LabNvtxRange lab_nvtx_decode_range(lab_nvtx, "decode", lab_nvtx_gen);
             // Common POD buffers for both0/1, allocated before d0; no I/O in the decision/launch path.
@@ -11664,6 +11729,7 @@ int main(int argc, char** argv) {
                     int64_t shallow_decision = -1; // only fresh A owns a decision; B never inherits one
                     int sfx_match = 0;
                     bool selective_stage0_seen = false;
+                    int policy_base = -1; // global chain output index for this window row0 (fresh A uses -1)
                     int64_t policy_chain = -1;
                     int policy_b_f0_ready = -1, policy_agree = -1;
                     float policy_pa = 0, policy_bonus_prob = 0;
@@ -11697,7 +11763,7 @@ int main(int argc, char** argv) {
                 strata::core::Verifier* selective_verifier = nullptr;
                 // The existing readiness events alone permit reading host outputs; no new event waits or readbacks.
                 auto policy_ready = [&](int ready, bool complete) {
-                    if (!lab_policy || policy_current_chain < 0) return;
+                    if (!lab_meta || policy_current_chain < 0) return;
                     auto& c = policy_chains[(size_t) policy_current_chain];
                     const int upto = std::min(ready, c.n_out);
                     if (lab_top2 && upto > 0 && !c.first_observed) {
@@ -11732,20 +11798,32 @@ int main(int argc, char** argv) {
                         if (!mtp.selective_source(selected, width, pos + accepted,
                                 selective_verifier ? selective_verifier->device() : -1, (uint64_t) force_k + 1, e)) return false;
                     }
-                    if (lab_policy) {
+                    if (lab_meta) {
                         const int64_t id = policy_chains_seen++;
                         policy_current_chain = -1;
-                        if (policy_nc < policy_chains.size()) {
+                        if (policy_nc < policy_chains.size() && (!lab_observer || observer_source_window < 640)) {
                             policy_current_chain = (int64_t) policy_nc++;
                             auto& c = policy_chains[(size_t) policy_current_chain];
+                            c.source_window = observer_source_window; c.parent_chain = observer_parent_chain;
+                            c.source_seq = observer_source_seq; c.carried_seq = force ? observer_carried_seq : -1;
+                            if (force) {
+                                if (lab_observer && (observer_carried_seq < 0 || observer_carried_root != tokens[accepted])) {
+                                    e = "observer: carried chain root lacks actual launched bonus match"; return false;
+                                }
+                                c.carried_rows[0] = tokens[accepted];
+                                for (int i = 1; i <= n_force && i < 8; ++i) c.carried_rows[i] = force[i - 1];
+                            }
                             c.id = id; c.p = pos; c.fixture_base = pos - (n - 1) + accepted + 1;
                             c.T = T; c.accepted = accepted; c.root = tokens[accepted];
                             c.n_force = n_force; c.n_out = n_out; c.kind = force != nullptr ? 1 : 2;
                             for (int j = 0; j < n_force && j < 7; ++j) c.force_ids[j] = force[j];
                             c.launch_ms = policy_now();
-                        } else policy_truncated = true;
+                        } else if (!lab_observer || observer_source_window < 640) policy_truncated = true;
                     }
+                    if (lab_observer) mtp.observer_source_window(observer_source_window);
                     const bool ok = mtp.chain_launch(T, tokens, pos, accepted, force, n_force, n_out, n_early, e);
+                    if (ok && lab_observer && policy_current_chain >= 0)
+                        policy_chains[(size_t) policy_current_chain].native_slot = mtp.observer_last_slot();
                     if (ok && lab_oracle_log) ++oracle_real_chains;
                     return ok;
                 };
@@ -11759,7 +11837,7 @@ int main(int argc, char** argv) {
                     const int ready = lab_oracle_instant ? 1 : mtp.chain_poll(e);
                     if (ready == 1) {
                         oracle_publish(oracle_chain_size);
-                        if (lab_policy && policy_current_chain >= 0)
+                        if (lab_meta && policy_current_chain >= 0)
                             policy_ready(policy_chains[(size_t) policy_current_chain].n_out, true);
                     }
                     return ready;
@@ -11862,7 +11940,7 @@ int main(int argc, char** argv) {
                     if (v.done(err)) {
                         if (!v.pl_finish(nullptr, err)) return false;
                         w.finished = true;
-                        if (lab_policy) {
+                        if (lab_meta) {
                             w.policy_f0 = policy_now();
                             // If w is still B, its successor does not exist: the field stays unknown, not false.
                             if (&w == &A) w.policy_b_f0_ready = B.ready ? 1 : 0;
@@ -11947,7 +12025,8 @@ int main(int argc, char** argv) {
                         B.prob[i - 1] = op[base + i];
                     }
                     B.p_on = pa * op[base];
-                    if (lab_policy) {
+                    if (lab_meta) {
+                        B.policy_base = base;
                         B.policy_chain = policy_current_chain;
                         B.policy_pa = pa; B.policy_bonus_prob = op[base]; B.policy_agree = agree;
                     }
@@ -12264,9 +12343,15 @@ int main(int argc, char** argv) {
                         if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);
                         if (v.done(err)) {
                             if (!v.pl_finish(outp.data(), err)) return die(err);
+                            if (lab_observer) {
+                                observer_target_device = v.device();
+                                float* slot = mtp.observer_target_slot((int) policy_windows_seen);
+                                if (slot && (v.device() != mtp.device() || !v.observer_copy_R(slot, A.T, err)))
+                                    return die(err.empty() ? "observer: target and MTP device must match" : err);
+                            }
                             force_rows_out(outp.data(), A.T, produced_n);   // lab bench: STRATA_FORCE_IDS
                             A.s1_done = true;
-                            if (lab_policy) A.policy_f1 = policy_now();
+                            if (lab_meta) A.policy_f1 = policy_now();
                             tre("F1", A.seq, A.T);
                         } else if (!err.empty()) return die(err);
                     }
@@ -12318,7 +12403,7 @@ int main(int argc, char** argv) {
                                     A.tok[i] = chain_tok()[i - 1];
                                     A.prob[i - 1] = chain_prob()[i - 1];
                                 }
-                                if (lab_policy) A.policy_chain = policy_current_chain;
+                                if (lab_meta) A.policy_chain = policy_current_chain;
                                 pick_lookup(A, chain_tok());
                                 A.ready = true;
                                 early_used = true;
@@ -12338,7 +12423,7 @@ int main(int argc, char** argv) {
                                 A.tok[i] = oc[i - 1];
                                 A.prob[i - 1] = op[i - 1];
                             }
-                            if (lab_policy) A.policy_chain = policy_current_chain;
+                            if (lab_meta) A.policy_chain = policy_current_chain;
                             pick_lookup(A, oc);
                             A.ready = true;
                             early_used = true;
@@ -12361,7 +12446,7 @@ int main(int argc, char** argv) {
                                         if (oc[i] != A.tok[i + 1]) agree = false;
                                         pa *= pl_agree ? op[i] : A.prob[i];
                                     }
-                                    if (lab_policy) {
+                                    if (lab_meta) {
                                         policy_agree = agree ? 1 : 0;
                                         if (policy_current_chain >= 0)
                                             policy_chains[(size_t) policy_current_chain].agree = policy_agree;
@@ -12407,7 +12492,7 @@ int main(int argc, char** argv) {
                         A.launched = true;
                         if (lab_shallow && A.shallow_decision >= 0)
                             shallow_decisions[(size_t) A.shallow_decision].final_T = A.T;
-                        if (lab_policy) A.policy_l0 = policy_now();
+                        if (lab_meta) A.policy_l0 = policy_now();
                         if (lab_oracle_log) ++oracle_stage0_launches;
                         tre("L0", A.seq, A.T, 0);
                     }
@@ -12438,7 +12523,7 @@ int main(int argc, char** argv) {
                                 d.launched = true; d.changed = false;
                                 for (int i = 0; i < (lab_bwindow ? B.T : 1); ++i) d.changed = d.changed || B.tok[i] != d.original[i];
                             }
-                            if (lab_policy) B.policy_l0 = policy_now();
+                            if (lab_meta) B.policy_l0 = policy_now();
                             if (lab_oracle_log) ++oracle_stage0_launches;
                             B.spec = true;
                             tre("L0", B.seq, B.T, 1);
@@ -12454,7 +12539,7 @@ int main(int argc, char** argv) {
                         if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
                         if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.s1 = true;
-                        if (lab_policy) A.policy_l1 = policy_now();
+                        if (lab_meta) A.policy_l1 = policy_now();
                         if (lab_oracle_log) ++oracle_stage1_launches;
                         tre("L1", A.seq, A.T);
                     }
@@ -12469,6 +12554,11 @@ int main(int argc, char** argv) {
                     chain_kind = 0;
                     int a = 0;
                     while (a < A.T - 1 && A.tok[a + 1] == outp[(size_t) a]) ++a;
+                    if (lab_observer) {
+                        observer_source_window = policy_windows_seen; observer_source_seq = A.seq;
+                        observer_carried_root = B.launched ? B.tok[0] : -1;
+                        observer_parent_chain = A.policy_chain; observer_carried_seq = B.launched ? B.seq : -1;
+                    }
                     if (lab_oracle_on && (a != A.T - 1 || A.T > oracle_remaining(A.p)))
                         return die("lab oracle: non-perfect or out-of-budget verified window");
                     if (lab_oracle_log) {
@@ -12492,16 +12582,22 @@ int main(int argc, char** argv) {
                             }
                         }
                     }
-                    if (lab_policy) {
+                    if (lab_meta) {
                         ++policy_windows_seen;
                         const double now = policy_now();
                         if (policy_nw < policy_windows.size()) {
                             auto& w = policy_windows[policy_nw++];
+                            w.ordinal = (int) policy_windows_seen - 1; w.chain_base = A.policy_base; w.b_chain_base = B.policy_base;
+                            for (int i = 0; i < B.T && i < 4; ++i) w.b_rows[i] = B.tok[i];
                             w.seq = A.seq; w.p = A.p; w.chain = A.policy_chain; w.b_chain = B.policy_chain;
                             w.T = A.T; w.a = a; w.spec = A.spec; w.prev_rollback = pl_prev_rolled;
                             w.emitted_before = produced_n; w.emitted = (int) std::min<int64_t>(a + 1, max_new - produced_n);
+                            if (lab_observer) for (int i = 0; i < w.emitted; ++i)
+                                if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outp[(size_t)i]) != o.eos_ids.end()) {
+                                    w.emitted = i + 1; break;
+                                }
                             for (int i = 0; i < A.T; ++i) {
-                                w.rows[i] = A.tok[i]; w.target[i] = outp[(size_t) i]; w.raw_target[i] = force_orig[(size_t) i];
+                                w.rows[i] = A.tok[i]; w.target[i] = outp[(size_t) i]; w.raw_target[i] = lab_observer ? outp[(size_t) i] : force_orig[(size_t) i];
                                 if (i + 1 < A.T) w.prob[i] = A.prob[i];
                             }
                             w.b_T = B.T; w.b_made = B.made; w.b_ready = B.ready; w.b_launched = B.launched;
@@ -12510,6 +12606,7 @@ int main(int argc, char** argv) {
                             w.b_f0_ready = A.policy_b_f0_ready; w.agree = B.policy_agree;
                             w.pa = B.policy_pa; w.bonus_prob = B.policy_bonus_prob; w.p_on = B.p_on;
                             w.l0_ms = A.policy_l0; w.f0_ms = A.policy_f0; w.l1_ms = A.policy_l1; w.f1_ms = A.policy_f1;
+                            if (lab_observer && w.ordinal == 511) observer_frontier = n + produced_n + w.emitted;
                             w.verdict_ms = now; w.interval_ms = now - policy_last_verdict;
                         } else policy_truncated = true;
                         policy_last_verdict = now;
@@ -12989,6 +13086,43 @@ int main(int argc, char** argv) {
                 p += a + 1;
             }
             const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();
+            if (lab_observer) {
+                if (!pl_ran || forced || force_win || force_over || force_win_hit || oracle_bypassed_chains || oracle_delivered ||
+                    !mtp.observer_finish(lab_observer_trace, force_k, stderr, err)) {
+                    std::printf("ERR observer: path/payload integrity: %s\n", err.c_str()); return 1;
+                }
+                std::FILE* fp = std::fopen(lab_observer_trace, "ab");
+                if (!fp) { std::printf("ERR observer: metadata open failed\n"); return 1; }
+                std::fprintf(fp,"{\"type\":\"request\",\"schema\":\"strata.observer.v1\",\"request\":%lld,\"on\":%d,\"context_tokens\":%lld,\"requested\":%lld,\"produced\":%lld,\"windows_seen\":%lld,\"chains_seen\":%lld,\"frontier\":%lld,\"target_device\":%d,\"mtp_device\":%d,\"A0\":\"deferred\",\"cutoff\":512,\"window_cap\":640,\"chain_cap\":1280,\"decode_ms\":%.17g}\n",
+                    (long long)force_k,observer_request_on,(long long)n,(long long)max_new,(long long)produced_n,
+                    (long long)policy_windows_seen,(long long)policy_chains_seen,(long long)observer_frontier,
+                    observer_target_device,mtp.device(),decode_ms);
+                auto ints = [&](const int32_t* ids, int k) { for(int i=0;i<k;++i) std::fprintf(fp,"%s%d",i?",":"",ids[i]); };
+                for(size_t i=0;i<policy_nc;++i) {
+                    const auto& c=policy_chains[i];
+                    std::fprintf(fp,"{\"type\":\"chain\",\"request\":%lld,\"id\":%lld,\"slot\":%d,\"source_window\":%lld,\"source_seq\":%lld,\"parent_chain\":%lld,\"carried_seq\":%lld,\"pos\":%lld,\"T\":%d,\"accepted\":%d,\"root\":%d,\"n_force\":%d,\"n_out\":%d,\"ready\":%d,\"launch_ms\":%.17g,\"complete_ms\":%.17g,\"ids\":[",
+                        (long long)force_k,(long long)c.id,c.native_slot,(long long)c.source_window,(long long)c.source_seq,(long long)c.parent_chain,(long long)c.carried_seq,
+                        (long long)c.p,c.T,c.accepted,c.root,c.n_force,c.n_out,c.ready,c.launch_ms,c.complete_ms);
+                    ints(c.ids,c.n_out);std::fputs("],\"prob\":[",fp);
+                    for(int j=0;j<c.n_out;++j) std::fprintf(fp,"%s%.17g",j?",":"",(double)c.prob[j]);
+                    std::fputs("],\"ready_ms\":[",fp);
+                    for(int j=0;j<c.n_out;++j) std::fprintf(fp,"%s%.17g",j?",":"",c.ready_ms[j]);
+                    std::fputs("],\"force_ids\":[",fp);ints(c.force_ids,c.n_force);
+                    std::fputs("],\"carried_rows\":[",fp);if(c.carried_seq>=0)ints(c.carried_rows,c.n_force+1);std::fputs("]}\n",fp);
+                }
+                for(size_t i=0;i<policy_nw;++i) {
+                    const auto& w=policy_windows[i];
+                    std::fprintf(fp,"{\"type\":\"window\",\"request\":%lld,\"ordinal\":%d,\"seq\":%d,\"pos\":%lld,\"chain\":%lld,\"chain_base\":%d,\"T\":%d,\"accepted\":%d,\"emitted_before\":%lld,\"emitted\":%d,\"spec\":%d,\"rollback\":%d,\"b_chain\":%lld,\"b_base\":%d,\"b_T\":%d,\"b_launched\":%d,\"f0_ms\":%.17g,\"f1_ms\":%.17g,\"verdict_ms\":%.17g,\"rows\":[",
+                        (long long)force_k,w.ordinal,w.seq,(long long)w.p,(long long)w.chain,w.chain_base,w.T,w.a,(long long)w.emitted_before,w.emitted,w.spec,w.prev_rollback,
+                        (long long)w.b_chain,w.b_chain_base,w.b_T,w.b_launched,w.f0_ms,w.f1_ms,w.verdict_ms);
+                    ints(w.rows,w.T);std::fputs("],\"raw\":[",fp);ints(w.raw_target,w.T);
+                    std::fputs("],\"prob\":[",fp);
+                    for(int j=0;j<w.T-1;++j) std::fprintf(fp,"%s%.17g",j?",":"",(double)w.prob[j]);
+                    std::fprintf(fp,"],\"pa\":%.17g,\"bonus_prob\":%.17g,\"p_on\":%.17g,\"b_ready\":%d,\"b_made\":%d,\"b_rows\":[",(double)w.pa,(double)w.bonus_prob,(double)w.p_on,w.b_ready,w.b_made);
+                    ints(w.b_rows,w.b_T);std::fputs("]}\n",fp);
+                }
+                if(std::fclose(fp)!=0) {std::printf("ERR observer: metadata close failed\n");return 1;}
+            }
             lab_nvtx_decode_range.finish();
             if (lab_nvtx)
                 std::fprintf(stderr, "strata lab nvtx: gen=%lld request=%lld decode_ms=%.6f scope=host_thread\n",
@@ -13241,7 +13375,7 @@ int main(int argc, char** argv) {
                 std::printf("ERR lab oracle: incomplete synthetic request or invalid final committed length\n");
                 return 1;
             }
-            if (lab_hq_free) {
+            if (lab_hq_free || lab_observer) {
                 if (!pl_ran || forced != nullptr || force_win != nullptr || lab_oracle_on ||
                     oracle_bypassed_chains != 0 || oracle_delivered != 0 || force_over != 0 || force_win_hit != 0) {
                     std::printf("ERR lab mtp free: unqualified or externally altered output path\n"); return 1;

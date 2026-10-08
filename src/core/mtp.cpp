@@ -158,6 +158,12 @@ MtpDrafter::~MtpDrafter() {
     if (anchor_valid_) cudaFree(anchor_valid_);
     if (anchor_stats_) cudaFree(anchor_stats_);
     if (anchor_h_meta_) cudaFreeHost(anchor_h_meta_);
+    if (observer_markers_) cudaFree(observer_markers_);
+    if (observer_host_markers_) cudaFreeHost(observer_host_markers_);
+    if (observer_native_) cudaFree(observer_native_);
+    if (observer_target_) cudaFree(observer_target_);
+    if (observer_host_) cudaFreeHost(observer_host_);
+    if (observer_h_meta_) cudaFreeHost(observer_h_meta_);
     if (feature_bank_) cudaFree(feature_bank_);
     if (feature_fixture_) cudaFree(feature_fixture_);
     if (feature_mask_) cudaFree(feature_mask_);
@@ -1060,6 +1066,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         return false;
     }
 #endif
+    if (observer_config_ && !observer_allocate(err)) return false;
     if (selective_config_ && !selective_allocate(err)) return false;
     if (anchor_config_ && !anchor_allocate(err)) return false;
     if (feature_config_ && !feature_allocate(err)) return false;
@@ -1842,6 +1849,8 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
     if (ok && first_top2_config_)
         mtp_first_top2(head_logits_, (int) (dhead_ ? n_dvocab_ : n_vocab_), 1, row_ + 1,
                        dhead_ ? dvocab_ : nullptr, out_ids_, first_top2_mapped_, cs_);
+    if (ok && observer_config_)
+        mtp_observer_copy(R_, HCN, sample_, N, row_ + 1, observer_m_meta_, observer_native_, observer_markers_, 0, kObserverChains, cs_);
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
     if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
@@ -1874,6 +1883,8 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
                                          feature_mask_, feature_stats_, j, cs_);
     bool ok = record_forward(1, row, cs_, err);
     coupled_rec_ = false;
+    if (ok && observer_config_ && j < kObserverDepth)
+        mtp_observer_copy(R_, HCN, sample_, g_->n_embd, row_ + 1, observer_m_meta_, observer_native_, observer_markers_, j, kObserverChains, cs_);
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
     if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
@@ -2393,6 +2404,14 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
         if ((hq_mode_ ? hq_step_[hq_mode_ - 1][j] : step_exec_[j]) == nullptr) {
             err = "mtp: chain graphs not prepared"; return false;
         }
+    // chain_live_ was checked above: ev_chain was consumed by chain_poll, never merely ev_step.
+    if (observer_config_) {
+        const bool detailed = observer_on_ && observer_window_ >= 0 && observer_window_ < kObserverWindows;
+        const int64_t slot = detailed ? observer_chains_++ : -1;
+        observer_h_meta_[0] = detailed && slot < kObserverChains ? 1 : 0;
+        observer_h_meta_[1] = observer_h_meta_[0] ? (int32_t) slot : -1;
+        if (detailed && slot >= kObserverChains) ++observer_overflow_;
+    }
     const Clock::time_point t0 = Clock::now();
     const int64_t NH = g_->n_head;
     auto put = [&](int row, int64_t cell) {
@@ -2453,6 +2472,85 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     if (!hq_pack_.empty()) ++hq_chains_[hq_mode_];
     ms_draft += ms_since(t0);
     ++rounds;
+    return true;
+}
+
+bool MtpDrafter::observer_allocate(std::string& err) {
+    const uint64_t native = (uint64_t) kObserverChains * 4 * (g_->hc * g_->n_embd + g_->n_embd) * sizeof(float);
+    const uint64_t target = (uint64_t) kObserverWindows * 4 * g_->hc * g_->n_embd * sizeof(float);
+    observer_bytes_ = native + target;
+    const size_t markers = kObserverChains * 4 * sizeof(int32_t);
+    if (cudaMalloc((void**) &observer_native_, native) != cudaSuccess ||
+        cudaMalloc((void**) &observer_markers_, markers) != cudaSuccess ||
+        cudaHostAlloc((void**) &observer_host_markers_, markers, cudaHostAllocDefault) != cudaSuccess ||
+        cudaMalloc((void**) &observer_target_, target) != cudaSuccess ||
+        cudaHostAlloc((void**) &observer_host_, observer_bytes_, cudaHostAllocDefault) != cudaSuccess ||
+        cudaHostAlloc((void**) &observer_h_meta_, 2 * sizeof(int32_t), cudaHostAllocMapped) != cudaSuccess ||
+        cudaHostGetDevicePointer((void**) &observer_m_meta_, observer_h_meta_, 0) != cudaSuccess) {
+        err = "mtp observer: common private allocation failed before expert-cache sizing"; return false;
+    }
+    observer_h_meta_[0] = 0; observer_h_meta_[1] = -1;
+    vram_ += observer_bytes_ + markers;
+    return true;
+}
+bool MtpDrafter::observer_begin(bool on, std::string& err) {
+    const OnDevice device(device_);
+    if (!observer_config_ || chain_live_ || !idle(err)) { err = "mtp observer: GEN boundary must be fully idle"; return false; }
+    observer_on_ = on; observer_chains_ = observer_overflow_ = 0; observer_window_ = -1;
+    observer_h_meta_[0] = 0; observer_h_meta_[1] = -1;
+    // Clear equal slabs in BOTH arms before decode; unread unused rows cannot leak old GEN data.
+    const size_t nb = (size_t) kObserverChains * 4 * (g_->hc * g_->n_embd + g_->n_embd) * sizeof(float);
+    if (cudaMemset(observer_markers_, 0, kObserverChains * 4 * sizeof(int32_t)) != cudaSuccess) {
+        err = "mtp observer: marker reset failed"; return false;
+    }
+    if (cudaMemset(observer_native_, 0, nb) != cudaSuccess ||
+        cudaMemset(observer_target_, 0, observer_bytes_ - nb) != cudaSuccess) {
+        err = "mtp observer: boundary reset failed"; return false;
+    }
+    return true;
+}
+float* MtpDrafter::observer_target_slot(int seq) const {
+    return observer_on_ && seq >= 0 && seq < kObserverWindows
+        ? observer_target_ + (int64_t) seq * 4 * g_->hc * g_->n_embd : nullptr;
+}
+bool MtpDrafter::observer_finish(const std::string& path, int64_t request, std::FILE* out, std::string& err) {
+    const OnDevice device(device_);
+    const Clock::time_point drain_start = Clock::now();
+    if (chain_live_ || !idle(err) || cudaDeviceSynchronize() != cudaSuccess) {
+        err = "mtp observer: untimed dump requires full completion"; return false;
+    }
+    const double drain_ms = ms_since(drain_start);
+    const size_t nb = (size_t) kObserverChains * 4 * (g_->hc * g_->n_embd + g_->n_embd) * sizeof(float);
+    const size_t used = (size_t) std::min<int64_t>(observer_chains_, kObserverChains) * 4 *
+                         (g_->hc * g_->n_embd + g_->n_embd) * sizeof(float);
+    if (observer_on_) {
+        if (cudaMemcpy(observer_host_, observer_native_, used, cudaMemcpyDeviceToHost) != cudaSuccess ||
+            cudaMemcpy((char*) observer_host_ + nb, observer_target_, observer_bytes_ - nb, cudaMemcpyDeviceToHost) != cudaSuccess) {
+            err = "mtp observer: untimed payload copy failed"; return false;
+        }
+        const size_t marker_bytes = kObserverChains * 4 * sizeof(int32_t);
+        if (cudaMemcpy(observer_host_markers_, observer_markers_, marker_bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
+            err = "mtp observer: marker copy failed"; return false;
+        }
+        const std::string marker_path = path + "." + std::to_string(request) + ".markers.i32";
+        std::FILE* mf = std::fopen(marker_path.c_str(), "wb");
+        if (!mf) { err = "mtp observer: marker open failed"; return false; }
+        const bool marker_ok = std::fwrite(observer_host_markers_, 1, marker_bytes, mf) == marker_bytes;
+        if (std::fclose(mf) != 0 || !marker_ok) { err = "mtp observer: marker write failed"; return false; }
+        const std::string native_path = path + "." + std::to_string(request) + ".mtp.f32";
+        const std::string target_path = path + "." + std::to_string(request) + ".target.f32";
+        std::FILE* fp = std::fopen(native_path.c_str(), "wb");
+        if (!fp) { err = "mtp observer: native payload open failed"; return false; }
+        bool ok = std::fwrite(observer_host_, 1, used, fp) == used; ok = std::fclose(fp) == 0 && ok;
+        fp = std::fopen(target_path.c_str(), "wb");
+        if (!fp) { err = "mtp observer: target payload open failed"; return false; }
+        ok = std::fwrite((char*) observer_host_ + nb, 1, observer_bytes_ - nb, fp) == observer_bytes_ - nb && ok;
+        ok = std::fclose(fp) == 0 && ok;
+        if (!ok) { err = "mtp observer: payload short write"; return false; }
+    }
+    std::fprintf(out, "strata lab observer: request %lld on=%d chain_slots=%lld chain_cap=%d overflow=%lld gpu_bytes=%llu pinned_bytes=%llu A0=deferred target_cap=%d depth=4 drain_ms=%.6f\n",
+        (long long) request, observer_on_, (long long) observer_chains_, kObserverChains,
+        (long long) observer_overflow_, (unsigned long long) (observer_bytes_ + kObserverChains*4*sizeof(int32_t)), (unsigned long long) (observer_bytes_ + kObserverChains*4*sizeof(int32_t) + 2*sizeof(int32_t)), kObserverWindows, drain_ms);
     return true;
 }
 

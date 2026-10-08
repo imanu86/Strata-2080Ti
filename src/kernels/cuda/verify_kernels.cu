@@ -1536,4 +1536,25 @@ bool pdl_launch_ok(const void* kernel, cudaStream_t stream) {
 }
 #endif
 
+namespace {
+__global__ void mtp_observer_copy_kernel(const float* residual, int64_t stride, const float* head_input,
+                                        int64_t n, const int32_t* row, const int32_t* meta,
+                                        float* slab, int32_t* markers, int depth, int cap) {
+    const int slot = meta[1];
+    if (meta[0] != 1 || slot < 0 || slot >= cap || depth < 0 || depth >= 4) return;
+    const int r = *row;
+    if (blockIdx.x == 0 && threadIdx.x == 0) markers[slot * 4 + depth] = r == 0 ? 1 : -1;
+    if (r != 0) return; // round is copied to row0; recursive steps are single-row.
+    const int64_t width = stride + n;
+    float* dst = slab + ((int64_t) slot * 4 + depth) * width;
+    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < width;
+         i += (int64_t) blockDim.x * gridDim.x)
+        dst[i] = i < stride ? residual[(int64_t) r * stride + i] : head_input[(int64_t) r * n + i - stride];
+}
+}
+void mtp_observer_copy(const float* residual, int64_t stride, const float* head_input, int64_t n,
+                       const int32_t* row, const int32_t* meta, float* slab, int32_t* markers, int depth, int cap, void* stream) {
+    mtp_observer_copy_kernel<<<64, 256, 0, (cudaStream_t) stream>>>(residual, stride, head_input, n, row, meta, slab, markers, depth, cap);
+}
+
 }  // namespace strata::kernels

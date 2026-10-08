@@ -83,6 +83,13 @@ public:
     void set_anchor_capture(bool on) { anchor_config_ = on; }
     bool anchor_begin(bool on, std::string& err);
     bool anchor_report(std::FILE* out, int64_t request, std::string& err);
+    // Observational FREE collector: private slabs, equal allocation before expert cache sizing.
+    void set_observer_capture(bool on) { observer_config_ = on; }
+    bool observer_begin(bool on, std::string& err);
+    void observer_source_window(int64_t seq) { observer_window_ = seq; }
+    int observer_last_slot() const { return observer_h_meta_ ? observer_h_meta_[1] : -1; }
+    float* observer_target_slot(int seq) const;
+    bool observer_finish(const std::string& path, int64_t request, std::FILE* out, std::string& err);
     void set_feature_capture(bool on) { feature_config_ = on; }
     bool feature_begin(int mode, const std::string& path, const uint8_t* identity,
                        const std::vector<int64_t>& prompt, const std::vector<int32_t>& fixture,
@@ -200,6 +207,14 @@ public:
     bool idle(std::string& err);
 
 private:
+    static constexpr int kObserverChains = 1280, kObserverWindows = 640, kObserverDepth = 4;
+    bool observer_allocate(std::string& err);
+    bool observer_config_ = false, observer_on_ = false;
+    int32_t *observer_h_meta_ = nullptr, *observer_m_meta_ = nullptr;
+    float *observer_native_ = nullptr, *observer_target_ = nullptr, *observer_host_ = nullptr;
+    int32_t *observer_markers_ = nullptr, *observer_host_markers_ = nullptr;
+    uint64_t observer_bytes_ = 0;
+    int64_t observer_window_ = -1, observer_chains_ = 0, observer_overflow_ = 0;
     static constexpr int kSelectiveRecent = 8192, kSelectiveProxy = 2051, kSelectiveCap = 10304;
     static constexpr int kSelectiveSlots = 3072;
     bool selective_allocate(std::string& err);

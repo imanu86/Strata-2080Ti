@@ -99,6 +99,16 @@ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const 
                 float* out_p = nullptr);
 /// --pipeline-windows, the drafter's chain teacher forced: `*tok = force[j]` when force[j] >= 0 (`force` is mapped
 /// host memory, read when the kernel runs), else `*tok` is left as it is.
+// Destination-only snapshot of the same selected native residual/head input as mtp_select.
+// meta may change ONLY after the full chain event completed; no partial-readiness reuse.
+#if defined(STRATA_USE_HIP)
+// CUDA-only lab collector; startup rejects enabling it on HIP, while ordinary HIP linking stays unchanged.
+inline void mtp_observer_copy(const float*, int64_t, const float*, int64_t,
+                              const int32_t*, const int32_t*, float*, int32_t*, int, int, void*) {}
+#else
+void mtp_observer_copy(const float* residual, int64_t stride, const float* head_input, int64_t n,
+                       const int32_t* row, const int32_t* meta, float* slab, int32_t* markers, int depth, int cap, void* stream);
+#endif
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream);
 // Lab future-residual oracle: no token/logit writes. Sequential on the drafter stream; mask resets at step1.
 // Causal anchor: seed is the selected VERIFIED target input row, before the MTP front overwrites it.

@@ -1,0 +1,878 @@
+{
+  "schema": "strata.native.dual.horizon.observer.result.v1",
+  "timestamp": "2026-10-08T05:32:05.508318+00:00",
+  "status": "PASS_NATIVE_CAUSAL_DATASET_AND_RAW_BAB_PARITY",
+  "decision": "Collection validated; ROOT decides any offline adapter probe. No training, optimized head, routing change or production adoption.",
+  "model": "gpt-6.1-sol",
+  "run": "DET-dual-observer-01",
+  "runtime": "COMPLETED_SINGLE_AUTHORIZED_RUN_8GEN",
+  "implementation": "Native CUDA observational MTPdepth1..4 + target-finalR taps IMPLEMENTED, compiled and executed; A0 intermediate tap explicitly deferred.",
+  "build": {
+    "status": "PASS",
+    "returncode": 0,
+    "immutable_snapshot": "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\build\\observer-v1",
+    "executable_sha256": "4dd6214df027a45e9f597cb814cbc446a8022921ecb3d85718fb1d0867c33b23",
+    "source_ref": "2062949844a6e24b4e9e9535d9a58f6c80fd490b+dual-observer-working-tree",
+    "source_unchanged_during_build": true,
+    "build_log_sha256": "b17418d4ae0614a8cd24c2fb07d9c688b51bb3f8458a4382cd54121879299ebb"
+  },
+  "provenance": {
+    "base_commit": "2062949844a6e24b4e9e9535d9a58f6c80fd490b",
+    "base_source_pins": {
+      "src/program/generate.cpp": "863f793f1c7ee54e2891a8c88aa4939625b1bffedd382b2f8f4a8c24c8fe5e22",
+      "include/strata/core/mtp.hpp": "b3b35537aa6ec193c4fec5d4f91fc3d69fd4aa76207ea8d6475217d4bf9ca710",
+      "src/core/mtp.cpp": "4dcff76b4538875acfd7fe77be4803e00b740280f7fd0599214903a37aa00f42",
+      "include/strata/core/verify.hpp": "da0e484545360640d50b1881bd703f7c3fae3b81046da53053713e2c1deffe3a",
+      "src/core/verify.cpp": "7f5ba28ea3fbc4b4e75e848873efc3e94c808d19805c23c17847ea8d59080359",
+      "include/strata/kernels/verify_kernels.hpp": "907e9f9abaa0eb285382e8776e0377f6eaefd159b0e4aa1a692613e2926e2479",
+      "src/kernels/cuda/verify_kernels.cu": "b97dbc432d41c658838085e5feb20c536c742a4eda8fa406cb93d628a4a7739c"
+    },
+    "executed_source_pins": {
+      "src/program/generate.cpp": "6e3480e983ecc3fd3e175bfe95ed43578eed23ddb0acbeb0575dd5d92e0712c9",
+      "include/strata/core/mtp.hpp": "9aa74ba49a55a07687bd4accb791c825a4a128740628ea2f3d513494c6dbe8cc",
+      "src/core/mtp.cpp": "c710f0fd76ffee59aef62fd73697049e90e976102535dd551e84bcfbea27e7dd",
+      "include/strata/core/verify.hpp": "ccdfff899ac3ac0c76308aa084e55d7b0d7d59031fc2de6f0c73f1dbb30612d4",
+      "src/core/verify.cpp": "b1a79b093ce6994994c2145f31cb0cc5e10b343285da2367b20d0617fd99dda1",
+      "include/strata/kernels/verify_kernels.hpp": "aa2f58061aeef55ea2bd0ae42443a3c24f5191ab2855cc64be3082d96bb993ad",
+      "src/kernels/cuda/verify_kernels.cu": "3d491d40c1eda70e1fec1852952ef3309f5d5258349735c6d7ff4614812dc985"
+    },
+    "source_pre_post_run_unchanged": true,
+    "diff_sha256": "d6a1d1367c7731d686e7304f8f52c07dbc3fef76fac1ded4da86f87e22f74471",
+    "manifest_sha256": "ef13eabec561ec8b4c87dfa54972ec578e8622a32fb7fe0e600f42be180e362b",
+    "runner_sha256": "a6a2f3eaa6afd13e615f25f9f771d513bf7a400d9fa6ecf96762ba3d0a08068e",
+    "bench_sha256": {
+      "guard_helpers.py": "73d95b8064340adfc08120a9de06c237dbd536043ff26db9f879386955fca129",
+      "hq_contract.py": "edc6979124e6f5296a3a85e4c9f2c62a3bbaa04b8a51f251a4baa8b865726f08",
+      "minp_contract.py": "bd303b45df4407ad40cdb97a78bb216019b74e3ed1d091abf3dd6f512c01bd50",
+      "observer_contract.py": "70a510d13c9b8e7eb0556c47b5859f036f1b67a135d772aa4734992347466342",
+      "observer_validation.py": "1b65504fc1d32e8ba73cab8a45e803c61a3451d16ad6e15a00076db15c2bb8c0",
+      "run_observer.py": "a6a2f3eaa6afd13e615f25f9f771d513bf7a400d9fa6ecf96762ba3d0a08068e",
+      "test_observer.py": "16abbd6e6d234d526bcf386484350051e5e0a9e4defbb850f46d56bc6e651aff"
+    },
+    "protocol_sha256": "c884dc7e8bd95f07eeba677b37c5b509057ac9cf45fef282e0d3fdbf230af4a8"
+  },
+  "CPU_tests": {
+    "native_observer_mutations": 38,
+    "prior_design_contracts": 24,
+    "status": "PASS",
+    "limitations": "CPU metadata tests; CUDA copy validity/parity now separately validated by markers, payload shapes/finite, real raw verifier/POD provenance and BAB."
+  },
+  "cases": {
+    "L01": {
+      "tokens_per_measured_GEN": 2560,
+      "finish": "length",
+      "raw_exact_BAB": true,
+      "timings": {
+        "B1": {
+          "request": 2,
+          "decode_ms": 43618.5,
+          "decode_tps": 58.6906931691828,
+          "drain_ms": 0.0161,
+          "decode_plus_drain_ms": 43618.5161,
+          "early_eos": false
+        },
+        "A": {
+          "request": 4,
+          "decode_ms": 40811.6,
+          "decode_tps": 62.72726381715003,
+          "drain_ms": 0.014,
+          "decode_plus_drain_ms": 40811.614,
+          "early_eos": false
+        },
+        "B2": {
+          "request": 6,
+          "decode_ms": 40671.7,
+          "decode_tps": 62.94302918245365,
+          "drain_ms": 0.0155,
+          "decode_plus_drain_ms": 40671.7155,
+          "early_eos": false
+        }
+      },
+      "overhead": {
+        "case": "L01",
+        "raw_exact_BAB": true,
+        "B1_overhead_pct": 6.877701437826511,
+        "B2_overhead_pct": -0.3427946956257588,
+        "B1_decode_plus_drain_overhead_pct": 6.877704224096592,
+        "B2_decode_plus_drain_overhead_pct": -0.34279090260924683,
+        "window_identity_required": false,
+        "policy_fingerprint_scope": "chain/window structure only; request/timestamps excluded; slots retained as allocation evidence",
+        "policy_fingerprints": {
+          "B1": "f263886eb9567a3d603dd273189b31dc5e0d424b3aa9c0f44c8fc5ca57cf7fc7",
+          "A": "b56edce31f0abaaf930750673df4b8a1c1c96dae9f62426e8b5187a7e932b1e4",
+          "B2": "f263886eb9567a3d603dd273189b31dc5e0d424b3aa9c0f44c8fc5ca57cf7fc7"
+        }
+      },
+      "canonical_dataset": "B1 only; B2 independent validation, never pooled",
+      "detail_windows": 640,
+      "captured_native_depth_rows": 2560,
+      "chain_split_counts": {
+        "train_past": 506,
+        "holdout_future": 126,
+        "purged_entire_boundary_chain": 8
+      },
+      "label_counts": {
+        "valid_raw": 1414,
+        "censored_after_first_mismatch": 1123,
+        "censored_branch_mismatch": 18,
+        "unverified": 5
+      },
+      "depth_cohort": {
+        "self_generated:depth1": {
+          "valid": 440,
+          "censored": 0,
+          "hits": 274,
+          "partitions": {
+            "train_past": 350,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 86
+          },
+          "conditional_hit_rate": 0.6227272727272727
+        },
+        "self_generated:depth2": {
+          "valid": 274,
+          "censored": 166,
+          "hits": 156,
+          "partitions": {
+            "train_past": 350,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 86
+          },
+          "conditional_hit_rate": 0.5693430656934306
+        },
+        "self_generated:depth3": {
+          "valid": 156,
+          "censored": 284,
+          "hits": 102,
+          "partitions": {
+            "train_past": 350,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 86
+          },
+          "conditional_hit_rate": 0.6538461538461539
+        },
+        "self_generated:depth4": {
+          "valid": 101,
+          "censored": 339,
+          "hits": 61,
+          "partitions": {
+            "train_past": 350,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 86
+          },
+          "conditional_hit_rate": 0.6039603960396039
+        },
+        "policy_carried:depth1": {
+          "valid": 199,
+          "censored": 1,
+          "hits": 131,
+          "partitions": {
+            "train_past": 156,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 40
+          },
+          "conditional_hit_rate": 0.6582914572864321
+        },
+        "policy_carried:depth2": {
+          "valid": 121,
+          "censored": 79,
+          "hits": 80,
+          "partitions": {
+            "train_past": 156,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 40
+          },
+          "conditional_hit_rate": 0.6611570247933884
+        },
+        "policy_carried:depth3": {
+          "valid": 77,
+          "censored": 123,
+          "hits": 49,
+          "partitions": {
+            "train_past": 156,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 40
+          },
+          "conditional_hit_rate": 0.6363636363636364
+        },
+        "policy_carried:depth4": {
+          "valid": 46,
+          "censored": 154,
+          "hits": 35,
+          "partitions": {
+            "train_past": 156,
+            "purged_entire_boundary_chain": 4,
+            "holdout_future": 40
+          },
+          "conditional_hit_rate": 0.7608695652173914
+        }
+      },
+      "joint_prefix_histogram": {
+        "self_generated:train_past:offered4": {
+          "4:observed": 49,
+          "2:observed": 47,
+          "0:observed": 133,
+          "1:observed": 89,
+          "3:observed": 32
+        },
+        "policy_carried:train_past:offered4": {
+          "1:censored": 9,
+          "4:observed": 31,
+          "2:observed": 22,
+          "3:observed": 8,
+          "2:censored": 3,
+          "1:observed": 30,
+          "0:observed": 51,
+          "3:censored": 2
+        },
+        "self_generated:purged_entire_boundary_chain:offered4": {
+          "0:observed": 1,
+          "1:observed": 2,
+          "3:censored": 1
+        },
+        "policy_carried:purged_entire_boundary_chain:offered4": {
+          "2:observed": 1,
+          "1:observed": 1,
+          "0:observed": 1,
+          "0:censored": 1
+        },
+        "policy_carried:holdout_future:offered4": {
+          "0:observed": 16,
+          "1:observed": 10,
+          "3:observed": 3,
+          "4:observed": 4,
+          "2:observed": 5,
+          "1:censored": 1,
+          "3:censored": 1
+        },
+        "self_generated:holdout_future:offered4": {
+          "0:observed": 32,
+          "1:observed": 27,
+          "4:observed": 12,
+          "2:observed": 7,
+          "3:observed": 8
+        }
+      },
+      "joint4": {
+        "self_generated:train_past": {
+          "offered_at_least4": 350,
+          "qualified_success4": 49,
+          "known_failure": 301,
+          "unknown_censored": 0,
+          "conditional_success4_rate": 0.14
+        },
+        "policy_carried:train_past": {
+          "offered_at_least4": 156,
+          "qualified_success4": 31,
+          "known_failure": 111,
+          "unknown_censored": 14,
+          "conditional_success4_rate": 0.21830985915492956
+        },
+        "self_generated:purged_entire_boundary_chain": {
+          "offered_at_least4": 4,
+          "qualified_success4": 0,
+          "known_failure": 3,
+          "unknown_censored": 1,
+          "conditional_success4_rate": 0.0
+        },
+        "policy_carried:purged_entire_boundary_chain": {
+          "offered_at_least4": 4,
+          "qualified_success4": 0,
+          "known_failure": 3,
+          "unknown_censored": 1,
+          "conditional_success4_rate": 0.0
+        },
+        "policy_carried:holdout_future": {
+          "offered_at_least4": 40,
+          "qualified_success4": 4,
+          "known_failure": 34,
+          "unknown_censored": 2,
+          "conditional_success4_rate": 0.10526315789473684
+        },
+        "self_generated:holdout_future": {
+          "offered_at_least4": 86,
+          "qualified_success4": 12,
+          "known_failure": 74,
+          "unknown_censored": 0,
+          "conditional_success4_rate": 0.13953488372093023
+        }
+      },
+      "holdout_window_deficient": false,
+      "holdout_valid_pairs": {
+        "self_generated": {
+          "1": 86,
+          "2": 54,
+          "3": 27,
+          "4": 20
+        },
+        "policy_carried": {
+          "1": 40,
+          "2": 23,
+          "3": 13,
+          "4": 7
+        }
+      },
+      "deep_holdout_small": true,
+      "frontier_absolute_exclusive": 132221,
+      "residual_diagnostic": {
+        "self_generated:depth1:train_past": {
+          "pairs": 350,
+          "relative_L2_mean": 1.1142393532400767,
+          "cosine_mean": 0.5055660542643844
+        },
+        "self_generated:depth2:train_past": {
+          "pairs": 217,
+          "relative_L2_mean": 1.2667676649111241,
+          "cosine_mean": 0.41569861248722556
+        },
+        "self_generated:depth3:train_past": {
+          "pairs": 128,
+          "relative_L2_mean": 1.4078180314557667,
+          "cosine_mean": 0.38255789309006916
+        },
+        "self_generated:depth4:train_past": {
+          "pairs": 81,
+          "relative_L2_mean": 1.4489007802949811,
+          "cosine_mean": 0.34833295677236253
+        },
+        "policy_carried:depth1:train_past": {
+          "pairs": 156,
+          "relative_L2_mean": 1.124650719154217,
+          "cosine_mean": 0.512179126475168
+        },
+        "policy_carried:depth2:train_past": {
+          "pairs": 96,
+          "relative_L2_mean": 1.311283938146001,
+          "cosine_mean": 0.4012768782182712
+        },
+        "policy_carried:depth3:train_past": {
+          "pairs": 63,
+          "relative_L2_mean": 1.4704088346947788,
+          "cosine_mean": 0.3570220235771847
+        },
+        "policy_carried:depth4:train_past": {
+          "pairs": 39,
+          "relative_L2_mean": 1.5265741468358622,
+          "cosine_mean": 0.3287806957812969
+        },
+        "self_generated:depth1:purged_entire_boundary_chain": {
+          "pairs": 4,
+          "relative_L2_mean": 1.188024151682693,
+          "cosine_mean": 0.5207495649540242
+        },
+        "self_generated:depth2:purged_entire_boundary_chain": {
+          "pairs": 3,
+          "relative_L2_mean": 1.1323851677843326,
+          "cosine_mean": 0.4238201855832806
+        },
+        "policy_carried:depth1:purged_entire_boundary_chain": {
+          "pairs": 3,
+          "relative_L2_mean": 1.092280871495092,
+          "cosine_mean": 0.5457266054932379
+        },
+        "policy_carried:depth2:purged_entire_boundary_chain": {
+          "pairs": 2,
+          "relative_L2_mean": 1.3074218793689152,
+          "cosine_mean": 0.4399069796700575
+        },
+        "policy_carried:depth3:purged_entire_boundary_chain": {
+          "pairs": 1,
+          "relative_L2_mean": 1.4480211865952155,
+          "cosine_mean": 0.4140059613951702
+        },
+        "policy_carried:depth1:holdout_future": {
+          "pairs": 40,
+          "relative_L2_mean": 1.1956933714340012,
+          "cosine_mean": 0.5403947134481009
+        },
+        "self_generated:depth1:holdout_future": {
+          "pairs": 86,
+          "relative_L2_mean": 1.1719496987946172,
+          "cosine_mean": 0.5180147090988464
+        },
+        "self_generated:depth2:holdout_future": {
+          "pairs": 54,
+          "relative_L2_mean": 1.333349149685297,
+          "cosine_mean": 0.44713351380418587
+        },
+        "self_generated:depth3:holdout_future": {
+          "pairs": 27,
+          "relative_L2_mean": 1.471465376260832,
+          "cosine_mean": 0.40015790907364446
+        },
+        "self_generated:depth4:holdout_future": {
+          "pairs": 20,
+          "relative_L2_mean": 1.5292313681145806,
+          "cosine_mean": 0.39138447688074834
+        },
+        "policy_carried:depth2:holdout_future": {
+          "pairs": 23,
+          "relative_L2_mean": 1.389979220204728,
+          "cosine_mean": 0.42967304637842707
+        },
+        "policy_carried:depth3:holdout_future": {
+          "pairs": 13,
+          "relative_L2_mean": 1.5096925259743073,
+          "cosine_mean": 0.3853757677470998
+        },
+        "policy_carried:depth4:holdout_future": {
+          "pairs": 7,
+          "relative_L2_mean": 1.5132375821983908,
+          "cosine_mean": 0.3935703311327826
+        },
+        "self_generated:depth3:purged_entire_boundary_chain": {
+          "pairs": 1,
+          "relative_L2_mean": 1.1625971064777447,
+          "cosine_mean": 0.4132286614382861
+        }
+      },
+      "payload": {
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.2.markers.i32": {
+          "bytes": 20480,
+          "sha256": "2b592f0f403f37129831cf2e36a1d4b1196563ef05f18174ea3f0a4773e0e78a"
+        },
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.2.mtp.f32": {
+          "bytes": 131072000,
+          "sha256": "f735d230054a50bc40157d182295cc6e9a8409d5572ff970a0f24a7524ff4687"
+        },
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.2.target.f32": {
+          "bytes": 104857600,
+          "sha256": "a3ab00c3c59661f197ac063be3c808d2f884aa01f3bd5ccf0cb5bac00badf9de"
+        }
+      }
+    },
+    "L02": {
+      "tokens_per_measured_GEN": 2560,
+      "finish": "length",
+      "raw_exact_BAB": true,
+      "timings": {
+        "B1": {
+          "request": 3,
+          "decode_ms": 42632.7,
+          "decode_tps": 60.04780368121184,
+          "drain_ms": 0.0151,
+          "decode_plus_drain_ms": 42632.715099999994,
+          "early_eos": false
+        },
+        "A": {
+          "request": 5,
+          "decode_ms": 42192.6,
+          "decode_tps": 60.674146651308526,
+          "drain_ms": 0.0151,
+          "decode_plus_drain_ms": 42192.615099999995,
+          "early_eos": false
+        },
+        "B2": {
+          "request": 7,
+          "decode_ms": 42564.7,
+          "decode_tps": 60.14373412710533,
+          "drain_ms": 0.014,
+          "decode_plus_drain_ms": 42564.714,
+          "early_eos": false
+        }
+      },
+      "overhead": {
+        "case": "L02",
+        "raw_exact_BAB": true,
+        "B1_overhead_pct": 1.0430739039547277,
+        "B2_overhead_pct": 0.8819082019121849,
+        "B1_decode_plus_drain_overhead_pct": 1.0430735306567795,
+        "B2_decode_plus_drain_overhead_pct": 0.881905279201356,
+        "window_identity_required": false,
+        "policy_fingerprint_scope": "chain/window structure only; request/timestamps excluded; slots retained as allocation evidence",
+        "policy_fingerprints": {
+          "B1": "7da4b21ba80b2ad696da7f6b5dde808b24efeedf0ee2d08a7cf91a1e5fa4d358",
+          "A": "e61c2fc6caffe40719ae43a7c410382323094ae8470a964772b1eb9bc6b9e82d",
+          "B2": "7da4b21ba80b2ad696da7f6b5dde808b24efeedf0ee2d08a7cf91a1e5fa4d358"
+        }
+      },
+      "canonical_dataset": "B1 only; B2 independent validation, never pooled",
+      "detail_windows": 640,
+      "captured_native_depth_rows": 2560,
+      "chain_split_counts": {
+        "train_past": 506,
+        "holdout_future": 127,
+        "purged_entire_boundary_chain": 7
+      },
+      "label_counts": {
+        "valid_raw": 1261,
+        "censored_after_first_mismatch": 1290,
+        "censored_branch_mismatch": 5,
+        "unverified": 4
+      },
+      "depth_cohort": {
+        "self_generated:depth1": {
+          "valid": 469,
+          "censored": 1,
+          "hits": 264,
+          "partitions": {
+            "train_past": 367,
+            "purged_entire_boundary_chain": 7,
+            "holdout_future": 96
+          },
+          "conditional_hit_rate": 0.5628997867803838
+        },
+        "self_generated:depth2": {
+          "valid": 264,
+          "censored": 206,
+          "hits": 133,
+          "partitions": {
+            "train_past": 367,
+            "purged_entire_boundary_chain": 7,
+            "holdout_future": 96
+          },
+          "conditional_hit_rate": 0.5037878787878788
+        },
+        "self_generated:depth3": {
+          "valid": 133,
+          "censored": 337,
+          "hits": 68,
+          "partitions": {
+            "train_past": 367,
+            "purged_entire_boundary_chain": 7,
+            "holdout_future": 96
+          },
+          "conditional_hit_rate": 0.5112781954887218
+        },
+        "self_generated:depth4": {
+          "valid": 68,
+          "censored": 402,
+          "hits": 34,
+          "partitions": {
+            "train_past": 367,
+            "purged_entire_boundary_chain": 7,
+            "holdout_future": 96
+          },
+          "conditional_hit_rate": 0.5
+        },
+        "policy_carried:depth1": {
+          "valid": 170,
+          "censored": 0,
+          "hits": 95,
+          "partitions": {
+            "train_past": 139,
+            "holdout_future": 31
+          },
+          "conditional_hit_rate": 0.5588235294117647
+        },
+        "policy_carried:depth2": {
+          "valid": 89,
+          "censored": 81,
+          "hits": 46,
+          "partitions": {
+            "train_past": 139,
+            "holdout_future": 31
+          },
+          "conditional_hit_rate": 0.5168539325842697
+        },
+        "policy_carried:depth3": {
+          "valid": 45,
+          "censored": 125,
+          "hits": 23,
+          "partitions": {
+            "train_past": 139,
+            "holdout_future": 31
+          },
+          "conditional_hit_rate": 0.5111111111111111
+        },
+        "policy_carried:depth4": {
+          "valid": 23,
+          "censored": 147,
+          "hits": 13,
+          "partitions": {
+            "train_past": 139,
+            "holdout_future": 31
+          },
+          "conditional_hit_rate": 0.5652173913043478
+        }
+      },
+      "joint_prefix_histogram": {
+        "self_generated:train_past:offered4": {
+          "4:observed": 27,
+          "2:observed": 52,
+          "1:observed": 100,
+          "0:observed": 158,
+          "3:observed": 30
+        },
+        "policy_carried:train_past:offered4": {
+          "4:observed": 7,
+          "2:observed": 20,
+          "0:observed": 63,
+          "1:observed": 35,
+          "1:censored": 6,
+          "3:observed": 7,
+          "2:censored": 1
+        },
+        "self_generated:purged_entire_boundary_chain:offered4": {
+          "0:observed": 4,
+          "1:observed": 1,
+          "2:observed": 1,
+          "0:censored": 1
+        },
+        "self_generated:holdout_future:offered4": {
+          "0:observed": 43,
+          "2:observed": 12,
+          "1:observed": 30,
+          "4:observed": 7,
+          "3:observed": 4
+        },
+        "policy_carried:holdout_future:offered4": {
+          "0:observed": 12,
+          "4:observed": 6,
+          "3:observed": 3,
+          "1:observed": 8,
+          "2:observed": 2
+        }
+      },
+      "joint4": {
+        "self_generated:train_past": {
+          "offered_at_least4": 367,
+          "qualified_success4": 27,
+          "known_failure": 340,
+          "unknown_censored": 0,
+          "conditional_success4_rate": 0.07356948228882834
+        },
+        "policy_carried:train_past": {
+          "offered_at_least4": 139,
+          "qualified_success4": 7,
+          "known_failure": 125,
+          "unknown_censored": 7,
+          "conditional_success4_rate": 0.05303030303030303
+        },
+        "self_generated:purged_entire_boundary_chain": {
+          "offered_at_least4": 7,
+          "qualified_success4": 0,
+          "known_failure": 6,
+          "unknown_censored": 1,
+          "conditional_success4_rate": 0.0
+        },
+        "self_generated:holdout_future": {
+          "offered_at_least4": 96,
+          "qualified_success4": 7,
+          "known_failure": 89,
+          "unknown_censored": 0,
+          "conditional_success4_rate": 0.07291666666666667
+        },
+        "policy_carried:holdout_future": {
+          "offered_at_least4": 31,
+          "qualified_success4": 6,
+          "known_failure": 25,
+          "unknown_censored": 0,
+          "conditional_success4_rate": 0.1935483870967742
+        }
+      },
+      "holdout_window_deficient": false,
+      "holdout_valid_pairs": {
+        "self_generated": {
+          "1": 96,
+          "2": 53,
+          "3": 23,
+          "4": 11
+        },
+        "policy_carried": {
+          "1": 31,
+          "2": 19,
+          "3": 11,
+          "4": 9
+        }
+      },
+      "deep_holdout_small": true,
+      "frontier_absolute_exclusive": 132060,
+      "residual_diagnostic": {
+        "self_generated:depth1:train_past": {
+          "pairs": 367,
+          "relative_L2_mean": 1.0480477287249328,
+          "cosine_mean": 0.5281596397825564
+        },
+        "self_generated:depth2:train_past": {
+          "pairs": 209,
+          "relative_L2_mean": 1.2704424896360167,
+          "cosine_mean": 0.4429137725068435
+        },
+        "self_generated:depth3:train_past": {
+          "pairs": 109,
+          "relative_L2_mean": 1.4248962205892033,
+          "cosine_mean": 0.392759412928027
+        },
+        "self_generated:depth4:train_past": {
+          "pairs": 57,
+          "relative_L2_mean": 1.4634849576139985,
+          "cosine_mean": 0.3758308720840818
+        },
+        "policy_carried:depth1:train_past": {
+          "pairs": 139,
+          "relative_L2_mean": 1.130642376612213,
+          "cosine_mean": 0.5399107769908634
+        },
+        "policy_carried:depth2:train_past": {
+          "pairs": 70,
+          "relative_L2_mean": 1.2712787821769322,
+          "cosine_mean": 0.44266331795578834
+        },
+        "policy_carried:depth3:train_past": {
+          "pairs": 34,
+          "relative_L2_mean": 1.4235750475833755,
+          "cosine_mean": 0.40624622110198816
+        },
+        "policy_carried:depth4:train_past": {
+          "pairs": 14,
+          "relative_L2_mean": 1.3583000538592724,
+          "cosine_mean": 0.38188110018708116
+        },
+        "self_generated:depth1:purged_entire_boundary_chain": {
+          "pairs": 6,
+          "relative_L2_mean": 1.114565613348045,
+          "cosine_mean": 0.5358311913728907
+        },
+        "self_generated:depth2:purged_entire_boundary_chain": {
+          "pairs": 2,
+          "relative_L2_mean": 1.192910755617186,
+          "cosine_mean": 0.4537967874799991
+        },
+        "self_generated:depth3:purged_entire_boundary_chain": {
+          "pairs": 1,
+          "relative_L2_mean": 1.3645136221592042,
+          "cosine_mean": 0.407630660765256
+        },
+        "self_generated:depth1:holdout_future": {
+          "pairs": 96,
+          "relative_L2_mean": 1.0962585395154107,
+          "cosine_mean": 0.5274356012624722
+        },
+        "self_generated:depth2:holdout_future": {
+          "pairs": 53,
+          "relative_L2_mean": 1.3241308960105544,
+          "cosine_mean": 0.45441009102718144
+        },
+        "self_generated:depth3:holdout_future": {
+          "pairs": 23,
+          "relative_L2_mean": 1.4645937331621097,
+          "cosine_mean": 0.3978015917292605
+        },
+        "policy_carried:depth1:holdout_future": {
+          "pairs": 31,
+          "relative_L2_mean": 1.1409685521263537,
+          "cosine_mean": 0.534455149905829
+        },
+        "self_generated:depth4:holdout_future": {
+          "pairs": 11,
+          "relative_L2_mean": 1.6175350979400336,
+          "cosine_mean": 0.35443635560938264
+        },
+        "policy_carried:depth2:holdout_future": {
+          "pairs": 19,
+          "relative_L2_mean": 1.3139156422704648,
+          "cosine_mean": 0.4119791923798894
+        },
+        "policy_carried:depth3:holdout_future": {
+          "pairs": 11,
+          "relative_L2_mean": 1.4679364062907359,
+          "cosine_mean": 0.38110010149170265
+        },
+        "policy_carried:depth4:holdout_future": {
+          "pairs": 9,
+          "relative_L2_mean": 1.463144704799377,
+          "cosine_mean": 0.32133679317158875
+        }
+      },
+      "payload": {
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.3.markers.i32": {
+          "bytes": 20480,
+          "sha256": "2b592f0f403f37129831cf2e36a1d4b1196563ef05f18174ea3f0a4773e0e78a"
+        },
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.3.mtp.f32": {
+          "bytes": 131072000,
+          "sha256": "5ce4c54f5b5325ef73f5ab3511b93960f7e061c3bf8379f08b6666a20a6893d6"
+        },
+        "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runtime\\observer.jsonl.3.target.f32": {
+          "bytes": 104857600,
+          "sha256": "ff3b4a59f61ac4430af14aed4eec2d89680a3eb08c08bc95a7a2093f31d3ddad"
+        }
+      }
+    }
+  },
+  "qualified_scope": {
+    "mode": "FREE actual greedy73 native MTP, minp.5/spec4/pipeline2, SSD131072 exact reset perGEN; no FORCE_IDS/WINDOWS/fixturelabels/token oracle",
+    "observational_only": true,
+    "training": false,
+    "new_MTP_head": false,
+    "new_MTP_instance": false,
+    "extra_rollouts": false,
+    "A0": "DEFERRED_NOT_CAPTURED",
+    "B1_canonical": true,
+    "B2_not_pooled": true,
+    "posthoc_residual_metric": "Native MTP output R versus matched actual target finalR for same causal input prefix; diagnostics only, no adapter fitted.",
+    "quality_scope": "Conditional on valid original-policy prefixes; first mismatch negatives retained, descendants censored. Joint native rollouts use measured outcomes, never products of marginal rates. This is not evaluation of an adapted rollout.",
+    "split": "512 past windows/128 chronological holdout, frozen token frontier; whole chain n_out<=7 crossing boundary purged including uncaptured depths5..7.",
+    "coverage": "640 detailed windows percase reached; qualified depth4 holdout only27 L01 and20 L02 pairs acrosscohorts, too small for a broad accuracy promise."
+  },
+  "common_allocation": {
+    "GPU2080_bytes": 367022080,
+    "pinned_bytes": 367022088,
+    "MiB_GPU2080": 350.01953125,
+    "GPU3060_A0_bytes": 0,
+    "independent_chain_cap": 1280,
+    "native_depths": 4,
+    "target_window_cap": 640,
+    "allocation_before_target_cache_sizing": true,
+    "actual_primary_cache_slots": 4640,
+    "actual_secondary_cache_slots": 8946,
+    "cache_equal_all_arms": true,
+    "elastic_events": 0,
+    "config_cache_not_equal_actual_slots": true
+  },
+  "isolation": {
+    "pass_": true,
+    "daily_unchanged": true,
+    "owned_processes": {
+      "14816": 1791436840.0652957
+    },
+    "remaining_owned": [],
+    "compiler_observations": [],
+    "threads_stopped": true,
+    "locks_after": "closed sentinel preserved; bench/build locks removed by owners",
+    "GPU_inventory": {
+      "fields": [
+        "index",
+        "uuid",
+        "name",
+        "memory.used",
+        "memory.total",
+        "utilization.gpu",
+        "clocks.sm",
+        "clocks.mem",
+        "temperature.gpu",
+        "power.draw",
+        "pstate"
+      ],
+      "rows": [
+        "0, GPU-aab7a70b-b795-9b37-f317-1423f89733be, NVIDIA GeForce RTX 3060, 2343, 12288, 19, 210, 810, 50, 20.73, P5",
+        "1, GPU-3ec189a9-0fe7-a128-af2c-8df8fb3e15c7, NVIDIA GeForce RTX 2080 Ti, 151, 22528, 0, 300, 405, 33, 22.30, P8"
+      ],
+      "rc": 0
+    },
+    "CUDA_VISIBLE_DEVICES": "1,0"
+  },
+  "evidence": {
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\verdict.json": "0f7e3afe5de417ac75bf7a537dbdfce338d4a8050f8bdc531686eee648c5b47f",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\result.json": "bd88b3107123fd4da2fec2a54092251d5876450fca8bc015b8df715319497455",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\isolation.json": "67ed3327b7dfad38496c0daad1947b29c55860f732458925f9abf2aa32a0134d",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\plan.json": "635cf09464f25613181e2e668daa0b3d411c66e51d4258297cbbeec879582109",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\dataset-request-02.json": "40480dc6db8b8b4815c24c6f830bafa20c4ae584752b00bb556c7063cbe875e0",
+    "C:\\Users\\imanu\\Documents\\Codex\\2026-10-07\\rip\\work\\dual-horizon-probe\\runs\\DET-dual-observer-01\\dataset-request-03.json": "c923fcb1e5b08e6ab3164d80038d8600708d07e591e20d9e67ae8037d6da3dd3"
+  },
+  "timing_limits": [
+    "Observer overhead is measured with common allocation/fixed caches; not a model speedup.",
+    "L01 B1 +6.88% decode+drain overhead but B2 -0.34%; this spread prevents a precise stable observer cost claim. L02 +1.04%/+0.88%.",
+    "Dump I/O is after decode and reported separately through wall GEN; final drain is included in decode+drain comparisons, overlapping stages are not added.",
+    "B1/B2 structural policy fingerprints happen to match, while OFF differs partly because slots are included. Window equality is not required for independent local pair validity."
+  ],
+  "publication": {
+    "status": "UNCOMMITTED_EXPERIMENT_DEFAULT_OFF",
+    "core_main": "20629498",
+    "known_modified_source_files": 7,
+    "default_enabled": false,
+    "commit_push": false
+  },
+  "STOP": "No further GEN, build, training, variants or publication until ROOT decision."
+}

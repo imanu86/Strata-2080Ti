@@ -261,6 +261,8 @@ public:
                          std::string& err);
 
     /// Token t's residual after the last layer, (hc, n_embd) on the device, valid until the next `run`.
+    // Observation only, after pl_finish. Copy all rows before this parity can be reused.
+    bool observer_copy_R(float* private_dst, int T, std::string& err) const;
     const float* final_R(int t) const;
     const float* final_R_all() const { return next_ ? next_->final_R_all() : R_; }
     /// Lab selective MTP: logical IDs from this window's LAST QSA, never target K/V. Copy before this verifier
