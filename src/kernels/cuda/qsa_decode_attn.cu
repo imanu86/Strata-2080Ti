@@ -805,14 +805,14 @@ __global__ void __launch_bounds__(THREADS, 3) attn_chunk_kernel_mlp(const float*
     };
     int c = 0;
     for (; c + VB <= n_here; c += VB) {
-        long long r[VB];
+        // the rows come from shared memory twice (a broadcast read) rather than staying in VB registers each
         long long any = 0;
 #pragma unroll
-        for (int u = 0; u < VB; ++u) { r[u] = srow[c + u]; any |= r[u]; }
+        for (int u = 0; u < VB; ++u) any |= srow[c + u];
         if (any < 0) break;
         RawV<KV_MODE> rv[VB];
 #pragma unroll
-        for (int u = 0; u < VB; ++u) rv[u] = load_raw_v<KV_MODE>(p, r[u], t);
+        for (int u = 0; u < VB; ++u) rv[u] = load_raw_v<KV_MODE>(p, srow[c + u], t);
 #pragma unroll
         for (int u = 0; u < VB; ++u) fold(c + u, cvt_v(rv[u]));
     }
