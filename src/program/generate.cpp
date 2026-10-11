@@ -1173,6 +1173,21 @@ void drive_pool_split(void* user, const float* x_f, const int32_t* ids, int64_t 
     d.d.pcie_num = s->pcie_num[st];
     drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);
 }
+/// critpath STRATA_CP_RESPLAN (Verifier::set_cp_note): a group the device planned is never served, but its routes
+/// count as the pool would count them (usage for the adaptive tier, every entry a VRAM hit).
+void drive_note_split(void* user, const int32_t* ids, int64_t n, int64_t layer) {
+    SplitDrive* s = (SplitDrive*) user;
+    strata::core::ExpertDispatch& d = s->base->d;
+    if (!d.usage.empty())
+        for (int64_t i = 0; i < n; ++i)
+            if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) layer * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
+    d.cache_hits += n;
+}
+/// critpath (docs/CRITPATH.md): an integer lever, `dflt` when unset or empty.
+int cp_env_int(const char* name, int dflt) {
+    const char* v = std::getenv(name);
+    return v != nullptr && v[0] != 0 ? std::atoi(v) : dflt;
+}
 
 /// Layer split across GPUs: a later stage on its own device, with its own copy of the dense weights, a session, an
 /// expert cache for its layers, a verify window and a prompt path; the last one also holds the head (the drafter
@@ -7554,6 +7569,7 @@ int main(int argc, char** argv) {
                 for (int par = 0; par < 2; ++par) {
                     stage_ver_p(st, par).set_stream(pl_stream[(size_t) st]);
                     stage_ver_p(st, par).set_always_publish(true);
+                    stage_ver_p(st, par).set_cp_note(&drive_note_split);   // critpath STRATA_CP_RESPLAN (opt-in)
                 }
         }
         if (n_stages > 1) {
@@ -11830,6 +11846,13 @@ int main(int argc, char** argv) {
                 std::thread pl_adapt_thr;
                 std::atomic<bool> pl_adapt_done{true};
                 bool pl_adapt_ok = true;
+                // critpath STRATA_CP_RESPLAN (docs/CRITPATH.md): the blocking tier's fence waits until this loop has passed a
+                // point between two launches after the tier marked its evictions on the host (cp_fence_ack, at the top of
+                // every pass): a later launch then uploads the marks before its window plans on the device (Verifier::
+                // cp_sync_res), an earlier one is behind the fence's events.  Open once the loop ends (no launch follows).
+                static const bool cp_resplan = cp_env_int("STRATA_CP_RESPLAN", 0) != 0;
+                std::atomic<int64_t> cp_fence_req{0}, cp_fence_ack{0};
+                std::atomic<bool> cp_fence_open{false};
                 // an error ends the engine, as the serial loop's do: every GPU wait is released first (#267), so no
                 // window in flight keeps spinning on a flag nobody raises, and the tier's thread can finish (the
                 // asynchronous tier's job does host work alone: it ends)
@@ -11837,6 +11860,7 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: pipelined decode: %s\n", m.c_str());
                     strata::core::diag_pipeline_fn().store(nullptr);
                     strata::core::release_gpu_waits(stderr);
+                    cp_fence_open.store(true);   // critpath: the tier's fence never waits for this loop again
                     if (pl_adapt_thr.joinable()) pl_adapt_thr.join();
                     if (ajob) {
                         ajob->wait();
@@ -11924,6 +11948,10 @@ int main(int argc, char** argv) {
                 // adapt()'s fence, on the tier's thread: it waits on the HOST.  A device-side wait (the refill streams
                 // waiting for the stages' events) would queue copies behind windows that need this loop, beside it.
                 adapt_fence = [&]() {
+                    if (cp_resplan) {   // critpath STRATA_CP_RESPLAN: the loop past a point between launches first
+                        const int64_t r = cp_fence_req.fetch_add(1) + 1;
+                        while (cp_fence_ack.load() < r && !cp_fence_open.load()) std::this_thread::yield();
+                    }
                     stage_record(fence_ev);
                     while (!stage_passed(fence_ev)) std::this_thread::yield();
                 };
@@ -12172,7 +12200,38 @@ int main(int argc, char** argv) {
                     return v == nullptr || std::atoi(v) != 0;
                 }();
                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
+                // ---- critpath levers (docs/CRITPATH.md), each opt-in; unset, the loop is the one above
+                // STRATA_CP_L1FIRST=1: A's last stage is launched in the pass that sees its front stage finish, right after
+                // the pumps - before the chain read, the elastic gap and B's speculative launch (its commit wait, snapshot
+                // and staging), which held the stage-1 launch ~0.45 ms in the fresh windows.
+                static const bool cp_l1first = cp_env_int("STRATA_CP_L1FIRST", 0) != 0;
+                // STRATA_CP_S1FIRST=1: while A's last stage runs, a rung layer of the speculative B is served only when its
+                // pool call fits before stage 1's next ring (the GPU's time from a served ring to the next one and B's layer
+                // time, both measured: EMAs) or right after stage 1 was served; else B waits a pass.
+                // STRATA_CP_S1FIRST_MAX_US (1500) bounds how long one B layer may wait.  B has slack: stage 1 takes ~17 ms,
+                // B's stage 0 ~7-11 ms.
+                static const bool cp_s1first = cp_env_int("STRATA_CP_S1FIRST", 0) != 0;
+                static const double cp_s1_max = std::max(0, cp_env_int("STRATA_CP_S1FIRST_MAX_US", 1500)) / 1000.0;
+                // STRATA_CP_CHAIN_PRE=n (1..S_mtp-1): the next chain's round and first n steps queued on the drafter's
+                // stream behind A's stage-1 window (MtpDrafter::chain_prelaunch), adopted at the verdict
+                static const int cp_chain_pre = cp_env_int("STRATA_CP_CHAIN_PRE", 0);
+                int64_t cp_l1_early = 0, cp_b_held = 0, cp_b_gap = 0, cp_b_forced = 0, cp_pre_seq = -1;
+                double cp_b_hold_ms = 0.0, cp_b_wait0 = -1.0;
+                double cp_s1_last = -1.0, cp_s1_gap = 0.35, cp_b_cost = 0.15;   // ms: stage 1's ring gap, B's layer
+                int64_t cp_s1_k = -1, cp_s1_seq = -1;
+                bool cp_prev_b = false;   // the pass before served a B layer (its ring gap sample is late)
+                const int64_t cp_pre0 = mtp.pre_launched, cp_ado0 = mtp.pre_adopted, cp_redo0 = mtp.pre_redone;
+                // A's last stage, once every front stage is done
+                auto launch_s1 = [&]() -> bool {
+                    if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
+                    if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
+                    if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return false;
+                    A.s1 = true;
+                    tre("L1", A.seq, A.T);
+                    return true;
+                };
                 while (true) {
+                    if (cp_resplan) cp_fence_ack.store(cp_fence_req.load());   // critpath: between two launches
                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
                     g_pl_diag.a_seq.store(A.seq, std::memory_order_relaxed);
                     g_pl_diag.a_bits.store(pw_bits(A), std::memory_order_relaxed);
@@ -12197,9 +12256,23 @@ int main(int argc, char** argv) {
                     // verdict), and while A's last stage runs, B one layer per pass
                     if (!pl_yield && ((doomed && !pump0(D)) || !pump0(A) || !pump0(B))) return die(err);
                     if (pl_yield && !pump0(A)) return die(err);
+                    if (cp_l1first && A.finished && !A.s1) {   // critpath STRATA_CP_L1FIRST: stage 1 before anything else
+                        if (!launch_s1()) return die(err);
+                        ++cp_l1_early;
+                    }
                     if (A.s1 && !A.s1_done) {
                         strata::core::Verifier& v = V1(A);
+                        const double cp_t_in = cp_s1first ? ms_now() : 0.0;
+                        const int64_t cp_k0 = v.pl_served();
+                        const bool cp_rang = cp_s1first && v.pl_rang();
                         if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);
+                        if (cp_s1first && v.pl_served() > cp_k0) {   // critpath STRATA_CP_S1FIRST: stage 1's ring gap
+                            if (cp_rang && cp_s1_seq == A.seq && cp_s1_last >= 0.0 && !cp_prev_b && cp_k0 == cp_s1_k)
+                                cp_s1_gap += 0.125 * ((cp_t_in - cp_s1_last) - cp_s1_gap);
+                            cp_s1_last = ms_now();
+                            cp_s1_k = v.pl_served();
+                            cp_s1_seq = A.seq;
+                        }
                         if (v.done(err)) {
                             if (!v.pl_finish(outp.data(), err)) return die(err);
                             force_rows_out(outp.data(), A.T, produced_n);   // lab bench: STRATA_FORCE_IDS
@@ -12207,7 +12280,48 @@ int main(int argc, char** argv) {
                             tre("F1", A.seq, A.T);
                         } else if (!err.empty()) return die(err);
                     }
-                    if (pl_yield && ((doomed && !pump0(D)) || !pump0(B, A.s1 && !A.s1_done ? 1 : 0))) return die(err);
+                    if (pl_yield) {
+                        if (doomed && !pump0(D)) return die(err);
+                        // critpath STRATA_CP_S1FIRST: B's rung layer waits while stage 1 is about to ring (see above)
+                        bool serve_b = true;
+                        const double cp_now = cp_s1first ? ms_now() : 0.0;
+                        if (cp_s1first && A.s1 && !A.s1_done && B.fl && VF(B.fr, B).pl_rang()) {
+                            strata::core::Verifier& v1 = V1(A);
+                            bool hold = v1.pl_rang();   // stage 1 rang meanwhile: the next pass serves it first
+                            // else B goes when its layer fits before the predicted ring, or right after stage 1 was
+                            // served (the start of its gap: the least B can delay it when the layer does not fit)
+                            if (!hold && v1.pl_serving() && cp_s1_seq == A.seq && cp_s1_last >= 0.0)
+                                hold = cp_now + cp_b_cost > cp_s1_last + cp_s1_gap - 0.03 && cp_now - cp_s1_last > 0.05;
+                            if (hold) {
+                                if (cp_b_wait0 < 0.0) cp_b_wait0 = cp_now;
+                                if (cp_now - cp_b_wait0 > cp_s1_max) {   // the bound: B's layer goes now
+                                    hold = false;
+                                    ++cp_b_forced;
+                                }
+                            }
+                            if (hold) {
+                                ++cp_b_held;
+                                serve_b = false;
+                            } else {
+                                ++cp_b_gap;
+                            }
+                        }
+                        if (serve_b && cp_b_wait0 >= 0.0) {
+                            cp_b_hold_ms += cp_now - cp_b_wait0;
+                            cp_b_wait0 = -1.0;
+                        }
+                        cp_prev_b = false;
+                        if (serve_b) {
+                            strata::core::Verifier* vb = B.fl ? &VF(B.fr, B) : nullptr;
+                            const int64_t kb0 = vb != nullptr ? vb->pl_served() : 0;
+                            if (!pump0(B, A.s1 && !A.s1_done ? 1 : 0)) return die(err);
+                            if (cp_s1first && vb != nullptr && vb->pl_served() > kb0) {   // B's layer time
+                                const double dt = ms_now() - cp_now;
+                                cp_b_cost += 0.125 * (dt - cp_b_cost);
+                                cp_prev_b = true;
+                            }
+                        }
+                    }
                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
                     if (!el_gap()) return die(err);   // fork: the elastic tail at a gap of stage 0
                     // ---- a wrong speculative window has stopped (it is launched on no further stage once doomed):
@@ -12378,12 +12492,37 @@ int main(int argc, char** argv) {
                         }
                     }
                     // ---- the last stage: A, once every front stage is done
-                    if (A.finished && !A.s1) {
-                        if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
-                        if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
-                        if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
-                        A.s1 = true;
-                        tre("L1", A.seq, A.T);
+                    if (A.finished && !A.s1 && !launch_s1()) return die(err);
+                    // ---- critpath STRATA_CP_CHAIN_PRE: the chain after A's verdict, queued behind A's stage-1 window on the
+                    // drafter's stream, its inputs derived on the device from A's picks (MtpDrafter::chain_prelaunch).  Once
+                    // the chain that made B is done and B's launch is settled (B is part of the verdict); greedy rows only
+                    if (cp_chain_pre > 0 && A.s1 && !A.s1_done && cp_pre_seq != A.seq && chain_kind == 0 &&
+                        !mtp.chain_live() && !(B.ready && !B.launched) && !ending && S_mtp >= 2 && mtp.max_t() >= 3 &&
+                        A.T <= mtp.max_t()) {
+                        strata::core::Verifier& v1 = V1(A);
+                        if (!v1.host_sampling() && mtp.device() == v1.device()) {
+                            strata::kernels::MtpChainVerdict cv;
+                            cv.T = A.T;
+                            cv.p = (long long) A.p;
+                            cv.b_launched = B.launched ? 1 : 0;
+                            cv.b_T = B.launched ? B.T : 0;
+                            for (int i = 0; i < 8; ++i) {
+                                cv.a_tok[i] = A.tok[i];
+                                cv.b_tok[i] = B.tok[i];
+                                cv.repl[i] = -1;
+                            }
+                            if (forced != nullptr)   // the forced bench: the rows force_rows_out replaces at the verdict
+                                for (int i = 0; i < A.T; ++i) {
+                                    const int64_t k = produced_n + i;
+                                    if (k >= (int64_t) forced->size()) break;
+                                    cv.repl[i] = (*forced)[(size_t) k];
+                                }
+                            const int pre = std::max(1, std::min(cp_chain_pre, std::min(S_mtp - 1, mtp.max_t() - 2)));
+                            if (!mtp.chain_prelaunch(cv, v1.out_dev(), v1.done_event(), v1.final_R(0), pre, err))
+                                return die(err);
+                            tre("CP", A.seq, pre);
+                        }
+                        cp_pre_seq = A.seq;   // once per A (also when it could not be queued)
                     }
                     // ---- A's verdict
                     if (!A.s1_done) continue;
@@ -12454,7 +12593,12 @@ int main(int argc, char** argv) {
                         // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
                         mtp.set_source_R(V1(A).final_R(0));
                         chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
-                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
+                        int cp_ad = 0;   // critpath STRATA_CP_CHAIN_PRE: the chain queued behind A's window, if it fits
+                        if (cp_pre_seq == A.seq &&
+                            (cp_ad = mtp.chain_adopt(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err)) < 0)
+                            return die(err);
+                        if (cp_ad == 0 &&
+                            !mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
                             return die(err);
                         chain_kind = 1;
                         tre("CL", A.seq, 1);
@@ -12486,7 +12630,11 @@ int main(int argc, char** argv) {
                         if (!last) {
                             mtp.set_source_R(V1(A).final_R(0));
                             chain_n = strata::kernels::kVerifyMaxT - 1;
-                            if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
+                            int cp_ad = 0;   // critpath STRATA_CP_CHAIN_PRE (see above)
+                            if (cp_pre_seq == A.seq &&
+                                (cp_ad = mtp.chain_adopt(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err)) < 0)
+                                return die(err);
+                            if (cp_ad == 0 && !mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
                                 return die(err);
                             chain_kind = 2;
                             tre("CL", A.seq, 2);
@@ -12504,6 +12652,7 @@ int main(int argc, char** argv) {
                     if (!last && ajob && !adapt_tick(false)) return die("an adaptive refill failed");
                     if (last) ending = true;
                 }
+                cp_fence_open.store(true);   // critpath: no launch follows, the tier's fence never waits for the loop
                 pl_drain();   // nothing in flight: both stages' commits and the drafter have landed
                 strata::core::diag_pipeline_fn().store(nullptr);
                 if (pl_adapt_thr.joinable()) pl_adapt_thr.join();   // its copies waited only for finished work
@@ -12538,6 +12687,28 @@ int main(int argc, char** argv) {
                 }
                 // the odd windows' counters and GPU profiles into the verifiers that report them
                 for (int st = 0; st < n_stages; ++st) stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 1));
+                // critpath (docs/CRITPATH.md): one line per request with every lever's counters while any is on
+                static const bool cp_any = cp_l1first || cp_s1first || cp_chain_pre > 0 || cp_resplan ||
+                                           cp_env_int("STRATA_CP_CHAIN_FUSE", 0) != 0;
+                if (cp_any) {
+                    std::string rp;
+                    for (int st = 0; st < n_stages; ++st) {
+                        const strata::core::Verifier& v = stage_ver_p(st, 0);
+                        char b[160];
+                        std::snprintf(b, sizeof b, " stage %d: %d layers, %lld planned / %lld host, %lld uploads;", st,
+                                      v.cp_layers(), (long long) v.cp_planned, (long long) v.cp_host,
+                                      (long long) v.cp_uploads);
+                        rp += b;
+                    }
+                    std::fprintf(stderr, "strata critpath: L1FIRST %lld early stage-1 launches | S1FIRST B held %lld passes "
+                                         "(%.1f ms), %lld B layers in a stage-1 gap, %lld past the bound; stage-1 ring gap "
+                                         "%.3f ms, B layer %.3f ms | CHAIN_PRE %lld queued, %lld adopted, %lld redone | "
+                                         "RESPLAN (all requests):%s\n",
+                                 (long long) cp_l1_early, (long long) cp_b_held, cp_b_hold_ms, (long long) cp_b_gap,
+                                 (long long) cp_b_forced, cp_s1_gap, cp_b_cost, (long long) (mtp.pre_launched - cp_pre0),
+                                 (long long) (mtp.pre_adopted - cp_ado0), (long long) (mtp.pre_redone - cp_redo0),
+                                 rp.c_str());
+                }
                 if (!pl_adapt_ok) {
                     std::printf("ERR an adaptive refill failed\n");
                     return 1;
