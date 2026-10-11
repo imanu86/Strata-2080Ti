@@ -22,6 +22,7 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/kernels/verify_kernels.hpp"   // critpath: MtpChainVerdict
 
 #include <cuda_runtime.h>
 
@@ -139,7 +140,21 @@ public:
     /// chain_tok()/chain_prob(); -1: an error.  A window's size is often decided by its first outputs (a draft below
     /// spec_min_p ends it), so the next launch need not wait for all of them.
     int chain_outputs_ready(std::string& err);
-    bool chain_live() const { return chain_live_; }
+    /// A chain in flight, or a pre-launched one not yet adopted (critpath STRATA_CP_CHAIN_PRE).
+    bool chain_live() const { return chain_live_ || pre_live_; }
+
+    // ---- critpath STRATA_CP_CHAIN_PRE (docs/CRITPATH.md): the next chain's round and first `pre_steps` steps queued
+    // on the drafter's stream behind the last stage's window (`after`), their inputs derived on the device from the
+    // window's picks (`out_dev`, mtp_chain_verdict) - no host turn between the window's end and the round.  At the
+    // verdict chain_adopt takes it as the chain the host would launch (the same inputs: then only the remaining steps
+    // are launched), or lets it finish and returns 0 so the caller launches the chain as before.
+    bool chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev, cudaEvent_t after,
+                         const float* src_R, int pre_steps, std::string& err);
+    /// chain_launch's arguments: 1 = adopted (the chain is live, as after chain_launch), 0 = not (nothing in flight
+    /// any more: launch it), -1 = an error.  No pre-launched chain: 0 at once.
+    int chain_adopt(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
+                    int n_early, std::string& err);
+    int64_t pre_launched = 0, pre_adopted = 0, pre_redone = 0;
     const int32_t* chain_tok() const { return chain_tok_; }
     const float* chain_prob() const { return chain_prob_; }
 
@@ -225,6 +240,10 @@ private:
     cudaEvent_t ev_chain_ = nullptr;
     cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs
     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
+    bool pre_live_ = false;                             ///< critpath STRATA_CP_CHAIN_PRE: queued, not adopted
+    int pre_steps_ = 0;
+    cudaEvent_t ev_pre_ = nullptr;                      ///< after the pre-launched round and steps
+    strata::kernels::MtpChainVerdict pre_v_;
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
     int64_t n_vocab_ = 0;
