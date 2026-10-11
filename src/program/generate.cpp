@@ -79,6 +79,7 @@
 #include "strata/core/progress.hpp"
 #include "strata/core/device.hpp"
 #include "strata/core/emulate.hpp"
+#include "strata/core/tc_sm75.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX   // gguf_reader.hpp includes windows.h
 #endif
@@ -124,6 +125,23 @@
 #include <string>
 #include <set>
 #include <vector>
+
+/// Fork sm_75 (Daily be4cf1c): cc 7.5, and only 7.5, adds FP16 images and a weight staging to the prompt path
+/// (prefill.cpp, hc16).  Where the prompt path owns its buffers - no borrow - each one is its own cudaMalloc and the
+/// expert cache, sized from the empirical MiB reserve, is what leaves room for them: add their bytes to it.  Sizes
+/// from `Prefill::carve`: xn16h = chunk * hc * n_embd * 2, lo16h = chunk * hc_lr * 2, the staged weight =
+/// hc * n_embd * hc_lr * 2.  The callers add this only where the empirical reserve stands in for the prompt path
+/// (`prefill_mib` / `split_pf_mib`); a borrowing stage's loan is sized by `Prefill::bytes_needed`, which prices them.
+static int64_t sm75_prompt_extra_bytes(const strata::core::ModelGeometry& g, int64_t chunk, int dev) {
+    int maj = 0, min = 0;
+    if (cudaDeviceGetAttribute(&maj, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
+        cudaDeviceGetAttribute(&min, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess) {
+        cudaGetLastError();
+        return 0;
+    }
+    if (!strata::core::tc_sm75_enabled(maj, min) || chunk <= 0) return 0;
+    return chunk * g.hc * g.n_embd * 2 + chunk * g.hc_lr * 2 + g.hc * g.n_embd * g.hc_lr * 2;
+}
 
 namespace {
 // Windows' WDDM driver model: native Windows, or WSL2 (its GPU goes through /dev/dxg to the Windows driver).  There,
@@ -3729,8 +3747,9 @@ int main(int argc, char** argv) {
         const int64_t pf = search && split_own_auto && !place_with_reserve ? 0 : split_pf_mib;
         const int64_t base_reserve =
             later && o.vram_reserve_later_mib >= 0 ? o.vram_reserve_later_mib : o.vram_reserve_mib;
-        const int64_t reserve = (base_reserve + pf + (later ? kWindowMib : kPipeSnapMib) +
-                                 kPipeWindowMib + (drafter ? kDrafterMib : 0)) << 20;
+        const int64_t reserve = ((base_reserve + pf + (later ? kWindowMib : kPipeSnapMib) +
+                                 kPipeWindowMib + (drafter ? kDrafterMib : 0)) << 20) +
+                                (pf > 0 ? sm75_prompt_extra_bytes(g, o.prefill_chunk, dev) : 0);
         return std::max<int64_t>((int64_t) fb - reserve, 0);
     };
     if (multi_gpu && split_auto) {
@@ -4927,7 +4946,8 @@ int main(int argc, char** argv) {
         if (stages.empty())
             for (const auto& d : slot_mtp)
                 mtp_bind += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);
-        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind + pipe_first;
+        const int64_t sm75_extra = prefill_mib > 0 ? sm75_prompt_extra_bytes(g, o.prefill_chunk, 0) : 0;
+        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind + pipe_first + sm75_extra;
         const int64_t blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
         int64_t slots = ((int64_t) free_b - reserve) / blob;
         if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
@@ -5012,7 +5032,8 @@ int main(int argc, char** argv) {
         size_t free_b = 0, total_b = 0;
         free_b = strata::core::device_free_bytes(); (void) total_b;
         const int64_t prefill_mib = owned_prefill_mib();
-        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + pipe_first;
+        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + pipe_first +
+                                (prefill_mib > 0 ? sm75_prompt_extra_bytes(g, o.prefill_chunk, 0) : 0);
         const int64_t fit = std::max<int64_t>(((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob, 0);
         if (o.expert_cache > fit) {
             // a WARNING that names the knob: the user asked for this size, and gets fewer slots
