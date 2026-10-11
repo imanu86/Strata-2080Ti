@@ -32,7 +32,8 @@ così da misurare su una base pulita. Prima i confronti erano falsati dalla VRAM
 | `865d8203` | upstream PR #1911 (aperta) | `STRATA_VRAM_FREE=device`: VRAM libera della scheda intera via NVML |
 | `b033a625` | nuovo | la cache elastica legge la VRAM libera con `device_free_bytes()` (NVML con `STRATA_VRAM_FREE=device`) |
 | `03da168d` | upstream PR #1503 (aperta) | il parcheggio non usa mai il K/V di un'altra conversazione |
-| (vedi log) | nuovo | il drafter MTP usa `first_needed()` anche in `mtp.cpp`, così `set_full_prefix` vale davvero (pezzo di `0cc421e7`) |
+| `bb816e18` | pezzo di `0cc421e7` | il drafter MTP usa `first_needed()` anche in `mtp.cpp`, così `set_full_prefix` vale davvero |
+| `341542b7` | nuovo | il prefisso su disco usa `available_host_bytes()` (0.1.42 ha tolto `conversation_available_memory`) |
 
 `host-core`, `--layer-split`, `--trim-stage-weights`, `--pipeline-windows`, `--vram-reserve-later-mib`,
 `--prompt-cache-tail/-every` sono già di upstream.
@@ -102,6 +103,7 @@ Per confronti col Daily aggiungere `STRATA_ROUTE_TAIL_SKIP=0`.
 
 ## Stato
 
-Compilato: vedi il `build.json` della build `build-upsync-<sha>` in
-`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\`. Installato no, provato no:
-nessuna GPU, nessun test, nessun motore avviato.
+Compilato sì (`341542b7`, `build_lock.py`, CUDA 75;86, test spenti): `strata.exe` sha256
+`e25c9e2f5e1d3857aba37a49e5d072d4907f3eb95cfd6aff08057ebd42bc4e64`, copiato con `build.json` in
+`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\build-upsync-341542b7\`.
+Installato no, provato no: nessuna GPU, nessun test, nessun motore avviato.
