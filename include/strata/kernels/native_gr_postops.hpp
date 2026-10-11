@@ -36,4 +36,14 @@ void native_gr_post_multi(const float* residual, const float* block_out, const f
 void native_gr_post_multi(const float* residual, const float* block_out, const float* inject,
                           float* output, int n_embd, int hc, int n_tok, void* stream);
 
+// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): native_moe_combine (k = 10, shared row, the vec4 kernel's
+// expression: native_moe.cu compiles with the same --use_fast_math) and native_gr_post in one launch for one token:
+// y = sum_k parts[k] * weights[k] + shared (the first product rounded, then one fmaf per expert in order, then the
+// shared row), output[c][:] = fmaf(y, 2 sigmoid(inject[c] / hc), residual[c][:]) for the hc streams.  `y_out`
+// (nullable) also receives y.  parts (10 x n_embd), shared, residual, output and y_out 16-byte aligned, n_embd a
+// multiple of 4; output may equal residual exactly.
+void native_moe_combine_k10_post(const float* parts, const float* weights, const float* shared, float* y_out,
+                                 const float* residual, const float* inject, float* output, int n_embd, int hc,
+                                 void* stream);
+
 } // namespace strata::kernels
