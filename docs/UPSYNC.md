@@ -57,10 +57,10 @@ legge su `OnDevice(0)` = la 3060, e NVML risponde per la 3060. Il dimensionament
 |---|---|
 | `12a6f553`, solo `STRATA_PL_EARLY_CHAIN` (#910 di Hardin22) | opt-in, spento nel Daily (`strata-dueschede.json` non lo imposta) e assente in upstream 0.1.42: non cambia il comportamento da riprodurre |
 | `434ddca4` (`STRATA_SPLIT_COMMIT_ASYNC`, tempi per blocco) | sperimentale / diagnostica |
-| `d2f0d52a` `d868840b` `93af2041` `3634cad2` `3d702c72` | misure diagnostiche (lancio del grafo, budget WDDM per fase, PLE) |
+| `d2f0d52a` `d868840b` `93af2041` `3634cad2` | misure diagnostiche (lancio del grafo, budget WDDM per fase, PLE del decode); `3d702c72` (PLE) portato nel `lab/ports1` |
 | `dd8eba52` (punto quieto `el_plan`, `pl_el_held`), `1541e340` (`pl_el_watch`) | `dd8eba52` era già sostituito nel Daily da `1541e340` (che toglie `el_plan`/`pl_el_runs`/`pl_el_held`); di `1541e340` manca solo il log delle finestre dopo gli eventi elastici |
 | `be4cf1c0` (B6 di default) | B6 resta opt-in; su 0.1.42 MMVQ_IL viene scelto prima (vedi sotto) |
-| `15fd2eac` `3f436aab` `c88c2192` (`STRATA_PREFILL_EXACT_SMALL`, `STRATA_QSA_PREFILL_MULTI`, percorsi sm_75 `STRATA_TC_SM75`) | solo prefill; fuori dal decode che si misura |
+| `15fd2eac` `3f436aab` (`STRATA_PREFILL_EXACT_SMALL`, `STRATA_QSA_PREFILL_MULTI`) | codice morto nella configurazione del Daily (vedi «lab/ports1: prefill del Daily»); i percorsi sm_75 di `c88c2192` sono portati nel `lab/ports1` |
 | `b8a51dbc`..`df973585` | già dentro `c7f2b447` (tranne `8b9c342b`, portato col commit della pipeline) |
 | `bdaf85d6` (#1122) `0cc421e7` (#1110) `dab24920` (#1091) `0f3ffb3f` (#904) `a32b5e1c` (#931), commit HIP/gfx11 di Claude/Strata W | già in upstream (a mano da Niko) |
 | `fde196d9` (#1033) `5be83b69` (#1064) `f4a2590c` (#949) `65a1a138` (#965) | in upstream secondo i sorgenti (stringhe e funzioni presenti) |
@@ -140,7 +140,8 @@ Per confronti col Daily aggiungere `STRATA_ROUTE_TAIL_SKIP=0`.
   va ritarata (probabile 700-1000) prima di confrontare.
 - **`--prompt-cache-file`**: l'identità del file include exe, argomenti e variabili `STRATA_*`/`CUDA_*`: il file del
   Daily (`prompt-prefix-dueschede-v1.bin`) non corrisponde e verrebbe **sostituito**. Usare un percorso diverso.
-- `STRATA_PREFILL_EXACT_SMALL=1`, `STRATA_QSA_PREFILL_MULTI=1`: qui non esistono (solo prefill del fork): nessun effetto.
+- `STRATA_PREFILL_EXACT_SMALL=1`, `STRATA_QSA_PREFILL_MULTI=1`: qui non esistono; anche nel Daily non avevano effetto
+  (vedi «lab/ports1: prefill del Daily»).
   `STRATA_PARALLEL_INTERMEDIATE_QUANT=0` era già il default del fork e qui non esiste: nessun effetto.
 - Il riparto PCIe automatico (0.1.42) e la quota di prefill su CPU (0.1.41) valgono con una GPU sola: col layer split
   restano spenti, come nel Daily.
@@ -154,7 +155,9 @@ Per confronti col Daily aggiungere `STRATA_ROUTE_TAIL_SKIP=0`.
   `STRATA_DF_PDL` (solo sm_90+) e `STRATA_DF_QB_Q4` (solo KV q4_0) cambiano default anche loro ma non toccano la 3060,
   la 2080 Ti né `--kv int8`: lasciati come upstream.
 - **`STRATA_SELECT_SIMT`** (#1091, blocchi QSA FP32 a tile sotto sm_80): nel Daily acceso di default, in 0.1.42 opt-in
-  (`=1`). Riguarda solo il prefill; per un confronto di prefill col Daily `STRATA_SELECT_SIMT=1`.
+  (`=1`). Riguarda solo il prefill. **Dal `lab/ports1` (`83424a3b`) di nuovo acceso di default**, `=0` lo spegne.
+- **`--ple-io`**: 0.1.42 misura la lettura diretta all'avvio e, sotto 15 000 righe/s, passa da solo a mmap. Dal
+  `lab/ports1` (`aaf2e069`) resta in lettura diretta come nel Daily (`STRATA_PLE_AUTO_MMAP=1` per il passaggio).
 
 ### Kernel del decode cambiati da 0.1.40.1 a 0.1.42 (con le opzioni del confronto)
 
@@ -227,6 +230,52 @@ Da provare sul banco (B-A-B, stesse opzioni del confronto):
 Build `cc94edf7` (codice uguale a `ae719a8e`): compilato sì (`build_lock.py`, CUDA 75;86, test spenti, quindi
 `mmvq_il_parity` non compilato), `strata.exe` sha256 `80fbf7f584d3636f11fe4105e1ca554ae0d996ab2ed90f9876f19cb2dbd7d0f4`,
 in `corse_2080ti\20261004_routed_keep\build-ports1-cc94edf7\`. Installato no, provato no.
+
+## lab/ports1: prefill del Daily (PLE, SELECT_SIMT, percorsi sm_75)
+
+Misura del banco a 131k (L01, prefill di 131 248 token): Daily `be4cf1c` 75 s (PLE dal SATA `D:`); `lab/ports1`
+`cc94edf7` 260 s col PLE da `D:` e 100 s da NVMe `C:`. Confronto dei sorgenti di prefill tra `82f46a8` (base del Daily),
+`be4cf1c` e `lab/ports1`:
+
+| Differenza | Daily (commit del fork) | Causa | Port |
+|---|---|---|---|
+| sonda della PLE all'avvio | non c'è: sempre `--ple-io direct` | 0.1.42 (#1425 #1549 #1629) prova 64 righe per lotto a freddo e sotto 15 000 righe/s passa a mmap. Sul SATA `D:` ha misurato **1 259 righe/s** (`DET-n-plec-a/engine.log`) → mmap → **260 s**: mmap legge una pagina per fault, il diretto tiene `--ple-inflight` letture in volo e la lettura anticipata del chunk dopo le nasconde (Daily dal SATA: p50 12,8 ms, ma 75 s) | `aaf2e069`: resta diretto, la sonda avvisa; `STRATA_PLE_AUTO_MMAP=1` ripristina il passaggio |
+| diagnostica PLE del prefill | `3d702c72` | media/massimo/letture > 100 ms in `ple io:`, riga «the chunk at token N waited X ms for its PLE rows» | `b83454c8` |
+| diagnostica PLE del decode | `93af2041` | `strata decode PLE primary: gather ...` e `strata decode PLE before/after: ple io ...` con `STRATA_DECODE_TIMING` | `743b2d07` (conta anche il gather della pipeline delle finestre, che il Daily non contava) |
+| punteggi QSA del prefill sotto sm_80 | `dab24920` (#1091), **acceso di default** | 0.1.42 lo ha opt-in: la 2080 Ti torna al kernel warp (~1 TFLOPS contro ~6,9) | `83424a3b`: acceso di default, `STRATA_SELECT_SIMT=0` lo spegne |
+| dequant delle proiezioni con store da 16 B (sm_75) | `c88c2192` (snapshot sm_75) | il kernel per gruppo scrive 2 B ogni 64 B; 0.1.42 ha coalescato solo Q8_0 | `7bdce0f2`: valori identici, solo cc 7.5, `STRATA_TC_SM75=0` lo spegne |
+| proiezioni dell'hyper-connection (down, up, inject) e `ssm_alpha`/`ssm_beta` sui tensor core FP16 (sm_75, «hc16») | `c88c2192` | cuBLAS non ha GEMM BF16 sotto sm_80 e le fa in FFMA (19,5% del tempo GPU del prompt nel Daily). 0.1.42 ha un suo percorso FP16 (`STRATA_BF16_TC`) ma **spento su sm_75**, come nel Daily | `794268e4`: pesi BF16 ricodificati in FP16 una matrice alla volta (6,55 MB), immagini FP16 delle attivazioni scritte dagli stessi kernel `gr_*`; il layer del draft resta BF16 (−27 punti di accettazione misurati nel Daily); solo cc 7.5, `STRATA_TC_SM75=0` lo spegne. Non bit per bit col BF16 (attivazioni in FP16 invece di BF16), come nel Daily |
+
+Non portate, perché nel Daily non facevano niente:
+
+- `STRATA_QSA_PREFILL_MULTI=1` (`3f436aab`, nel JSON del Daily): il kernel sta in `qsa_block_scores`, che il prefill
+  chiama solo se `qsa_block_scores_tc` rifiuta. Con SELECT_SIMT acceso (default del Daily) la 2080 Ti prende il kernel
+  a tile, la 3060 quello TF32: il ramo non si raggiunge (servirebbero `STRATA_SELECT_SIMT=0`, `STRATA_SELECT_OLD` o
+  più di 2 milioni di query in un lotto).
+- `STRATA_PREFILL_EXACT_SMALL=1` (`15fd2eac`, nel JSON): legge solo `Prefill::request_chunk`, che nel Daily non chiama
+  nessuno (`generate.cpp` usa la sua lambda `request_chunk`).
+- `STRATA_PARALLEL_INTERMEDIATE_QUANT=0`: `=0` è il comportamento seriale, l'unico di 0.1.42.
+- `STRATA_PREFILL_STATS` / byte HtoD degli esperti, `closed_usage` (sonde), `chunk_max` (già nel port dell'elastica).
+
+Già di upstream o sostituite: #1033 (esperti residenti raggruppati, `fde196d9`), il top-k largo su Turing (`c3d6bb2c`),
+la PLE letta per chunk con lettura anticipata e il lettore batch (identici in 0.1.42). `STRATA_BF16_TC` di upstream
+(tutti i GEMM BF16 del prompt in FP16 su 7.x) resta spento su sm_75 come nel Daily: `hc16` ne copre i pezzi grossi.
+
+Il percorso PLE del decode è identico fra Daily e 0.1.42 (`prefetch_rows` alla preparazione della finestra,
+`gather_batch` al layer 0 o prima del lancio, stesso gather nella pipeline delle finestre; stesso lettore, stessa row
+cache, stesso `--ple-inflight` 256, stesso keep-awake): l'unica differenza è il passaggio a mmap della sonda, che in
+mmap toglie anche la row cache da 16M righe e le letture in volo. Torna col dato del banco: Daily da `D:` a `C:`
+−0,1% di decode e 76 → 73 s di prefill; nuova base +3,9% di decode e 260 → 100 s (da `C:` la sonda dice «fine» e resta
+diretta).
+
+Atteso: col PLE da `D:` di nuovo ~100 s o meno (il passaggio a mmap era il grosso); il resto (100 → ~75 s) da
+SELECT_SIMT e dai percorsi sm_75 sulla 2080 Ti, che nel log del `lab/ports1` è lo stadio che tira (265 W contro 43 W
+della 3060). Da misurare sul banco: L01 a 131k, Daily contro questa build, PLE da `D:` e da `C:`; poi
+`STRATA_SELECT_SIMT=0` e `STRATA_TC_SM75=0` per separare i due pezzi.
+
+Build `743b2d07`: compilato sì (`build_lock.py`, CUDA 75;86, test spenti), `strata.exe` sha256
+`24642b42c91d532c24a9cc9ef57b0f99e60d14398b20be8aa1d03a654e952226`, in
+`corse_2080ti\20261004_routed_keep\build-ports1-743b2d07\`. Installato no, provato no.
 
 ## Stato
 
