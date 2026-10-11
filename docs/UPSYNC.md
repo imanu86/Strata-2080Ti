@@ -126,9 +126,12 @@ Per confronti col Daily aggiungere `STRATA_ROUTE_TAIL_SKIP=0`.
   mancati che tutti i token della finestra mettono al rango 7 o oltre non vengono né copiati né calcolati. Risposte
   leggermente diverse e **meno lavoro sugli esperti**: anche col banco forzato il carico non è quello del Daily.
   `STRATA_ROUTE_TAIL_SKIP=0` torna al comportamento del Daily.
-- **MMVQ_IL** (T 2-4, bit per bit) è di default su entrambe le schede: cambia solo la velocità. `STRATA_MMVQ_IL=0`
-  rimette i kernel multi-colonna di 0.1.40. B6 (`STRATA_B6_MMVQ_ROWS=1`, nel Daily acceso) scatta solo dove IL non
-  prende la forma: per riprodurre il Daily `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1`.
+- **MMVQ_IL** (T 2-4, bit per bit) in 0.1.42 è di default **solo sulla 3060**: `il_arch_ok()` vuole sm_80+ (o
+  sm_70 con `STRATA_SM70_TABLE=1`), quindi la 2080 Ti (sm_75) resta sui kernel multi-colonna. Correzione del
+  `lab/ports1`: qui prima c'era scritto che sm_75 usava la tabella sm_80+, ma nel codice di 0.1.42 non succede.
+  Dal `lab/ports1` (PR #1437) la 2080 Ti ha la sua tabella per forma con `STRATA_MMVQ_IL=1` (vedi sotto).
+  `STRATA_MMVQ_IL=0` rimette i kernel multi-colonna di 0.1.40 su tutte e due. B6 (`STRATA_B6_MMVQ_ROWS=1`, nel Daily
+  acceso) scatta solo dove IL non prende la forma: per riprodurre il Daily `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1`.
 - **`STRATA_PIPELINE_ELASTIC`**: di default acceso con due schede e `--pipeline-windows` come nel Daily, col profilo
   architectds dal `da277800` (theta 0,10, verificata prima, lookup oltre una finestra). `STRATA_PIPELINE_ELASTIC=0`
   torna a upstream (theta 0,20, ordine D-A-B). Il riepilogo scrive `theta 0.10` e `yield on`.
@@ -164,11 +167,62 @@ del Daily, tolti l'attenzione QSA (sopra) e i `STRATA_DF_*`.
 | GDN (`gdn*.cu`), `gr.cu`, `native_gr_postops.cu`, `native_ple_postops.cu` | identici al Daily | nessuno |
 | esperti (`s2_expert_grouped.cu`, `shared_expert.cu`) | identici | nessuno |
 | HC (`fused_gr.cu`, `ccd657a2`) | prodotti della norma HC tenuti nello scratch esistente | bit per bit, neutro |
-| MMVQ (`native_mmvq.cu`, `q8_1_il.cuh`) | MMVQ_IL per T 2-4 di default; su sm_75 usa la tabella sm_80+ (manca il controllo di capability) | spento con `STRATA_MMVQ_IL=0`; B6 opt-in qui, di default nel Daily |
+| MMVQ (`native_mmvq.cu`, `q8_1_il.cuh`) | MMVQ_IL per T 2-4 di default sulla 3060; la 2080 Ti (sm_75) resta sui kernel multi-colonna (`il_arch_ok()`: sm_80+), tabella sm_75 opt-in dal `lab/ports1` | spento con `STRATA_MMVQ_IL=0`; B6 opt-in qui, di default nel Daily |
 | router (`native_router.cu`, `route_prior.cu`) | `STRATA_ROUTE_RESIDENT`, `STRATA_ROUTE_PRIOR` opt-in; route tail skip di default | nessuno con `STRATA_ROUTE_TAIL_SKIP=0` |
 | `iq_kernels.cu`, `verify_kernels.cu` | clamp delle scale q8_1 (#606, #1448), Volta mode 8 opt-in | trascurabile |
 | `dequant_bf16.cu`, `native_bf16.cu`, `sampler.cu`, `qsa_prompt_attn.cu` | Q8_0 coalescato, PDL sotto sm_70, sampler opt-in, Volta | nessuno sul decode a greedy |
 | `qsa_select.cu` | SIMT #1091 opt-in (di default nel Daily) | solo prefill |
+
+## lab/ports1: PR #1437 (MMVQ_IL su sm_75) e #1889 (`STRATA_SIDE_MIXER`)
+
+Branch `lab/ports1` da `lab/chainfuse` (`50c04dc0`). Due PR upstream ancora aperte, portate con `gh pr diff`:
+
+| Commit | PR | Cosa |
+|---|---|---|
+| `2f84fa7f` | #1437 (porting su 0.1.42: il PR è su un `main` precedente alle tabelle per architettura) | tabella `kIlRowsSm75` per forma esatta (n_in x n_out), solo con `STRATA_MMVQ_IL=1` esatto; `native_mmvq_il_supported(..., n_in)`, `native_mmvq_il_rows_for(cc, ..., n_in)`, `native_mmvq_il_last_rows()` |
+| `4ad73342` | #1437 | `mmvq_il_parity`: forme sm_75, controllo del percorso lanciato, opt-in rigoroso, `--sm75-bench` a coppie |
+| `ae719a8e` | #1889 (applicato com'è) | `STRATA_SIDE_MIXER=1/2`, più le chiamate IL del ramo con `n_in` ed esclusione di `STRATA_DF_BRANCH` in init |
+
+### MMVQ_IL su sm_75 e B6: chi vince
+
+La tabella sm_75 vale solo con `STRATA_MMVQ_IL=1` **esatto** (`true`, `yes` o non impostato la lasciano spenta; `=0`
+spegne IL su tutte e due le schede). La 3060 (sm_86) non cambia: `=1` o non impostato le danno la stessa tabella
+condivisa sm_80+. `STRATA_MMVQ_IL_ROWS` sovrascrive anche la tabella sm_75, ma solo con l'opt-in.
+
+Con `STRATA_MMVQ_IL=1` e `STRATA_B6_MMVQ_ROWS=1` insieme la scelta si fa per chiamata, in `verify.cpp` (`mm`):
+
+1. se la forma esatta e T (2-4) hanno una cella non nulla nella tabella della scheda, **vince IL** (kernel interleaved):
+   B6 non vede quella chiamata;
+2. altrimenti la chiamata va a `native_mmvq` e lì **vince B6** (Q4_K, Q5_K, Q6_K, IQ4_XS, layout esatto, niente
+   S26 tsum). Sulla 2080 Ti questo vuol dire: celle a 0 della tabella (es. IQ4_XS 2560x640 a T 2-3, Q6_K 2560x6144 e
+   6144x2560 a T 2), forme non elencate (le chiavi 2560x512 ecc.), finestre T 5+, e tutto quello che non passa dal
+   gate IL (draft, prompt).
+
+Con `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1` B6 prende tutto, come nel Daily. Non provato sulle schede: le
+celle in cui IL batte B6 sulla 2080 Ti vanno misurate (`mmvq_il_parity --sm75-bench` confronta IL con i kernel
+multi-colonna, non con B6; con `STRATA_B6_MMVQ_ROWS=1` nell'ambiente il lato «multi» del banco è B6).
+
+### `STRATA_SIDE_MIXER` e `STRATA_DF_BRANCH`: si sovrappongono
+
+Stessa idea (lavoro del mixer che legge solo l'input del layer su rami del grafo della finestra), passi in parte uguali:
+
+| | GDN | QSA | altro |
+|---|---|---|---|
+| `STRATA_DF_BRANCH` (qui acceso di default con CUDA su Windows) | a/b, z | catena di q, query dell'indicizzatore (solo `qb`) | copia di step/pos della finestra sul ramo; solo G = 1 (niente `--spec-split`), niente batch, niente profiler |
+| `STRATA_SIDE_MIXER=1` | a/b | tutta la catena dell'indicizzatore: chiave, snapshot della coda, append, query, punteggi, top-k | niente batch |
+| `STRATA_SIDE_MIXER=2` | a/b, z (anche col kernel IL) | come `=1` più la catena di q (anche col kernel IL) | niente batch |
+
+`=2` contiene tutto `STRATA_DF_BRANCH` tranne la copia degli input. Per questo non si accendono mai insieme: con
+`STRATA_SIDE_MIXER` a 1 o 2 `STRATA_DF_BRANCH` si spegne già in `Verifier::init` (i suoi stream non vengono creati)
+e in `record_window` (`br` falso). Il default Windows cede in silenzio; se `STRATA_DF_BRANCH` è chiesto in modo
+esplicito, stderr lo dice una volta. `STRATA_SIDE_MIXER=0` o non impostato: il codice di prima, stessi lanci nello
+stesso ordine. Dichiarato dal PR: bit per bit (exact7 7/7), +1,3% / +4,2% (tail skip acceso / spento) su una 5080
+Linux, `=2` 1,9% per giro meno di `STRATA_DF_BRANCH`. **Non provato** col layer split né su Windows; il rischio di
+stallo di #905 (fork/join nel grafo) è lo stesso di `STRATA_DF_BRANCH`, che da noi su Windows non si è mai visto.
+
+Da provare sul banco (B-A-B, stesse opzioni del confronto):
+- 2080 Ti: `STRATA_MMVQ_IL=1` contro non impostato, con e senza `STRATA_B6_MMVQ_ROWS=1`;
+- mixer: default (`STRATA_DF_BRANCH` acceso) contro `STRATA_SIDE_MIXER=2` (e `=1`).
 
 ## Stato
 
