@@ -2689,6 +2689,31 @@ constexpr IlRows kIlRows_70[] = {
     {13, {{0, 2, 2, 2, 2}, {0, 2, 2, 2, 2}, {0, 1, 2, 2, 2}}},   // Q5_K
     {14, {{0, 1, 1, 1, 1}, {0, 2, 2, 2, 2}, {0, 2, 2, 4, 2}}},   // Q6_K
 };
+// Turing (sm_75), PR #1437 (ported onto 0.1.42): an exact-shape table, opt-in with exactly STRATA_MMVQ_IL=1 (see
+// il_dispatch_rows).  Quadro RTX 8000, CUDA 12.4/GCC 13, mmvq_il_parity --sm75-bench: two sweeps of seven alternating
+// A/B pairs, cold-weight rotation, T=2/3/4; kept only the cells where every pair in both sweeps saves >= 3%, charging
+// the full interleave launch to each MMVQ.  Exact GGUF dense shapes (n_in x n_out) only, no row-class extrapolation:
+// an unlisted shape keeps native_mmvq's kernels.  Confirmed on an RTX 2080 Ti 22 GB (PR comment, +4.4% decode).
+struct IlShapeRows { int type, n_in, n_out; uint8_t r[3]; };
+constexpr IlShapeRows kIlRowsSm75[] = {
+    {23, 2560,    640, {0, 0, 2}},
+    {23, 2560,   6144, {2, 4, 2}},
+    {23, 2560,  10240, {2, 2, 2}},
+    {23, 2560,  12288, {2, 4, 2}},
+    {12, 2560,   6144, {2, 2, 2}},
+    {12, 2560,  10240, {2, 2, 2}},
+    {12, 2560,  12288, {4, 2, 2}},
+    {12, 6144,   2560, {4, 2, 2}},
+    {13, 2560,   6144, {2, 2, 2}},
+    {13, 2560,  10240, {2, 4, 4}},
+    {13, 2560,  12288, {4, 2, 4}},
+    {13, 6144,   2560, {0, 4, 4}},
+    {14, 2560,   6144, {0, 2, 4}},
+    {14, 2560,  10240, {2, 2, 4}},
+    {14, 2560,  12288, {2, 4, 4}},
+    {14, 6144,   2560, {0, 2, 2}},
+    {14, 2560, 248320, {2, 4, 2}},
+};
 struct IlArch { int cc; const IlRows* t; size_t n; };
 constexpr IlArch kIlArch[] = {
     {70, kIlRows_70, sizeof(kIlRows_70) / sizeof(IlRows)},   // Volta: PR 1401, measured on a V100-SXM2
@@ -2726,12 +2751,18 @@ const std::vector<IlEnvRow>& il_env_rows() {
 }
 }  // namespace
 // The rows a warp for a card of compute capability `cc` (major * 10 + minor); 0: native_mmvq's kernels.  Pure, so a test
-// can check every architecture's table without that card.
-int native_mmvq_il_rows_for(int cc, int type, int ncols, int n_out) {
+// can check every architecture's table without that card.  n_in: the reduction width, read only by sm_75's exact-shape
+// table (0: any width matches).  STRATA_MMVQ_IL_ROWS overrides every card's table, sm_75's too.
+int native_mmvq_il_rows_for(int cc, int type, int ncols, int n_out, int n_in) {
     if (ncols < 2 || ncols > 4) return 0;
     const int cls = n_out < 2048 ? 0 : n_out < 4096 ? 1 : n_out < 8192 ? 2 : n_out < 12288 ? 3 : 4;
     for (const IlEnvRow& e : il_env_rows())
         if (e.type == type && e.ncols == ncols) return e.r[cls];
+    if (cc == 75) {
+        for (const IlShapeRows& e : kIlRowsSm75)
+            if (e.type == type && e.n_out == n_out && (n_in == 0 || e.n_in == n_in)) return e.r[ncols - 2];
+        return 0;
+    }
     const IlRows* t = kIlRowsShared;
     size_t n = sizeof(kIlRowsShared) / sizeof(IlRows);
     for (const IlArch& a : kIlArch)
@@ -2753,16 +2784,29 @@ int il_cc() {
     }
     return cc[dev];
 }
-int il_rows(int type, int ncols, int n_out) { return native_mmvq_il_rows_for(il_cc(), type, ncols, n_out); }
+int il_rows(int type, int ncols, int n_out, int n_in) { return native_mmvq_il_rows_for(il_cc(), type, ncols, n_out, n_in); }
 int g_tune_rows = 0;   // native_mmvq_il_tune (tests, benchmarks): rows a warp for every shape (0: the table)
+thread_local int g_last_il_rows = 0;   // PR #1437: this thread's last native_mmvq_il launch (0: native_mmvq)
 }  // namespace
-void native_mmvq_il_tune(int rows) { g_tune_rows = rows; }
+void native_mmvq_il_tune(int rows) {
+    if (rows != 0 && rows != 1 && rows != 2 && rows != 4)
+        throw std::invalid_argument("native_mmvq_il_tune requires rows 0, 1, 2 or 4");
+    g_tune_rows = rows;
+}
+int native_mmvq_il_last_rows() { return g_last_il_rows; }
 
 namespace {
-// sm_80 and newer (measured on sm_86 and sm_120) and Volta (sm_70, its own table above); Pascal/Turing keep
-// native_mmvq's kernels unchanged
+// sm_80 and newer (measured on sm_86 and sm_120), Volta (sm_70) and Turing (sm_75), each with its table above; Pascal
+// keeps native_mmvq's kernels unchanged
 // Volta (PR 1401): opt-in with STRATA_SM70_TABLE=1 until the author confirms on a V100 with the final code
 bool sm70_opt_in() { const char* v = std::getenv("STRATA_SM70_TABLE"); return v != nullptr && std::atoi(v) != 0; }
+// Turing (PR #1437): opt-in with exactly STRATA_MMVQ_IL=1; unset, 0 and any other value (`true` too) keep sm_75 on
+// native_mmvq's kernels, as in 0.1.42.  (verify.cpp's g_mmvq_il() is a separate, looser switch: only `0...` turns the
+// interleaved calls off for every card.)
+bool sm75_opt_in() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_IL"); return v != nullptr && std::strcmp(v, "1") == 0; }();
+    return on;
+}
 bool il_arch_ok() {
     static int ok[16] = {};   // 0 unknown, 1 yes, -1 no, by device ordinal
     int dev = 0;
@@ -2778,19 +2822,33 @@ bool il_arch_ok() {
 }
 }  // namespace
 
-bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out) {
-    if (ncols < 2 || ncols > 4 || !g_multi_exact || !il_arch_ok()) return false;
-    return (g_tune_rows ? g_tune_rows : il_rows(ggml_type, ncols, n_out)) != 0 &&
-           (ggml_type == 23 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14);
+namespace {
+// rows a warp for this call on this card (0: native_mmvq's kernels).  The tuning override bypasses the table and the
+// sm_75 opt-in (tests must time the kernel, not the fallback), never the architecture or the exact layout.
+int il_dispatch_rows(int type, int ncols, int n_out, int n_in) {
+    if (ncols < 2 || ncols > 4 || n_out <= 0 || n_in < 0 || n_in % QK != 0 || !g_multi_exact ||
+        (type != 23 && type != 12 && type != 13 && type != 14)) return 0;
+    if (il_cc() == 75) {
+        if (g_tune_rows) return g_tune_rows;
+        return sm75_opt_in() ? il_rows(type, ncols, n_out, n_in) : 0;
+    }
+    if (!il_arch_ok()) return 0;
+    return g_tune_rows ? g_tune_rows : il_rows(type, ncols, n_out, n_in);
+}
+}  // namespace
+
+bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out, int n_in) {
+    return il_dispatch_rows(ggml_type, ncols, n_out, n_in) != 0;
 }
 
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
                     int n_out, int ncols, void* stream) {
-    if (!native_mmvq_il_supported(ggml_type, ncols, n_out)) {
+    g_last_il_rows = 0;
+    const int r = il_dispatch_rows(ggml_type, ncols, n_out, n_in);
+    if (!r) {   // B6 (STRATA_B6_MMVQ_ROWS) can still take this call inside native_mmvq
         native_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream);
         return;
     }
-    const int r = g_tune_rows ? g_tune_rows : il_rows(ggml_type, ncols, n_out);
     validate_shape(n_in, ncols, QK);
     validate_pointer(weights);
     validate_pointer(x_il);
@@ -2804,6 +2862,7 @@ void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, cons
     case 14: launch_il_rows<IlQ6K>(r, weights, x_il, y, n_in, n_out, ncols, s); break;
     }
     launch_check();
+    g_last_il_rows = r;
 }
 
 #else  // HIP: no interleaved path
@@ -2811,13 +2870,14 @@ std::size_t native_q8_1_il_bytes(int n_in, int ncols) { return native_q8_1_bytes
 void native_q8_1_interleave(const void*, void*, int, int, void*) {
     throw std::invalid_argument("native_q8_1_interleave is CUDA only");
 }
-bool native_mmvq_il_supported(int, int, int) { return false; }
-int native_mmvq_il_rows_for(int, int, int, int) { return 0; }
+bool native_mmvq_il_supported(int, int, int, int) { return false; }
+int native_mmvq_il_rows_for(int, int, int, int, int) { return 0; }
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void*, float* y, int n_in, int n_out,
                     int ncols, void* stream) {
     native_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream);
 }
 void native_mmvq_il_tune(int) {}
+int native_mmvq_il_last_rows() { return 0; }
 #endif  // !__HIPCC__
 
 } // namespace strata::kernels

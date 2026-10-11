@@ -149,15 +149,21 @@ std::size_t native_q8_1_il_bytes(int n_in, int ncols);
 // to x_il (native_q8_1_il_bytes): the same values in the same bytes.
 void native_q8_1_interleave(const void* x_q8_1, void* x_il, int n_in, int ncols, void* stream);
 // True when native_mmvq_il runs its own kernel for this call (IQ4_XS, Q4_K, Q5_K, Q6_K, 2-4 columns, the exact layout).
-bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out);
+// n_in: the reduction width - sm_75's table (opt-in, exactly STRATA_MMVQ_IL=1, PR #1437) is by exact shape; 0 asks
+// whether any measured width matches.  sm_80+ and sm_70 keep their row-class tables.
+bool native_mmvq_il_supported(int ggml_type, int ncols, int n_out, int n_in);
 // native_mmvq for 2..4 columns whose copy native_q8_1_interleave wrote, bitwise native_mmvq's output: kernels in which a
 // warp takes 1, 2 or 4 rows and reads the columns from the interleaved copy; native_mmvq (x_q8_1) when not supported.
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
                     int n_out, int ncols, void* stream);
 // The table's rows a warp (0, 1, 2, 4; 0 = native_mmvq's kernels) for a card of compute capability `cc` (major * 10 + minor).
 // Per-architecture tables plus STRATA_MMVQ_IL_ROWS; see native_mmvq.cu and docs/MMVQ_IL_TABLE.md.
-int native_mmvq_il_rows_for(int cc, int ggml_type, int ncols, int n_out);
-// Tests and benchmarks: every native_mmvq_il call takes `rows` a warp (0: the table).
+// cc 75: the exact-shape table (n_in 0 = any width), without the STRATA_MMVQ_IL=1 opt-in that the dispatch adds.
+int native_mmvq_il_rows_for(int cc, int ggml_type, int ncols, int n_out, int n_in = 0);
+// Tests and benchmarks: every native_mmvq_il call takes `rows` a warp (0: the table), on sm_75 without the opt-in too.
 void native_mmvq_il_tune(int rows);
+// Host-side observation of this thread's last native_mmvq_il launch: 0 native_mmvq, else rows a warp.  No device work
+// or synchronization; also records the path chosen during graph capture.
+int native_mmvq_il_last_rows();
 
 } // namespace strata::kernels
