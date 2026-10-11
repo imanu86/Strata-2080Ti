@@ -10697,7 +10697,7 @@ int main(int argc, char** argv) {
                     const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
                     const uint64_t held = incoming ? incoming->bytes() : 0;
                     if (!ec && bytes <= strata::core::prefix_cache_max_bytes + 88 &&
-                            strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), bytes + held + 1024 * 1024, floor)) {
+                            strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes + held + 1024 * 1024, floor)) {
                         std::vector<int32_t> prefix(ids.begin(), ids.begin() + disk_root);
                         strata::core::SavedConversation image;
                         // One GPU: the whole-session form, as before.  A layer split: the same checks as a parked
@@ -11569,7 +11569,7 @@ int main(int argc, char** argv) {
                         }
                         if (sized &&
                                 estimate <= strata::core::prefix_cache_max_bytes &&
-                                strata::core::conversation_memory_admit(strata::core::conversation_available_memory(), estimate, floor)) {
+                                strata::core::conversation_memory_admit(strata::core::available_host_bytes(), estimate, floor)) {
                             strata::core::SavedConversation image;
                             bool captured = n_st == 0
                                 ? strata::core::conversation_snapshot_save(image, view, ss, g, use_mtp ? &mtp.kv_state() : nullptr, err)
