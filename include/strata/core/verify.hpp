@@ -254,6 +254,7 @@ public:
     /// argmax rows), for a chain launched behind it on the device.
     cudaEvent_t done_event() const { return ev_done_; }
     const int32_t* out_dev() const { return m_out_; }
+    const int32_t* out_host() const { return h_out_; }
     /// pl_finish samples on the host (a sampled request, penalties, a logit bias): the graph's rows are not the picks.
     bool host_sampling() const {
         const bool sampled = !sampling_.greedy && sampling_.temperature > 0.0f;

@@ -3079,6 +3079,17 @@ bool Verifier::cp_prepare(std::string& err) {
     if (cp_min < 0.0 || exec_cp_[1] != nullptr || !cp_mask_.empty()) return true;   // off, or prepared already
     cp_mask_.assign((size_t) (le_ - lb_), 0);   // (non-empty from here on: decided once)
     if (!always_publish_ || all_resident_ || h_res_ == nullptr || hits_.d_res == nullptr) return true;
+    // STRATA_ROUTE_RESIDENT / STRATA_ROUTE_PRIOR route by the device table in every layer: the marks this lever uploads
+    // at each launch would reach their routing sooner than res_upload does, and change their output - off beside them
+    const char* rp = std::getenv("STRATA_ROUTE_PRIOR");
+    if (route_resident_cfg().margin > 0.0f || (rp != nullptr && std::atof(rp) > 0.0)) {
+        std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: off beside STRATA_ROUTE_RESIDENT / STRATA_ROUTE_PRIOR\n");
+        return true;
+    }
+    if ((le_ - lb_) * 2 + 2 > kCpRings) {   // the rings of a split window (G = 2) must fit the map
+        std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: off, %lld layers in one stage\n", (long long) (le_ - lb_));
+        return true;
+    }
     const int64_t ne = g_->n_expert;
     std::string list;
     for (int64_t l = lb_; l < le_; ++l) {
@@ -3107,10 +3118,14 @@ bool Verifier::cp_prepare(std::string& err) {
     cp_rec_ = true;
     for (int T = 1; ok && T <= max_t_; ++T) ok = capture_into(T, exec_cp_[T], err);
     cp_rec_ = false;
-    if (!ok) {
+    if (!ok) {   // the lever only: the windows run the graphs they always ran (exec_)
         cudaGetLastError();
-        if (err.empty()) err = "verify: STRATA_CP_RESPLAN: allocation or capture failed";
-        return false;
+        std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: off, allocation or capture failed (%s)\n",
+                     err.empty() ? "out of memory?" : err.c_str());
+        err.clear();
+        for (auto& e : exec_cp_)
+            if (e) { cudaGraphExecDestroy(e); e = nullptr; }
+        std::fill(cp_mask_.begin(), cp_mask_.end(), (uint8_t) 0);
     }
     return true;
 }

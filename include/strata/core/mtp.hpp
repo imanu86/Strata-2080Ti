@@ -148,8 +148,9 @@ public:
     // window's picks (`out_dev`, mtp_chain_verdict) - no host turn between the window's end and the round.  At the
     // verdict chain_adopt takes it as the chain the host would launch (the same inputs: then only the remaining steps
     // are launched), or lets it finish and returns 0 so the caller launches the chain as before.
-    bool chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev, cudaEvent_t after,
-                         const float* src_R, int pre_steps, std::string& err);
+    /// `out_host`: the host view of `out_dev` (chain_adopt checks the rows the device read against the host's).
+    bool chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev, const int32_t* out_host,
+                         cudaEvent_t after, const float* src_R, int pre_steps, std::string& err);
     /// chain_launch's arguments: 1 = adopted (the chain is live, as after chain_launch), 0 = not (nothing in flight
     /// any more: launch it), -1 = an error.  No pre-launched chain: 0 at once.
     int chain_adopt(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
@@ -244,6 +245,7 @@ private:
     int pre_steps_ = 0;
     cudaEvent_t ev_pre_ = nullptr;                      ///< after the pre-launched round and steps
     strata::kernels::MtpChainVerdict pre_v_;
+    const int32_t* pre_out_host_ = nullptr;             ///< the window's picks as the host reads them
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
     int64_t n_vocab_ = 0;

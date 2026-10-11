@@ -1181,7 +1181,9 @@ void drive_note_split(void* user, const int32_t* ids, int64_t n, int64_t layer) 
     if (!d.usage.empty())
         for (int64_t i = 0; i < n; ++i)
             if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) layer * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
-    d.cache_hits += n;
+    d.cache_hits += n;     // (the multi dispatch's counts for a window whose entries are all VRAM hits)
+    d.experts += n;
+    d.layers = layer + 1;
 }
 /// critpath (docs/CRITPATH.md): an integer lever, `dflt` when unset or empty.
 int cp_env_int(const char* name, int dflt) {
@@ -12520,7 +12522,8 @@ int main(int argc, char** argv) {
                                     cv.repl[i] = (*forced)[(size_t) k];
                                 }
                             const int pre = std::max(1, std::min(cp_chain_pre, std::min(S_mtp - 1, mtp.max_t() - 2)));
-                            if (!mtp.chain_prelaunch(cv, v1.out_dev(), v1.done_event(), v1.final_R(0), pre, err))
+                            if (!mtp.chain_prelaunch(cv, v1.out_dev(), v1.out_host(), v1.done_event(), v1.final_R(0), pre,
+                                                     err))
                                 return die(err);
                             tre("CP", A.seq, pre);
                         }

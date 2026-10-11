@@ -1527,14 +1527,15 @@ int MtpDrafter::chain_poll(std::string& err) {
     return 1;
 }
 
-bool MtpDrafter::chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev, cudaEvent_t after,
-                                 const float* src_R, int pre_steps, std::string& err) {
+bool MtpDrafter::chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev,
+                                 const int32_t* out_host, cudaEvent_t after, const float* src_R, int pre_steps,
+                                 std::string& err) {
     const OnDevice on_device(device_);
     if (chain_live_ || pre_live_) { err = "mtp: a chain is already in flight"; return false; }
     if (!force_on_ || ev_chain_ == nullptr || h_force_ == nullptr) { err = "mtp: chains need prepare_chain"; return false; }
     const int T = v.T;
     if (T < 1 || T > max_t_ || pre_steps < 0 || pre_steps > max_t_ - 2 || v.b_T < 0 || v.b_T > 8 || out_dev == nullptr ||
-        after == nullptr || round_exec_[T] == nullptr) {
+        out_host == nullptr || after == nullptr || round_exec_[T] == nullptr) {
         err = "mtp: pre-launched chain arguments out of range";
         return false;
     }
@@ -1566,6 +1567,7 @@ bool MtpDrafter::chain_prelaunch(const strata::kernels::MtpChainVerdict& v, cons
     pre_live_ = true;
     pre_steps_ = pre_steps;
     pre_v_ = w;
+    pre_out_host_ = out_host;
     ++pre_launched;
     ms_draft += ms_since(t0);
     return true;
@@ -1584,6 +1586,9 @@ int MtpDrafter::chain_adopt(int T, const int32_t* tokens, int64_t p, int a, cons
     bool same = v.T == T && v.p == (long long) p && a_dev == a && nf_dev == n_force && n_out >= pre_steps_ + 1 &&
                 n_out <= max_t_ - 1;
     for (int j = 0; same && j < n_force; ++j) same = force[j] == v.b_tok[1 + j];
+    // and the rows themselves: what the device read (the mapped picks, or the forced bench's) is what the host passes
+    for (int t = 0; same && t < T; ++t)
+        same = tokens[t] == (v.repl[t] >= 0 ? v.repl[t] : ((const volatile int32_t*) pre_out_host_)[t]);
     if (!same) {
         // it ran on another guess (B changed after it was queued): it wrote only what a launch writes again, so let it
         // finish and the caller launches the chain as before
