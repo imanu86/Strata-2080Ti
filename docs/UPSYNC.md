@@ -197,3 +197,29 @@ riepilogo deve dire `theta 0.10`, `yield on`, e le speculative tornare verso 164
 
 Build precedente: `341542b7`, sha256 `e25c9e2f5e1d3857aba37a49e5d072d4907f3eb95cfd6aff08057ebd42bc4e64`
 (`build-upsync-341542b7\`), senza il profilo architectds.
+
+## Immagini con l'encoder su CPU (`strata-upsync-vision.json`)
+
+Il motore non cambia: `--vision` nella riga di comando (tabella delle posizioni M-RoPE per ogni stadio del layer split)
+e la sezione `"vision"` del JSON, che `serve/server.py` usa per avviare `strata-vision` accanto al motore.
+
+- `strata-vision.exe`: `tools/vision` di questo branch, CPU (`STRATA_VISION_CUDA=OFF`, `STRATA_PORTABLE=OFF`: AVX2 nativo
+  sul 5800X, OpenMP), llama.cpp `3cf03257` del Daily (stessa revisione di `setup.py`), cartella `build-vision-cpu`.
+  Compilato con `build_lock_cpu.py --project vision` (accanto a `build_lock.py`, stesso `build.lock`). sha256
+  `93441f400aeabbba101e21816d90279ab22a16358b84bb2c0223810e524695d4`, copiato in `build-upsync-133e3a69\`.
+- `llama-quantize.exe` (`--project quantize`, `build-llama-cpu`): accetta il mmproj (arch fittizia `clip` di llama.cpp).
+  `mmproj-Qwen3.8-Flash-Next-Q8_0.gguf` da BF16 (sha256 `b1a82259...49bd0`): 616.703.328 byte, sha256
+  `6cbb8943b156bed0aca85a48a2d33f1c820885c5787447b0c37985f54809b0fe`; 83 tensori in Q8_0, 27 in F16 (righe non
+  multiple di 32), 588 MiB contro 865.
+- Prova del solo encoder (niente motore, niente GPU): `test-1.jpeg` di mtmd, 300 token, 8 thread: Q8_0 3,09 s, BF16
+  3,91 s; coseno per token Q8_0/BF16 medio 0,9956, mediana 0,9996, 6 token sotto 0,95 e 3 sotto 0,9 (minimo 0,79),
+  L2 relativa 0,096. Peggio dei 0,9988 di DETAILS.md sul token peggiore: da guardare sulle risposte.
+- JSON: `strata-dueschede.json` + `--vision`, `--prompt-cache 16`, `--conversation-cache-mib 6144`,
+  `--conversation-cache-slots 2`, `"fit_max_tokens": true`, prefisso `prompt-prefix-upsync-v1.bin`, log
+  `strata_upsync_vision.log`; env `STRATA_VRAM_FREE=device STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1 STRATA_ATTN_DAILY=1
+  STRATA_ROUTE_TAIL_SKIP=0`; tolte `STRATA_PARALLEL_INTERMEDIATE_QUANT`, `STRATA_PREFILL_EXACT_SMALL`,
+  `STRATA_QSA_PREFILL_MULTI` (non esistono in 0.1.42). `"vision"`: `gpu` false, `threads` 8, `max_tokens` 300.
+- Server: `serve` e `tools` di questo branch (git archive) in `build-upsync-133e3a69\source\`, come per il Daily.
+
+Provato no: il motore con `--vision` sulle due schede, le immagini via API e via Claude Code, il riuso della cache del
+prompt con le immagini, e `--vram-reserve-mib 1393` con `STRATA_VRAM_FREE=device` (da ritarare).
