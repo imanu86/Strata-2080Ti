@@ -1191,6 +1191,170 @@ int cp_env_int(const char* name, int dflt) {
     return v != nullptr && v[0] != 0 ? std::atoi(v) : dflt;
 }
 
+/// draftwin (docs/DRAFTWIN.md), opt-in with STRATA_DW=1: the pipelined loop sizes its windows by expected tokens per
+/// millisecond instead of --spec-min-p alone.  A (fresh, on the critical path) and B (speculative, behind A) each take
+/// the T rows that maximize
+///
+///     V(T) = E(T) - R * [ C(class, T) + F * (1 - P_on(T)) ]
+///
+/// E(T) = 1 + the cumulative products of the drafts' calibrated acceptances (the tokens the window emits on average);
+/// C(class, T) = the measured verdict-to-verdict time of a window of that class and size (EMA per class x T, seeded by a
+/// linear prior); F = the fresh penalty (a fresh window against a speculative one of the same size, measured): the window
+/// after this one is speculative only when this one is accepted whole AND its bonus guess is right, P_on(T) = the
+/// cumulative acceptance of the T - 1 drafts times the acceptance of the first draft held back (its probability is known
+/// when the chain has produced it, else the running mean), so every row added multiplies P_on by the next draft's
+/// acceptance; R = the decode's running tokens per ms (Dinkelbach: a row pays when its tokens buy its time at the rate
+/// already reached).  The acceptance of a draft, given the drafts before it held, is learned online by depth and
+/// probability decile (prior = the drafter's own probability, weight STRATA_DW_PRIOR_N) from every verified row and from
+/// the bonus row's verdict on the first draft held back.  A's size is decided as soon as no further draft, even a sure
+/// one, could beat the best window over the outputs in (the wait for a chain step costs STRATA_DW_STEP_MS on the
+/// fresh path); B's the same without a step cost.  Only which rows are verified changes: every emitted token is the
+/// target's own.  Variables: STRATA_DW_R_SCALE (R scaled: > 1 stricter), STRATA_DW_TAIL (0: never a row below
+/// --spec-min-p), STRATA_DW_FPEN (scales F; 0 = the plain Dinkelbach rule), STRATA_DW_COST_FRESH / STRATA_DW_COST_SPEC
+/// ("a,b": prior ms = a + b * T), STRATA_DW_COST_PRIOR_N, STRATA_DW_STEP_MS, STRATA_DW_R0.
+struct DraftWin {
+    static constexpr int kDepth = 4, kBins = 10, kT = 8;
+    bool on = false, tail = true;
+    double r_scale = 1.0, prior_n = 8.0, cost_prior_n = 10.0, step_ms = 0.9, r0 = 0.065, fpen0 = 8.0, fpen_scale = 1.0;
+    double prior_a[2] = {17.5, 12.4}, prior_b[2] = {5.7, 3.8};   // fresh / speculative: ms = a + b * T (L02 at 131k)
+    double ok[kDepth][kBins] = {}, n[kDepth][kBins] = {};       // draft `depth` accepted / scored, by probability decile
+    double held_ok = 0.0, held_n = 0.0;                          // the first draft held back: right (the bonus row) / scored
+    double c_ms[2][kT + 1] = {}, c_n[2][kT + 1] = {};           // verdict intervals by class (0 fresh, 1 spec) and T
+    double tok_e = 0.0, ms_e = 0.0;                              // EMA of a window's tokens and ms: R = their ratio
+    // per request
+    int64_t a_sized = 0, a_shorter = 0, a_longer = 0, a_tail = 0, a_waited = 0;
+    int64_t b_sized = 0, b_shorter = 0, b_longer = 0, b_tail = 0;
+    DraftWin() {
+        on = cp_env_int("STRATA_DW", 0) != 0;
+        tail = cp_env_int("STRATA_DW_TAIL", 1) != 0;
+        auto num = [](const char* name, double dflt, double lo) {
+            const char* v = std::getenv(name);
+            return v != nullptr && v[0] != 0 ? std::max(lo, std::atof(v)) : dflt;
+        };
+        r_scale = num("STRATA_DW_R_SCALE", 1.0, 0.0);
+        prior_n = num("STRATA_DW_PRIOR_N", 8.0, 0.01);
+        cost_prior_n = num("STRATA_DW_COST_PRIOR_N", 10.0, 0.01);
+        step_ms = num("STRATA_DW_STEP_MS", 0.9, 0.0);
+        r0 = num("STRATA_DW_R0", 0.065, 0.001);
+        fpen_scale = num("STRATA_DW_FPEN", 1.0, 0.0);
+        auto pair = [&](const char* name, int c) {
+            const char* v = std::getenv(name);
+            if (v == nullptr || v[0] == 0) return;
+            double a = prior_a[c], b = prior_b[c];
+            if (std::sscanf(v, "%lf,%lf", &a, &b) == 2 && a >= 0.0 && b >= 0.0) { prior_a[c] = a; prior_b[c] = b; }
+        };
+        pair("STRATA_DW_COST_FRESH", 0);
+        pair("STRATA_DW_COST_SPEC", 1);
+        fpen0 = std::max(0.0, (prior_a[0] + 2.0 * prior_b[0]) - (prior_a[1] + 2.0 * prior_b[1]));
+    }
+    void reset_counters() { a_sized = a_shorter = a_longer = a_tail = a_waited = 0; b_sized = b_shorter = b_longer = b_tail = 0; }
+    static int bin(float p) { return std::clamp((int) (p * kBins), 0, kBins - 1); }
+    /// the acceptance of draft `depth` (0 = the first) with probability p, given the drafts before it held
+    double q(int depth, float p) const {
+        const int d = std::clamp(depth, 0, kDepth - 1), b = bin(p);
+        return (ok[d][b] + prior_n * (double) p) / (n[d][b] + prior_n);
+    }
+    void learn(int depth, float p, bool hit) {
+        if (!(p > 0.0f)) return;
+        const int d = std::clamp(depth, 0, kDepth - 1), b = bin(p);
+        ok[d][b] = 0.998 * ok[d][b] + (hit ? 1.0 : 0.0);
+        n[d][b] = 0.998 * n[d][b] + 1.0;
+    }
+    void learn_held(int depth, float p, bool hit) {
+        learn(depth, p, hit);
+        held_ok = 0.99 * held_ok + (hit ? 1.0 : 0.0);
+        held_n = 0.99 * held_n + 1.0;
+    }
+    double held_mean() const { return (held_ok + 0.4 * 4.0) / (held_n + 4.0); }
+    double cost(int c, int T) const {
+        T = std::clamp(T, 1, kT);
+        const double prior = prior_a[c] + prior_b[c] * T;
+        return (prior * cost_prior_n + c_ms[c][T]) / (cost_prior_n + c_n[c][T]);
+    }
+    void observe(int c, int T, double ms, int tokens) {
+        if (!(ms > 0.0) || T < 1 || T > kT) return;
+        c_ms[c][T] = 0.99 * c_ms[c][T] + ms;
+        c_n[c][T] = 0.99 * c_n[c][T] + 1.0;
+        if (ms_e <= 0.0) { tok_e = tokens; ms_e = ms; return; }
+        tok_e = 0.97 * tok_e + 0.03 * tokens;
+        ms_e = 0.97 * ms_e + 0.03 * ms;
+    }
+    double R() const { return r_scale * (ms_e > 0.0 ? tok_e / ms_e : r0); }
+    /// the fresh penalty: a fresh window against a speculative one, weighted by the sizes seen (prior when none)
+    double fpen() const {
+        double s = 0.0, w = 0.0;
+        for (int T = 1; T <= kT; ++T) {
+            const double wt = c_n[0][T] + c_n[1][T];
+            if (wt <= 0.0) continue;
+            s += wt * (cost(0, T) - cost(1, T));
+            w += wt;
+        }
+        return fpen_scale * std::max(0.0, w > 0.0 ? s / w : fpen0);
+    }
+    /// V(T) over the k drafts in (pr[j] = the chain's probability of draft j + 1, the window's row j + 1)
+    double value(int c, const float* pr, int k, int T, double R, double F) const {
+        double E = 1.0, qq = 1.0;
+        for (int t = 2; t <= T; ++t) { qq *= q(t - 2, pr[t - 2]); E += qq; }
+        const double ch = T - 1 < k ? q(T - 1, pr[T - 1]) : held_mean();   // the first draft held back
+        return E - R * (cost(c, T) + F * (1.0 - qq * ch));
+    }
+    /// the window size over the k drafts in: 1 .. min(S, k + 1) rows
+    int choose(int c, const float* pr, int k, int S, float min_p) const {
+        const int tmax = std::max(1, std::min(S, k + 1));
+        const double R = this->R(), F = fpen();
+        int bt = 1;
+        double best = value(c, pr, k, 1, R, F);
+        for (int T = 2; T <= tmax; ++T) {
+            if (!tail && min_p > 0.0f && pr[T - 2] < min_p) break;
+            const double v = value(c, pr, k, T, R, F);
+            if (v > best + 1e-9) { best = v; bt = T; }
+        }
+        return bt;
+    }
+    /// with k drafts in: could one more, even a sure one, still beat the best window over these?  If not, decide now
+    bool decided(int c, const float* pr, int k, int S, float min_p) const {
+        if (k + 2 > S || k + 1 > kT - 1) return true;
+        if (!tail && min_p > 0.0f)
+            for (int j = 0; j < k; ++j)
+                if (pr[j] < min_p) return true;   // no row past an unlikely draft: nothing left to wait for
+        const double R = this->R(), F = fpen();
+        double best = value(c, pr, k, 1, R, F);
+        for (int T = 2; T <= k + 1; ++T) best = std::max(best, value(c, pr, k, T, R, F));
+        float opt[kT + 1] = {};
+        for (int j = 0; j < k; ++j) opt[j] = pr[j];
+        opt[k] = 1.0f;
+        const double v = value(c, opt, k + 1, k + 2, R, F) - R * (c == 0 ? step_ms : 0.0);
+        return v <= best;
+    }
+    void report(std::FILE* f, int S) const {
+        std::fprintf(f, "strata draftwin: A %lld sized (%lld shorter, %lld longer than --spec-min-p's, %lld with a tail "
+                        "below it, %lld waited past its stop), B %lld sized (%lld shorter, %lld longer, %lld tail); R %.4f "
+                        "tok/ms, fresh penalty %.1f ms, held draft right %.2f\n",
+                     (long long) a_sized, (long long) a_shorter, (long long) a_longer, (long long) a_tail,
+                     (long long) a_waited, (long long) b_sized, (long long) b_shorter, (long long) b_longer,
+                     (long long) b_tail, R(), fpen(), held_mean());
+        std::string cs;
+        char b[64];
+        for (int c = 0; c < 2; ++c) {
+            cs += c == 0 ? " fresh" : " | spec";
+            for (int T = 1; T <= std::min(S, kT); ++T) {
+                std::snprintf(b, sizeof b, " %d:%.1f/%.0f", T, cost(c, T), c_n[c][T]);
+                cs += b;
+            }
+        }
+        std::fprintf(f, "strata draftwin cost (T: ms/n, prior-blended):%s\n", cs.c_str());
+        for (int d = 0; d < kDepth; ++d) {
+            std::string qs;
+            for (int k = 0; k < kBins; ++k)
+                if (n[d][k] >= 1.0) {
+                    std::snprintf(b, sizeof b, " %.1f:%.2f/%.0f", (double) k / kBins, ok[d][k] / n[d][k], n[d][k]);
+                    qs += b;
+                }
+            if (!qs.empty()) std::fprintf(f, "strata draftwin acceptance depth %d (decile: rate/n):%s\n", d, qs.c_str());
+        }
+    }
+};
+
 /// Layer split across GPUs: a later stage on its own device, with its own copy of the dense weights, a session, an
 /// expert cache for its layers, a verify window and a prompt path; the last one also holds the head (the drafter
 /// lives on its device too).
@@ -11783,6 +11947,7 @@ int main(int argc, char** argv) {
                     int32_t tok[8] = {};
                     float prob[8] = {};    // prob[i]: the drafter's probability of tok[i + 1]
                     float p_on = 0.0f;     // the chain's estimate that the window before is accepted whole, tok[0] its bonus
+                    float pb0 = 0.0f;      // draftwin: the chain's probability of tok[0] alone (the draft A held back)
                     // launched: on stage 0; finished: done on every front stage (all but the last); s1: on the last
                     bool ready = false, launched = false, finished = false, s1 = false, s1_done = false;
                     int fr = 0;            // front stages done
@@ -11801,6 +11966,9 @@ int main(int argc, char** argv) {
                 const float theta = pl_theta;
                 const int force_miss = pl_force_miss;
                 static const bool pl_log = pipe_dbg_env("STRATA_PIPELINE_LOG") != nullptr;
+                static DraftWin dw;      // draftwin (docs/DRAFTWIN.md): STRATA_DW=1 sizes A and B by tokens per ms
+                dw.reset_counters();
+                int dw_wait_seq = -1;    // the A whose decision draftwin held past --spec-min-p's stop (counted once)
                 // the snapshot of the GDN state window `seq` reads on front stage `st` (overlapped: before its launch
                 // there, on the stage's side stream)
                 auto snap_take = [&](int st, int seq) -> bool {
@@ -11911,6 +12079,17 @@ int main(int argc, char** argv) {
                     }
                     return std::max(1, std::min(T, 1 + avail - from));
                 };
+                // draftwin: A's size over the k outputs in (fresh class), against --spec-min-p's for the counters
+                auto dw_size_a = [&](const float* pr, int k) {
+                    const int t_min = t_rule(pr, 0, k);
+                    const int T = dw.choose(0, pr, k, S_mtp, (float) req_spec_min_p);
+                    ++dw.a_sized;
+                    if (T < t_min) ++dw.a_shorter;
+                    else if (T > t_min) ++dw.a_longer;
+                    if (T >= 2 && req_spec_min_p > 0.0 && pr[T - 2] < (float) req_spec_min_p) ++dw.a_tail;
+                    if (T != t_min) tre("DW", A.seq, t_min, T);
+                    return T;
+                };
                 // B from the chain's outputs: its row 0 is the guess at index `base`, its drafts follow
                 auto make_b = [&](const int32_t* oc, const float* op, int base, int avail, float pa) {
                     B = PW{};
@@ -11919,10 +12098,20 @@ int main(int argc, char** argv) {
                     B.p = A.p + A.T;
                     B.tok[0] = oc[base];
                     B.T = t_rule(op, base + 1, avail);
+                    if (dw.on) {   // draftwin: B's size by tokens per ms (speculative class)
+                        const int t_min = B.T;
+                        B.T = dw.choose(1, op + base + 1, avail - base - 1, S_mtp, (float) req_spec_min_p);
+                        ++dw.b_sized;
+                        if (B.T < t_min) ++dw.b_shorter;
+                        else if (B.T > t_min) ++dw.b_longer;
+                        if (B.T >= 2 && req_spec_min_p > 0.0 && op[base + B.T - 1] < (float) req_spec_min_p) ++dw.b_tail;
+                        if (B.T != t_min) tre("DW", B.seq, t_min, B.T);
+                    }
                     for (int i = 1; i < B.T; ++i) {
                         B.tok[i] = oc[base + i];
                         B.prob[i - 1] = op[base + i];
                     }
+                    B.pb0 = op[base];
                     B.p_on = pa * op[base];
                     if (force_miss > 0 && ++pl_fm % force_miss == 0) B.tok[0] = B.tok[0] == 0 ? 1 : 0;
                     B.ready = true;
@@ -12368,8 +12557,15 @@ int main(int argc, char** argv) {
                             if (!decided && req_spec_min_p > 0.0)
                                 for (int j = 0; j < k; ++j)
                                     if (mtp.chain_prob()[j] < (float) req_spec_min_p) { decided = true; break; }
+                            if (dw.on) {   // draftwin: decided once no further draft could beat the best window over these
+                                const bool d_dw = k >= S_mtp - 1 ||
+                                                  dw.decided(0, mtp.chain_prob(), std::min(k, S_mtp - 1), S_mtp, (float) req_spec_min_p);
+                                if (decided && !d_dw && dw_wait_seq != A.seq) { ++dw.a_waited; dw_wait_seq = A.seq; }
+                                decided = d_dw;
+                            }
                             if (decided) {
-                                A.T = t_rule(mtp.chain_prob(), 0, std::min(k, S_mtp - 1));
+                                A.T = dw.on ? dw_size_a(mtp.chain_prob(), std::min(k, S_mtp - 1))
+                                            : t_rule(mtp.chain_prob(), 0, std::min(k, S_mtp - 1));
                                 for (int i = 1; i < A.T; ++i) {
                                     A.tok[i] = mtp.chain_tok()[i - 1];
                                     A.prob[i - 1] = mtp.chain_prob()[i - 1];
@@ -12386,7 +12582,7 @@ int main(int argc, char** argv) {
                         const int32_t* oc = mtp.chain_tok();
                         const float* op = mtp.chain_prob();
                         if (r == 1 && chain_kind == 2 && !early_used) {
-                            A.T = t_rule(op, 0, std::min(chain_n, S_mtp - 1));
+                            A.T = dw.on ? dw_size_a(op, std::min(chain_n, S_mtp - 1)) : t_rule(op, 0, std::min(chain_n, S_mtp - 1));
                             for (int i = 1; i < A.T; ++i) {
                                 A.tok[i] = oc[i - 1];
                                 A.prob[i - 1] = op[i - 1];
@@ -12398,7 +12594,10 @@ int main(int argc, char** argv) {
                         if (!b_done && (chain_kind == 1 || early_used)) {
                             const int base = A.T - 1;                    // B's row 0: the guess of A's bonus
                             bool decided = r == 1 || k >= base + S_mtp;
-                            if (!decided && k > base + 1 && req_spec_min_p > 0.0)
+                            if (dw.on) {   // draftwin: B waits (off the critical path) while one more draft could pay
+                                if (!decided && k >= base + 1)
+                                    decided = dw.decided(1, op + base + 1, k - base - 1, S_mtp, (float) req_spec_min_p);
+                            } else if (!decided && k > base + 1 && req_spec_min_p > 0.0)
                                 for (int j = base + 1; j < k; ++j)
                                     if (op[j] < (float) req_spec_min_p) { decided = true; break; }
                             if (decided) {
@@ -12579,6 +12778,16 @@ int main(int argc, char** argv) {
                         rb_n[c][pl_prev_rolled ? 1 : 0][B.launched ? 1 : 0] += 1;
                         cls_tok[c] += a + 1;
                         cls_n[c] += 1;
+                        if (dw.on) {   // draftwin: this window's class and size cost this much; what its drafts taught
+                            if (A.seq > 0 && last_verdict > 0.0) dw.observe(c, A.T, now - last_verdict, a + 1);
+                            if (!A.sfx && !A.lookup) {
+                                // rows up to the first rejected one are observed; the ones after it are not comparable
+                                for (int j = 0; j < A.T - 1 && j <= a; ++j) dw.learn(j, A.prob[j], j < a);
+                                // every draft held: the bonus row says whether the first draft held back was right
+                                if (a == A.T - 1 && B.made && !B.lookup && B.pb0 > 0.0f)
+                                    dw.learn_held(A.T - 1, B.pb0, B.tok[0] == outp[(size_t) A.T - 1]);
+                            }
+                        }
                         last_verdict = now;
                     }
                     if (pl_log)
@@ -12765,6 +12974,7 @@ int main(int argc, char** argv) {
                         }
                     std::fprintf(stderr, "strata pipeline calibration (p_on decile: on/scored):%s\n", cal.c_str());
                 }
+                if (dw.on) dw.report(stderr, S_mtp);   // draftwin: its counters for this request, its tables so far
             }
             while (!pl_ran && !cancelled && produced_n < max_new) {
                 int T = use_mtp ? S_mtp : 1;   // no --mtp: one token a round unless a lookup draft fires
