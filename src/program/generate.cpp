@@ -6450,7 +6450,8 @@ int main(int argc, char** argv) {
     // fork (Daily 12a6f553): beside the pipeline the prompt path may borrow the core too - nothing decodes while a prompt
     // is read, and the lent slots are refilled before the decode as the tail's are (with only the 1.5 GiB tail lent the
     // 131k prompt read fell from ~85 s to 134 s)
-    const int64_t el_lend_floor = pipe_elastic_env() ? 0 : el_core;
+    // (not const: STRATA_RAM_CORE raises it to CUDA0's fixed core in the serve path, so no later replan lends the core)
+    int64_t el_lend_floor = pipe_elastic_env() ? 0 : el_core;
     // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
     // or with --prefill auto the largest chunk whose buffers take at most kAutoLendPct % of the slots (a
     // lent slot's expert is streamed during the prompt and refilled after it; measured on a 12 GB card, 32K Q2_0
@@ -7106,6 +7107,7 @@ int main(int argc, char** argv) {
             int32_t first_now = -1;        // where its buffers are laid out now
             int64_t lent_chunk = 0;
             std::vector<std::pair<int32_t, int32_t>> lent;
+            int64_t rc_floor = 0;          // STRATA_RAM_CORE: the fixed core's slots [0, rc_floor) are never lent
         };
         // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
         // per layer), otherwise max_blob each.
@@ -7131,6 +7133,45 @@ int main(int argc, char** argv) {
         // keeps the pinned-share rule.  STRATA_SPLIT_RING=N: N slots on a split; 0: the pinned-share rule.
         // (decided above, before the lend regions were sized: a no-op here unless the resident RAM mode skipped it)
         decide_split_ring();
+        // ---- STRATA_RAM_CORE=1 (docs/RAM_CORE.md): per cache (0: CUDA0's, i: stages[i-1]'s) a FIXED CORE of its lowest
+        // slots - the profile's hottest experts, which the startup fill put there first - that never changes hands: no
+        // adaptive swap picks it (core_adapt or not), the prompt path never borrows it, the elastic tail never shrinks
+        // into it, the elastic K/V never takes it.  Its experts then need no RAM copy and the arena gives those pages
+        // back (rc_arm, before the first request).  rc_floor[ci]: the slots a loan must leave, asked for BEFORE the loan
+        // is planned (STRATA_RAM_CORE_SLOTS_DEV<n>), so the loan takes only what lies above; rc_core[ci]: the core
+        // itself, settled once the loans are (CUDA0's default: the part of the elastic core the prompt does not borrow).
+        bool rc_req = false, rc_auto0 = false;
+        std::vector<int64_t> rc_core(1 + stages.size(), 0), rc_floor(1 + stages.size(), 0);
+        auto rc_env = [](int dev, int64_t def) -> int64_t {
+            const std::string name = "STRATA_RAM_CORE_SLOTS_DEV" + std::to_string(dev);
+            const char* v = std::getenv(name.c_str());
+            return v != nullptr && v[0] != '\0' ? (int64_t) std::atoll(v) : def;
+        };
+        constexpr int64_t kRcDefault = 3500;   // ~6 GB of a 2080 Ti's 1.78 MB slots
+        if (strata::core::ArenaExpertSource::ram_core_requested()) {
+            std::string why;
+            if (srcp != &arena_src || !arena_src.mapped()) why = "the experts are not in the resident arena (--mmap-experts / file tier)";
+            else if (host_res.empty() || d_res == nullptr) why = "no residency table (a fillable --expert-cache with --expert-profile is needed)";
+            else if (peer.valid()) why = "a peer GPU's expert tier (--peer-device) is on";
+            else if (drive.d.remote_count > 0 || remote_opt) why = "remote experts are on";
+            else if (!arena_src.ram_core_arm(why)) {}
+            if (!why.empty()) {
+                std::fprintf(stderr, "strata ram core: NOT armed: %s\n", why.c_str());
+            } else {
+                rc_req = true;
+                const int64_t r0 = rc_env(0, -1);
+                rc_auto0 = r0 < 0;
+                if (!rc_auto0) {
+                    int64_t c = std::min<int64_t>(r0, std::max<int64_t>(0, xcache.slots() - 128));
+                    if (el_core > 0) c = std::min(c, el_core);   // above the elastic core the tail may shrink
+                    rc_floor[0] = c;
+                    el_lend_floor = std::max(el_lend_floor, c);
+                }
+                for (size_t i = 0; i < stages.size(); ++i)
+                    rc_floor[i + 1] = std::min<int64_t>(std::max<int64_t>(0, rc_env(stages[i]->dev, kRcDefault)),
+                                                        std::max<int64_t>(0, stages[i]->cache.slots() - 128));
+            }
+        }
         std::vector<PfPart> pf_parts;
         // a cache too small to lend the prompt path its buffers would make it allocate them on top - on a card
         // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
@@ -7139,6 +7180,7 @@ int main(int argc, char** argv) {
             pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}});
             for (auto& st : stages)
                 pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});
+            for (size_t i = 0; i < pf_parts.size() && i < rc_floor.size(); ++i) pf_parts[i].rc_floor = rc_floor[i];
             // The two tests plan_lend makes for CUDA0 alone, one participant at a time: a loan must leave the
             // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
@@ -7146,6 +7188,7 @@ int main(int argc, char** argv) {
             auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
                 const int64_t k = part_slots(p, c);
                 if (p.cache == &xcache && k > xcache.slots() - el_lend_floor) return false;
+                if (k > p.cache->slots() - p.rc_floor) return false;   // STRATA_RAM_CORE: the fixed core is never lent
                 if (k <= 0 || k + 128 > p.cache->slots()) return false;
                 return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
             };
@@ -7182,6 +7225,7 @@ int main(int argc, char** argv) {
                                                                   kAutoLendPct * p.cache->slots() / 100));
                     // --elastic: the two-zone cache lends only its tail (fits_one refuses the core as well)
                     if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_lend_floor));
+                    budget = std::min(budget, std::max<int64_t>(0, p.cache->slots() - p.rc_floor));   // STRATA_RAM_CORE
                     const uint64_t avail = part_bytes(p, (int32_t) (p.cache->slots() - budget));
                     const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
                     room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
@@ -7532,7 +7576,31 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // STRATA_RAM_CORE: the loans are settled - each fixed core is what its floor asked for, never past its first
+        // lendable slot; CUDA0's default is the elastic core below the prompt path's loan (without the elastic cache,
+        // kRcDefault below it).  From here on el_lend_floor (CUDA0's replans) and rc_floor (the stages) keep it unlent.
+        if (rc_req) {
+            const int64_t first0 = !pf_parts.empty() && pf_parts[0].first >= 0 ? (int64_t) pf_parts[0].first : xcache.slots();
+            rc_core[0] = std::min<int64_t>(rc_auto0 ? (el_core > 0 ? el_core : kRcDefault) : rc_floor[0], first0);
+            rc_core[0] = std::max<int64_t>(0, std::min<int64_t>(rc_core[0], xcache.slots()));
+            el_lend_floor = std::max(el_lend_floor, rc_core[0]);
+            for (size_t i = 0; i < stages.size(); ++i) {
+                const bool lends = i + 1 < pf_parts.size() && pf_parts[i + 1].first >= 0;
+                const int64_t fi = lends ? (int64_t) pf_parts[i + 1].first : stages[i]->cache.slots();
+                rc_core[i + 1] = std::max<int64_t>(0, std::min(rc_floor[i + 1], fi));
+            }
+            for (size_t i = 0; i < pf_parts.size() && i < rc_core.size(); ++i) pf_parts[i].rc_floor = rc_core[i];
+        }
         kvg_start(borrow != nullptr ? (int64_t) lend_first : xcache.slots());
+        if (rc_req) kvg.floor = std::max<int64_t>(kvg.floor, rc_core[0]);   // the elastic K/V never takes the core
+        // STRATA_RAM_CORE: whether the expert of layer l in slot `slot` (of the layer's own cache) is in a fixed core
+        auto rc_fixed = [&](int64_t l, int32_t slot) -> bool {
+            if (!rc_req || slot < 0) return false;
+            const size_t ci = multi_gpu ? (size_t) stage_of(l) : 0;
+            return ci < rc_core.size() && (int64_t) slot < rc_core[ci];
+        };
+        std::atomic<int64_t> rc_swaps{0};      // the adaptive tier's swaps (adapt() may run on the pipeline's thread)
+        int64_t rc_swaps0 = 0;                 // ... at the previous request-end line
         // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last
         // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for
         // the widest window; a request without penalties gets a null buffer and takes the byte-for-byte
@@ -8574,7 +8642,9 @@ int main(int argc, char** argv) {
                     if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
                     // --elastic: the core never leaves - unless core_adapt; beside the pipeline el_core counts CUDA0's
                     // slots and a later stage's layers hold slots of their own cache
-                    else if (r[e] >= el_core || core_adapt || (pipe_elastic_env() && multi_gpu && stage_of(l) != 0))
+                    // STRATA_RAM_CORE: a fixed core's expert is never a victim, core_adapt or not
+                    else if (!rc_fixed(l, r[e]) &&
+                             (r[e] >= el_core || core_adapt || (pipe_elastic_env() && multi_gpu && stage_of(l) != 0)))
                         vict.emplace_back(u[e], e);
                 }
                 if (cand.empty() || vict.empty()) continue;
@@ -8589,6 +8659,7 @@ int main(int argc, char** argv) {
             }
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
+            rc_swaps.fetch_add((int64_t) swaps.size(), std::memory_order_relaxed);
             // the copies back read the cache of the card that owns each layer (see resident_stage_swaps)
             auto home_of = [&](int64_t layer) -> SwapHome {
                 const int stn = multi_gpu ? stage_of(layer) : 0;
@@ -8707,7 +8778,9 @@ int main(int argc, char** argv) {
         static const bool el_trace = std::getenv("STRATA_ELASTIC_TRACE") != nullptr;
         const int64_t el_step_max = 512ll << 20;   // at most this much per growth step (its copies are async)
         const int64_t el_shrink_step = std::max<int64_t>(64ll << 20, (int64_t) o.elastic_shrink_step_mib << 20);
-        const int64_t el_min_slots = std::max<int64_t>(256, el_core);   // the core is never shrunk
+        // the core is never shrunk (nor STRATA_RAM_CORE's fixed core, which lies inside it when the elastic core exists)
+        const int64_t el_fixed = std::max<int64_t>(el_core, rc_core[0]);
+        const int64_t el_min_slots = std::max<int64_t>(256, el_fixed);
         const int64_t el_chunk_max = sp_chunk_max > 0 ? sp_chunk_max : o.prefill_chunk;
         Clock::time_point el_last{};
         Clock::time_point el_stable_since = Clock::now();
@@ -8735,6 +8808,8 @@ int main(int argc, char** argv) {
             int64_t c = el_chunk_max;
             const int64_t k = plan_lend(c);
             if (k <= 0 || c > el_chunk_max) return;   // nothing fits (not above el_min_slots): keep the plan
+            // STRATA_RAM_CORE: plan_lend kept its count above el_lend_floor; the participant's own count must too
+            if (xcache.slots() - part_slots(pf_parts[0], c) < el_lend_floor) return;
             o.prefill_chunk = c;
             // 0.1.30: the loan lives in the participant (CUDA0 is the first; the elastic cache is single-GPU)
             pf_parts[0].first = (int32_t) (xcache.slots() - part_slots(pf_parts[0], c));
@@ -8755,7 +8830,7 @@ int main(int argc, char** argv) {
             for (int64_t l = 0; l < g.n_layers; ++l)
                 for (int32_t ex = 0; ex < (int32_t) g.n_expert && el_layer(l); ++ex) {
                     const size_t i = (size_t) (l * g.n_expert + ex);
-                    if (host_res[i] < el_core) continue;   // not resident, or in the core (never displaced)
+                    if (host_res[i] < el_fixed) continue;   // not resident, or in the core (never displaced)
                     const float u = have_usage ? drive.d.usage[i] : 0.0f;
                     (host_res[i] >= n ? tail : keep)[(size_t) l].emplace_back(u, ex);
                 }
@@ -9044,7 +9119,7 @@ int main(int argc, char** argv) {
                 const int32_t* r = a_res.data() + l * g.n_expert;
                 for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {
                     if (r[e] < 0) { if (u[e] >= 2.0f && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
-                    else vict.emplace_back(u[e], e);
+                    else if (!rc_fixed(l, r[e])) vict.emplace_back(u[e], e);   // STRATA_RAM_CORE: the core stays
                 }
                 if (cand.empty() || vict.empty()) continue;
                 std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
@@ -9388,6 +9463,78 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata trace: %s %lld %lld\n", what, a, b);
             std::fflush(stderr);
         };
+        // ---- STRATA_RAM_CORE: everything is laid out and nothing is lent - the fixed cores' RAM copies go now.  rc_slot_of:
+        // per residency index, the core slot its expert was given back in (-1: not in a core); every request's end checks
+        // the experts are still there (`fuori posto`, must be 0) and how many were read again from the file (must be 0).
+        std::vector<int32_t> rc_slot_of;
+        std::vector<int64_t> rc_n(rc_core.size(), 0), rc_kept_reg(rc_core.size(), 0);
+        std::vector<uint64_t> rc_bytes(rc_core.size(), 0);
+        auto rc_dev = [&](size_t ci) -> int { return ci == 0 ? 0 : stages[ci - 1]->dev; };
+        auto rc_log = [&](const char* when) {
+            if (!rc_req) return;
+            const double G = 1073741824.0;
+            int64_t misplaced = 0;
+            for (size_t i = 0; i < rc_slot_of.size(); ++i)
+                if (rc_slot_of[i] >= 0 && host_res[i] != rc_slot_of[i]) ++misplaced;
+            std::string per;
+            for (size_t ci = 0; ci < rc_core.size(); ++ci) {
+                char b[160];
+                if (ci == 0)
+                    std::snprintf(b, sizeof b, "dev%d %lld esperti (%.2f GiB) senza copia RAM", rc_dev(ci), (long long) rc_n[ci],
+                                  (double) rc_bytes[ci] / G);
+                else
+                    std::snprintf(b, sizeof b, ", dev%d %lld (%.2f GiB)", rc_dev(ci), (long long) rc_n[ci], (double) rc_bytes[ci] / G);
+                per += b;
+            }
+            const uint64_t cap = arena_src.arena_capacity();
+            const MemSample ms = mem_sample();
+            std::fprintf(stderr, "strata ram core: %s; arena da %.2f a %.2f GiB; riletti %lld (%s; fuori posto %lld; scambi "
+                                 "dell'adattamento %lld; privata %.2f GiB, working set %.2f GiB)\n", per.c_str(), (double) cap / G,
+                         (double) (cap - std::min(cap, arena_src.ram_core_bytes())) / G, (long long) arena_src.ram_core_reread(),
+                         when, (long long) misplaced, (long long) (rc_swaps.load() - rc_swaps0), (double) ms.commit_mib / 1024.0,
+                         (double) ms.rss_mib / 1024.0);
+            rc_swaps0 = rc_swaps.load();
+            std::fflush(stderr);
+        };
+        if (rc_req) {
+            const auto t0 = Clock::now();
+            const MemSample ms0 = mem_sample();
+            const auto& lay = strata::kernels::cpu::expert_layout();
+            rc_slot_of.assign(host_res.size(), -1);
+            std::vector<int64_t> held(rc_core.size(), 0);
+            for (size_t i = 0; i < host_res.size(); ++i) {
+                const int64_t l = (int64_t) i / g.n_expert;
+                if (!rc_fixed(l, host_res[i])) continue;
+                const size_t ci = multi_gpu ? (size_t) stage_of(l) : 0;
+                ++held[ci];
+                rc_slot_of[i] = host_res[i];
+                bool reg = false;
+                const uint64_t b = arena_src.ram_core_drop(l, (int64_t) i % g.n_expert, &reg);
+                if (b > 0) {
+                    ++rc_n[ci];
+                    rc_bytes[ci] += b;
+                } else if (reg) {
+                    ++rc_kept_reg[ci];
+                }
+            }
+            arena_src.ram_core_settle();
+            const MemSample ms1 = mem_sample();
+            for (size_t ci = 0; ci < rc_core.size(); ++ci) {
+                const strata::core::ExpertCache& c = ci == 0 ? xcache : stages[ci - 1]->cache;
+                std::fprintf(stderr, "strata ram core:   dev%d: nucleo fisso slot [0, %lld) di %lld (%lld esperti, %.2f GiB in "
+                                     "VRAM); %lld senza copia RAM, %lld tenuti nel prefisso registrato (%.2f GiB), mai "
+                                     "prestato, mai scambiato, mai ristretto\n", rc_dev(ci), (long long) rc_core[ci],
+                             (long long) c.slots(), (long long) held[ci],
+                             c.slot_offsets() != nullptr ? (double) c.slot_offsets()[rc_core[ci]] / 1073741824.0
+                                                         : (double) rc_core[ci] * (double) lay.max_blob / 1073741824.0,
+                             (long long) rc_n[ci], (long long) rc_kept_reg[ci],
+                             (double) arena_src.registered_bytes() / 1073741824.0);
+            }
+            std::fprintf(stderr, "strata ram core:   pagine restituite in %.0f ms; privata %.2f -> %.2f GiB, working set %.2f -> %.2f GiB\n",
+                         std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), (double) ms0.commit_mib / 1024.0,
+                         (double) ms1.commit_mib / 1024.0, (double) ms0.rss_mib / 1024.0, (double) ms1.rss_mib / 1024.0);
+            rc_log("avvio");
+        }
         {
             // what is left once everything is allocated: under WDDM a GPU filled to the brim does not fail, it pages -
             // and a page-in while the verify graph spins on a host flag stalls the request for good
@@ -9595,8 +9742,8 @@ int main(int argc, char** argv) {
             const int64_t want_free = (int64_t) reserve << 20, mapped = xcache.mapped_bytes();
             const int64_t before = xcache.slots();
             // what stays at least: the prompt path's smallest loan (256 tokens) and the 128 slots it must leave
-            const int64_t floor_slots = std::min<int64_t>(xcache.full_slots(),
-                128 + (pf_parts.empty() || pf_parts[0].first < 0 ? 0 : part_slots(pf_parts[0], 256)));
+            const int64_t floor_slots = std::max<int64_t>(rc_core[0], std::min<int64_t>(xcache.full_slots(),   // + STRATA_RAM_CORE
+                128 + (pf_parts.empty() || pf_parts[0].first < 0 ? 0 : part_slots(pf_parts[0], 256))));
             std::string note;
             if ((int64_t) free_b < want_free) {
                 const int64_t floor_b = xcache.bytes_of(floor_slots);
@@ -13198,6 +13345,7 @@ int main(int argc, char** argv) {
                         (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                         (long long) req_offload, chain_txt);
             std::fflush(stdout);
+            rc_log("fine richiesta");   // STRATA_RAM_CORE
             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
                             (int64_t) live.size() == p;
