@@ -103,7 +103,9 @@ P/H dice quanto rende). B-A-B; atteso: `ms_wait`/waitA dello stadio 1 giù per i
 layer-finestra), CPU host libera per l'altro stadio; `U` pochi per richiesta (uno per giro del tier, non uno per
 finestra).
 
-**Rischi.** Correttezza dipende dalla tabella device allineata (sopra); un errore lì produce output sbagliato, non un
+**Rischi.** Spento da solo accanto a `STRATA_ROUTE_RESIDENT`/`STRATA_ROUTE_PRIOR` (instradano con la tabella del device
+in ogni layer) e se la cattura del secondo set di grafi fallisce (riga `off, allocation or capture failed`).
+Correttezza dipende dalla tabella device allineata (sopra); un errore lì produce output sbagliato, non un
 blocco: confrontare `target picks replaced` e il testo. L'uso dei layer pianificati è contato dagli id (giusto), ma il
 lookahead CS-T e il trace di routing (`--dump-routing`) non li vedono. Maschera decisa una volta (prima cattura): un
 layer che diventa tutto residente dopo non entra. Due set di grafi: più tempo di cattura e un po' di memoria.
@@ -179,9 +181,14 @@ Poi le promosse insieme contro A.
 ## Stato della build
 
 Compilato sì (`build_lock.py`, CUDA 75;86, test spenti), installato no, provato no: nessuna GPU, nessun motore, nessun
-test. `strata.exe` dal codice di `7a267888`: sha256 `7c73ef0fe9530cfa3095500f2be88d2f679c0ec1831873adf6ba6f32b514e87f`,
+test. `strata.exe` dal codice di `39daa703`: sha256 `d5abe4738b4cd29d2a4438ac79c4d12aa1eeb08c212630d50bdb51851c3b09e8`,
 copiato con `build.json` in `moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\
 build-critpath2-<sha>\`. Senza `STRATA_CP_*` deve comportarsi come `lab/upsync` `431e28a7`.
+
+Revisione avversaria (sola lettura) prima della build: nessun rilievo alto; chiusi in `39daa703` i medi (RESPLAN spento
+accanto a `STRATA_ROUTE_RESIDENT`/`STRATA_ROUTE_PRIOR`, contatori `experts`/`layers` dei gruppi pianificati) e i bassi
+(limite degli squilli, RESPLAN che si spegne invece di fermare il motore se la cattura fallisce, controllo dei token
+letti dal device prima di adottare la catena).
 
 ## File toccati
 
