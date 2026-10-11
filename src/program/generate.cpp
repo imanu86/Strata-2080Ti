@@ -2161,6 +2161,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: --resident-cpu-experts requires --mmap-experts and a static --expert-profile\n");
         return 2;
     }
+    if (strata::core::RamDedup::requested() && !o.serve) {
+        std::fprintf(stderr,"strata RAM dedup: requires --serve and batch0 closed-world lifecycle\n"); return 2;
+    }
     const bool remote_caches = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 ||
                                o.expert_cache_remote[2] > 0;
     // A layer split keeps the resident RAM mode: every stage's GPU cache is left out of the RAM copy, and an adaptive
@@ -6045,6 +6048,25 @@ int main(int argc, char** argv) {
     // request hands them back and the slots are refilled with the profile's hottest experts.  Neither side's
     // addresses move, so every captured graph stays valid.  The context is never smaller: --max-context cells always
     // fit, the cache simply holds fewer experts while a long one is live.
+    // RAM dedup is armed only in the closed-world batch0 serve path. No decommit
+    // occurs while a blob_stable pointer can be used by a fill, stager or CPU job.
+    strata::core::RamDedup* dd = nullptr;
+    auto dd_evict = [&](size_t i, strata::core::ExpertCache& cache, int32_t slot,
+                        cudaStream_t stream, int device, std::string& e) -> bool {
+        return !dd || dd->present((int64_t)i/g.n_expert, (int64_t)i%g.n_expert) ||
+               (slot >= 0 && dd->evict((int64_t)i/g.n_expert, (int64_t)i%g.n_expert,
+                                     cache.device_slot(slot), (void*)stream, device, e));
+    };
+    // Rare wholesale cache remaps restore every absent owner before changing its
+    // backing. This is deliberately more conservative than the adaptive path.
+    auto dd_restore_primary = [&](std::string& e) -> bool {
+        if (!dd) return true;
+        for (size_t i=0;i<host_res.size();++i)
+            if (host_res[i]>=0 && (!multi_gpu || stage_of((int64_t)i/g.n_expert)==0) &&
+                !dd_evict(i,xcache,host_res[i],nullptr,0,e)) return false;
+        // Completion alone leaves RAM InFlight. Publish CPU-only only after landing.
+        return dd->drain(true,e);
+    };
     struct KvGrow {
         bool on = false;
         int64_t top = 0, lo = 0;          // slots [lo, top) hold no expert; their whole chunks may be with the K/V
@@ -6078,6 +6100,7 @@ int main(int argc, char** argv) {
         const int64_t need = strata::core::qsa_kv_elastic_need(target);
         if (need == 0) { kvg.cells = strata::core::qsa_kv_elastic_cells(); return true; }
         quiesce();
+        if (!dd_restore_primary(err)) return false;
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
         std::vector<int32_t> owner;   // slot -> residency index
@@ -7779,6 +7802,26 @@ int main(int argc, char** argv) {
                 }
                 return {&xcache, adapt_stream, -1};
             };
+            // Queue recovery BEFORE retiring host_res or waiting for the pipeline
+            // fence. An out expert can become a CPU miss while that fence waits.
+            if (dd) for (const Swap& s : swaps) {
+                const size_t out=(size_t)s.layer*g.n_expert+s.out;
+                const int stn=multi_gpu?stage_of(s.layer):0;
+                GpuStage* gs=stn>0?stages[(size_t)stn-1].get():nullptr;
+                std::string de;
+                if (!dd_evict(out,gs?gs->cache:xcache,host_res[out],
+                              gs?gs->adapt_stream:adapt_stream,gs?gs->dev:0,de)) {
+                    std::fprintf(stderr,"strata RAM dedup fatal: %s\n",de.c_str()); return false;
+                }
+            }
+            // Keep every victim GPU-resident until its authoritative RAM copy is Present.
+            // The service can continue GPU-hit dispatch while this tier waits/lands.
+            if (dd && !swaps.empty()) {
+                std::string de;
+                if (!dd->drain(true,de)) {
+                    std::fprintf(stderr,"strata RAM dedup fatal: %s\n",de.c_str()); return false;
+                }
+            }
             if (!resident_stage_swaps(src, host_res, g.n_expert, swaps, home_of)) return false;
             if (pin_blobs_on()) {   // lock the batch's source pages (a file-backed arena on AMD; see pin_blobs)
                 std::vector<std::pair<uintptr_t, uintptr_t>> spans;
@@ -7924,6 +7967,7 @@ int main(int argc, char** argv) {
             const int64_t S = xcache.slots();
             if (n >= S) return true;
             apply_pending(true);
+            if (!dd_restore_primary(e)) return false;
             cudaDeviceSynchronize();
             const auto& lay = strata::kernels::cpu::expert_layout();
             const bool have_usage = !drive.d.usage.empty();
@@ -8771,6 +8815,7 @@ int main(int argc, char** argv) {
                     keep = floor_b;
                     note = " (the cache keeps its smallest size: the prompt path's buffers)";
                 }
+                if (!dd_restore_primary(e)) return false;
                 if (!xcache.shrink(keep, e)) return false;
                 const int64_t live = xcache.slots();
                 for (size_t i = 0; i < host_res.size(); ++i)
@@ -9209,6 +9254,118 @@ int main(int argc, char** argv) {
                 if (!pump(false)) return false;
             return true;
         };
+        if (strata::core::RamDedup::requested()) {
+#if !defined(_WIN32) || defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+            std::fprintf(stderr,"strata RAM dedup: unsupported platform/backend\n"); return 1;
+#else
+            if (o.batch!=0 || host_res.empty() || d_res==nullptr || srcp!=&arena_src || peer.valid() || remote_caches ||
+                !o.shared_expert_arena.empty() || fs_swap || drive.d.lookahead != nullptr || pin_blobs_on()) {
+                std::fprintf(stderr,"strata RAM dedup: requires batch0 anonymous arena, no helper/peer/foresight/dynamic pinning\n"); return 1;
+            }
+            if (!arena_src.dedup_arm(strata::core::RamDedup::bounce_bytes_env(),err)) {
+                std::fprintf(stderr,"strata RAM dedup: arm failed: %s\n",err.c_str()); return 1;
+            }
+            dd=arena_src.dedup();
+            std::fprintf(stderr,"strata RAM dedup: armed arena %.3f GiB actual registered %.3f GiB bounce %.3f GiB; default OFF\n",
+                         (double)arena_src.arena_bytes()/1073741824.0,
+                         (double)arena_src.registered_bytes()/1073741824.0,(double)dd->bounce_bytes()/1073741824.0);
+#endif
+        }
+        // DD-only: the final adaptive round may still be pending after the last window.
+        // Wait and publish at a fully idle boundary; OFF keeps its historical next-tick policy.
+        auto dd_settle_pending = [&](std::string& e) -> bool {
+            if (!dd || pending.empty()) return true;
+            if (drive.d.failed || peer.valid()) { e="RAM dedup: pending settle has failed/unsupported driver"; return false; }
+            int saved=-1;
+            if (cudaGetDevice(&saved)!=cudaSuccess) { e="RAM dedup: pending settle get device failed"; return false; }
+            auto restore=[&]() { if(cudaSetDevice(saved)==cudaSuccess)return true; e="RAM dedup: pending settle restore device failed"; return false; };
+            auto select=[&](int dev) { if(cudaSetDevice(dev)==cudaSuccess)return true; e="RAM dedup: pending settle select device failed"; return false; };
+            auto fence=[&](cudaError_t rc,const char* why) { if(rc==cudaSuccess)return true; e=std::string("RAM dedup: pending settle ")+why+": "+cudaGetErrorString(rc); return false; };
+            const auto t0=Clock::now();
+            for(int st=0;st<2;++st) for(int par=0;par<2;++par) {
+                auto* v=PV[st][par]; if(!v || (!pipe && par!=0))continue;
+                if(v->in_flight()) { e="RAM dedup: pending settle verifier still active"; restore(); return false; }
+                if(!select(v->device()) || !v->wait_commit(e) || !fence(cudaStreamSynchronize(v->stream()),"verifier fence failed")) { restore(); return false; }
+            }
+            if(!select(0) || !fence(cudaEventSynchronize(adapt_ev),"primary copy event failed")) { restore(); return false; }
+            for(auto& st:stages) if(st->adapt_live) {
+                if(!select(st->dev) || !fence(cudaEventSynchronize(st->adapt_ev),"stage copy event failed")) { restore(); return false; }
+            }
+            if(!restore())return false;
+            if(!dd->drain(true,e) || !dd->error().empty()) { if(e.empty())e=dd->error(); return false; }
+            // No host lease is retired until every copy and RAM landing above has succeeded.
+            unpin_blobs(pin_live);
+            src.commit_exchanges();
+            const size_t landed=pending.size();
+            for(const auto& [i,slot]:pending) {
+                host_res[(size_t)i]=slot;
+                srcp->release((int64_t)i/g.n_expert,(int64_t)i%g.n_expert);
+            }
+            if(d_res && (!select(0) || !fence(res_put(d_res),"primary residency upload failed"))) { restore(); return false; }
+            for(auto& st:stages) {
+                if(!select(st->dev) || !fence(res_put(st->d_res),"stage residency upload failed")) { restore(); return false; }
+            }
+            if(!restore())return false;
+            for(auto& st:stages)st->adapt_live=false;
+            pending.clear(); pending_age=0;
+            std::fprintf(stderr,"strata RAM dedup: postpipeline settle %zu pending, %.3f ms (before DONE; included in request timing)\n",landed,std::chrono::duration<double,std::milli>(Clock::now()-t0).count());
+            return true;
+        };
+        // Full quiet barrier invalidates opt-in blob_stable leases. Registered aliases
+        // remain protected; no eligible unregistered expert pointer survives in graphs.
+        auto dd_sweep = [&](std::string& e) -> bool {
+            if (!dd) return true;
+            const bool tier_busy=el_tier_busy && el_tier_busy();
+            if (drive.d.failed || !pending.empty() || !el_fill.empty() || tier_busy || !pin_live.empty() || mtp.chain_live()) {
+                char reason[320];
+                std::snprintf(reason,sizeof(reason),"RAM dedup: request did not become quiescent: driver_failed=%d pending=%zu el_fill=%zu tier_busy=%d pin_live=%zu chain_live=%d provisional_decommitted=%llu",
+                    (int)drive.d.failed,pending.size(),el_fill.size(),(int)tier_busy,pin_live.size(),(int)mtp.chain_live(),
+                    (unsigned long long)dd->decommitted_bytes());
+                e=reason; return false;
+            }
+            for (const PfPart& p : pf_parts) if (!p.lent.empty()) { e="RAM dedup: loan still active"; return false; }
+            int saved_device=-1;
+            if(cudaGetDevice(&saved_device)!=cudaSuccess) { e="RAM dedup: get device failed"; return false; }
+            auto select_checked=[&](int dev) {
+                if(cudaSetDevice(dev)==cudaSuccess)return true;
+                e="RAM dedup: select device failed"; return false;
+            };
+            auto restore_checked=[&]() {
+                if(cudaSetDevice(saved_device)==cudaSuccess)return true;
+                e="RAM dedup: restore device failed"; return false;
+            };
+            for (int st=0;st<2;++st) for(int par=0;par<2;++par) {
+                auto* v=PV[st][par]; if(!v || (!pipe && par!=0))continue;
+                if(v->in_flight()) { e="RAM dedup: verifier still active"; restore_checked(); return false; }
+                if(!select_checked(v->device())) { restore_checked(); return false; }
+                if(!v->wait_commit(e) || cudaStreamSynchronize(v->stream())!=cudaSuccess) {
+                    if(e.empty())e="RAM dedup: verifier fence failed"; restore_checked(); return false;
+                }
+            }
+            for (int dev=0;dev<(multi_gpu?(int)stages.size()+1:1);++dev) {
+                if(!select_checked(dev==0?0:stages[(size_t)dev-1]->dev)) { restore_checked(); return false; }
+                if(cudaDeviceSynchronize()!=cudaSuccess) { e="RAM dedup: device fence failed"; restore_checked(); return false; }
+            }
+            if(!restore_checked())return false;
+            if(!dd->drain(true,e) || !dd->error().empty()) { if(e.empty())e=dd->error(); return false; }
+            // All recovery landings are complete: this is maintained memory before new drops.
+            std::fprintf(stderr,"strata RAM dedup: pre-sweep decommitted %llu, net %.3f GiB (recovery drained)\n",
+                         (unsigned long long)dd->decommitted_bytes(),
+                         ((double)dd->decommitted_bytes()-(double)dd->bounce_bytes()-(double)dd->metadata_bytes())/1073741824.0);
+            const uint64_t before=dd->decommitted_bytes(), quota=strata::core::RamDedup::keep_quota_env();
+            uint64_t kept=0;
+            for(size_t i=0;i<host_res.size();++i) if(host_res[i]>=0) {
+                const int64_t l=(int64_t)i/g.n_expert;
+                const uint64_t bytes=strata::kernels::cpu::expert_layout().blob_bytes(l);
+                if(quota!=~0ull && kept<quota) { kept+=bytes; continue; }
+                uint64_t freed=0;if(!dd->drop(l,(int64_t)i%g.n_expert,freed,e))return false;
+            }
+            std::fprintf(stderr,"strata RAM dedup: quiet sweep released %.3f GiB, absent %lld, net %.3f GiB, D2H %lld/%.2f ms\n",
+                         (double)(dd->decommitted_bytes()-before)/1073741824.0,(long long)dd->absent(),
+                         ((double)dd->decommitted_bytes()-(double)dd->bounce_bytes()-(double)dd->metadata_bytes())/1073741824.0,
+                         (long long)dd->d2h_experts(),dd->d2h_ms());
+            return true;
+        };
         for (;;) {
             if (batch_on() || (piped && pipe_inflight())) {
                 if (!try_next_line(line)) {
@@ -9228,6 +9385,9 @@ int main(int argc, char** argv) {
                 if (piped && line.rfind("BSTOP ", 0) != 0 && !pipe_drain()) return 1;
             } else if (!next_line(line)) {
                 break;
+            }
+            if (dd && (o.batch!=0 || line.rfind("BGEN",0)==0 || line.rfind("BATCH",0)==0)) {
+                std::printf("ERR RAM dedup does not support runtime batch activation\n"); std::fflush(stdout); continue;
             }
             // --batch: BSTOP <slot> ends that slot at its next batch window; BGEN <slot> <max_new> ... reads the
             // request's prompt and first token as a GEN 1, then continues it in that slot
@@ -10315,6 +10475,16 @@ int main(int argc, char** argv) {
                     }
                     const strata::core::OnDevice on(p.dev);
                     const int32_t first = std::max<int32_t>(p.first, (int32_t) (p.cache->slots() - part_slots(p, want)));
+                    // Relayout may overwrite the loan immediately: recover its
+                    // original experts before handing these device pages to prefill.
+                    if (dd) {
+                        for (int64_t l=p.lb;l<p.le;++l) for (int64_t ex=0;ex<g.n_expert;++ex) {
+                            const size_t i=(size_t)(l*g.n_expert+ex);
+                            if (host_res[i]>=first && !dd_evict(i,*p.cache,host_res[i],nullptr,p.dev,e)) return false;
+                        }
+                        // A completed D2H is not yet committed RAM: land before lending.
+                        if (!dd->drain(true,e)) return false;
+                    }
                     if (want != p.sp->chunk() || first != p.first_now) {
                         if (!p.sp->relayout(want, p.cache->device_slot(first), part_bytes(p, first), e)) return false;
                         p.first_now = first;
@@ -10661,6 +10831,15 @@ int main(int argc, char** argv) {
                 return 1;
             }
             tr("prompt done (slots refilled)");
+            if (dd) {
+                const auto sweep_start = Clock::now();
+                if (!dd_sweep(err)) {
+                    std::printf("ERR RAM dedup predecode sweep: %s\n", err.c_str());
+                    std::fflush(stdout); return 1;
+                }
+                std::fprintf(stderr, "strata RAM dedup: predecode sweep %.3f ms (included in prompt/TTFT)\n",
+                             std::chrono::duration<double, std::milli>(Clock::now()-sweep_start).count());
+            }
             if (il_parts > 0)
                 std::fprintf(stderr, "strata batch: the prompt was read in %lld parts, the slots decoding %.0f ms between "
                                      "them\n", (long long) il_parts + 1, il_ms);
@@ -10990,6 +11169,7 @@ int main(int argc, char** argv) {
                     const Clock::time_point t0 = Clock::now();
                     const strata::core::OnDevice on(dev0);
                     if (plan.kind == 1) {
+                        if (!dd_restore_primary(err)) return false;
                         const int64_t S = xcache.slots(), n = plan.arg;
                         if (n >= S) return true;
                         int dropped = 0;
@@ -11478,6 +11658,7 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 while (mtp.chain_live() && mtp.chain_poll(err) == 0) {}
+                if (!dd_settle_pending(err)) { std::printf("ERR %s\n",err.c_str()); return 1; }
                 mtp.set_source_R(ver.final_R_all());   // the serial loop's rows again
                 const double pl_ms = std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count();
                 dt_run += pl_ms;
@@ -11838,6 +12019,7 @@ int main(int argc, char** argv) {
             if (o.lookup_chain > 0)
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
+            if (!dd_sweep(err)) { std::printf("ERR %s\n",err.c_str()); return 1; }
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s\n",
                         (long long) produced_n,
