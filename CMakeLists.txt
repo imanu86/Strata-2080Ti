@@ -421,6 +421,14 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
                          SKIP_RETURN_CODE 77)
   endif()
+  # chainfuse (docs/CHAINFUSE.md): the MTP chain step's fused segments (STRATA_CHAIN_FUSE2) against the default kernel
+  # sequences, bit for bit, with the microseconds of each (GPU, synthetic, no model).  Not in the default build:
+  # `cmake --build <dir> --target chain_step_bench`.
+  if(STRATA_ENABLE_CUDA)
+    add_executable(chain_step_bench EXCLUDE_FROM_ALL src/kernels/chain_step_bench.cpp)
+    target_include_directories(chain_step_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(chain_step_bench PRIVATE strata_kernels CUDA::cudart)
+  endif()
   # the QSA selection (block scores on the warp kernel and the tensor-core one, top-k): a GPU bench with a
   # scorer-vs-scorer comparison and an FP64 accuracy gate (synthetic, no model); the ctest runs a 32K context under a
   # 262144-cell capacity (the top-k dispatch follows the capacity) and exits non-zero on a failed gate
