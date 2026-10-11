@@ -226,7 +226,7 @@ Da provare sul banco (B-A-B, stesse opzioni del confronto):
 
 Build `cc94edf7` (codice uguale a `ae719a8e`): compilato sì (`build_lock.py`, CUDA 75;86, test spenti, quindi
 `mmvq_il_parity` non compilato), `strata.exe` sha256 `80fbf7f584d3636f11fe4105e1ca554ae0d996ab2ed90f9876f19cb2dbd7d0f4`,
-in `corse_2080ti61004_routed_keepuild-ports1-cc94edf7\`. Installato no, provato no.
+in `corse_2080ti\20261004_routed_keep\build-ports1-cc94edf7\`. Installato no, provato no.
 
 ## Stato
 
