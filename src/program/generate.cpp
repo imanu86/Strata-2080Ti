@@ -12292,17 +12292,19 @@ int main(int argc, char** argv) {
                             // served (the start of its gap: the least B can delay it when the layer does not fit)
                             if (!hold && v1.pl_serving() && cp_s1_seq == A.seq && cp_s1_last >= 0.0)
                                 hold = cp_now + cp_b_cost > cp_s1_last + cp_s1_gap - 0.03 && cp_now - cp_s1_last > 0.05;
+                            bool bound = false;
                             if (hold) {
                                 if (cp_b_wait0 < 0.0) cp_b_wait0 = cp_now;
                                 if (cp_now - cp_b_wait0 > cp_s1_max) {   // the bound: B's layer goes now
                                     hold = false;
+                                    bound = true;
                                     ++cp_b_forced;
                                 }
                             }
                             if (hold) {
                                 ++cp_b_held;
                                 serve_b = false;
-                            } else {
+                            } else if (!bound) {
                                 ++cp_b_gap;
                             }
                         }
