@@ -5,7 +5,8 @@ le patch del Daily, `STRATA_CP_*` di `docs/CRITPATH.md`, `STRATA_CHAIN_FUSE2` di
 Configurazione del Daily: 3060 = stadio 0 (layer 0-15), 2080 Ti = stadio 1 (layer 16-47, testa, drafter MTP),
 `--spec 4 --kv int8 --kv-resident 32768 --max-context 262144 --mtp rt_it48k`, chat singola a 131k.
 
-Stato: vedi «Stato della build» in fondo. Nessun motore avviato; micro-bench sì (`qsa_rows_bench`, sotto).
+Stato: vedi «Stato della build» in fondo. Micro-bench sì (`qsa_rows_bench`); una cattura nsys del motore (build
+`743b2d07`, §3) sotto `bench.lock`.
 
 ## 0. L'ipotesi e il verdetto
 
@@ -24,8 +25,10 @@ attenzione) costa per riga in più **29 µs sulla 2080 Ti** (22 con `STRATA_ATTN
 cioè **0,23 ms** (0,18) sugli 8 layer dello stadio 1 e **0,35 ms** (0,28) sui 4 dello stadio 0, contro i **3,0 e 2,8 ms**
 misurati per riga sui due stadi (§3): l'attenzione QSA e la selezione spiegano **l'8% circa** del costo per riga, non il
 grosso; l'ipotesi presupponeva 2,0 + 1,5 ms. Il costo per riga sta altrove (§3): esperti, GDN, hyper-connection, host.
-Il kernel multi-riga (§4) non è stato portato: anche azzerando del tutto il termine per riga dell'attenzione si
-guadagnerebbero al massimo 0,1-0,2 ms per riga e stadio.
+L'nsys per T del §3 lo conferma nel motore: per riga lo stadio 1 paga +3,26 ms, di cui esperti +1,31, MMVQ densi (B6)
++0,63, hyper-connection +0,48, attese host +0,36, QSA +0,30; lo stadio 0 +2,45, di cui esperti +1,04, MMVQ +0,59, hc
++0,41, QSA +0,24. Portato qui (§4) solo il pezzo QSA che conviene, bit per bit: `STRATA_QSA_ROWS=1`, i punteggi
+dell'indicizzatore (−0,06 / −0,12 ms per riga). Il kernel multi-riga dell'attenzione no (§4).
 
 ## 1. Come il codice tratta le T righe (verifica nel sorgente)
 
@@ -120,42 +123,117 @@ Con `STRATA_ATTN_DAILY=1`: attenzione 41,3 / 71,0 / 110,3 / 131,4 (+30,0 per rig
 - Il T = 1 del top-k (111 contro 82 µs) e della sequenza è più lento di T = 2: è la prima misura della serie (clock della
   scheda non ancora al massimo), non un effetto del kernel.
 
-## 3. Da dove viene davvero il costo per riga
+## 3. Da dove viene davvero il costo per riga: nsys per T, per famiglia e per stadio
 
-Misure del motore (`DET-cp-clean/pipe_trace.txt`, 3 richieste L02 a 131k, banco forzato, mediane; script
-`pipe_rows.py` ricostruibile: F0−L0 e F1−L1 per T):
+Cattura `DET-qsarows-nsys2` (12/10, build `build-ports1-743b2d07`, banco forzato L02 a 131k: `STRATA_FORCE_IDS` +
+`STRATA_FORCE_WINDOWS=ref_def1_trace.txt`, 286 finestre di L02 dopo una L01 di 16 token che scalda il prefisso, opzioni
+`--layer-split 16 --trim-stage-weights --pipeline-windows 2 --vram-reserve-later-mib 384 --host-core last`, env
+`STRATA_VRAM_FREE=device STRATA_ROUTE_TAIL_SKIP=0 STRATA_ATTN_DAILY=1 STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1
+STRATA_MTP_SHARED_BRANCH=0 STRATA_SIDE_MIXER=2`, `CUDA_VISIBLE_DEVICES=1,0`; `nsys profile --trace=cuda
+--cuda-graph-trace=node`, 1,26 M kernel; cartella `20261004_routed_keep\DET-qsarows-nsys2\` con `nsys_rows.txt`,
+`run_nsys.bat`; script `nsys_rows.py` e `run_nsys.py` in `20261004_routed_keep\`). Nessun crash a 286 finestre; il
+report `.nsys-rep`/`.sqlite` in `D:\ds4_work\strata\nsys\`.
 
-| | T=1 | T=2 | T=3 | T=4 | per riga |
+Metodo: i kernel di un lancio di grafo condividono il `correlationId` del `cudaGraphLaunch`; il grafo della finestra è
+uno per T (`exec_[T]`) e il T si legge da `gridZ` del kernel dei chunk dell'attenzione; device 0 = 3060 = stadio 0
+(712 nodi), device 1 = 2080 Ti = stadio 1 (1397 nodi). Per (stadio, T) la mediana sulle finestre del tempo kernel per
+famiglia, il muro del grafo (primo inizio → ultima fine) e i buchi (muro − unione dei kernel); il costo marginale per
+riga è la pendenza ai minimi quadrati sulle mediane T = 1..4. Finestre: stadio 0 n = 218/114/66/81, stadio 1
+110/81/45/58. In ms per finestra:
+
+**Stadio 0 (3060, layer 0-15)**
+
+| famiglia | T=1 | T=2 | T=3 | T=4 | **per riga** | kernel che la fanno |
+|---|---|---|---|---|---|---|
+| esperti VRAM | 1,93 | 2,97 | 4,12 | 5,00 | **+1,04** | `native_gu_multi` +0,51, `native_down_multi` +0,37, router `bf16_f32_mmvf(_multi)` +0,07, `route(_multi)` |
+| MMVQ densi | 2,52 | 3,17 | 3,64 | 4,32 | **+0,59** | a T=1 i kernel per formato (`q6_k` 0,60, `iq4_xs` 0,74, `q4_k` 0,33, `q5_k` 0,15, `small` 0,09 = 1,96); da T=2 `b6_mmvq_rows` 2,09 → 2,42 → 3,04 (+0,47 per riga) + `native_mmvq_multi` 0,18-0,26; `mmvq_multi` +0,07 |
+| hyper-connection | 1,58 | 2,05 | 2,50 | 2,80 | **+0,41** | `gr_up_multi` +0,21 (0,74 → 1,39), `gr_down_staged` +0,12 (0,73 → 1,09); `gr_norm_split`, `gr_write_norm_rs` piatti |
+| QSA | 0,68 | 0,89 | 1,15 | 1,40 | **+0,24** | `block_scores_multi` +0,14 (0,22 → 0,64), `attn_chunk_pre75` +0,09 (0,12 → 0,37), `block_topk_wide` piatto 0,30-0,32 |
+| GDN | 0,24 | 0,28 | 0,33 | 0,38 | +0,05 | `gdn_step_norm_multi` +0,03, `gdn_conv_l2_multi`, `gdn_ab_multi` |
+| attese host (`wait_flag_ge`) | 2,07 | 2,04 | 0,84 | 2,20 | ~0 | **2 ms piatti**: la GPU aspetta i flag dell'host per layer |
+| altro (copie, resolve, doorbell) | 0,26 | 0,31 | 0,38 | 0,60 | +0,11 | `copy_kernel`, `copy_rows_from_mapped`, `doorbell_publish` |
+| buchi fra i nodi | 0,01 | 0,01 | 0,01 | 0,01 | 0 | |
+| **muro del grafo** | **9,31** | **11,69** | **13,39** | **16,91** | **+2,45** | |
+
+**Stadio 1 (2080 Ti, layer 16-47, testa)**
+
+| famiglia | T=1 | T=2 | T=3 | T=4 | **per riga** | kernel che la fanno |
+|---|---|---|---|---|---|---|
+| esperti VRAM | 3,04 | 4,43 | 5,68 | 7,00 | **+1,31** | `native_gu_multi` +0,88 (1,56 → 4,21), `native_down_multi` +0,36 (0,73 → 1,82), router +0,08 |
+| MMVQ densi | 5,13 | 5,55 | 6,11 | 7,06 | **+0,63** | T=1 per formato (`q6_k` 1,52, `q5_k` 1,06, `q4_k` 0,56, `iq4_xs` 0,55, `small` 0,23 = 3,92); da T=2 `b6_mmvq_rows` 4,04 → 4,46 → 5,19 (+0,58 per riga, 134 chiamate) + `native_mmvq_multi` 0,25-0,31; `mmvq_multi` +0,11 |
+| hyper-connection | 2,42 | 2,71 | 3,22 | 3,85 | **+0,48** | `gr_up_multi` +0,27 (1,10 → 1,91), `gr_down_staged` +0,21 (1,04 → 1,66) |
+| attese host (`wait_flag_ge`) | 1,46 | 1,95 | 2,05 | 2,62 | **+0,36** | 96 attese per finestra: il servizio degli esperti per layer cresce con le righe |
+| QSA | 1,24 | 1,48 | 1,80 | 2,14 | **+0,30** | `block_scores_multi` +0,16 (0,34 → 0,82), `attn_chunk_pre75` +0,12 (0,18 → 0,55), `block_topk_wide` piatto 0,65-0,69 |
+| GDN | 0,39 | 0,45 | 0,54 | 0,65 | +0,09 | `gdn_step_norm_multi` +0,04, `gdn_ab_multi` +0,04 |
+| altro | 0,52 | 0,57 | 0,65 | 0,77 | +0,08 | copie, `resolve`, doorbell |
+| PLE | 0,08 | 0,08 | 0,08 | 0,08 | 0 | |
+| buchi fra i nodi | 3,49 | 3,57 | 3,57 | 3,64 | +0,05 | **3,5 ms piatti**: ~2,5 µs fra i 1397 nodi del grafo |
+| **muro del grafo** | **16,68** | **19,83** | **22,54** | **26,62** | **+3,26** | |
+
+(La catena del drafter sulla 2080 Ti: 1904 grafi di 54 kernel, muro 0,89 ms, di cui QSA 0,30 e MMVQ 0,36: il passo
+di `docs/CHAINFUSE.md`, invariato.) Le pendenze dei muri (+2,45 e +3,26 ms per riga) coincidono con le F0−L0 / F1−L1
+della traccia della pipeline (`DET-cp-clean`: +2,8 e +3,0 ms). Il QSA ne è il **10%** (stadio 0) e il **9%** (stadio 1),
+come il micro-bench del §2 prevedeva.
+
+### Le leve, in ms recuperabili per riga
+
+1. **Esperti (`native_gu_multi_kernel` / `native_down_multi_kernel`, `iq_kernels.cu`): +1,04 / +1,31 ms per riga.**
+   I pesi di un esperto sono già letti una volta per finestra (`GRP_NC = 4` righe per passata); il costo per riga è
+   quello degli esperti **distinti** in più (~9 per layer e riga, `VRAM hits` 24 → 35 per layer-window fra T 2 e 3,5) e
+   della loro decodifica IQ3_XXS: a T = 1 1,56 ms per 32 layer × 10 esperti × ~1,2 MB di gate/up = 12 MB per layer →
+   ~250 GB/s, il **40% della banda** della 2080 Ti; a T = 4 ~55%. Il kernel è legato alla decodifica dei codebook
+   IQ3_XXS e al prodotto per entrata, non alla banda. Recuperabile: portarlo al 70-80% della banda vale ~**0,5 ms per
+   riga sullo stadio 1 e ~0,4 sullo stadio 0** (più ~1 ms piatto a T = 1). Cosa serve: profilo del kernel (ncu: issue
+   slot, pipe della decodifica), poi una riscrittura della decodifica/lettura con le stesse somme per entrata (stesso
+   albero per esperto → stessi bit) o, fuori parità, un formato più leggero per gli esperti caldi. Lavoro grande.
+2. **MMVQ densi con B6 (`b6_mmvq_rows_kernel`, `native_mmvq.cu`): +0,47 / +0,58 ms per riga.** I pesi sono letti una
+   volta ma il kernel paga ~0,3 ms per riga e stadio di prodotti Q8_1 (il micro-bench B6 dava 0,28 + 0,26); la 2080 Ti
+   ha dal `lab/ports1` la tabella MMVQ_IL sm_75 (`STRATA_MMVQ_IL=1`, PR #1437, bit per bit): B-A-B pronto, atteso
+   **0,2-0,4 ms per riga** se IL batte B6 sulle forme calde (Q6_K 2560×6144 / 6144×2560, IQ4_XS). Sulla 3060 la
+   tabella sm_80+ è di default in 0.1.42 e qui era spenta dall'env (`STRATA_MMVQ_IL=0` riproduce il Daily): stesso B-A-B.
+3. **Hyper-connection (`gr_up_multi_kernel`, `gr_down_staged_kernel`, `fused_gr.cu`): +0,41 / +0,48 ms per riga.**
+   65 chiamate per stadio di kernel piccoli (17 → 29 µs l'uno da T = 1 a 4): il lavoro per riga è dentro il blocco,
+   non su più blocchi. Recuperabile ~**0,3 ms per riga e stadio** con righe su blocchi distinti (stesse somme per riga →
+   stessi bit); serve leggere i due kernel e la loro geometria (`GrMulti`). Lavoro medio.
+4. **Attese host (`wait_flag_ge_kernel`): 2 ms piatti sullo stadio 0, 1,5 → 2,6 ms sullo stadio 1 (+0,36 per riga).**
+   È il thread host che serve gli esperti layer per layer (`CRITPATH`, `per-layer host`): fronte host, non kernel.
+5. **Buchi fra i nodi dello stadio 1: 3,5 ms piatti per finestra** (13% di una finestra T = 2): fusioni di nodi nel
+   grafo della verifica come in `CHAINFUSE` (−2,5 µs a nodo tolto); non è per riga ma è la voce piatta più grossa.
+6. **QSA: +0,24 / +0,30 ms per riga.** Metà sono i punteggi (`block_scores_multi`): fatto qui, §4 (`STRATA_QSA_ROWS=1`,
+   −0,06 / −0,12 ms per riga); l'altra metà è l'ondata in più del kernel dei chunk (§2), non conviene.
+
+## 4. `STRATA_QSA_ROWS=1`: i punteggi dell'indicizzatore con meno pressione per riga (bit per bit)
+
+Dall'nsys (§3) il kernel QSA che cresce di più con le righe è `block_scores_multi_kernel` (+0,14 / +0,16 ms per riga su
+4 / 8 layer: ~20 µs per chiamata e riga su entrambe le schede). Le chiavi sono già lette una volta per tutte le query;
+il costo per riga sta nelle **pipe di shared e shuffle**: per (blocco, query) 4 letture `LDS.128` delle fette di q e 5
+shuffle per testa (20 per blocco e query) — 32 769 blocchi × (4 LDS + 20 SHFL) per query ≈ 15-20 µs di sola emissione.
+`block_scores_rows_kernel<NQ>` (`qsa_select.cu`, NQ = 1..4): (1) le fette di q delle NQ query (4 teste × 4 float a lane)
+in **registri** per tutto il kernel (44 / 63 / 78 / 94 registri, STACK 0, `cuobjdump -res-usage`); (2) i prodotti di
+lane delle 4 teste **ridotti a scatter** con gli accoppiamenti di `warp_sum` (xor 16 e 8 tengono una testa per lane,
+poi 4, 2, 1: sei shuffle per le quattro teste invece di venti) e raccolti sulla lane 0 in ordine di testa (tre shuffle).
+Ogni somma addiziona gli stessi due operandi dello stesso livello di `warp_sum` (la somma float commuta), l'espressione
+del prodotto è lo stesso testo nello stesso file, i relu si sommano nell'ordine delle teste: **stessi bit** del kernel
+multi e del kernel per query. Blocco di coda e +1e9 come prima. Opt-in: `STRATA_QSA_ROWS=1` esatto, in
+`qsa_block_scores` per le chiamate senza `active_blocks` fino a 4 query (le finestre del decode); oltre, o senza la
+variabile, il kernel multi di prima.
+
+Parità e µs (`qsa_rows_bench --rows`, 12/10, `docs/qsa_rows_bench_rows_2026-10-12.txt`): punteggi **e** id del top-k
+identici (memcmp) a T = 1..4 a 131k e a contesto corto (celle 100-103, blocco di coda pieno), 16 casi su due schede, con e
+senza `STRATA_ATTN_DAILY`:
+
+| `qsa_block_scores`, µs a chiamata | T=1 | T=2 | T=3 | T=4 | per riga |
 |---|---|---|---|---|---|
-| stadio 0, `F0−L0` (3060, layer 0-15) | 22,05 | 24,64 | 29,16 | 30,53 | **+2,8 ms** |
-| stadio 1, `F1−L1` (2080 Ti, layer 16-47 + testa) | 13,16 | 15,57 | 18,33 | 22,14 | **+3,0 ms** |
-| passaggio `F0→L1` (host) | 0,17 | 0,19 | 0,20 | 0,20 | ~0 |
+| 2080 Ti, multi (riferimento) | 47,2 | 56,9 | 78,2 | 101,2 | +18,0 |
+| 2080 Ti, `STRATA_QSA_ROWS=1` | **36,2** | **38,0** | **49,2** | **54,6** | **+6,1** |
+| 3060, multi | 73,4 | 109,4 | 151,9 | 193,5 | +40,0 |
+| 3060, `STRATA_QSA_ROWS=1` | **63,3** | **75,5** | **98,0** | **130,2** | **+22,3** |
 
-I kernel QSA (§2) ne coprono 0,23 ms (stadio 1) e 0,35 ms (stadio 0): l'8% e il 12%. Il resto, per quanto si legge nel codice e nei contatori del motore:
+Nel motore: stadio 1 (8 layer) −0,09 ms a T = 1 e −0,37 a T = 4 per finestra; stadio 0 (4 layer) −0,04 e −0,25. Piccolo
+(1-1,5% di una finestra), sicuro, bit per bit. Il T = 4 sulla 3060 resta alto perché a 94 registri il kernel scende a
+2 CTA per SM: una versione a due passate di 2 query terrebbe 63 registri (da provare se la 3060 conta).
 
-1. **Esperti.** `strata decode timing … per layer-window: VRAM hits 23.16 (avg T 2.02)` contro `35.12 (avg T 3.53)`
-   (`DET-cp-clean/engine.log`, richieste 1 e 0): ~8-10 esperti distinti in più per riga e per layer (k = 10, con
-   sovrapposizioni), ognuno 1,47 MB sulla 3060 (4433 slot in 6,21 GiB) e 1,83 MB sulla 2080 Ti (9150 slot in 15,95
-   GiB, IQ3_XXS). A banda piena: stadio 1 32 layer × 9 × 1,83 MB = 0,53 GB → **0,86 ms per riga** (616 GB/s); stadio 0
-   16 × 9 × 1,47 MB = 0,21 GB → **0,59 ms** (360 GB/s). I kernel `gu_grouped_t` / `down_grouped_t` non sono alla banda
-   (nel drafter 24 + 15 µs per ~20 MB: ~50%), quindi il costo reale è probabilmente **1,2-1,7 ms** (stadio 1) e
-   **0,9-1,2** (stadio 0). Più gli esperti **CPU**: `CPU experts 0.52 ms (0.58 entries)` a T 2,02 contro `2.98 ms (4.08
-   entries)` a T 3,53 — ~0,75 ms l'uno, e il numero di mancati cresce con le righe (testi diversi: da ripetere sulla
-   stessa lista).
-2. **GDN** (36 layer): `gdn_step_norm_multi` esegue la ricorrenza delle T righe **in sequenza nello stesso kernel**
-   (lo stato S×S per testa letto una volta, aggiornato T volte); costo per riga piccolo ma su 36 layer: da misurare
-   (atteso 0,1-0,3 ms per stadio).
-3. **Hyper-connection** (`fused_gr.cu`, tre chiamate per layer, 4 stream): nel drafter 111 µs per passo a T = 1;
-   nel modello per layer e per riga la parte proporzionale a T è da misurare (kernel piccoli: più blocchi, non più
-   tempo, se restano sotto un'ondata).
-4. **Proiezioni**: MMVQ_IL / B6 multi-colonna, pesi letti una volta: ~0,3 ms per riga sulle due schede (B6, misurato).
-5. **Host per layer**: `per-layer host 1.52 → 4.80 ms/window` fra avg T 2,02 e 3,53 (richieste diverse), `jobs`,
-   `actq`, `plan`: il servizio degli esperti per layer cresce con gli esperti mancati, cioè con T.
-
-Dove guardare per gli 80 t/s: esperti (riga per riga sono ~metà del costo) e il loro servizio host; non l'attenzione
-QSA.
-
-## 4. Kernel multi-riga: disegno e perché non è in questa build
+### Il kernel multi-riga dell'attenzione: disegno e perché non è qui
 
 Un kernel «K/V caricati una volta per tutte le righe che hanno scelto la cella» è possibile **bit per bit** solo se
 ogni riga conserva la *propria* partizione in chunk (il massimo del chunk, la somma degli esponenziali e la piega dei
@@ -174,46 +252,49 @@ più a T = 4 (2080 Ti con `STRATA_ATTN_DAILY=1`) e sulla 3060 da T = 2: azzerand
 dell'attenzione misurato (§2) si guadagnerebbero al massimo 8 × 14-24 µs = **0,1-0,2 ms per riga** sullo stadio 1 e
 4 × 30-47 = **0,12-0,19 ms** sullo stadio 0, su 3,0 e 2,8: sotto il rumore del banco (±5% in t/s). Sul **window denso** del drafter
 (1024 blocchi, 5 ondate, 46 MB) il kernel multi-riga varrebbe ~200 µs per riga in più, ma il drafter attende con una
-riga sola: niente da guadagnare lì. `STRATA_QSA_ROWS` resta quindi un nome riservato (il bench accetta `--rows` e lo
-dice); se un giorno la verifica attende su T > 4 o su window densi, il disegno sopra è quello da portare, con
+riga sola: niente da guadagnare lì. `STRATA_QSA_ROWS` qui accende solo il kernel dei punteggi; se un giorno la verifica attende su T > 4 o su window densi, il disegno sopra è quello da portare, con
 `qsa_rows_bench --rows` come parità (memcmp per riga contro `qsa_decode_attn_batch`).
 
 ## 5. Come misurarlo nel motore (banco forzato B-A-B)
 
-Senza kernel nuovo non c'è un B-A-B da fare. Per attribuire il costo per riga nel motore, stesso exe e argomenti del
-Daily (`docs/UPSYNC.md`, «Riprodurre il Daily»), `STRATA_DECODE_TIMING=1`, `STRATA_FORCE_IDS` + `STRATA_FORCE_WINDOWS`
-della traccia di riferimento (le righe per finestra sono forzate, quindi uguali fra i bracci), `STRATA_PIPELINE_TRACE`:
+Stesso exe e argomenti del §3, `STRATA_DECODE_TIMING=1`, `STRATA_FORCE_IDS` + `STRATA_FORCE_WINDOWS` (righe per finestra
+forzate, uguali fra i bracci). Tre corse alternate B (`STRATA_QSA_ROWS=1`), A (senza), B:
 
-- `pipe_rows.py` (F0−L0 e F1−L1 per T) sulla traccia: il costo per riga di ogni stadio;
-- nsys di una richiesta (come `DET-cp-nsys5`) raggruppando i kernel per `cudaGraphLaunch` e per T della finestra:
-  somma per famiglia (esperti `*_grouped_t`, `gdn_*`, `gr_*`, MMVQ, QSA `attn_chunk_*`/`block_*`) e differenza T=4 − T=1;
-- `strata decode timing`: `VRAM hits` ed `entries` CPU per layer-window contro avg T, sulla stessa lista.
+- identità: `strata work: … accepted X of Y drafts … target picks replaced` uguale (gli id della selezione sono gli
+  stessi bit, quindi anche l'attenzione e i token);
+- tempo: `strata decode stage 1: GPU-reach wait` (−0,1/−0,4 ms per finestra secondo T), `strata pipeline: … ms/window`,
+  t/s; sotto il rumore (±5%) serve la traccia nsys o `STRATA_PIPELINE_TRACE` + `pipe_rows.py` (F1−L1 per T).
 
-B-A-B utili sul QSA, già disponibili: `STRATA_ATTN_DAILY=1` / niente (kernel dei chunk e merge v2: cambia l'occupazione,
-quindi le ondate a T = 4), `STRATA_SCORES_MULTI=0` (punteggi per query, griglia (max_blocks/8, n): per vedere quanto vale
-la lettura unica delle chiavi).
+Per le leve del §3: `STRATA_MMVQ_IL=1` contro `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1` (leva 2, pronta); nsys come
+`DET-qsarows-nsys2` (`run_nsys.bat NAME 500`, poi `nsys export --type=sqlite` e `nsys_rows.py`) dopo ogni intervento
+sugli esperti o sulle hyper-connection: la tabella per famiglia e T dice se la pendenza è scesa.
 
 ## 6. Rischi e limiti
 
-- Il bench è sintetico: selezioni da punteggi casuali con query perturbate (unione 75-85% di una riga); una finestra
-  vera può sovrapporsi di più o di meno. Il costo dell'attenzione a cap 2051 non dipende dall'unione nel kernel attuale.
-- La residenza (`qsa_kv_resolve`, pagine a −1) non è nel bench: le celle mascherate costano meno, non di più.
-- I µs sono a GPU libera; nel motore i kernel QSA dello stadio 1 convivono con la catena del drafter e il merge legge
-  parziali già in L2.
-- L'attribuzione del §3 oltre il QSA è da contatori e da struttura del codice, non da nsys per T: è l'ordine di
-  grandezza, non la misura. Il passo successivo è l'nsys per T del §5.
+- La cattura nsys è una richiesta (L02, 286 finestre) con tracciamento acceso: i µs assoluti sono gonfiati di poco
+  (`--cuda-graph-trace=node`), le pendenze per T no (stesso rumore a ogni T); la classe fresca/speculativa non è
+  distinta (stesso grafo); la L01 di 16 token è servita solo a scaldare il prefisso.
+- `STRATA_PIPELINE_TRACE` non ha scritto il file in questa corsa (serve anche `STRATA_PIPELINE_DEBUG=1`, come in
+  `DET-cp-nsys5`): il confronto con F0−L0 / F1−L1 usa `DET-cp-clean`.
+- Il micro-bench è sintetico (selezioni da punteggi casuali, unione 75-85%); le pendenze nel motore (§3) lo confermano.
+- `STRATA_QSA_ROWS=1` a T = 4 usa 94 registri (2 CTA per SM): sulla 3060 il guadagno a T = 4 è un terzo, non la metà.
+- Le stime di recupero delle leve 1 e 3 sono dall'efficienza misurata (banda, µs per chiamata), non da un prototipo.
 
 ## Stato della build
 
-Compilato sì (`build_lock.py`, CUDA 12.6, sm_75+86, test spenti): `strata.exe` dal codice di `5dffa63f` (= `lab/ports1`
-`295d6e7f` nel motore: il branch aggiunge solo il bench, il target CMake e questo documento; **nessun kernel del motore è
-cambiato**), sha256 `68c6413615cd06de854cb472e6a4bad51c949851d571e382d9b535a892e64b22`, copiato con `build.json` in
-`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\build-qsarows-<sha>\`;
-`qsa_rows_bench.exe` nello stesso `build-sm7586\` del worktree. Installato no, provato no (nessun motore avviato);
-micro-bench sì, sulle due schede, sotto `bench.lock`. L'exe deve comportarsi come la build `cc94edf7` di `lab/ports1`.
+Compilato sì (`build_lock.py`, CUDA 12.6, sm_75+86, test spenti): `strata.exe` dal codice di `4d8ba8bb`
+(`STRATA_QSA_ROWS=1` opt-in; senza la variabile i lanci sono quelli di `lab/ports1` `295d6e7f`), sha256 vedi
+`build.json`, copiato con `qsa_rows_bench.exe`, i log dei bench e `build.json` in
+`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\build-qsarows-<sha>\`.
+Installato no, provato no (il motore sotto nsys è stato avviato sulla build `743b2d07`, non su questa); micro-bench sì
+sulle due schede sotto `bench.lock` (parità bit per bit e µs del §2 e del §4). La build precedente (`c6fd0440`, solo
+bench e documento) è in `build-qsarows-c6fd0440\` con sha256 `68c6413615cd06de854cb472e6a4bad51c949851d571e382d9b535a892e64b22`.
 
 ## File toccati
 
-- `src/kernels/qsa_rows_bench.cpp`, `CMakeLists.txt` (target `qsa_rows_bench`, `EXCLUDE_FROM_ALL`).
-- `docs/QSAROWS.md`, `docs/qsa_rows_bench_2026-10-12.txt` (l'uscita grezza del bench sulle due schede, con e senza
-  `STRATA_ATTN_DAILY=1`).
+- `src/kernels/cuda/qsa_select.cu`, `include/strata/kernels/qsa_select.hpp`: `block_scores_rows_kernel<NQ>`,
+  `qsa_block_scores_rows`, `STRATA_QSA_ROWS` in `qsa_block_scores`.
+- `src/kernels/qsa_rows_bench.cpp`, `CMakeLists.txt` (target `qsa_rows_bench`, `EXCLUDE_FROM_ALL`; `--rows` = parità e µs).
+- `docs/QSAROWS.md`, `docs/qsa_rows_bench_2026-10-12.txt`, `docs/qsa_rows_bench_rows_2026-10-12.txt` (uscite grezze).
+- Fuori dal repo (lab, `moe-aggressive-commit\...\20261004_routed_keep\`): `run_nsys.py` (run_long + `--cases`,
+  `--first-tokens`, variabili di iniezione nsys), `nsys_rows.py`, `pipe_rows.py`, `DET-qsarows-nsys2\`.
