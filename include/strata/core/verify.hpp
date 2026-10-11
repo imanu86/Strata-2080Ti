@@ -242,6 +242,32 @@ public:
     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
     void diag_pipelined(std::FILE* f, const char* name) const;
 
+    // ---- critical-path levers of the pipelined windows (docs/CRITPATH.md); all opt-in, the default graphs unchanged.
+    /// STRATA_CP_S1FIRST: the window in flight has a ring the host has not served yet (its GPU waits on it now).
+    bool pl_rang() const {
+        return fl_active_ && fl_k_ < fl_total_ && !ar_on() && *(volatile const uint32_t*) h_seq_ >= (uint32_t) (fl_k_ + 1);
+    }
+    /// ... has layers left for the host to serve (its GPU will ring again).
+    bool pl_serving() const { return fl_active_ && fl_k_ < fl_total_ && !ar_on(); }
+    int64_t pl_served() const { return fl_k_; }
+    /// STRATA_CP_CHAIN_PRE: the event after the last pipelined window's graph, and its picks on the device (the mapped
+    /// argmax rows), for a chain launched behind it on the device.
+    cudaEvent_t done_event() const { return ev_done_; }
+    const int32_t* out_dev() const { return m_out_; }
+    /// pl_finish samples on the host (a sampled request, penalties, a logit bias): the graph's rows are not the picks.
+    bool host_sampling() const {
+        const bool sampled = !sampling_.greedy && sampling_.temperature > 0.0f;
+        return head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr);
+    }
+    /// STRATA_CP_RESPLAN: the routes of a group the device planned (no host service) are still counted - the adaptive
+    /// tier ranks its victims by them.  Called with the pool's `user` instead of the pool.
+    using CpNoteFn = void (*)(void* user, const int32_t* ids, int64_t n, int64_t layer);
+    void set_cp_note(CpNoteFn fn) { cp_note_ = fn; }
+    int64_t cp_planned = 0;      ///< STRATA_CP_RESPLAN: layer-groups the device planned (no host service)
+    int64_t cp_host = 0;         ///< ... layer-groups of those layers the host served (a route outside VRAM)
+    int64_t cp_uploads = 0;      ///< ... residency table uploads before a launch (the host table had moved)
+    int cp_layers() const { int n = 0; for (uint8_t m : cp_mask_) n += m; return n; }
+
     /// Measurement hook (STRATA_LOGPOS): after run(), write one line per row t of the last window's head -
     /// "pos target logprob top top_logprob hit extra_logprob target_logprob_without_extra" - where row t is the
     /// distribution at pos0 + t, targets[t] is the token at pos0 + t + 1, extra_logprob is the log-probability of
@@ -332,6 +358,24 @@ private:
     double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;
     int32_t pl_prev_[2] = {-1, -1};
     std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served
+    // critpath STRATA_CP_RESPLAN (capture_all): the pipelined graphs plan on the device the groups of the layers in
+    // cp_mask_ whose routes are all in VRAM, and the host never serves those (see record_window, service)
+    bool cp_rec_ = false;                 ///< record_window is capturing the RESPLAN variant
+    bool cp_win_ = false;                 ///< the window in flight runs it
+    std::vector<uint8_t> cp_mask_;        ///< per layer of [lb_, le_): planned on the device when every route hits
+    cudaGraphExec_t exec_cp_[9] = {};
+    uint32_t* h_cpmap_ = nullptr; uint32_t* m_cpmap_ = nullptr;   ///< per ring: 1 device-planned, 2 served by the host
+    int32_t* h_cpids_ = nullptr; int32_t* m_cpids_ = nullptr;     ///< per ring: the planned group's routed ids
+    static constexpr int kCpRings = 2 * 64 + 2;
+    CpNoteFn cp_note_ = nullptr;
+    std::vector<int32_t> cp_shadow_;      ///< the host table's [lb_, le_) rows as last queued to the device
+    std::vector<uint64_t> cp_off_shadow_; ///< the slot offsets as last queued (an elastic arena moves them)
+    unsigned long long* cp_off_d_ = nullptr;   ///< the device copy, room for every (layer, expert) slot
+    uint8_t* cp_pin_ = nullptr;           ///< pinned copies for the uploads: the rows, then the offsets
+    cudaEvent_t cp_up_ev_ = nullptr;      ///< after the last upload (the pinned copies are free again)
+    bool cp_sync_res(std::string& err);   ///< the stage's residency rows to the device when the host's moved
+    bool cp_prepare(std::string& err);    ///< capture_all: the mask and the RESPLAN graphs (once)
+    bool capture_into(int T, cudaGraphExec_t& exec_t, std::string& err);
     bool capture_commit_batch(const int* rows, int S, int hbase, std::string& err);
     bool stage_batch(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos, std::string& err);
     strata::kernels::SamplerParams sampling_ = [] {

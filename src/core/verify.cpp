@@ -418,6 +418,13 @@ Verifier::~Verifier() {
         if (e) cudaGraphExecDestroy(e);
     for (auto& e : exec_nr_)
         if (e) cudaGraphExecDestroy(e);
+    for (auto& e : exec_cp_)
+        if (e) cudaGraphExecDestroy(e);
+    if (cp_up_ev_) { cudaEventSynchronize(cp_up_ev_); cudaEventDestroy(cp_up_ev_); }
+    if (cp_pin_) cudaFreeHost(cp_pin_);
+    if (cp_off_d_) cudaFree(cp_off_d_);
+    if (h_cpmap_) cudaFreeHost(h_cpmap_);
+    if (h_cpids_) cudaFreeHost(h_cpids_);
     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
     for (auto& kv : exec_bm_)
         if (kv.second) cudaGraphExecDestroy(kv.second);
@@ -1406,6 +1413,25 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
                           plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, nullptr, 0, cs, m_plan_err_);
+        } else if (cp_rec_) {
+            // critpath STRATA_CP_RESPLAN: a layer of cp_mask_ plans its group on the device when every route is in VRAM
+            // (resident_plan writes skip_[grp] = ring); its doorbell then carries only the routed ids (the host counts
+            // their usage and serves nothing) and its waits below return at once.  Every ring is STORED (a planned
+            // group does not ring the host), so the host reads the ring's map word before it serves a masked layer.
+            const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
+            const bool cpl = cp_mask_[(size_t) (l - lb_)] != 0;
+            if (cpl)
+                resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
+                              hits_.cache_base, hits_.slot_off != nullptr ? cp_off_d_ : nullptr, (long long) hits_.blob,
+                              plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
+                              ring, cs);
+            doorbell_publish_cp(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
+                                m_ids_ + tb * K, m_w_ + tb * K, m_seq_, ring, cpl ? skip_ + grp : nullptr,
+                                cpl ? m_cpmap_ : nullptr, m_cpids_ + (size_t) ring * (size_t) (max_t_ * K), cs);
+            if (sh_fork_late) {
+                cudaEventRecord(ev_fork_, cs);
+                cudaStreamWaitEvent(sh_cs_, ev_fork_, 0);
+            }
         } else {
             if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
                 resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
@@ -1514,7 +1540,35 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                hit_xs_ + (size_t) tb * (N / 32), hit_scratch_, dst_buf, cs);
             }
         };
-        if (ar_on()) {
+        // critpath STRATA_CP_RESPLAN: a masked layer's group waits like E-6's (returns at once when the device planned
+        // it) but copies only the CPU's rows, as the host-planned path does: a planned group's plan lists every entry as
+        // a GPU row, so copy_rows_from_mapped writes zeros and reads nothing over PCIe (E-6 copied all n*k rows).
+        const bool cpl = cp_rec_ && !ar_on() && cp_mask_[(size_t) (l - lb_)] != 0;
+        if (cpl) {
+            wait_flag_ge_or(m_flagA_, ring, skip_ + grp, cs);
+            copy_i32_from_mapped_unless(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, skip_ + grp, ring, cs);
+            stamp(l, 19, grp);
+            grouped(p_ptr, p_start, p_counts, 0, hit_out);
+            stamp(l, 20, grp);
+            wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
+            if (sink_.pcie_mode == 2) {
+                const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
+                uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
+                fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
+                rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs);
+            }
+            stamp(l, 21, grp);
+            grouped(p_ptr2, p_start2, p_counts + 2, kPcieGroupRows, hit_out);
+            stamp(l, 22, grp);
+            wait_flag_ge_or(m_flag_, ring, skip_ + grp, cs);
+            stamp(l, 23, grp);
+            if (dec_batch)
+                copy_rows_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K, N, p_dst, p_counts + 1, cs);
+            else
+                copy_or_zero_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (long long) n * K * N, skip_ + grp,
+                                         ring, cs);
+            moe_hit_add(parts_out, hit_out, p_dst, p_counts + 1, cap, N, cs);
+        } else if (ar_on()) {
             stamp(l, 19, grp);
             grouped(p_ptr, p_start, p_counts, 0, parts_out);
             stamp(l, 20, grp);
@@ -1751,7 +1805,11 @@ void Verifier::refresh_ar() {
 }
 
 bool Verifier::capture(int T, std::string& err) {
-    cudaGraphExec_t& exec_t = ar_off_ ? exec_nr_[T] : exec_[T];
+    return capture_into(T, ar_off_ ? exec_nr_[T] : exec_[T], err);
+}
+
+// the window graph into `exec_t` (exec_ / exec_nr_ by ar_off_, or exec_cp_ while cp_rec_ is set)
+bool Verifier::capture_into(int T, cudaGraphExec_t& exec_t, std::string& err) {
     if (exec_t != nullptr) return true;
     {   // said before the capture: a process that exits inside it (#1275: Windows, 313 MiB free) leaves this line as the trace
         size_t free_b = 0, total_b = 0;
@@ -1935,6 +1993,7 @@ void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
     *(volatile uint32_t*) h_flag_ = 0;
     *(volatile uint32_t*) h_flagA_ = 0;
     *(volatile uint32_t*) h_flagB_ = 0;
+    if (h_cpmap_ != nullptr) std::memset(h_cpmap_, 0, (size_t) kCpRings * 4);   // critpath STRATA_CP_RESPLAN
     std::atomic_thread_fence(std::memory_order_seq_cst);
     last_t_ = T;
     last_pos0_ = pos0;
@@ -2991,6 +3050,107 @@ bool Verifier::capture_all(std::string& err) {
         cudaGetLastError();
     }
     pl_ple_rows_.assign((size_t) strata::kernels::kVerifyMaxT * strata::kernels::PLE_N_HEADS, 0u);
+    if (!cp_prepare(err)) return false;
+    return true;
+}
+
+// critpath STRATA_CP_RESPLAN=1 (opt-in; docs/CRITPATH.md): the pipelined windows' second graph set.  A layer of this
+// stage whose experts are resident at least STRATA_CP_RESPLAN_MIN (default 1.0: all 512) when the graphs are captured
+// plans each group on the device when every route of the group is in VRAM (resident_plan, E-6), and then neither rings
+// the host nor waits for it; the host skips it (service) and only counts its routes' usage (set_cp_note).  A group with
+// a route outside VRAM rings and is served as always.  The device table follows the host's before every launch
+// (cp_sync_res): an expert the tier evicts is -1 on the host before its slot is reused, so a later window never plans
+// a stale slot; a window launched before is covered by the tier's fence, as the doorbell path is.
+namespace {
+double cp_resplan_min() {
+    static const double v = [] {
+        const char* e = std::getenv("STRATA_CP_RESPLAN");
+        if (e == nullptr || e[0] == 0 || e[0] == '0') return -1.0;
+        const char* m = std::getenv("STRATA_CP_RESPLAN_MIN");
+        const double x = m != nullptr ? std::atof(m) : 1.0;
+        return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
+    }();
+    return v;
+}
+}  // namespace
+
+bool Verifier::cp_prepare(std::string& err) {
+    const double cp_min = cp_resplan_min();
+    if (cp_min < 0.0 || exec_cp_[1] != nullptr || !cp_mask_.empty()) return true;   // off, or prepared already
+    cp_mask_.assign((size_t) (le_ - lb_), 0);   // (non-empty from here on: decided once)
+    if (!always_publish_ || all_resident_ || h_res_ == nullptr || hits_.d_res == nullptr) return true;
+    const int64_t ne = g_->n_expert;
+    std::string list;
+    for (int64_t l = lb_; l < le_; ++l) {
+        if (l == lb_ && ple_stage()) continue;   // its ring's flag releases the PLE rows (gathered when it is served)
+        int64_t res = 0;
+        for (int64_t e = 0; e < ne; ++e) res += h_res_[l * ne + e] >= 0 ? 1 : 0;
+        if (res > 0 && (double) res >= cp_min * (double) ne) {
+            cp_mask_[(size_t) (l - lb_)] = 1;
+            list += " " + std::to_string((long long) l);
+        }
+    }
+    std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: layers [%lld, %lld) on CUDA%d: %d at >= %.0f%% VRAM "
+                         "residency planned on the device when every route hits:%s\n", (long long) lb_, (long long) le_,
+                 device_, cp_layers(), cp_min * 100.0, list.empty() ? " none" : list.c_str());
+    if (cp_layers() == 0) return true;
+    const size_t rows_b = (size_t) ((le_ - lb_) * ne) * 4, off_b = (size_t) (g_->n_layers * ne) * 8;
+    bool ok = true;
+    if (skip_ == nullptr)
+        ok = cudaMalloc((void**) &skip_, 64) == cudaSuccess && cudaMemset(skip_, 0, 64) == cudaSuccess;
+    if (ok && hits_.slot_off != nullptr) ok = cudaMalloc((void**) &cp_off_d_, off_b) == cudaSuccess;
+    ok = ok && mapped((size_t) kCpRings * 4, (void**) &h_cpmap_, (void**) &m_cpmap_) &&
+         mapped((size_t) kCpRings * (size_t) (max_t_ * ss_->k) * 4, (void**) &h_cpids_, (void**) &m_cpids_) &&
+         cudaHostAlloc((void**) &cp_pin_, rows_b + off_b, cudaHostAllocDefault) == cudaSuccess &&
+         cudaEventCreateWithFlags(&cp_up_ev_, cudaEventDisableTiming) == cudaSuccess && cudaEventRecord(cp_up_ev_, cs_) == cudaSuccess;
+    if (ok) ok = cp_sync_res(err) && cudaStreamSynchronize(cs_) == cudaSuccess;   // the tables before any capture
+    cp_rec_ = true;
+    for (int T = 1; ok && T <= max_t_; ++T) ok = capture_into(T, exec_cp_[T], err);
+    cp_rec_ = false;
+    if (!ok) {
+        cudaGetLastError();
+        if (err.empty()) err = "verify: STRATA_CP_RESPLAN: allocation or capture failed";
+        return false;
+    }
+    return true;
+}
+
+bool Verifier::cp_sync_res(std::string& err) {
+    const int64_t ne = g_->n_expert;
+    const size_t nrow = (size_t) ((le_ - lb_) * ne);
+    const int32_t* hr = h_res_ + lb_ * ne;
+    int64_t max_slot = -1;   // the highest slot a planned layer holds: its offset and every lower one go to the device
+    for (int64_t l = lb_; l < le_; ++l)
+        if (cp_mask_[(size_t) (l - lb_)])
+            for (int64_t e = 0; e < ne; ++e) max_slot = std::max<int64_t>(max_slot, hr[(l - lb_) * ne + e]);
+    const bool rows_same = cp_shadow_.size() == nrow && std::memcmp(cp_shadow_.data(), hr, nrow * 4) == 0;
+    const size_t n_off = hits_.slot_off != nullptr && max_slot >= 0 ? (size_t) max_slot + 1 : 0;
+    const bool off_same = n_off == 0 || (cp_off_shadow_.size() >= n_off &&
+                                         std::memcmp(cp_off_shadow_.data(), hits_.slot_off, n_off * 8) == 0);
+    if (rows_same && off_same) return true;
+    if (n_off > (size_t) (g_->n_layers * ne)) { err = "verify: STRATA_CP_RESPLAN: a slot past the offset table"; return false; }
+    // the pinned copies are reused: the last upload must have left them (at a launch the stage's stream holds no
+    // window, so this does not wait in practice)
+    if (cudaEventSynchronize(cp_up_ev_) != cudaSuccess) { err = "verify: STRATA_CP_RESPLAN: upload event failed"; return false; }
+    const size_t rows_b = nrow * 4;
+    if (!off_same) {   // the offsets first: a row may name a slot the elastic arena has just added
+        std::memcpy(cp_pin_ + rows_b, hits_.slot_off, n_off * 8);
+        if (cudaMemcpyAsync(cp_off_d_, cp_pin_ + rows_b, n_off * 8, cudaMemcpyHostToDevice, cs_) != cudaSuccess) {
+            err = "verify: STRATA_CP_RESPLAN: slot offset upload failed";
+            return false;
+        }
+        cp_off_shadow_.assign(hits_.slot_off, hits_.slot_off + n_off);
+    }
+    if (!rows_same) {
+        std::memcpy(cp_pin_, hr, rows_b);
+        if (cudaMemcpyAsync((void*) (hits_.d_res + lb_ * ne), cp_pin_, rows_b, cudaMemcpyHostToDevice, cs_) != cudaSuccess) {
+            err = "verify: STRATA_CP_RESPLAN: residency upload failed";
+            return false;
+        }
+        cp_shadow_.assign(hr, hr + nrow);
+    }
+    if (cudaEventRecord(cp_up_ev_, cs_) != cudaSuccess) { err = "verify: STRATA_CP_RESPLAN: upload event failed"; return false; }
+    ++cp_uploads;
     return true;
 }
 
@@ -3051,10 +3211,13 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
     fl_total_ = (le_ - lb_) * G;
     fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;
     if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);   // #649: this window's breadcrumbs only
+    // critpath STRATA_CP_RESPLAN: the RESPLAN graph, behind the residency rows the host holds now
+    cp_win_ = exec_cp_[T] != nullptr;
+    if (cp_win_ && !cp_sync_res(err)) return false;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     trace_ev("WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
     ms_host += ms_since(t0);
-    const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
+    const cudaError_t le = cudaGraphLaunch(cp_win_ ? exec_cp_[T] : exec_[T], cs_);
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
@@ -3125,6 +3288,22 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
                 return -1;
             }
             return 0;
+        }
+        if (cp_win_ && cp_mask_[(size_t) (l - lb_)]) {   // critpath STRATA_CP_RESPLAN: did the device plan this group?
+            const uint32_t m = *(volatile uint32_t*) (h_cpmap_ + want);
+            if (m == 1) {   // yes: its GPU waits for nothing; its routes still count for the adaptive tier
+                const int grp = (int) (fl_k_ % G);
+                const int n = gte[grp] - gtb[grp];
+                if (cp_note_ != nullptr && pool != nullptr)
+                    cp_note_(user, h_cpids_ + (size_t) want * (size_t) (max_t_ * ss.k), (int64_t) n * ss.k, l);
+                ++cp_planned;
+                ++fl_k_;
+                const double now = now_ms();
+                ms_wait += now - fl_since_ms_;
+                fl_since_ms_ = fl_flush_ms_ = now;
+                continue;
+            }
+            ++cp_host;
         }
         const Clock::time_point b = Clock::now();
         ms_wait += now_ms() - fl_since_ms_;
@@ -3238,6 +3417,8 @@ bool Verifier::pl_commit_async(int n_keep, std::string& err) {
 void Verifier::absorb_stats(Verifier& o) {
     ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
     windows += o.windows;
+    cp_planned += o.cp_planned; cp_host += o.cp_host; cp_uploads += o.cp_uploads;   // critpath STRATA_CP_RESPLAN
+    o.cp_planned = o.cp_host = o.cp_uploads = 0;
     o.ms_wait = o.ms_pool = o.ms_host = o.ms_commit = 0;
     o.windows = 0;
     for (int k = 0; k < 2; ++k)
