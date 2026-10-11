@@ -14,6 +14,7 @@
 #include "strata/kernels/gr.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
+#include "strata/kernels/native_gr_postops.hpp"   // chainfuse: native_moe_combine_k10_post
 #include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/native_qsa.hpp"
@@ -77,6 +78,46 @@ bool cp_chain_fuse() {
     }();
     return on;
 }
+// chainfuse (docs/CHAINFUSE.md): STRATA_CHAIN_FUSE2=1 (opt-in) - the drafter's step and round graphs with fused kernels,
+// every word the same (the same expressions in the same order; only launches and loads in flight change).
+// STRATA_CHAIN_FUSE2_MASK (default 63) picks the fusions for an A/B one at a time: 1 the deeper-pipelined attention chunk
+// kernel, 2 the staged attention merge, 4 norm + q8_1, 8 gate + q8_1, 16 the head tail (argmax + top prob + map_ids +
+// mtp_select + force in one launch), 32 combine + residual write.  STRATA_CHAIN_FUSE2_VB (8, 16 or 32, default 16):
+// values in flight a thread in the chunk kernel.  The argmax graphs only (coupled sampling keeps its own); CUDA only.
+int chain_fuse2_mask() {
+    static const int mask = [] {
+        const char* v = std::getenv("STRATA_CHAIN_FUSE2");
+        const bool on = v != nullptr && v[0] != '\0' && v[0] != '0';
+        if (!on) return 0;
+        int m = 63;
+        const char* mv = std::getenv("STRATA_CHAIN_FUSE2_MASK");
+        if (mv != nullptr && mv[0] != '\0') m = std::atoi(mv) & 63;
+#if defined(STRATA_USE_HIP)
+        std::fprintf(stderr, "strata chainfuse: STRATA_CHAIN_FUSE2 is CUDA only: off\n");
+        return 0;
+#else
+        if (!strata::kernels::qsa_decode_attn_fuse2_built()) m &= ~3;
+        std::fprintf(stderr, "strata chainfuse: STRATA_CHAIN_FUSE2 mask %d (%s%s%s%s%s%s), %d values in flight\n", m,
+                     (m & 1) ? "attn-chunk " : "", (m & 2) ? "attn-merge " : "", (m & 4) ? "norm+q8 " : "",
+                     (m & 8) ? "gate+q8 " : "", (m & 16) ? "head-tail " : "", (m & 32) ? "combine+post" : "",
+                     [] { const char* b = std::getenv("STRATA_CHAIN_FUSE2_VB"); const int n = b ? std::atoi(b) : 16;
+                          return n == 8 || n == 32 ? n : 16; }());
+        return m;
+#endif
+    }();
+    return mask;
+}
+bool chain_fuse2(int bit) { return (chain_fuse2_mask() & bit) != 0; }
+int chain_fuse2_vb() {
+    static const int vb = [] {
+        const char* b = std::getenv("STRATA_CHAIN_FUSE2_VB");
+        const int n = b != nullptr ? std::atoi(b) : 16;
+        return n == 8 || n == 32 ? n : 16;
+    }();
+    return vb;
+}
+constexpr int kFuse2AttnChunk = 1, kFuse2AttnMerge = 2, kFuse2NormQ8 = 4, kFuse2GateQ8 = 8, kFuse2HeadTail = 16,
+              kFuse2CombinePost = 32;
 constexpr int GGML_Q8_0 = 8;
 constexpr int GGML_Q4_0 = 2;
 using Clock = std::chrono::steady_clock;
@@ -418,6 +459,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         probs_ = b.take<float>(T + 4);
         arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
         top_scratch_ = b.take<uint8_t>(strata::kernels::row_top_prob_scratch_bytes((int) T));
+        tail_scratch_ = b.take<uint8_t>(std::max<uint64_t>(64, strata::kernels::mtp_head_tail_scratch_bytes()));
         dummy_inj_ = b.take<float>(HC);
     };
     Bump count;
@@ -715,9 +757,21 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
             embedding_gather_dev(codes, scales, offsets, tok_, T, we->ne0, we->code_bits, we->code_bias, we->group_elems,
                                  (uint64_t) (we->ne0 / (8 / we->code_bits)), (uint64_t) (we->ne0 / we->group_elems), emb_, cs);
         }
-        native_qsa_rms_norm_weighted(emb_, f32("pre_fc_norm_embedding.weight"), en_, (int) N, T, EPS, cs);
-        native_quantize_q8_1(en_, xq_, (int) N, T, cs);
+        // chainfuse (docs/CHAINFUSE.md): one row (a chain step, a T = 1 round) - the norm and its q8_1 quantization in
+        // one launch (the same bytes in xq_; en_ / hn_ are not kept: nothing else reads them)
+        const bool fuse_nq = T == 1 && chain_fuse2(kFuse2NormQ8);
+        if (fuse_nq) {
+            native_qsa_rms_norm_q8_1(emb_, f32("pre_fc_norm_embedding.weight"), nullptr, xq_, (int) N, T, EPS, cs);
+        } else {
+            native_qsa_rms_norm_weighted(emb_, f32("pre_fc_norm_embedding.weight"), en_, (int) N, T, EPS, cs);
+            native_quantize_q8_1(en_, xq_, (int) N, T, cs);
+        }
         native_mmvq(wt_fc_embedding, wp_fc_embedding, xq_, e2_, (int) N, (int) N, T, cs);
+        if (fuse_nq && !hnorm_stream_ && HC <= 8) {
+            // one RMS over the hc * N values, quantized as the HC columns the loop below quantizes in one chunk
+            native_qsa_rms_norm_q8_1(Rin_, f32("pre_fc_norm_hidden.weight"), nullptr, xq_, (int) (HC * N), T, EPS, cs);
+            native_mmvq(wt_fc_hidden, wp_fc_hidden, xq_, h2_, (int) N, (int) N, (int) HC, cs);
+        } else {
         if (hnorm_stream_)   // --mtp-hnorm stream: one RMS per stream, each scaled by its slice of the weight
             native_qsa_rms_norm_grouped(Rin_, f32("pre_fc_norm_hidden.weight"), hn_, (int) N, (int) HC, (int) (T * HC), EPS, cs);
         else
@@ -726,6 +780,7 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
             const int nc = (int) std::min<int64_t>(8, T * HC - c0);
             native_quantize_q8_1(hn_ + (size_t) c0 * N, xq_, (int) N, nc, cs);
             native_mmvq(wt_fc_hidden, wp_fc_hidden, xq_, h2_ + (size_t) c0 * N, (int) N, (int) N, nc, cs);
+        }
         }
         add_streams_broadcast(h2_, e2_, R_, N, (int) HC, T, cs);
         // ---- the attention hyper-connection
@@ -837,10 +892,21 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);
         const QsaAttnPools pools = qsa_attn_pools(st_);
         if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
-        qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
+        // chainfuse (docs/CHAINFUSE.md): the deeper-pipelined chunk kernel and / or the staged merge, the same partials
+        // and the same output (bit for bit) with more loads in flight
+        if (chain_fuse2(kFuse2AttnChunk) || chain_fuse2(kFuse2AttnMerge))
+            qsa_decode_attn_batch_fuse2(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T,
+                                        chain_fuse2(kFuse2AttnChunk) ? chain_fuse2_vb() : 0,
+                                        chain_fuse2(kFuse2AttnMerge) ? 1 : 0, cs);
+        else
+            qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
         if (st_.kv_rot) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
-        native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
-        native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
+        if (chain_fuse2(kFuse2GateQ8)) {   // chainfuse: the gate and its q8_1 quantization in one launch (attn32_ not kept)
+            native_qsa_gate_q8_1(attn_, qfull_, nullptr, xq_, (int) (T * NH), (int) HD, cs);
+        } else {
+            native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
+            native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
+        }
         native_mmvq(wt_o_proj, wp_o_proj, xq_, bo_, (int) (NH * HD), (int) N, T, cs);
         // ---- the MLP hyper-connection (the attention write folded in)
         {
@@ -940,6 +1006,14 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             const char* v = std::getenv("STRATA_NO_MULTI_GR");
             return v != nullptr && v[0] != '\0' && v[0] != '0';
         }();
+        // chainfuse (docs/CHAINFUSE.md): the combine and the residual write in one launch (T = 1, the native combine's
+        // k = 10 vec4 kernel and gr_write's native post: the same expressions)
+        const bool fuse_cp = T == 1 && !fuse_head_gr && chain_fuse2(kFuse2CombinePost) && native_moe_combine_enabled() &&
+                             K == 10 && gr_native_mmvf_enabled() && (N & 3) == 0 &&
+                             (((uintptr_t) parts_ | (uintptr_t) shared_ | (uintptr_t) R_ | (uintptr_t) y_) & 15u) == 0;
+        if (fuse_cp) {
+            native_moe_combine_k10_post(parts_, w_, shared_, y_, R_, inj2_, R_, (int) N, (int) HC, cs);
+        } else {
         for (int t = 0; t < T; ++t) {
             if (!(T > 1 && native_moe_combine_enabled())) {
                 if (native_moe_combine_enabled())
@@ -956,6 +1030,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         // its own, so doing them after the loop changes nothing)
         if (!fuse_head_gr && !no_multi_gr)
             gr_write_multi(R_, y_, inj2_, gs, R_, T, cs);
+        }
         // ---- the final mixer and the main model's head
         if (fuse_head_gr) {
             FusedGrArgs fa[kFusedGrMaxT];
@@ -1005,6 +1080,9 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
                                      cparams_, cring_, kCoupledHistCap, coupled_j_, step, cscratch_, out_ids_, probs_, cs);
             return true;
         }
+        // chainfuse (docs/CHAINFUSE.md): the pick, its probability, map_ids and mtp_select run as one launch recorded by
+        // the caller (capture_round / capture_step: mtp_head_tail) - the same words
+        if (chain_fuse2(kFuse2HeadTail)) return true;
         if (argmax_rows_wanted()) {
             argmax_rows(head_logits_, T, (int) nv, arg_scratch_, out_ids_, cs);
         } else {
@@ -1105,8 +1183,16 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
         coupled_rec_ = false;
     }
     const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
+    if (ok && !coupled && chain_fuse2(kFuse2HeadTail)) {
+        // chainfuse: record_rest left the head logits; the pick, its probability, map_ids, mtp_select and the forcing in
+        // one launch
+        mtp_head_tail(head_logits_, (int) (dhead_ != nullptr ? n_dvocab_ : n_vocab_), dhead_ != nullptr ? dvocab_ : nullptr,
+                      R_, HCN, row_ + 1, Rin_, out_ids_, probs_, tok_, m_out_, 0, m_prob_, force_on_ ? m_force_ : nullptr,
+                      tail_scratch_, cs_);
+    } else {
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
     if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
+    }
     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
 }
 
@@ -1134,8 +1220,14 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
     bool ok = record_forward(1, row, cs_, err);
     coupled_rec_ = false;
     const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
+    if (ok && !coupled && chain_fuse2(kFuse2HeadTail)) {   // chainfuse: the step's tail in one launch (capture_round)
+        mtp_head_tail(head_logits_, (int) (dhead_ != nullptr ? n_dvocab_ : n_vocab_), dhead_ != nullptr ? dvocab_ : nullptr,
+                      R_, HCN, row_ + 1, Rin_, out_ids_, probs_, tok_, m_out_, j, m_prob_, force_on_ ? m_force_ : nullptr,
+                      tail_scratch_, cs_);
+    } else {
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
     if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
+    }
     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
 }
 
