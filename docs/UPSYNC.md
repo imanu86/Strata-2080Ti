@@ -224,6 +224,10 @@ Da provare sul banco (B-A-B, stesse opzioni del confronto):
 - 2080 Ti: `STRATA_MMVQ_IL=1` contro non impostato, con e senza `STRATA_B6_MMVQ_ROWS=1`;
 - mixer: default (`STRATA_DF_BRANCH` acceso) contro `STRATA_SIDE_MIXER=2` (e `=1`).
 
+Build `cc94edf7` (codice uguale a `ae719a8e`): compilato sì (`build_lock.py`, CUDA 75;86, test spenti, quindi
+`mmvq_il_parity` non compilato), `strata.exe` sha256 `80fbf7f584d3636f11fe4105e1ca554ae0d996ab2ed90f9876f19cb2dbd7d0f4`,
+in `corse_2080ti61004_routed_keepuild-ports1-cc94edf7\`. Installato no, provato no.
+
 ## Stato
 
 Compilato sì (`133e3a69`, `build_lock.py`, CUDA 75;86, test spenti): `strata.exe` sha256
