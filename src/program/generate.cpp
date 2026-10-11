@@ -3272,13 +3272,21 @@ int main(int argc, char** argv) {
         }
         // Recommend, never force: when the default direct reads measure slow, switch to the mapped reads (40-100x
         // faster on the reporters' drives); an explicit --ple-io direct is kept and only warned about.
+        // Fork (Daily 0.1.40.1 behaviour): the switch is opt-in, STRATA_PLE_AUTO_MMAP=1.  The probe reads 64 rows a
+        // batch from a cold table, a much lower queue depth than a prompt chunk's batched read: on the owner's SATA
+        // SSD it measured 1,259 rows/s, switched to mmap, and a 131K prompt took 260 s instead of 75 s (mmap faults
+        // the rows in one page at a time; direct keeps --ple-inflight reads in flight and the read-ahead hides them).
+        static const bool ple_auto_mmap = [] {
+            const char* v = std::getenv("STRATA_PLE_AUTO_MMAP");
+            return v != nullptr && v[0] == '1';
+        }();
         if (pio.mode == strata::kernels::PleIo::Direct && std::getenv("STRATA_PLE_PROBE") == nullptr) {
             constexpr double kSlowRowsPerS = 15000.0;   // ~60 MB/s of 4 KiB pages; a healthy NVMe is >100k
             const double rps = ple_direct_rows_per_s(ple_table);
             if (rps >= kSlowRowsPerS)
                 std::fprintf(stderr, "strata generate: PLE direct read probe: %.0f rows/s (fine)\n", rps);
             if (rps > 0 && rps < kSlowRowsPerS) {
-                if (!o.ple_io_explicit) {
+                if (!o.ple_io_explicit && ple_auto_mmap) {
                     std::fprintf(stderr, "strata generate: --ple-io direct measures slow here (%.0f rows/s, about %.0f MB/s of "
                                          "random 4 KiB reads): using --ple-io mmap instead (the OS file cache holds the pages; "
                                          "--ple-io direct forces the old mode, --ple-io ram keeps the table in RAM)\n",
@@ -3294,7 +3302,9 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata generate: WARNING: --ple-io direct measures slow here (%.0f rows/s, about %.0f "
                                          "MB/s of random 4 KiB reads): a prompt can spend minutes reading layer 1 and trip the "
                                          "stall watchdog (#1425, #1629). --ple-io mmap was 40-100x faster on such drives; "
-                                         "--ple-io ram needs the RAM for the table\n", rps, rps * 4096.0 / 1e6);
+                                         "--ple-io ram needs the RAM for the table; kept direct (fork: the probe's batches are "
+                                         "smaller than a prompt's, STRATA_PLE_AUTO_MMAP=1 switches to mmap)\n",
+                                 rps, rps * 4096.0 / 1e6);
                 }
             }
         }
