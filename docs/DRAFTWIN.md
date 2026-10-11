@@ -189,9 +189,11 @@ da provare con parità sulle bozze (`accepted X of Y` uguale).
 
 ## Stato della build
 
-Compilato: vedi il commit `FABLE-MTP-DRAFTWIN.md: stato della build` (sha dell'exe e cartella `build-draftwin-<sha>`).
-Installato no, provato no: nessuna GPU usata, nessun motore avviato. Senza `STRATA_DW` l'exe deve comportarsi come
-`lab/chainfuse` `50c04dc0`.
+Compilato sì (`build_lock.py`, CUDA 12.6, sm_75+86, test spenti; 140/140, nessun avviso su `generate.cpp`):
+`strata.exe` dal codice di `7d93cd38`, sha256 `5c9732db8b66f3cbe73c21baeb46a9a163fafd68729eb06a14a531c4e67f394a`, copiato
+con `build.json` in `moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\
+build-draftwin-7d93cd38\`. Installato no, provato no: nessuna GPU usata, nessun motore avviato, nessun test. Senza
+`STRATA_DW` l'exe deve comportarsi come `lab/chainfuse` `50c04dc0`.
 
 ## File toccati
 
