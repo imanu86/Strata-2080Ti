@@ -13,7 +13,8 @@
 //   dense    qsa_decode_attn_batch over a 32768-cell window per row: the drafter's shape, which the hypothesis's
 //            "~240 us a query" comes from (the drafter runs it with ONE query per step: capture_round's record_rest)
 //
-// --rows: reserved for the multi-row attention kernel (STRATA_QSA_ROWS=1) should the numbers call for one (docs/QSAROWS.md).
+// --rows: block_scores_rows_kernel (STRATA_QSA_ROWS=1, docs/QSAROWS.md) against the multi kernel, scores and ids bit for
+// bit, and its microseconds beside the reference's.
 //
 //   qsa_rows_bench [--device N] [--iters 100] [--ctx 131072] [--max-context 262144] [--rows] [--no-dense]
 //   exit 0 (77: no GPU; 1: a --rows parity failure)
@@ -274,7 +275,75 @@ int main(int argc, char** argv) {
                 4 * per_row / 1000.0, 8 * per_row / 1000.0);
 
     bool ok = true;
-    if (rows) std::puts("-- --rows: the multi-row kernel is not in this build (docs/QSAROWS.md)");
+    if (rows) {
+        // QSAROWS: block_scores_rows_kernel (STRATA_QSA_ROWS=1) against block_scores_multi_kernel, bit for bit on the scores
+        // and on the ids the top-k draws from them, at every T; then the microseconds of the two
+        std::puts("-- STRATA_QSA_ROWS: qsa_block_scores_rows against qsa_block_scores (multi), scores and ids bit for bit");
+        float* scores_b = dalloc<float>((size_t) (MAXT * max_blocks));
+        int32_t* ids_b = dalloc<int32_t>((size_t) (MAXT * cap));
+        long long cases = 0, failed = 0;
+        Table t_rows;
+        for (int T = 1; T <= MAXT; ++T) {
+            ck(cudaMemset(scores, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
+            ck(cudaMemset(scores_b, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
+            ck(cudaMemset(ids, 0x7F, (size_t) MAXT * cap * 4), "fill");
+            ck(cudaMemset(ids_b, 0x7F, (size_t) MAXT * cap * 4), "fill");
+            k::qsa_block_scores(pooled, dead, q_idx, steps, T, max_blocks, s, scores, st);
+            if (!k::qsa_block_scores_rows(pooled, dead, q_idx, steps, T, max_blocks, s, scores_b, st)) {
+                std::printf("  FAIL T=%d: qsa_block_scores_rows refused the call\n", T);
+                ++cases; ++failed;
+                continue;
+            }
+            k::qsa_block_topk(scores, steps, T, max_blocks, cap, s, ids, st);
+            k::qsa_block_topk(scores_b, steps, T, max_blocks, cap, s, ids_b, st);
+            ck(cudaDeviceSynchronize(), "rows sync");
+            const std::vector<float> a = download(scores, (size_t) T * max_blocks), b = download(scores_b, (size_t) T * max_blocks);
+            const std::vector<int32_t> ia = download(ids, (size_t) T * cap), ib2 = download(ids_b, (size_t) T * cap);
+            ++cases;
+            const bool same_s = std::memcmp(a.data(), b.data(), a.size() * 4) == 0;
+            const bool same_i = std::memcmp(ia.data(), ib2.data(), ia.size() * 4) == 0;
+            if (!same_s || !same_i) {
+                ++failed;
+                size_t count = 0, first = a.size();
+                for (size_t i = 0; i < a.size(); ++i)
+                    if (std::memcmp(&a[i], &b[i], 4) != 0) { if (first == a.size()) first = i; ++count; }
+                std::printf("  FAIL T=%d: scores %s (%zu of %zu differ, first at query %zu block %zu), ids %s\n", T,
+                            same_s ? "same" : "DIFFER", count, a.size(), first / (size_t) max_blocks, first % (size_t) max_blocks,
+                            same_i ? "same" : "DIFFER");
+            }
+            t_rows.us[T] = tm.us([&] { k::qsa_block_scores_rows(pooled, dead, q_idx, steps, T, max_blocks, s, scores_b, st); },
+                                 iters);
+        }
+        // a short context too (n_bid small, the tail block with cells): rows at cells 100..103
+        {
+            std::vector<int32_t> hs2(hst);
+            for (int t = 0; t < MAXT; ++t) {
+                const int64_t pos = 100 + t, n_kv = pos + 1;
+                hs2[(size_t) t * k::kStepCount + k::kStepPos] = (int32_t) pos;
+                hs2[(size_t) t * k::kStepCount + k::kStepNKv] = (int32_t) n_kv;
+                hs2[(size_t) t * k::kStepCount + k::kStepNBid] = (int32_t) (n_kv / s.idx_block);
+                hs2[(size_t) t * k::kStepCount + k::kStepWidth] = (int32_t) k::qsa_selection_width(n_kv, s);
+            }
+            int32_t* steps2 = upload(hs2);
+            for (int T = 1; T <= MAXT; ++T) {
+                ck(cudaMemset(scores, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
+                ck(cudaMemset(scores_b, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
+                k::qsa_block_scores(pooled, dead, q_idx, steps2, T, max_blocks, s, scores, st);
+                k::qsa_block_scores_rows(pooled, dead, q_idx, steps2, T, max_blocks, s, scores_b, st);
+                ck(cudaDeviceSynchronize(), "rows sync");
+                const std::vector<float> a = download(scores, (size_t) T * max_blocks), b = download(scores_b, (size_t) T * max_blocks);
+                ++cases;
+                if (std::memcmp(a.data(), b.data(), a.size() * 4) != 0) { ++failed; std::printf("  FAIL short context T=%d\n", T); }
+            }
+            ck(cudaFree(steps2), "free");
+        }
+        std::printf("  parity: %lld cases, %lld differ -> %s\n", cases, failed, failed ? "FAIL" : "bit-identical");
+        ok = failed == 0;
+        t_scores.print("scores  qsa_block_scores (multi, reference)");
+        t_rows.print("scores  qsa_block_scores_rows");
+        ck(cudaFree(scores_b), "free");
+        ck(cudaFree(ids_b), "free");
+    }
     for (void* p : {(void*) k8, (void*) v8, (void*) k8s, (void*) v8s, (void*) table, (void*) pooled, (void*) dead,
                     (void*) tail, (void*) block_pos, (void*) gamma, (void*) q_idx, (void*) raw, (void*) q, (void*) steps,
                     (void*) steps_d, (void*) ids_d, (void*) scores, (void*) ids, (void*) scratch, (void*) attn,
