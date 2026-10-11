@@ -120,6 +120,13 @@ void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei
                             void* stream);
 void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,
                           float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream);
+/// critpath STRATA_CP_RESPLAN (docs/CRITPATH.md): the pipelined window's doorbell, ring STORED as `value`.  `skip` null:
+/// doorbell_publish_value.  Else, when *skip == value (resident_plan planned the group on the device: every routed
+/// expert in VRAM) only the k routed ids go to `ids_log` and map[value] = 1 - the host has nothing to serve; otherwise
+/// the payload as doorbell_publish_value and map[value] = 2.  The map word is visible before the ring.
+void doorbell_publish_cp(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
+                         int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value, const uint32_t* skip,
+                         uint32_t* map, int32_t* ids_log, void* stream);
 /// SYCL: publishes launched or recorded while `on` store the payload with plain stores instead of uncached ones, for
 /// a caller that reads the payload only after the publishing kernel has ended (the stepped verify window).
 void doorbell_plain_payload(bool on);

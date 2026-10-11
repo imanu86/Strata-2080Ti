@@ -90,12 +90,28 @@ void add_streams_broadcast(const float* h, const float* e, float* R, int64_t n_e
 void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream);
 /// The draft chain's next input: R_dst[:] = R_src[row], tok_dst[0] = ids[row], out[j] = ids[row], with
 /// row = *row_dev (device memory).  `out` may be mapped host memory.
+/// `force` (critpath STRATA_CP_CHAIN_FUSE, mapped host memory): force_token folded in - *tok_dst = force[j] when it is
+/// >= 0, the pick otherwise; out[j] stays the pick.  The same words as mtp_select then force_token.
 void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
                 int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs = nullptr,
-                float* out_p = nullptr);
+                float* out_p = nullptr, const int32_t* force = nullptr);
 /// --pipeline-windows, the drafter's chain teacher forced: `*tok = force[j]` when force[j] >= 0 (`force` is mapped
 /// host memory, read when the kernel runs), else `*tok` is left as it is.
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream);
+/// critpath STRATA_CP_CHAIN_PRE (docs/CRITPATH.md): the next chain's inputs from the verified window's picks, on the
+/// device, so the round can follow the last stage's graph with no host turn.  `out` = the window's picks (the last
+/// stage's mapped argmax rows); row t's token is repl[t] when >= 0 (the forced bench), else out[t].  a = the accepted
+/// drafts (a_tok[t + 1] == token t), on = b_launched && a == T - 1 && b_tok[0] == token T - 1.  Writes what
+/// MtpDrafter::chain_launch stages on the host: tok[0, T), the step/pos rows of cells p + t (t < T), of p + a (row
+/// 2 max_t - 1) and of p + a + j (row max_t + j - 1, 1 <= j <= max_t - 2), row = {a, 0}, force[16] = b_tok[1 + j]
+/// for j < b_T - 1 when on, else -1.  All outputs mapped host memory (device aliases).
+struct MtpChainVerdict {
+    int T = 0, max_t = 0, nh = 0, b_launched = 0, b_T = 0;
+    long long p = 0;
+    int32_t a_tok[8] = {}, repl[8] = {}, b_tok[8] = {};
+};
+void mtp_chain_verdict(const MtpChainVerdict& v, const int32_t* out, int32_t* tok, int32_t* step, int32_t* pos,
+                       int32_t* row, int32_t* force, void* stream);
 /// Row *row_dev of a, b and c (a_n, b_n, c_n floats a row) copied to their row 0 (the draft layer's rest runs on
 /// row 0).  Graph-capturable: the row is read on the device.
 void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, int64_t b_n, float* c, int64_t c_n,

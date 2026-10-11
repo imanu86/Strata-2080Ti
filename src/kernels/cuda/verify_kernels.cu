@@ -564,14 +564,16 @@ __global__ void row_top_prob_kernel(const float* __restrict__ logits, int n_voca
 
 __global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t stride, const int32_t* __restrict__ ids,
                                   const int32_t* __restrict__ row_dev, float* __restrict__ R_dst,
-                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p) {
+                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p,
+                                  const int32_t* force) {
     const int row = *row_dev;
     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < stride; i += (int64_t) gridDim.x * blockDim.x)
         R_dst[i] = R_src[(size_t) row * stride + i];
     __syncthreads();
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         const int32_t tok = ids[row];
-        *tok_dst = tok;
+        const int32_t f = force != nullptr ? ((const volatile int32_t*) force)[j] : -1;   // critpath: force_token folded in
+        *tok_dst = f >= 0 ? f : tok;
         if (probs != nullptr && out_p != nullptr) ((volatile float*) out_p)[j] = probs[row];
         __threadfence_system();
         if (out != nullptr) ((volatile int32_t*) out)[j] = tok;
@@ -592,6 +594,41 @@ __global__ void dense_steps_kernel(const int32_t* __restrict__ cells, int n, int
 __global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {
     const int32_t f = ((const volatile int32_t*) force)[j];
     if (f >= 0) *tok = f;
+}
+
+// critpath STRATA_CP_CHAIN_PRE: see mtp_chain_verdict in verify_kernels.hpp.  The rows are MtpDrafter::chain_launch's
+// put(): {cell, cell + 1, (cell + 1) / 4, cell + 1} and nh copies of cell.
+__global__ void mtp_chain_verdict_kernel(MtpChainVerdict v, const int32_t* out, int32_t* tok, int32_t* step,
+                                         int32_t* pos, int32_t* row, int32_t* force) {
+    __shared__ int32_t s_o[8];
+    __shared__ int s_a, s_on;
+    const int i = threadIdx.x;
+    if (i == 0) {
+        for (int t = 0; t < v.T; ++t) s_o[t] = v.repl[t] >= 0 ? v.repl[t] : ((const volatile int32_t*) out)[t];
+        int a = 0;
+        while (a < v.T - 1 && v.a_tok[a + 1] == s_o[a]) ++a;
+        s_a = a;
+        s_on = (v.b_launched != 0 && a == v.T - 1 && v.b_tok[0] == s_o[v.T - 1]) ? 1 : 0;
+    }
+    __syncthreads();
+    const int a = s_a;
+    const int n_rows = v.T + 1 + (v.max_t - 2);   // the window's cells, output 0's cell, every step's cell
+    for (int r = i; r < n_rows; r += blockDim.x) {
+        int rw;
+        long long cell;
+        if (r < v.T) { rw = r; cell = v.p + r; }
+        else if (r == v.T) { rw = 2 * v.max_t - 1; cell = v.p + a; }
+        else { const int j = r - v.T; rw = v.max_t + j - 1; cell = v.p + a + j; }
+        step[rw * 4 + 0] = (int32_t) cell;
+        step[rw * 4 + 1] = (int32_t) (cell + 1);
+        step[rw * 4 + 2] = (int32_t) ((cell + 1) / 4);
+        step[rw * 4 + 3] = (int32_t) (cell + 1);
+        for (int h = 0; h < v.nh; ++h) pos[rw * v.nh + h] = (int32_t) cell;
+    }
+    if (i < v.T) tok[i] = s_o[i];
+    if (i < 16) force[i] = (s_on && i < v.b_T - 1) ? v.b_tok[1 + i] : -1;
+    if (i == 0) { row[0] = a; row[1] = 0; }
+    __threadfence_system();
 }
 
 }  // namespace
@@ -639,10 +676,21 @@ void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, 
 }
 
 void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
-                int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs, float* out_p) {
+                int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs, float* out_p,
+                const int32_t* force) {
     mtp_select_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(R_src, R_stride, ids, row_dev, R_dst, tok_dst, out, j,
-                                                            probs, out_p);
+                                                            probs, out_p, force);
     check("mtp_select");
+}
+
+void mtp_chain_verdict(const MtpChainVerdict& v, const int32_t* out, int32_t* tok, int32_t* step, int32_t* pos,
+                       int32_t* row, int32_t* force, void* stream) {
+    if (v.T < 1 || v.T > 8 || v.max_t < 2 || v.max_t > 8 || v.b_T > 8) {
+        std::fprintf(stderr, "mtp_chain_verdict: window size out of range\n");
+        std::exit(1);
+    }
+    mtp_chain_verdict_kernel<<<1, 64, 0, (cudaStream_t) stream>>>(v, out, tok, step, pos, row, force);
+    check("mtp_chain_verdict");
 }
 
 void force_token(int32_t* tok, const int32_t* force, int j, void* stream) {
