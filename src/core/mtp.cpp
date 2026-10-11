@@ -80,42 +80,42 @@ bool cp_chain_fuse() {
 }
 // chainfuse (docs/CHAINFUSE.md): STRATA_CHAIN_FUSE2=1 (opt-in) - the drafter's step and round graphs with fused kernels,
 // every word the same (the same expressions in the same order; only launches and loads in flight change).
-// STRATA_CHAIN_FUSE2_MASK (default 63) picks the fusions for an A/B one at a time: 1 the deeper-pipelined attention chunk
-// kernel, 2 the staged attention merge, 4 norm + q8_1, 8 gate + q8_1, 16 the head tail (argmax + top prob + map_ids +
-// mtp_select + force in one launch), 32 combine + residual write.  STRATA_CHAIN_FUSE2_VB (8, 16 or 32, default 16):
-// values in flight a thread in the chunk kernel.  The argmax graphs only (coupled sampling keeps its own); CUDA only.
+// STRATA_CHAIN_FUSE2_MASK (default 62) picks the fusions for an A/B one at a time: 2 the staged attention merge, 4 norm +
+// q8_1, 8 gate + q8_1, 16 the head tail (argmax + top prob + map_ids + mtp_select + force in one launch), 32 combine +
+// residual write.  The attention CHUNK kernel is its own variable, so it can be measured apart (the first version lost):
+// STRATA_CHAIN_FUSE2_ATTN = 1..4 picks attn_chunk_kernel_stage's variant (1 plain staged values, 2 + the next keys
+// prefetched, 3 + the first values before the scores, 4 both; 0 / unset: pre75 as before).  The argmax graphs only
+// (coupled sampling keeps its own); CUDA only.
+int chain_fuse2_attn_env() {
+    const char* a = std::getenv("STRATA_CHAIN_FUSE2_ATTN");
+    const int n = a != nullptr ? std::atoi(a) : 0;
+    return n >= 1 && n <= 4 ? n : 0;
+}
 int chain_fuse2_mask() {
     static const int mask = [] {
         const char* v = std::getenv("STRATA_CHAIN_FUSE2");
         const bool on = v != nullptr && v[0] != '\0' && v[0] != '0';
         if (!on) return 0;
-        int m = 63;
+        int m = 62;
         const char* mv = std::getenv("STRATA_CHAIN_FUSE2_MASK");
-        if (mv != nullptr && mv[0] != '\0') m = std::atoi(mv) & 63;
+        if (mv != nullptr && mv[0] != '\0') m = std::atoi(mv) & 62;
 #if defined(STRATA_USE_HIP)
         std::fprintf(stderr, "strata chainfuse: STRATA_CHAIN_FUSE2 is CUDA only: off\n");
         return 0;
 #else
-        if (!strata::kernels::qsa_decode_attn_fuse2_built()) m &= ~3;
-        std::fprintf(stderr, "strata chainfuse: STRATA_CHAIN_FUSE2 mask %d (%s%s%s%s%s%s), %d values in flight\n", m,
-                     (m & 1) ? "attn-chunk " : "", (m & 2) ? "attn-merge " : "", (m & 4) ? "norm+q8 " : "",
-                     (m & 8) ? "gate+q8 " : "", (m & 16) ? "head-tail " : "", (m & 32) ? "combine+post" : "",
-                     [] { const char* b = std::getenv("STRATA_CHAIN_FUSE2_VB"); const int n = b ? std::atoi(b) : 16;
-                          return n == 8 || n == 32 ? n : 16; }());
+        int attn = chain_fuse2_attn_env();
+        if (!strata::kernels::qsa_decode_attn_fuse2_built()) { m &= ~2; attn = 0; }
+        if (attn) m |= 1;
+        std::fprintf(stderr, "strata chainfuse: STRATA_CHAIN_FUSE2 mask %d (%s%s%s%s%s), attention chunk variant %d\n", m,
+                     (m & 2) ? "attn-merge " : "", (m & 4) ? "norm+q8 " : "", (m & 8) ? "gate+q8 " : "",
+                     (m & 16) ? "head-tail " : "", (m & 32) ? "combine+post" : "", attn);
         return m;
 #endif
     }();
     return mask;
 }
 bool chain_fuse2(int bit) { return (chain_fuse2_mask() & bit) != 0; }
-int chain_fuse2_vb() {
-    static const int vb = [] {
-        const char* b = std::getenv("STRATA_CHAIN_FUSE2_VB");
-        const int n = b != nullptr ? std::atoi(b) : 16;
-        return n == 8 || n == 32 ? n : 16;
-    }();
-    return vb;
-}
+int chain_fuse2_attn() { return chain_fuse2(1) ? chain_fuse2_attn_env() : 0; }
 constexpr int kFuse2AttnChunk = 1, kFuse2AttnMerge = 2, kFuse2NormQ8 = 4, kFuse2GateQ8 = 8, kFuse2HeadTail = 16,
               kFuse2CombinePost = 32;
 constexpr int GGML_Q8_0 = 8;
@@ -895,8 +895,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         // chainfuse (docs/CHAINFUSE.md): the deeper-pipelined chunk kernel and / or the staged merge, the same partials
         // and the same output (bit for bit) with more loads in flight
         if (chain_fuse2(kFuse2AttnChunk) || chain_fuse2(kFuse2AttnMerge))
-            qsa_decode_attn_batch_fuse2(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T,
-                                        chain_fuse2(kFuse2AttnChunk) ? chain_fuse2_vb() : 0,
+            qsa_decode_attn_batch_fuse2(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, chain_fuse2_attn(),
                                         chain_fuse2(kFuse2AttnMerge) ? 1 : 0, cs);
         else
             qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);

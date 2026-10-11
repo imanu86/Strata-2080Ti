@@ -4,7 +4,7 @@
 // shapes (n_embd 2560, hc 4, 24 query heads x 256, 2 KV heads, 32k-cell window, 48,542-token draft head), no model.
 //
 // Segments (the step's 54 kernels and their microseconds on the 2080 Ti come from nsys, DET-cp-nsys5):
-//   attn    attn_chunk_kernel_pre75 (240 us) + attn_merge_v2_kernel (50 us)  vs  attn_chunk_kernel_mlp + attn_merge_v3
+//   attn    attn_chunk_kernel_pre75 (240 us) + attn_merge_v2_kernel (50 us)  vs  attn_chunk_kernel_stage (4 variants) + attn_merge_v3
 //   norm    norm + native_quantize_q8_1 (2560 and 4 x 2560 values)           vs  norm_q8_1
 //   gate    gate + native_quantize_q8_1 (6144 values)                       vs  gate_q8_1
 //   tail    sampler_greedy / argmax_rows + row_top_prob_split + map_ids + mtp_select + force_token (~34 us)  vs  mtp_head_tail
@@ -12,7 +12,7 @@
 //   graph   (--graph) a captured graph of 50 one-block kernels with and without a fork / join to a side stream: the cost
 //           of a cross-stream edge inside a graph on this driver (the step shows a 33 us bubble after its fork / join)
 //
-//   chain_step_bench [--device N] [--iters 200] [--vb 8|16|32] [--graph]     exit 0: every segment bit-identical (77: no GPU)
+//   chain_step_bench [--device N] [--iters 200] [--attn 1|2|3|4] [--graph]   exit 0: every segment bit-identical (77: no GPU)
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/native_gr_postops.hpp"
 #include "strata/kernels/native_moe.hpp"
@@ -108,7 +108,7 @@ constexpr int N = 2560, HC = 4, NH = 24, HD = 256, NKV = 2, NVOCAB = 48542, K10 
 constexpr int64_t WINDOW = 32768;
 
 // ---------------------------------------------------------------- attention: pre75 + v2 against mlp + v3
-bool seg_attn(std::mt19937& rng, Timer& t, int iters, int vb, double& sa, double& sb) {
+bool seg_attn(std::mt19937& rng, Timer& t, int iters, int attn_variant, double& sa, double& sb) {
     const k::QsaShapes s = k::qsa_real_shapes();
     const int64_t PS = s.page_size, H = s.n_head_kv, D = s.head_dim;
     const int64_t cells = WINDOW + 1024, pages = cells / PS, rows = pages * H * PS;
@@ -182,18 +182,18 @@ bool seg_attn(std::mt19937& rng, Timer& t, int iters, int vb, double& sa, double
                 ck(cudaMemset(scratch_b, 0xFF, scratch_floats * 4), "scratch NaN");
                 k::qsa_decode_attn_chunks_only(q, pools(fmt, tabp), ids, steps, cap, s, scratch_a, 1, 1, st);
                 k::qsa_decode_attn_merge_only(steps, cap, s, scratch_a, attn_a, 1, 1, st);
-                for (int kern : {2, 3, 4}) {
+                for (int kern : {2, 3, 4, 5}) {
                     ck(cudaMemset(scratch_b, 0xFF, scratch_floats * 4), "scratch NaN");
                     ck(cudaMemset(attn_b, 0x7F, (size_t) NH * D * 4), "attn fill");
                     k::qsa_decode_attn_chunks_only(q, pools(fmt, tabp), ids, steps, cap, s, scratch_b, 1, kern, st);
                     k::qsa_decode_attn_merge_only(steps, cap, s, scratch_b, attn_b, 1, 2, st);
                     ck(cudaDeviceSynchronize(), "attn sync");
                     char what[128];
-                    std::snprintf(what, sizeof what, "attn partials fmt %s holes %d width %d vb %d", fmt ? "int8" : "fp16",
-                                  holes, width, kern == 3 ? 8 : kern == 4 ? 32 : 16);
+                    std::snprintf(what, sizeof what, "attn partials fmt %s holes %d width %d variant %d", fmt ? "int8" : "fp16",
+                                  holes, width, kern - 1);
                     bool c_ok = same(scratch_a, scratch_b, used_floats, what);
-                    std::snprintf(what, sizeof what, "attn output fmt %s holes %d width %d vb %d", fmt ? "int8" : "fp16",
-                                  holes, width, kern == 3 ? 8 : kern == 4 ? 32 : 16);
+                    std::snprintf(what, sizeof what, "attn output fmt %s holes %d width %d variant %d", fmt ? "int8" : "fp16",
+                                  holes, width, kern - 1);
                     c_ok = same(attn_a, attn_b, (size_t) NH * D, what) && c_ok;
                     // the merge alone on the reference partials, and the production fuse2 entry
                     ck(cudaMemset(attn_b, 0x7F, (size_t) NH * D * 4), "attn fill");
@@ -204,10 +204,10 @@ bool seg_attn(std::mt19937& rng, Timer& t, int iters, int vb, double& sa, double
                     c_ok = same(attn_a, attn_b, (size_t) NH * D, what) && c_ok;
                     ck(cudaMemset(attn_b, 0x7F, (size_t) NH * D * 4), "attn fill");
                     k::qsa_decode_attn_batch_fuse2(q, pools(fmt, tabp), ids, steps, cap, s, scratch_b, attn_b, 1,
-                                                   kern == 3 ? 8 : kern == 4 ? 32 : 16, 1, st);
+                                                   kern - 1, 1, st);
                     ck(cudaDeviceSynchronize(), "fuse2 sync");
-                    std::snprintf(what, sizeof what, "attn batch_fuse2 fmt %s holes %d width %d vb %d",
-                                  fmt ? "int8" : "fp16", holes, width, kern == 3 ? 8 : kern == 4 ? 32 : 16);
+                    std::snprintf(what, sizeof what, "attn batch_fuse2 fmt %s holes %d width %d variant %d",
+                                  fmt ? "int8" : "fp16", holes, width, kern - 1);
                     c_ok = same(attn_a, attn_b, (size_t) NH * D, what) && c_ok;
                     ++cases;
                     if (!c_ok) ++failed;
@@ -220,11 +220,10 @@ bool seg_attn(std::mt19937& rng, Timer& t, int iters, int vb, double& sa, double
     // timing at the drafter's shape: INT8, every page resident, 32768 cells
     set_case((int) WINDOW);
     const k::QsaAttnPools p8 = pools(1, table_full);
-    const int kern = vb == 8 ? 3 : vb == 32 ? 4 : 2;
     std::printf("attn timing (int8, 32768 cells, one query):\n");
-    for (int kk : {3, 2, 4}) {
+    for (int kk : {2, 3, 4, 5}) {
         char what[64];
-        std::snprintf(what, sizeof what, "chunk pass mlp vb %d vs pre75", kk == 3 ? 8 : kk == 4 ? 32 : 16);
+        std::snprintf(what, sizeof what, "chunk pass stage variant %d vs pre75", kk - 1);
         double da = 0, db = 0;
         bab(t, what,
             [&] { k::qsa_decode_attn_chunks_only(q, p8, ids, steps, cap, s, scratch_b, 1, kk, st); },
@@ -237,15 +236,14 @@ bool seg_attn(std::mt19937& rng, Timer& t, int iters, int vb, double& sa, double
             [&] { k::qsa_decode_attn_merge_only(steps, cap, s, scratch_a, attn_a, 1, 1, st); }, iters, da, db);
     }
     char what[64];
-    std::snprintf(what, sizeof what, "attention segment (vb %d)", vb);
+    std::snprintf(what, sizeof what, "attention segment (variant %d + merge v3)", attn_variant);
     bab(t, what,
-        [&] { k::qsa_decode_attn_batch_fuse2(q, p8, ids, steps, cap, s, scratch_b, attn_b, 1, vb, 1, st); },
+        [&] { k::qsa_decode_attn_batch_fuse2(q, p8, ids, steps, cap, s, scratch_b, attn_b, 1, attn_variant, 1, st); },
         [&] {
             k::qsa_decode_attn_chunks_only(q, p8, ids, steps, cap, s, scratch_a, 1, 1, st);
             k::qsa_decode_attn_merge_only(steps, cap, s, scratch_a, attn_a, 1, 1, st);
         },
         iters, sa, sb);
-    (void) kern;
     for (void* p : {(void*) k8, (void*) v8, (void*) k8s, (void*) v8s, (void*) k16, (void*) v16, (void*) table_full,
                     (void*) table_holes, (void*) q, (void*) ids, (void*) steps, (void*) scratch_a, (void*) scratch_b,
                     (void*) attn_a, (void*) attn_b})
@@ -520,19 +518,19 @@ void seg_graph(Timer& t, int iters) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    int device = 0, iters = 200, vb = 16;
+    int device = 0, iters = 200, attn_variant = 1;   // 1: the only variant without spills on sm_75 (cuobjdump)
     bool graph = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) device = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc) iters = std::atoi(argv[++i]);
-        else if (std::strcmp(argv[i], "--vb") == 0 && i + 1 < argc) vb = std::atoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--attn") == 0 && i + 1 < argc) attn_variant = std::atoi(argv[++i]);
         else if (std::strcmp(argv[i], "--graph") == 0) graph = true;
         else {
-            std::fprintf(stderr, "usage: chain_step_bench [--device N] [--iters 200] [--vb 8|16|32] [--graph]\n");
+            std::fprintf(stderr, "usage: chain_step_bench [--device N] [--iters 200] [--attn 1|2|3|4] [--graph]\n");
             return 2;
         }
     }
-    if (vb != 8 && vb != 16 && vb != 32) { std::fprintf(stderr, "--vb 8, 16 or 32\n"); return 2; }
+    if (attn_variant < 1 || attn_variant > 4) { std::fprintf(stderr, "--attn 1..4\n"); return 2; }
     int devices = 0;
     if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
         std::puts("SKIP: no GPU");
@@ -542,15 +540,15 @@ int main(int argc, char** argv) {
     ck(cudaStreamCreate(&st), "stream");
     cudaDeviceProp prop{};
     ck(cudaGetDeviceProperties(&prop, device), "cudaGetDeviceProperties");
-    std::printf("chain_step_bench on device %d (%s, %d.%d), %d iterations, vb %d\n", device, prop.name, prop.major,
-                prop.minor, iters, vb);
+    std::printf("chain_step_bench on device %d (%s, %d.%d), %d iterations, attention variant %d\n", device, prop.name,
+                prop.major, prop.minor, iters, attn_variant);
     if (!k::qsa_decode_attn_fuse2_built()) std::puts("note: the chainfuse attention kernels are not built here");
     std::mt19937 rng(20261011u);
     Timer t;
     double sum_a = 0.0, sum_b = 0.0;
     bool ok = true;
     std::puts("-- attention (chunk pass + merge)");
-    ok = seg_attn(rng, t, iters, vb, sum_a, sum_b) && ok;
+    ok = seg_attn(rng, t, iters, attn_variant, sum_a, sum_b) && ok;
     std::puts("-- norm + q8_1");
     ok = seg_norm(rng, t, iters, sum_a, sum_b) && ok;
     std::puts("-- gate + q8_1");

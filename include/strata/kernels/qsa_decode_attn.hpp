@@ -44,21 +44,23 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
                            int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);
 
 /// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1; the MTP drafter's dense attention): qsa_decode_attn_batch with
-/// the deeper-pipelined chunk kernel (attn_chunk_kernel_mlp: every key of a warp and `vb` = 8, 16 or 32 values a thread
-/// in flight; INT8 and FP16 pools, other formats take the environment's chunk kernel) and, with `merge` 1, the staged
-/// merge (attn_merge_v3_kernel).  Bit for bit the output of attn_chunk_kernel_pre75 + attn_merge_v2_kernel (the same
-/// expressions in the same order; only the number of loads in flight changes).  CUDA only: elsewhere, or where the
-/// pre75 kernel is not built, it is qsa_decode_attn_batch.  `qsa_decode_attn_fuse2_built()` says which.
+/// the staged chunk kernel (`variant` 1..4 = attn_chunk_kernel_stage<M, KPF, EARLY>: the values of a stage of cells
+/// through shared memory with one 16-byte load a thread, 1: plain, 2: the next pair of keys prefetched, 3: the first
+/// stage of values fetched before the scores, 4: both; 0: the environment's chunk kernel; INT8 and FP16 pools, other
+/// formats take the environment's chunk kernel) and, with `merge` 1, the staged merge (attn_merge_v3_kernel).  Bit for
+/// bit the output of attn_chunk_kernel_pre75 + attn_merge_v2_kernel (the same expressions in the same order; only how
+/// the loads are issued changes).  CUDA only: elsewhere, or where the pre75 kernel is not built, it is
+/// qsa_decode_attn_batch.  `qsa_decode_attn_fuse2_built()` says which.
 void qsa_decode_attn_batch_fuse2(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
-                                 int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, int vb,
+                                 int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, int variant,
                                  int merge, void* stream);
 bool qsa_decode_attn_fuse2_built();
 
 /// For src/kernels/qsa_merge_daily_parity.cpp and src/kernels/chain_step_bench.cpp only: qsa_decode_attn_batch's two
 /// passes apart, whatever the environment says.  `chunks_only` runs the chunk pass into `scratch` with `daily_chunk`
 /// 0: attn_chunk_kernel (upstream's default), 1: the Daily's (attn_chunk_kernel_pre75, what STRATA_ATTN_DAILY=1 picks
-/// on CUDA), 2 / 3 / 4: chainfuse's attn_chunk_kernel_mlp with 16 / 8 / 32 values in flight (INT8 and FP16 pools; a
-/// Q4_0 pool takes the environment's kernel).  `merge_only` merges those partials with `v2` 0: attn_merge_kernel,
+/// on CUDA), 2 / 3 / 4 / 5: chainfuse's attn_chunk_kernel_stage variants 1 / 2 / 3 / 4 (INT8 and FP16 pools; a Q4_0
+/// pool takes the environment's kernel).  `merge_only` merges those partials with `v2` 0: attn_merge_kernel,
 /// 1: attn_merge_v2_kernel (STRATA_ATTN_MERGE_V2, on with STRATA_ATTN_DAILY), 2: chainfuse's attn_merge_v3_kernel.
 /// Width must not exceed an unaligned cap (the chunk pass keeps its upstream contract); for aligned caps the grid
 /// bounds widths above cap.  One input can go through every pair and the outputs be compared bit for bit.
