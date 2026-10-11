@@ -157,13 +157,12 @@ bolla sparisce dalla traccia, la strada è togliere il ramo laterale e fondere l
 
 ## Stato della build
 
-Compilato sì (`build_lock.py`, CUDA 12.6, sm_75+86, test spenti, target `strata`): `strata.exe` dall'albero delle
-fusioni (kernel e cablaggio di `a13a33a6` a meno di una riga di stile in `mtp.cpp`), sha256
-`a52b71df5d25c0ca59e7fa08c924369247e874de35f2d7049d54a3363bedf5ac`, in
-`C:\Users\imanu\source\repos\Strata-wt\chainfuse\build-sm7586\`. Il target `chain_step_bench` è in coda dietro il
-`bench.lock` del banco (il log in fondo a questa sezione viene aggiornato quando compila). Installato no, provato no:
-nessuna GPU usata, nessun motore avviato, nessun test eseguito; i µs del §2 sono stime da verificare col bench (§3a).
-Senza `STRATA_CHAIN_FUSE2` l'exe deve comportarsi come `lab/critpath2` `8b4fd975`.
+Compilato sì (`build_lock.py`, CUDA 12.6, sm_75+86, test spenti): `strata.exe` dal codice del motore di `21e4cb85`
+(= `a5554440`, che tocca solo il bench), sha256 `040843a5e07aac48f8e2c64e91c52d19902b5bc8418eef99c4dcec80c56f15a6`, e
+`chain_step_bench.exe` (target a parte, `a5554440`), entrambi in `C:\Users\imanu\source\repos\Strata-wt\chainfuse\
+build-sm7586\`. Installato no, provato no: nessuna GPU usata, nessun motore avviato, nessun test né bench eseguito; i
+µs del §2 sono stime da verificare col bench (§3a) prima del B-A-B. Senza `STRATA_CHAIN_FUSE2` l'exe deve
+comportarsi come `lab/critpath2` `8b4fd975`.
 
 ## File toccati
 
