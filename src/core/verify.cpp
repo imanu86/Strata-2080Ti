@@ -3119,11 +3119,14 @@ bool Verifier::cp_sync_res(std::string& err) {
     const int64_t ne = g_->n_expert;
     const size_t nrow = (size_t) ((le_ - lb_) * ne);
     const int32_t* hr = h_res_ + lb_ * ne;
+    // (an offset moves only when the elastic arena regrows a slot, and its expert is published into the rows after:
+    // unchanged rows, nothing to upload - the usual launch costs one 64 KiB compare)
+    const bool rows_same = cp_shadow_.size() == nrow && std::memcmp(cp_shadow_.data(), hr, nrow * 4) == 0;
+    if (rows_same && (hits_.slot_off == nullptr || !cp_off_shadow_.empty())) return true;
     int64_t max_slot = -1;   // the highest slot a planned layer holds: its offset and every lower one go to the device
     for (int64_t l = lb_; l < le_; ++l)
         if (cp_mask_[(size_t) (l - lb_)])
             for (int64_t e = 0; e < ne; ++e) max_slot = std::max<int64_t>(max_slot, hr[(l - lb_) * ne + e]);
-    const bool rows_same = cp_shadow_.size() == nrow && std::memcmp(cp_shadow_.data(), hr, nrow * 4) == 0;
     const size_t n_off = hits_.slot_off != nullptr && max_slot >= 0 ? (size_t) max_slot + 1 : 0;
     const bool off_same = n_off == 0 || (cp_off_shadow_.size() >= n_off &&
                                          std::memcmp(cp_off_shadow_.data(), hits_.slot_off, n_off * 8) == 0);
