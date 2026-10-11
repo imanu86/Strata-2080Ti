@@ -34,6 +34,9 @@ così da misurare su una base pulita. Prima i confronti erano falsati dalla VRAM
 | `03da168d` | upstream PR #1503 (aperta) | il parcheggio non usa mai il K/V di un'altra conversazione |
 | `bb816e18` | pezzo di `0cc421e7` | il drafter MTP usa `first_needed()` anche in `mtp.cpp`, così `set_full_prefix` vale davvero |
 | `341542b7` | nuovo | il prefisso su disco usa `available_host_bytes()` (0.1.42 ha tolto `conversation_available_memory`) |
+| `da277800` | `5140210d` + gating di `83c27bbd` | architectds: finestra verificata servita per prima (`Verifier::service(..., max_layers)`; stadio frontale di A, poi l'ultimo stadio di A, poi D e B, B un layer per passata mentre gira l'ultimo stadio di A), lookup oltre una finestra (`lookup_next`, anche dopo una finestra della catena con match >= 12 e tasso >= 0,85), **theta 0,10**. Acceso dal profilo `STRATA_PIPELINE_ELASTIC` (di default con due schede e `--pipeline-windows`, come nel Daily) |
+| `856bd674` | `ae6a4561` | log: costo dei rollback per classe (`strata pipeline rollback cost`) |
+| `ab54c5e1` | `12a6f553` (parte rimasta) | log: latenza della catena dal lancio al B pronto, forzata e fresca |
 
 `host-core`, `--layer-split`, `--trim-stage-weights`, `--pipeline-windows`, `--vram-reserve-later-mib`,
 `--prompt-cache-tail/-every` sono già di upstream.
@@ -49,10 +52,10 @@ legge su `OnDevice(0)` = la 3060, e NVML risponde per la 3060. Il dimensionament
 
 | Fork | Perché |
 |---|---|
-| `5140210d` (architectds: verificata servita prima, lookup oltre una finestra, theta 0,10) | prestazione, non serve per far girare; nel Daily era acceso dal profilo `STRATA_PIPELINE_ELASTIC`. Qui theta resta 0,20 di upstream |
-| `12a6f553` (`STRATA_PL_EARLY_CHAIN`, latenza della catena) | sperimentale / diagnostica |
+| `12a6f553`, solo `STRATA_PL_EARLY_CHAIN` (#910 di Hardin22) | opt-in, spento nel Daily (`strata-dueschede.json` non lo imposta) e assente in upstream 0.1.42: non cambia il comportamento da riprodurre |
 | `434ddca4` (`STRATA_SPLIT_COMMIT_ASYNC`, tempi per blocco) | sperimentale / diagnostica |
-| `ae6a4561` `d2f0d52a` `d868840b` `93af2041` `3634cad2` `3d702c72` | misure diagnostiche (rollback per classe, lancio del grafo, budget WDDM per fase, PLE) |
+| `d2f0d52a` `d868840b` `93af2041` `3634cad2` `3d702c72` | misure diagnostiche (lancio del grafo, budget WDDM per fase, PLE) |
+| `dd8eba52` (punto quieto `el_plan`, `pl_el_held`), `1541e340` (`pl_el_watch`) | `dd8eba52` era già sostituito nel Daily da `1541e340` (che toglie `el_plan`/`pl_el_runs`/`pl_el_held`); di `1541e340` manca solo il log delle finestre dopo gli eventi elastici |
 | `be4cf1c0` (B6 di default) | B6 resta opt-in; su 0.1.42 MMVQ_IL viene scelto prima (vedi sotto) |
 | `15fd2eac` `3f436aab` `c88c2192` (`STRATA_PREFILL_EXACT_SMALL`, `STRATA_QSA_PREFILL_MULTI`, percorsi sm_75 `STRATA_TC_SM75`) | solo prefill; fuori dal decode che si misura |
 | `b8a51dbc`..`df973585` | già dentro `c7f2b447` (tranne `8b9c342b`, portato col commit della pipeline) |
@@ -87,8 +90,9 @@ Per confronti col Daily aggiungere `STRATA_ROUTE_TAIL_SKIP=0`.
 - **MMVQ_IL** (T 2-4, bit per bit) è di default su entrambe le schede: cambia solo la velocità. `STRATA_MMVQ_IL=0`
   rimette i kernel multi-colonna di 0.1.40. B6 (`STRATA_B6_MMVQ_ROWS=1`, nel Daily acceso) scatta solo dove IL non
   prende la forma: per riprodurre il Daily `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1`.
-- **`STRATA_PIPELINE_ELASTIC`**: di default acceso con due schede e `--pipeline-windows` come nel Daily, ma senza il
-  profilo architectds (theta 0,20 invece di 0,10, niente "verificata prima" né lookup oltre una finestra).
+- **`STRATA_PIPELINE_ELASTIC`**: di default acceso con due schede e `--pipeline-windows` come nel Daily, col profilo
+  architectds dal `da277800` (theta 0,10, verificata prima, lookup oltre una finestra). `STRATA_PIPELINE_ELASTIC=0`
+  torna a upstream (theta 0,20, ordine D-A-B). Il riepilogo scrive `theta 0.10` e `yield on`.
 - **`--vram-reserve-mib 1393`** era tarato per compensare la cecità di WDDM. Con `STRATA_VRAM_FREE=device` la riserva
   si confronta con la VRAM libera dell'intera 3060 (desktop 8K compreso): la stessa cifra lascia più margine reale;
   va ritarata (probabile 700-1000) prima di confrontare.
@@ -103,7 +107,16 @@ Per confronti col Daily aggiungere `STRATA_ROUTE_TAIL_SKIP=0`.
 
 ## Stato
 
-Compilato sì (`341542b7`, `build_lock.py`, CUDA 75;86, test spenti): `strata.exe` sha256
-`e25c9e2f5e1d3857aba37a49e5d072d4907f3eb95cfd6aff08057ebd42bc4e64`, copiato con `build.json` in
-`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\build-upsync-341542b7\`.
+Compilato sì (`ab54c5e1`, `build_lock.py`, CUDA 75;86, test spenti): `strata.exe` sha256
+`397e065d0064493e9b25a2309d1e5964430bdb833354581aa6038163e8878558`, copiato con `build.json` in
+`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\build-upsync-ab54c5e1\`.
 Installato no, provato no: nessuna GPU, nessun test, nessun motore avviato.
+
+Perché: sul banco forzato a 131k (L01/L02) `341542b7` era più lento del Daily del 4,6-7,3% anche con le opzioni
+del Daily; su L02 164 finestre speculative su 600 nel Daily contro 133, stage host 0,50 → 1,69 ms, per-layer host
+1,09 → 2,36 ms. Mancava il profilo architectds: con theta 0,20 meno B passano il gate, e con l'ordine D-A-B di
+upstream il ciclo serve tutto B (e D) prima del layer di A su cui la scheda aspetta. Da verificare sul banco: il
+riepilogo deve dire `theta 0.10`, `yield on`, e le speculative tornare verso 164/600.
+
+Build precedente: `341542b7`, sha256 `e25c9e2f5e1d3857aba37a49e5d072d4907f3eb95cfd6aff08057ebd42bc4e64`
+(`build-upsync-341542b7\`), senza il profilo architectds.
