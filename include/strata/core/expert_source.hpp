@@ -22,6 +22,7 @@
 #pragma once
 
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/ram_dedup.hpp"
 #include "strata/core/exchange_storage.hpp"
 #include "strata/core/hit_hook.hpp"
 #include "strata/kernels/cpu/pool.hpp"
@@ -144,7 +145,10 @@ public:
     /// reused staging buffer - otherwise the pool would read the next expert's bytes while computing this one.
     virtual const uint8_t* blob(int64_t layer, int64_t expert) = 0;
     /// A blob pointer that stays valid (not recycled) for as long as the source is open: for a copy that runs
-    /// asynchronously long after the call (the adaptive tier's swap-ins).  Defaults to `blob`.
+    /// asynchronously long after the call (the adaptive tier's swap-ins). Defaults to `blob`.
+    /// Exception: opt-in Arena RAM dedup grants a lease through the driver's checked
+    /// full-quiescence barrier. Callers must not retain/use it beyond that barrier;
+    /// normal sources and the default-OFF arena preserve source-open lifetime.
     virtual const uint8_t* blob_stable(int64_t layer, int64_t expert) { return blob(layer, expert); }
 
     /// Blobs touched, for the driver to report.  A source that does not count returns 0.
@@ -848,9 +852,16 @@ public:
     double load_seconds() const { return load_seconds_; }
     double load_read_seconds() const { return load_read_s_; }
     double load_copy_seconds() const { return load_copy_s_; }
+    // RAM dedup opt-in: stable pointers are protected until the driver's checked fill fence,
+    // then reclaimable only at a full quiescent request boundary.
+    bool dedup_arm(uint64_t bounce_bytes, std::string& err);
+    RamDedup* dedup() { return dedup_.get(); }
+    uint64_t arena_bytes() const;
+    uint64_t registered_bytes() const { return pinned_bytes_; }
 
 private:
     void* arena_ = nullptr;          ///< the PinnedArena, owned
+    std::unique_ptr<RamDedup> dedup_;
     void* map_ = nullptr;            ///< STRATA_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
     uint64_t map_bytes_ = 0;
     std::vector<const uint8_t*> dev_slice_;   ///< device alias of each registered slice (or of the whole range)

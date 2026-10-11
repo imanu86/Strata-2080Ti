@@ -67,6 +67,13 @@ struct PinnedArena {
     PinnedArena(const PinnedArena&) = delete;
     PinnedArena& operator=(const PinnedArena&) = delete;
 
+    // Anonymous release bookkeeping also uses mapping_base == base. A shared
+    // header instead makes these pointers differ; never treat nonnull as shared.
+    bool dedup_private_layout() const {
+        return base && backing == PageBacking::NormalPages && mapping_base == base &&
+               capacity > 0 && mapping_bytes == capacity && registered_bytes <= capacity &&
+               (uintptr_t)base <= UINTPTR_MAX - capacity;
+    }
     bool valid() const { return base != nullptr; }
     uint8_t* data() const { return (uint8_t*) base; }
 };

@@ -4097,6 +4097,15 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
 }
 
 void ArenaExpertSource::close() {
+    if (dedup_) {
+        std::string err;
+        if (!dedup_->close(err)) {
+            std::fprintf(stderr, "strata ram dedup: fatal close, arena/resources retained: %s\n", err.c_str());
+            (void)dedup_.release(); arena_ = nullptr; base_ = nullptr;
+            return; // CUDA cannot prove quiescence: retained allocations are never reused.
+        }
+        dedup_.reset();
+    }
 #if !defined(_WIN32)
     if (map_ != nullptr) munmap(map_, (size_t) map_bytes_);
 #endif
@@ -4110,6 +4119,36 @@ void ArenaExpertSource::close() {
     base_ = nullptr;
     blobs_ = 0;
     n_expert_ = 0;
+}
+
+uint64_t ArenaExpertSource::arena_bytes() const {
+    return arena_ ? ((const PinnedArena*)arena_)->capacity : map_bytes_;
+}
+
+bool ArenaExpertSource::dedup_arm(uint64_t bounce_bytes, std::string& err) {
+    if (dedup_ && dedup_->armed()) return true;
+    if (!arena_ || !base_ || map_) { err = "RAM dedup requires anonymous expert arena"; return false; }
+    const auto* a = (const PinnedArena*)arena_;
+    if (!a->dedup_private_layout()) {
+        err = "RAM dedup requires coherent anonymous normal-page backing"; return false;
+    }
+#if defined(_WIN32)
+    MEMORY_BASIC_INFORMATION first{}, last{};
+    const auto* end = (const uint8_t*)a->base + a->capacity - 1;
+    if (!VirtualQuery(a->base, &first, sizeof(first)) || !VirtualQuery(end, &last, sizeof(last)) ||
+        first.AllocationBase != a->base || last.AllocationBase != a->base ||
+        first.Type != MEM_PRIVATE || last.Type != MEM_PRIVATE ||
+        first.State != MEM_COMMIT || last.State != MEM_COMMIT) {
+        err = "RAM dedup requires committed MEM_PRIVATE arena allocation"; return false;
+    }
+#endif
+    auto d = std::make_unique<RamDedup>();
+    // Completed register_slices prefix, not the configured pinning cap.
+    std::vector<std::pair<uint64_t,uint64_t>> ranges;
+    if (a->registered_bytes) ranges.emplace_back(0,a->registered_bytes);
+    if (!d->arm((uint8_t*)base_, a->capacity, ranges, true,
+                n_expert_ > 0 ? blobs_/n_expert_ : 0, n_expert_, bounce_bytes, err)) return false;
+    dedup_ = std::move(d); return true;
 }
 
 void ArenaExpertSource::prefetch(int64_t layer, int64_t expert) {
@@ -4166,6 +4205,13 @@ const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
     const int64_t idx = layer * n_expert_ + expert;
     if (idx < 0 || idx >= blobs_) return nullptr;
     ++reads_;
+    if (dedup_ && !dedup_->present(layer, expert)) {
+        std::string err;
+        if (!dedup_->ensure(layer, expert, err)) {
+            std::fprintf(stderr, "strata ram dedup: fatal blob access: %s\n", err.c_str());
+            return nullptr;
+        }
+    }
     // Pointer arithmetic into resident memory.  No fault, no copy, no mapping - which is the entire point of
     // this class over `FileExpertSource`.
     return base_ + strata::kernels::cpu::expert_layout().blob_offset(layer, expert);
