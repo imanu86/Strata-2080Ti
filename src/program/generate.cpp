@@ -12153,6 +12153,12 @@ int main(int argc, char** argv) {
                 // per window class (0: fresh, 1: run speculatively ahead of its predecessor's verdict): the time from
                 // the previous verdict, the tokens it emitted, how many
                 double cls_ms[2] = {0, 0}, cls_tok[2] = {0, 0}, cls_n[2] = {0, 0};
+                // fork (Daily ae6a4561): the cost of a rollback on the verified path.  Verdict intervals by [A run ahead]
+                // [the verdict before rolled a window back][a B ran beside A]: a fresh A after a rollback against a fresh
+                // A after a verdict that launched nothing is the time the wrong window held stage 0; B beside A or not is
+                // the contention a speculative window puts on the window being verified.  Log only.
+                double rb_ms[2][2][2] = {}, rb_n[2][2][2] = {};
+                bool pl_prev_rolled = false;
                 int64_t cal_n[10] = {}, cal_on[10] = {};   // per p_on decile: windows scored, on the path
                 double last_verdict = 0.0;
                 int64_t pl_disagree = 0, pl_late = 0;
@@ -12420,6 +12426,8 @@ int main(int argc, char** argv) {
                         if (A.sfx) { ++sfx_windows; sfx_drafts += A.T - 1; sfx_ok += a; }
                         if (A.seq > 0 && !last) policy.observe(A.sfx, A.T, a, A.sfx_match, now - last_verdict);
                         cls_ms[c] += now - last_verdict;
+                        rb_ms[c][pl_prev_rolled ? 1 : 0][B.launched ? 1 : 0] += now - last_verdict;
+                        rb_n[c][pl_prev_rolled ? 1 : 0][B.launched ? 1 : 0] += 1;
                         cls_tok[c] += a + 1;
                         cls_n[c] += 1;
                         last_verdict = now;
@@ -12437,6 +12445,7 @@ int main(int argc, char** argv) {
                     if (!last && !ajob && !pl_adapt()) return die("an adaptive refill failed");
                     if (on && !last) {
                         ++pl_on;
+                        pl_prev_rolled = false;   // fork (rb_ms)
                         // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
                         mtp.set_source_R(V1(A).final_R(0));
                         chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
@@ -12458,6 +12467,7 @@ int main(int argc, char** argv) {
                         // (snapshot restored, the commit replayed) once it has stopped
                         for (int st = 0; st < pl_nf; ++st)
                             if ((A.com & (1u << st)) == 0 && !VF(st, A).pl_commit_async(a + 1, err)) return die(err);
+                        pl_prev_rolled = B.launched;   // fork (rb_ms)
                         if (B.launched) {   // a wrong guess (or the end): undo once it has stopped
                             doomed = true;
                             D = B;
@@ -12541,6 +12551,20 @@ int main(int argc, char** argv) {
                         std::fprintf(stderr, "strata pipeline: elastic tail beside the windows: %lld shrinks, %lld growths at "
                                              "gaps of stage 0, %.1f ms on the loop's thread\n",
                                      (long long) pl_el_shrinks, (long long) pl_el_grows, pl_el_ms);
+                    {   // fork (Daily ae6a4561): verdict intervals, [A ahead][after a rollback][B beside]
+                        std::string t;
+                        char cb[96];
+                        for (int i = 0; i < 2; ++i)
+                            for (int j = 0; j < 2; ++j)
+                                for (int k = 0; k < 2; ++k)
+                                    if (rb_n[i][j][k] > 0) {
+                                        std::snprintf(cb, sizeof cb, " %s%s%s %.0fx%.2f", i ? "spec" : "fresh",
+                                                      j ? "+afterRB" : "", k ? "+Bbeside" : "", rb_n[i][j][k],
+                                                      rb_ms[i][j][k] / rb_n[i][j][k]);
+                                        t += cb;
+                                    }
+                        std::fprintf(stderr, "strata pipeline rollback cost (windows x ms):%s\n", t.c_str());
+                    }
                     std::fprintf(stderr, "strata pipeline classes: fresh %.0f windows %.2f ms %.2f tok | speculative %.0f "
                                          "windows %.2f ms %.2f tok | forced-chain disagreements %lld, chain late %lld\n",
                                  cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
