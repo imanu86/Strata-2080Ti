@@ -71,7 +71,6 @@ template <typename T> bool same(const T* a, const T* b, size_t n, const char* wh
     size_t count = 0;
     for (size_t i = 0; i < n; ++i) count += std::memcmp(&ha[i], &hb[i], sizeof(T)) != 0;
     std::printf("  FAIL %s: %zu of %zu elements differ, first at %zu\n", what, count, n, first);
-    (void) elem;
     return false;
 }
 uint16_t f16_value(uint32_t r) { return (uint16_t) ((r & 0x8000u) | ((11u + (r >> 16) % 5u) << 10) | (r & 0x3FFu)); }
