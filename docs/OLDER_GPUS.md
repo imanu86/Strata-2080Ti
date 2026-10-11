@@ -169,6 +169,26 @@ Setup does not build these; build by hand and run `serve/server.py` with a confi
   `__syncwarp` are version-gated, and RDNA1's missing signed dot4 uses llama.cpp's SDWA sequence
   (`-DSTRATA_GFX1012_PORTABLE_DOT=ON`: the portable one).
 
+## Turing (sm_75): opt-in interleaved verify projections
+
+(PR #1437, ported onto 0.1.42 in the fork's `lab/ports1`.) `STRATA_MMVQ_IL=1` enables an exact-shape table
+(`kIlRowsSm75`, by reduction width and row count) for dense IQ4_XS, Q4_K, Q5_K and Q6_K projections in 2-4-token
+verify windows. All sm_75 cards are eligible; the table was tuned on a Quadro RTX 8000 and confirmed on an RTX 2080 Ti
+22 GB (PR comment: +4.4% whole-model decode on average, bitwise kernel parity). An unset value, `0`, or anything other
+than exactly `1` (`true` too) keeps the existing sm_75 path, as do unlisted shapes. The sm_80-and-newer and sm_70 tables
+are unchanged; Pascal and HIP do not use this path. It reorders the same Q8_1 bytes and preserves the multi-column
+kernel's output bit for bit. `STRATA_MMVQ_IL_ROWS` overrides the table on sm_75 too (with the opt-in).
+
+On the RTX 8000 (CUDA 12.4 / GCC 13) the table keeps 46 of 69 dense shape/window cells: each saved at least 3% in every
+alternating A/B pair in two seven-pair sweeps, including the interleave launch. Whole-model decode there (IQ3_S + MTP,
+`--spec 4`, INT8 KV, medians of three runs of 128 tokens, only `STRATA_MMVQ_IL=1` changed): 83.7 -> 88.9 tok/s at a
+537-token prompt, 75.4 -> 80.4 at 4,057, 68.4 -> 72.1 at 32,057.
+
+For a CUDA build with `-DSTRATA_BUILD_TESTS=ON`, `STRATA_MMVQ_IL=1 ./build/mmvq_il_parity` checks bitwise parity and
+the path actually launched for the table, the fallback and forced 1/2/4-row kernels; repeat with `=0` and `=true` to
+check the strict opt-in. `./build/mmvq_il_parity --sm75-bench` runs the paired shape sweep on sm_75. No model is
+needed. Select the card with `CUDA_VISIBLE_DEVICES`; other sm_75 hardware needs its own measurements.
+
 ## Reports welcome
 
 These paths stay experimental until more people run them. A report with the card, the driver / ROCm version, the
