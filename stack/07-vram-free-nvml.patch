@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: imanu <imanu86@gmail.com>
+Date: Mon, 12 Oct 2026 07:34:17 +0200
+Subject: [PATCH] FABLE-STRATA-Porta su 0.1.43 la PR upstream #1911: VRAM
+ libera della scheda intera via NVML (STRATA_VRAM_FREE=device), letta anche
+ dalla cache elastica
+
+Da lab/candidate2 865d8203 + b033a625, applicate pulite.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/docs/DETAILS.md b/docs/DETAILS.md
+index 49c49d1b..ad453e5d 100644
+--- a/docs/DETAILS.md
++++ b/docs/DETAILS.md
+@@ -257,6 +257,20 @@ GPU nor the RAM budget holds (only pages - the experts computed are the same; `S
+ is what runs [Unsloth's UD-Q4_K_XL](UNSLOTH_Q4.md) (72 GiB of experts) on a 64 GB PC: 7-8.5 tokens/s at N = 40 on an
+ RTX 5070, against ~3 tokens/s before these changes.
+ 
++**Opt-in switches measured on a hybrid Intel CPU under Windows (Core i7-13700K, 8 P + 8 E cores, RTX 5090, 64 GB RAM,
++Windows 11, Swift 1.5 IQ3_XXS at 128K):**
++- `STRATA_VRAM_FREE=device` (Windows, NVIDIA): `--expert-cache auto` reads the free VRAM of the whole card through NVML.
++  Under WDDM CUDA's own figure counts this process only: with 6 GiB held by another process it still read 30,994 MiB
++  free where NVML read 24,348. With the image encoder loaded (1,547 MiB) the cache was therefore sized too large and
++  shrunk by guesses: six starts of one config (engine 0.1.40.3 and 0.1.41, the default 700 MiB reserve) ended with
++  9,002 to 14,454 slots and 93 MiB to 10 GiB free. With the switch and `--vram-reserve-mib 1500` (0.1.41 built from
++  source): one pass, 13,007 to 13,188 slots and 973 to 1,392 MiB free over seven starts. On 0.1.42 with this switch
++  built in, three interleaved starts each: the default sized 13,543 slots after two shrink steps and ended with 336,
++  602 and 602 MiB free; the switch with a 1,500 MiB reserve 13,102 to 13,130 slots after one step and 1,107 to 1,288
++  MiB free. A run that filled the card to
++  0 MiB free decoded 80-115 tok/s where the same text ran at 205-230 with 900 MiB or more free. Not measured: AMD
++  cards, Linux (the switch is compiled for Windows CUDA builds only).
++
+ **Switches added in 0.1.40 (all off unless noted; none changes the default output):**
+ - `--kv-grow` (or `STRATA_KV_GROW=1`; `--no-kv-grow` turns it off): the K/V takes VRAM only for the cells the requests
+   reach, and the expert cache holds the rest, giving slots back as the context grows. It needs one GPU, an expert
+diff --git a/include/strata/core/expert_cache.hpp b/include/strata/core/expert_cache.hpp
+index 7df517eb..a891cfcb 100644
+--- a/include/strata/core/expert_cache.hpp
++++ b/include/strata/core/expert_cache.hpp
+@@ -75,7 +75,9 @@ bool write_expert_profile(const std::string& path, int64_t n_layers, int64_t n_e
+ /// Free device memory for the expert cache.  On a unified memory system - one memory for the CPU and the GPU, such as
+ /// the DGX Spark (GB10); CUDA reports it as cudaDevAttrIntegrated - cudaMemGetInfo counts only MemFree, not the page cache - which, with the experts read from the GGUF in place, is mostly those
+ /// files' clean pages and gives way to a device allocation.  There the figure is MemAvailable less 6 GiB for the OS
+-/// and the engine's host side (STRATA_UMA_HEADROOM_GIB).  Elsewhere it is cudaMemGetInfo's.
++/// and the engine's host side (STRATA_UMA_HEADROOM_GIB).  Elsewhere it is cudaMemGetInfo's.  On Windows with an NVIDIA
++/// card STRATA_VRAM_FREE=device (opt-in) takes the smaller of that and NVML's figure for the whole card: under WDDM
++/// cudaMemGetInfo does not count what other processes hold.
+ size_t device_free_bytes();
+ 
+ class ExpertCache {
+diff --git a/src/core/expert_cache.cpp b/src/core/expert_cache.cpp
+index 76f47a14..f129296b 100644
+--- a/src/core/expert_cache.cpp
++++ b/src/core/expert_cache.cpp
+@@ -21,8 +21,64 @@
+ #include <utility>
+ #include <cstring>
+ 
++#if defined(_WIN32) && !defined(STRATA_EC_NO_VMM)
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++#define STRATA_EC_NVML_FREE 1
++#endif
++
+ namespace strata::core {
+ 
++#if defined(STRATA_EC_NVML_FREE)
++namespace {
++
++// STRATA_VRAM_FREE=device (opt-in, Windows + NVIDIA).  Under WDDM cudaMemGetInfo answers for THIS process: memory
++// another process holds on the card (the image encoder, a browser, another engine) is not in its free figure.
++// Measured on an RTX 5090, driver 610.88: with 6 GiB written by another process, cudaMemGetInfo in a second process
++// still read 30,994 MiB free where NVML read 24,348.  NVML (nvml.dll, installed with every driver) counts the whole
++// card.  The library is loaded from the system directory only, at first use; false when it cannot answer.
++bool nvml_device_free(size_t& out) {
++    struct Memory { unsigned long long total, free, used; };
++    typedef int (*InitFn)(void);
++    typedef int (*ByBusFn)(const char*, void**);
++    typedef int (*MemFn)(void*, Memory*);
++    struct Lib {
++        ByBusFn by_bus = nullptr;
++        MemFn mem = nullptr;
++        Lib() {
++            HMODULE h = LoadLibraryExW(L"nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++            if (h == nullptr) return;
++            const auto init = (InitFn) (void*) GetProcAddress(h, "nvmlInit_v2");
++            const auto bus = (ByBusFn) (void*) GetProcAddress(h, "nvmlDeviceGetHandleByPciBusId_v2");
++            const auto m = (MemFn) (void*) GetProcAddress(h, "nvmlDeviceGetMemoryInfo");
++            if (init == nullptr || bus == nullptr || m == nullptr || init() != 0) return;
++            by_bus = bus;
++            mem = m;
++        }
++    };
++    static const Lib lib;
++    if (lib.mem == nullptr) return false;
++    int dev = 0;
++    cudaDeviceProp prop{};
++    if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return false;
++    char bus[32];
++    std::snprintf(bus, sizeof bus, "%08X:%02X:%02X.0", (unsigned) prop.pciDomainID, (unsigned) prop.pciBusID,
++                  (unsigned) prop.pciDeviceID);
++    void* handle = nullptr;
++    Memory m{};
++    if (lib.by_bus(bus, &handle) != 0 || lib.mem(handle, &m) != 0) return false;
++    out = (size_t) m.free;
++    return true;
++}
++
++}  // namespace
++#endif
++
+ // See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
+ // not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
+ // NVIDIA's reference snippet): an expert cache that pushes the system into swap would be far slower than a smaller one.
+@@ -66,6 +122,27 @@ size_t device_free_bytes() {
+             if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);
+         }
+     }
++#endif
++#if defined(STRATA_EC_NVML_FREE)
++    static const bool device_wide = [] {
++        const char* v = std::getenv("STRATA_VRAM_FREE");
++        return v != nullptr && std::strcmp(v, "device") == 0;
++    }();
++    if (device_wide) {
++        size_t nvml_b = 0;
++        const bool got = nvml_device_free(nvml_b);
++        static std::atomic<bool> said{false};
++        if (!said.exchange(true)) {
++            if (got)
++                std::fprintf(stderr, "strata generate: STRATA_VRAM_FREE=device: free VRAM is read for the whole card "
++                                     "(NVML: %lld MiB now; CUDA's figure for this process alone: %lld MiB)\n",
++                             (long long) (nvml_b >> 20), (long long) (free_b >> 20));
++            else
++                std::fprintf(stderr, "strata generate: STRATA_VRAM_FREE=device: NVML did not answer (nvml.dll); free "
++                                     "VRAM stays CUDA's figure for this process\n");
++        }
++        if (got) free_b = std::min(free_b, nvml_b);
++    }
+ #endif
+     return free_b;
+ }
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index b70e6581..914c9a68 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -8875,10 +8875,14 @@ int main(int argc, char** argv) {
+         std::deque<std::pair<Clock::time_point, int64_t>> el_seen;
+         Clock::time_point el_last_grow{}, el_last_shrink{};
+         int el_backoff = 1;
++        // upsync: with STRATA_VRAM_FREE=device (#1911) the whole card's free VRAM (NVML), the smaller of the two: under
++        // WDDM cudaMemGetInfo counts this process only, so the desktop and other programs on CUDA0 (the card with the
++        // display) were invisible to the policy and the cache grew until Windows paged.  Without it, as before.
+         auto el_free = []() -> int64_t {
+             const strata::core::OnDevice on(0);   // the elastic cache's card (CUDA0)
+             size_t f = 0, t = 0;
+-            return cudaMemGetInfo(&f, &t) == cudaSuccess ? (int64_t) f : -1;
++            if (cudaMemGetInfo(&f, &t) != cudaSuccess) return -1;
++            return (int64_t) std::min(f, strata::core::device_free_bytes());
+         };
+         // the tail moved: the prompt path's chunk and first lendable slot are planned again by the startup's own rule
+         // (plan_lend: auto takes the largest chunk that lends at most its share of the slots), and the next lend lays
+@@ -9546,6 +9550,8 @@ int main(int argc, char** argv) {
+             // and a page-in while the verify graph spins on a host flag stalls the request for good
+             size_t free_b = 0, total_b = 0;
+             cudaMemGetInfo(&free_b, &total_b);
++            // STRATA_VRAM_FREE=device: the whole card's figure when it is the smaller one (the same value otherwise)
++            free_b = std::min(free_b, strata::core::device_free_bytes());
+             // below ~256 MiB a later allocation (a first-used window's buffers, the desktop, another program) can make
+             // the driver page GPU memory, and a verify graph spinning on a host flag then never finishes
+             const int64_t free_mib = (int64_t) (free_b >> 20);

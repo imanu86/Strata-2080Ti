@@ -1,0 +1,971 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: imanu <imanu86@gmail.com>
+Date: Mon, 12 Oct 2026 07:38:58 +0200
+Subject: [PATCH] FABLE-STRATA-Porta su 0.1.43 STRATA_QSA_ROWS=1: punteggi
+ dell'indicizzatore QSA con le query in registri e le 4 teste ridotte in 6
+ shuffle (stessi bit) e qsa_rows_bench
+
+Da lab/candidate2 5dffa63f + c6fd0440 + 4d8ba8bb + f69f5e99 (lab/qsarows), applicate pulite. B-A-B +3,2/+0,1% (docs/QSAROWS.md).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a3c5ca1b..0027880f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -429,6 +429,14 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+     target_include_directories(chain_step_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+     target_link_libraries(chain_step_bench PRIVATE strata_kernels CUDA::cudart)
+   endif()
++  # QSAROWS (docs/QSAROWS.md): what the T rows of a verification window cost in a QSA layer's decode kernels at a long
++  # context (block scores, top-k, attention over each row's selection, indexer append), row by row; GPU, synthetic, no
++  # model.  Not in the default build: `cmake --build <dir> --target qsa_rows_bench`.
++  if(STRATA_ENABLE_CUDA)
++    add_executable(qsa_rows_bench EXCLUDE_FROM_ALL src/kernels/qsa_rows_bench.cpp)
++    target_include_directories(qsa_rows_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
++    target_link_libraries(qsa_rows_bench PRIVATE strata_kernels CUDA::cudart)
++  endif()
+   # the QSA selection (block scores on the warp kernel and the tensor-core one, top-k): a GPU bench with a
+   # scorer-vs-scorer comparison and an FP64 accuracy gate (synthetic, no model); the ctest runs a 32K context under a
+   # 262144-cell capacity (the top-k dispatch follows the capacity) and exits non-zero on a failed gate
+diff --git a/docs/QSAROWS.md b/docs/QSAROWS.md
+new file mode 100644
+index 00000000..aa30fc23
+--- /dev/null
++++ b/docs/QSAROWS.md
+@@ -0,0 +1,300 @@
++# QSAROWS: le T righe di una finestra nei kernel QSA del decode
++
++Branch `lab/qsarows` del fork `imanu86/Strata-2080Ti`, da `lab/ports1` (`295d6e7f`: `lab/upsync` = upstream v0.1.42 più
++le patch del Daily, `STRATA_CP_*` di `docs/CRITPATH.md`, `STRATA_CHAIN_FUSE2` di `docs/CHAINFUSE.md`, port #1437/#1889).
++Configurazione del Daily: 3060 = stadio 0 (layer 0-15), 2080 Ti = stadio 1 (layer 16-47, testa, drafter MTP),
++`--spec 4 --kv int8 --kv-resident 32768 --max-context 262144 --mtp rt_it48k`, chat singola a 131k.
++
++Stato: vedi «Stato della build» in fondo. Micro-bench sì (`qsa_rows_bench`); una cattura nsys del motore (build
++`743b2d07`, §3) sotto `bench.lock`.
++
++## 0. L'ipotesi e il verdetto
++
++Ipotesi (dal fronte `draftwin`): una riga in più nella finestra costa 5,7 ms nelle fresche (≈2,5 sullo stadio 0 e
++2,5-2,9 sullo stadio 1); gli esperti in più spiegherebbero solo ~0,6 + 0,45 ms; se l'attenzione QSA del decode lavora
++riga per riga rileggendo K/V per ogni riga, 8 layer × ~0,25 ms sullo stadio 1 e 4 × ~0,25 sulla 3060 spiegherebbero
++quasi tutto, e anche il rallentamento da 40-70k a 131k.
++
++**Verdetto: falsa.** La struttura «una riga = un lancio su tutte le celle» esiste solo nel drafter MTP, che però
++attende sempre con **una** query (`record_rest`: `const int T = 1`), e i ~240 µs vengono dal suo window **denso** di
++32 768 celle. Nella verifica (i 12 layer QSA del modello) ogni riga attende sulla **propria selezione di 2051 celle**
++(`idx_top_k` 2048 + 3): 33 chunk × 2 teste K/V = 66 blocchi per riga, 2 MB di K/V per riga, già in L2 fra le righe. Il
++kernel è legato alla latenza dei suoi blocchi, non alla banda, e le T righe sono blocchi in parallelo (`blockIdx.z`),
++non lanci in sequenza. I numeri sono nel §2: l'intero layer QSA (append dell'indicizzatore, punteggi, top-k,
++attenzione) costa per riga in più **29 µs sulla 2080 Ti** (22 con `STRATA_ATTN_DAILY=1`) e **88 µs sulla 3060** (70),
++cioè **0,23 ms** (0,18) sugli 8 layer dello stadio 1 e **0,35 ms** (0,28) sui 4 dello stadio 0, contro i **3,0 e 2,8 ms**
++misurati per riga sui due stadi (§3): l'attenzione QSA e la selezione spiegano **l'8% circa** del costo per riga, non il
++grosso; l'ipotesi presupponeva 2,0 + 1,5 ms. Il costo per riga sta altrove (§3): esperti, GDN, hyper-connection, host.
++L'nsys per T del §3 lo conferma nel motore: per riga lo stadio 1 paga +3,26 ms, di cui esperti +1,31, MMVQ densi (B6)
+++0,63, hyper-connection +0,48, attese host +0,36, QSA +0,30; lo stadio 0 +2,45, di cui esperti +1,04, MMVQ +0,59, hc
+++0,41, QSA +0,24. Portato qui (§4) solo il pezzo QSA che conviene, bit per bit: `STRATA_QSA_ROWS=1`, i punteggi
++dell'indicizzatore (−0,06 / −0,12 ms per riga). Il kernel multi-riga dell'attenzione no (§4).
++
++## 1. Come il codice tratta le T righe (verifica nel sorgente)
++
++Tutto in `src/core/verify.cpp` (layer QSA di una finestra di `n` = T righe, `tb..te`) e nei kernel richiamati:
++
++| passo | chiamata | come tratta le T righe | K/V o chiavi letti |
++|---|---|---|---|
++| chiave dell'indicizzatore | `native_qsa_indexer_append_steps(raw, step+pos, 4, n, …)` (`native_qsa_indexer.cu`) | **un blocco**, le n celle in sequenza dentro il kernel (`for step_idx`); pooling al completamento del blocco di 4 | niente |
++| punteggi dei blocchi | `qsa_block_scores(pooled, dead, qidx, steps, n, max_blocks_, …)` senza `active_blocks` → `block_scores_multi_kernel` (`qsa_select.cu` §810) | 256 CTA a passo fisso sui blocchi; **ogni chiave pooled letta una volta** per tutte le n query (`for qi < nq` sul `k4` già in registri); le query in shared | pooled `n_bid+1` × 128 × 4 B = **16,8 MB a 131k, una volta** |
++| top-k | `qsa_block_topk(scores, steps, n, max_blocks_ (65538), cap_ 2051, …)` → `max_blocks > fit` (33 792) → `block_topk_wide_kernel` | **un CTA per query**, 1024 thread, 4 passate radix sui 32 769 punteggi; le n query in parallelo su n SM | i punteggi (128 KB per query) 4+2 volte |
++| residenza | `qsa_kv_resolve(st, g, sel, steps, n, cap_)` | le n selezioni insieme | pagine mancanti |
++| attenzione | `qsa_decode_attn_batch(qcur, pools, sel, steps, cap_ 2051, …, n)` → `launch_chunks_batch` griglia **(33 chunk, 2 teste K/V, n)** + merge (24, n) | **blocco per (chunk, testa, riga)**: `blockIdx.z` = riga con `ids + z*cap`, `step + z*4`; K/V della riga letti dal suo blocco | 2051 × 2 teste × 512 B = **2 MB per riga** (int8 K+V+scale); le righe condividono ~75-85% delle celle (§2) e stanno in L2 |
++
++Quindi: nessun kernel per riga; il K/V viene letto da ogni blocco di ogni riga ma la quantità è di 2 MB per riga e per
++layer e resta in L2 (5,5 MB sulla 2080 Ti, 3 MB sulla 3060); la selezione è già «multi-riga» (chiavi lette una volta).
++Con `STRATA_ATTN_DAILY=1` il kernel dei chunk è `attn_chunk_kernel_pre75` (73-78 registri, 3 blocchi per SM): 66 × T
++blocchi contro 204 slot sulla 2080 Ti (68 SM) e 84 sulla 3060 (28 SM) — sulla 3060 già T = 2 è una seconda ondata.
++Senza la variabile il kernel di base (37-41 registri, 4 blocchi/SM per la shared da 15,9 KB: 272 e 112 slot).
++
++**Il drafter** (`src/core/mtp.cpp`): il round di catch-up registra `record_front(T, …)` per i K/V delle T celle e
++poi `record_rest` **per la sola riga a** (`copy_row_to_first`, `const int T = 1`): l'attenzione densa sul window di
++32 768 celle (`window_ids` + `qsa_decode_attn_batch(…, T=1)`) gira una volta per round e una per passo. I 240 + 50 µs
++di `docs/CHAINFUSE.md` sono questo kernel a una query; non si moltiplicano per le righe della finestra.
++
++**Perché a 131k si va più piano che a 40-70k, allora.** Dalla parte QSA cresce solo il lavoro per *finestra* (non per
++riga): i punteggi leggono `n_bid` chiavi (16,8 MB a 131k contro 5-9 MB) e il top-k passa 4 volte su 32 769 punteggi;
++il resto (K/V 2051 celle) è costante. Il grosso del rallentamento è fuori dal QSA (esperti ed EV della cache, §3).
++
++## 2. Misure: `qsa_rows_bench`
++
++Target CMake fuori dal default (solo CUDA), stessa procedura di `chain_step_bench`:
++
++```
++python ...\20261006_due_schede\build_lock.py C:\Users\imanu\source\repos\Strata-wt\qsarows --target qsa_rows_bench
++build-sm7586\qsa_rows_bench.exe --device 0            # la 2080 Ti (senza CUDA_VISIBLE_DEVICES)
++build-sm7586\qsa_rows_bench.exe --device 1            # la 3060
++STRATA_ATTN_DAILY=1 build-sm7586\qsa_rows_bench.exe …  # con i kernel del Daily
++```
++
++Dati sintetici alla geometria reale (24 teste × 256, 2 teste K/V, indicizzatore 4 × 128, blocchi di 4, top-k 2048),
++pool int8 con tabella delle pagine identità, contesto 131 072 (righe alle celle 131 072..131 075), capacità 262 144 come
++il Daily (`max_blocks` 65 538, `cap` 2051). Le query dell'indicizzatore delle 4 righe sono una query più un rumore
++piccolo, così le selezioni si sovrappongono come in una finestra vera (il bench stampa l'unione). Per T = 1..4 misura
++(eventi CUDA, mediana di tre giri da `--iters` chiamate) i quattro kernel del layer e la loro sequenza, più il caso
++denso a 32 768 celle per riga (la forma da cui veniva il «~240 µs a query»). La GPU va presa con `bench.lock`.
++
++Misurato il 12/10 (build `5dffa63f`, `--iters 100`, GPU libera, `bench.lock` preso). Unione delle selezioni delle righe:
++2 righe 2474 celle (1,21× una riga), 3 righe 2759 (1,35×), 4 righe 2903 (1,42×). µs per chiamata:
++
++### 2080 Ti (device 0)
++
++| kernel | T=1 | T=2 | T=3 | T=4 | per riga |
++|---|---|---|---|---|---|
++| `qsa_block_scores` (multi) | 47,3 | 57,1 | 80,6 | 103,0 | +18,6 |
++| `qsa_block_topk` (wide) | 110,9 | 81,0 | 82,3 | 82,9 | ~0 |
++| `qsa_decode_attn_batch` cap 2051 | 67,0 | 74,5 | 106,2 | 138,6 | +23,9 |
++| `native_qsa_indexer_append_steps` | 7,0 | 7,1 | 7,5 | 7,8 | +0,3 |
++| **layer QSA** (i quattro in sequenza) | 245,9 | 223,7 | 276,1 | 333,3 | **+29,1** |
++| denso 32 768 celle per riga (forma del drafter) | 651,3 | 1079,1 | 1525,4 | 1956,7 | +435 |
++
++Con `STRATA_ATTN_DAILY=1` (pre75 + merge v2): attenzione 37,3 / 42,1 / 59,0 / 78,0 (+13,6 per riga); layer 209,2 / 191,1 /
++230,1 / 275,4 (**+22,1**); denso 395,7 / 547,4 / 801,3 / 1060,9 (+222 per riga: il «~240 µs a query» dell'ipotesi).
++
++### 3060 (device 1)
++
++| kernel | T=1 | T=2 | T=3 | T=4 | per riga |
++|---|---|---|---|---|---|
++| `qsa_block_scores` (multi) | 64,4 | 106,1 | 152,6 | 194,2 | +43,3 |
++| `qsa_block_topk` (wide) | 106,5 | 87,7 | 86,6 | 86,7 | ~0 |
++| `qsa_decode_attn_batch` cap 2051 | 101,7 | 145,6 | 202,8 | 242,8 | +47,0 |
++| `native_qsa_indexer_append_steps` | 6,9 | 7,1 | 8,3 | 7,0 | +0,1 |
++| **layer QSA** | 263,7 | 340,6 | 449,6 | 527,3 | **+87,9** |
++| denso 32 768 celle per riga | 1032,2 | 1826,6 | 2565,8 | 3311,4 | +760 |
++
++Con `STRATA_ATTN_DAILY=1`: attenzione 41,3 / 71,0 / 110,3 / 131,4 (+30,0 per riga); layer 223,1 / 280,3 / 361,3 / 434,7
++(**+70,5**); denso 475,3 / 869,1 / 1289,7 / 1728,8 (+418).
++
++### Lettura
++
++- **Per riga e per stadio**: 2080 Ti 8 layer × 29 µs = **0,23 ms** (0,18 col Daily); 3060 4 layer × 88 µs = **0,35 ms**
++  (0,28). L'ipotesi prevedeva 2,0 e 1,5 ms: **l'attenzione QSA non è la leva**. Lo stadio 1 paga 3,0 ms per riga e lo
++  stadio 0 2,8 (§3): il QSA ne è l'8% e il 12%.
++- **L'attenzione a cap 2051** cresce di 14-24 µs per riga sulla 2080 Ti e 30-47 sulla 3060: non è la banda (2 MB per
++  riga, in L2) ma l'ondata in più — 66 blocchi per riga, 204 slot (pre75) o 272 (kernel di base) sulla 2080 Ti, 84 /
++  112 sulla 3060, dove già T = 2 è una seconda ondata. Il kernel del Daily dimezza il costo per riga su tutte e due.
++- **I punteggi** (`block_scores_multi_kernel`) crescono di 19 µs (2080 Ti) e 43 (3060) per riga: le chiavi sono lette
++  una volta ma il ciclo sulle query dentro il warp è sequenziale (12 istruzioni + 5 shuffle per testa e query su
++  32 769 blocchi); è l'altra metà del termine per riga del layer QSA. Il **top-k** è piatto (un CTA per query, in
++  parallelo) e **l'append** è trascurabile.
++- **Il caso denso** conferma da dove veniva il numero dell'ipotesi: +222 µs per riga col pre75 sulla 2080 Ti (+418 sulla
++  3060). Ma nessun percorso della verifica lo lancia, e il drafter attende con una riga sola (§1).
++- Il T = 1 del top-k (111 contro 82 µs) e della sequenza è più lento di T = 2: è la prima misura della serie (clock della
++  scheda non ancora al massimo), non un effetto del kernel.
++
++## 3. Da dove viene davvero il costo per riga: nsys per T, per famiglia e per stadio
++
++Cattura `DET-qsarows-nsys2` (12/10, build `build-ports1-743b2d07`, banco forzato L02 a 131k: `STRATA_FORCE_IDS` +
++`STRATA_FORCE_WINDOWS=ref_def1_trace.txt`, 286 finestre di L02 dopo una L01 di 16 token che scalda il prefisso, opzioni
++`--layer-split 16 --trim-stage-weights --pipeline-windows 2 --vram-reserve-later-mib 384 --host-core last`, env
++`STRATA_VRAM_FREE=device STRATA_ROUTE_TAIL_SKIP=0 STRATA_ATTN_DAILY=1 STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1
++STRATA_MTP_SHARED_BRANCH=0 STRATA_SIDE_MIXER=2`, `CUDA_VISIBLE_DEVICES=1,0`; `nsys profile --trace=cuda
++--cuda-graph-trace=node`, 1,26 M kernel; cartella `20261004_routed_keep\DET-qsarows-nsys2\` con `nsys_rows.txt`,
++`run_nsys.bat`; script `nsys_rows.py` e `run_nsys.py` in `20261004_routed_keep\`). Nessun crash a 286 finestre; il
++report `.nsys-rep`/`.sqlite` in `D:\ds4_work\strata\nsys\`.
++
++Metodo: i kernel di un lancio di grafo condividono il `correlationId` del `cudaGraphLaunch`; il grafo della finestra è
++uno per T (`exec_[T]`) e il T si legge da `gridZ` del kernel dei chunk dell'attenzione; device 0 = 3060 = stadio 0
++(712 nodi), device 1 = 2080 Ti = stadio 1 (1397 nodi). Per (stadio, T) la mediana sulle finestre del tempo kernel per
++famiglia, il muro del grafo (primo inizio → ultima fine) e i buchi (muro − unione dei kernel); il costo marginale per
++riga è la pendenza ai minimi quadrati sulle mediane T = 1..4. Finestre: stadio 0 n = 218/114/66/81, stadio 1
++110/81/45/58. In ms per finestra:
++
++**Stadio 0 (3060, layer 0-15)**
++
++| famiglia | T=1 | T=2 | T=3 | T=4 | **per riga** | kernel che la fanno |
++|---|---|---|---|---|---|---|
++| esperti VRAM | 1,93 | 2,97 | 4,12 | 5,00 | **+1,04** | `native_gu_multi` +0,51, `native_down_multi` +0,37, router `bf16_f32_mmvf(_multi)` +0,07, `route(_multi)` |
++| MMVQ densi | 2,52 | 3,17 | 3,64 | 4,32 | **+0,59** | a T=1 i kernel per formato (`q6_k` 0,60, `iq4_xs` 0,74, `q4_k` 0,33, `q5_k` 0,15, `small` 0,09 = 1,96); da T=2 `b6_mmvq_rows` 2,09 → 2,42 → 3,04 (+0,47 per riga) + `native_mmvq_multi` 0,18-0,26; `mmvq_multi` +0,07 |
++| hyper-connection | 1,58 | 2,05 | 2,50 | 2,80 | **+0,41** | `gr_up_multi` +0,21 (0,74 → 1,39), `gr_down_staged` +0,12 (0,73 → 1,09); `gr_norm_split`, `gr_write_norm_rs` piatti |
++| QSA | 0,68 | 0,89 | 1,15 | 1,40 | **+0,24** | `block_scores_multi` +0,14 (0,22 → 0,64), `attn_chunk_pre75` +0,09 (0,12 → 0,37), `block_topk_wide` piatto 0,30-0,32 |
++| GDN | 0,24 | 0,28 | 0,33 | 0,38 | +0,05 | `gdn_step_norm_multi` +0,03, `gdn_conv_l2_multi`, `gdn_ab_multi` |
++| attese host (`wait_flag_ge`) | 2,07 | 2,04 | 0,84 | 2,20 | ~0 | **2 ms piatti**: la GPU aspetta i flag dell'host per layer |
++| altro (copie, resolve, doorbell) | 0,26 | 0,31 | 0,38 | 0,60 | +0,11 | `copy_kernel`, `copy_rows_from_mapped`, `doorbell_publish` |
++| buchi fra i nodi | 0,01 | 0,01 | 0,01 | 0,01 | 0 | |
++| **muro del grafo** | **9,31** | **11,69** | **13,39** | **16,91** | **+2,45** | |
++
++**Stadio 1 (2080 Ti, layer 16-47, testa)**
++
++| famiglia | T=1 | T=2 | T=3 | T=4 | **per riga** | kernel che la fanno |
++|---|---|---|---|---|---|---|
++| esperti VRAM | 3,04 | 4,43 | 5,68 | 7,00 | **+1,31** | `native_gu_multi` +0,88 (1,56 → 4,21), `native_down_multi` +0,36 (0,73 → 1,82), router +0,08 |
++| MMVQ densi | 5,13 | 5,55 | 6,11 | 7,06 | **+0,63** | T=1 per formato (`q6_k` 1,52, `q5_k` 1,06, `q4_k` 0,56, `iq4_xs` 0,55, `small` 0,23 = 3,92); da T=2 `b6_mmvq_rows` 4,04 → 4,46 → 5,19 (+0,58 per riga, 134 chiamate) + `native_mmvq_multi` 0,25-0,31; `mmvq_multi` +0,11 |
++| hyper-connection | 2,42 | 2,71 | 3,22 | 3,85 | **+0,48** | `gr_up_multi` +0,27 (1,10 → 1,91), `gr_down_staged` +0,21 (1,04 → 1,66) |
++| attese host (`wait_flag_ge`) | 1,46 | 1,95 | 2,05 | 2,62 | **+0,36** | 96 attese per finestra: il servizio degli esperti per layer cresce con le righe |
++| QSA | 1,24 | 1,48 | 1,80 | 2,14 | **+0,30** | `block_scores_multi` +0,16 (0,34 → 0,82), `attn_chunk_pre75` +0,12 (0,18 → 0,55), `block_topk_wide` piatto 0,65-0,69 |
++| GDN | 0,39 | 0,45 | 0,54 | 0,65 | +0,09 | `gdn_step_norm_multi` +0,04, `gdn_ab_multi` +0,04 |
++| altro | 0,52 | 0,57 | 0,65 | 0,77 | +0,08 | copie, `resolve`, doorbell |
++| PLE | 0,08 | 0,08 | 0,08 | 0,08 | 0 | |
++| buchi fra i nodi | 3,49 | 3,57 | 3,57 | 3,64 | +0,05 | **3,5 ms piatti**: ~2,5 µs fra i 1397 nodi del grafo |
++| **muro del grafo** | **16,68** | **19,83** | **22,54** | **26,62** | **+3,26** | |
++
++(La catena del drafter sulla 2080 Ti: 1904 grafi di 54 kernel, muro 0,89 ms, di cui QSA 0,30 e MMVQ 0,36: il passo
++di `docs/CHAINFUSE.md`, invariato.) Le pendenze dei muri (+2,45 e +3,26 ms per riga) coincidono con le F0−L0 / F1−L1
++della traccia della pipeline (`DET-cp-clean`: +2,8 e +3,0 ms). Il QSA ne è il **10%** (stadio 0) e il **9%** (stadio 1),
++come il micro-bench del §2 prevedeva.
++
++### Le leve, in ms recuperabili per riga
++
++1. **Esperti (`native_gu_multi_kernel` / `native_down_multi_kernel`, `iq_kernels.cu`): +1,04 / +1,31 ms per riga.**
++   I pesi di un esperto sono già letti una volta per finestra (`GRP_NC = 4` righe per passata); il costo per riga è
++   quello degli esperti **distinti** in più (~9 per layer e riga, `VRAM hits` 24 → 35 per layer-window fra T 2 e 3,5) e
++   della loro decodifica IQ3_XXS: a T = 1 1,56 ms per 32 layer × 10 esperti × ~1,2 MB di gate/up = 12 MB per layer →
++   ~250 GB/s, il **40% della banda** della 2080 Ti; a T = 4 ~55%. Il kernel è legato alla decodifica dei codebook
++   IQ3_XXS e al prodotto per entrata, non alla banda. Recuperabile: portarlo al 70-80% della banda vale ~**0,5 ms per
++   riga sullo stadio 1 e ~0,4 sullo stadio 0** (più ~1 ms piatto a T = 1). Cosa serve: profilo del kernel (ncu: issue
++   slot, pipe della decodifica), poi una riscrittura della decodifica/lettura con le stesse somme per entrata (stesso
++   albero per esperto → stessi bit) o, fuori parità, un formato più leggero per gli esperti caldi. Lavoro grande.
++2. **MMVQ densi con B6 (`b6_mmvq_rows_kernel`, `native_mmvq.cu`): +0,47 / +0,58 ms per riga.** I pesi sono letti una
++   volta ma il kernel paga ~0,3 ms per riga e stadio di prodotti Q8_1 (il micro-bench B6 dava 0,28 + 0,26); la 2080 Ti
++   ha dal `lab/ports1` la tabella MMVQ_IL sm_75 (`STRATA_MMVQ_IL=1`, PR #1437, bit per bit): B-A-B pronto, atteso
++   **0,2-0,4 ms per riga** se IL batte B6 sulle forme calde (Q6_K 2560×6144 / 6144×2560, IQ4_XS). Sulla 3060 la
++   tabella sm_80+ è di default in 0.1.42 e qui era spenta dall'env (`STRATA_MMVQ_IL=0` riproduce il Daily): stesso B-A-B.
++3. **Hyper-connection (`gr_up_multi_kernel`, `gr_down_staged_kernel`, `fused_gr.cu`): +0,41 / +0,48 ms per riga.**
++   65 chiamate per stadio di kernel piccoli (17 → 29 µs l'uno da T = 1 a 4): il lavoro per riga è dentro il blocco,
++   non su più blocchi. Recuperabile ~**0,3 ms per riga e stadio** con righe su blocchi distinti (stesse somme per riga →
++   stessi bit); serve leggere i due kernel e la loro geometria (`GrMulti`). Lavoro medio.
++4. **Attese host (`wait_flag_ge_kernel`): 2 ms piatti sullo stadio 0, 1,5 → 2,6 ms sullo stadio 1 (+0,36 per riga).**
++   È il thread host che serve gli esperti layer per layer (`CRITPATH`, `per-layer host`): fronte host, non kernel.
++5. **Buchi fra i nodi dello stadio 1: 3,5 ms piatti per finestra** (13% di una finestra T = 2): fusioni di nodi nel
++   grafo della verifica come in `CHAINFUSE` (−2,5 µs a nodo tolto); non è per riga ma è la voce piatta più grossa.
++6. **QSA: +0,24 / +0,30 ms per riga.** Metà sono i punteggi (`block_scores_multi`): fatto qui, §4 (`STRATA_QSA_ROWS=1`,
++   −0,06 / −0,12 ms per riga); l'altra metà è l'ondata in più del kernel dei chunk (§2), non conviene.
++
++## 4. `STRATA_QSA_ROWS=1`: i punteggi dell'indicizzatore con meno pressione per riga (bit per bit)
++
++Dall'nsys (§3) il kernel QSA che cresce di più con le righe è `block_scores_multi_kernel` (+0,14 / +0,16 ms per riga su
++4 / 8 layer: ~20 µs per chiamata e riga su entrambe le schede). Le chiavi sono già lette una volta per tutte le query;
++il costo per riga sta nelle **pipe di shared e shuffle**: per (blocco, query) 4 letture `LDS.128` delle fette di q e 5
++shuffle per testa (20 per blocco e query) — 32 769 blocchi × (4 LDS + 20 SHFL) per query ≈ 15-20 µs di sola emissione.
++`block_scores_rows_kernel<NQ>` (`qsa_select.cu`, NQ = 1..4): (1) le fette di q delle NQ query (4 teste × 4 float a lane)
++in **registri** per tutto il kernel (44 / 63 / 78 / 94 registri, STACK 0, `cuobjdump -res-usage`); (2) i prodotti di
++lane delle 4 teste **ridotti a scatter** con gli accoppiamenti di `warp_sum` (xor 16 e 8 tengono una testa per lane,
++poi 4, 2, 1: sei shuffle per le quattro teste invece di venti) e raccolti sulla lane 0 in ordine di testa (tre shuffle).
++Ogni somma addiziona gli stessi due operandi dello stesso livello di `warp_sum` (la somma float commuta), l'espressione
++del prodotto è lo stesso testo nello stesso file, i relu si sommano nell'ordine delle teste: **stessi bit** del kernel
++multi e del kernel per query. Blocco di coda e +1e9 come prima. Opt-in: `STRATA_QSA_ROWS=1` esatto, in
++`qsa_block_scores` per le chiamate senza `active_blocks` fino a 4 query (le finestre del decode); oltre, o senza la
++variabile, il kernel multi di prima.
++
++Parità e µs (`qsa_rows_bench --rows`, 12/10, `docs/qsa_rows_bench_rows_2026-10-12.txt`): punteggi **e** id del top-k
++identici (memcmp) a T = 1..4 a 131k e a contesto corto (celle 100-103, blocco di coda pieno), 16 casi su due schede, con e
++senza `STRATA_ATTN_DAILY`:
++
++| `qsa_block_scores`, µs a chiamata | T=1 | T=2 | T=3 | T=4 | per riga |
++|---|---|---|---|---|---|
++| 2080 Ti, multi (riferimento) | 47,2 | 56,9 | 78,2 | 101,2 | +18,0 |
++| 2080 Ti, `STRATA_QSA_ROWS=1` | **36,2** | **38,0** | **49,2** | **54,6** | **+6,1** |
++| 3060, multi | 73,4 | 109,4 | 151,9 | 193,5 | +40,0 |
++| 3060, `STRATA_QSA_ROWS=1` | **63,3** | **75,5** | **98,0** | **130,2** | **+22,3** |
++
++Nel motore: stadio 1 (8 layer) −0,09 ms a T = 1 e −0,37 a T = 4 per finestra; stadio 0 (4 layer) −0,04 e −0,25. Piccolo
++(1-1,5% di una finestra), sicuro, bit per bit. Il T = 4 sulla 3060 resta alto perché a 94 registri il kernel scende a
++2 CTA per SM: una versione a due passate di 2 query terrebbe 63 registri (da provare se la 3060 conta).
++
++### Il kernel multi-riga dell'attenzione: disegno e perché non è qui
++
++Un kernel «K/V caricati una volta per tutte le righe che hanno scelto la cella» è possibile **bit per bit** solo se
++ogni riga conserva la *propria* partizione in chunk (il massimo del chunk, la somma degli esponenziali e la piega dei
++valori in ordine di cella sono alberi fissi sui 64 slot del chunk; il merge li piega in ordine di chunk). Il disegno
++che lo rispetta: blocco per (chunk c, testa K/V), **tutte le righe** del chunk c insieme — `ids_t[64c .. 64c+63]` per
++t = 0..T−1 — con l'unione delle celle del blocco caricata una volta (K in registri a coppie per warp come nel pre75,
++V in scena in shared come `attn_chunk_kernel_stage`), i punteggi per (riga, cella) con la q della riga da shared/L1,
++`sp[t][h][64]` e `spt[t]` per riga, la piega per riga nello stesso ordine. Griglia (33, 2) invece di (33, 2, T);
++shared 15,9 KB + 3 KB × T + 4,2 KB; registri 12 × T accumulatori (T = 4: 48) → 2 blocchi per SM; le celle comuni fra
++le righe (75-85%) lette una volta invece di T.
++
++Perché non lo porto: a cap 2051 i blocchi per riga stanno in un'ondata fino a T = 3 sulla 2080 Ti (66 × T su 204
++slot) e il kernel è legato alla latenza della catena del blocco, non alla banda; mettere T righe nello stesso blocco
++allunga la catena (più celle nell'unione, T × il lavoro) e toglie parallelismo. Il guadagno possibile è sull'ondata in
++più a T = 4 (2080 Ti con `STRATA_ATTN_DAILY=1`) e sulla 3060 da T = 2: azzerando del tutto il termine per riga
++dell'attenzione misurato (§2) si guadagnerebbero al massimo 8 × 14-24 µs = **0,1-0,2 ms per riga** sullo stadio 1 e
++4 × 30-47 = **0,12-0,19 ms** sullo stadio 0, su 3,0 e 2,8: sotto il rumore del banco (±5% in t/s). Sul **window denso** del drafter
++(1024 blocchi, 5 ondate, 46 MB) il kernel multi-riga varrebbe ~200 µs per riga in più, ma il drafter attende con una
++riga sola: niente da guadagnare lì. `STRATA_QSA_ROWS` qui accende solo il kernel dei punteggi; se un giorno la verifica attende su T > 4 o su window densi, il disegno sopra è quello da portare, con
++`qsa_rows_bench --rows` come parità (memcmp per riga contro `qsa_decode_attn_batch`).
++
++## 5. Come misurarlo nel motore (banco forzato B-A-B)
++
++Stesso exe e argomenti del §3, `STRATA_DECODE_TIMING=1`, `STRATA_FORCE_IDS` + `STRATA_FORCE_WINDOWS` (righe per finestra
++forzate, uguali fra i bracci). Tre corse alternate B (`STRATA_QSA_ROWS=1`), A (senza), B:
++
++- identità: `strata work: … accepted X of Y drafts … target picks replaced` uguale (gli id della selezione sono gli
++  stessi bit, quindi anche l'attenzione e i token);
++- tempo: `strata decode stage 1: GPU-reach wait` (−0,1/−0,4 ms per finestra secondo T), `strata pipeline: … ms/window`,
++  t/s; sotto il rumore (±5%) serve la traccia nsys o `STRATA_PIPELINE_TRACE` + `pipe_rows.py` (F1−L1 per T).
++
++Per le leve del §3: `STRATA_MMVQ_IL=1` contro `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1` (leva 2, pronta); nsys come
++`DET-qsarows-nsys2` (`run_nsys.bat NAME 500`, poi `nsys export --type=sqlite` e `nsys_rows.py`) dopo ogni intervento
++sugli esperti o sulle hyper-connection: la tabella per famiglia e T dice se la pendenza è scesa.
++
++## 6. Rischi e limiti
++
++- La cattura nsys è una richiesta (L02, 286 finestre) con tracciamento acceso: i µs assoluti sono gonfiati di poco
++  (`--cuda-graph-trace=node`), le pendenze per T no (stesso rumore a ogni T); la classe fresca/speculativa non è
++  distinta (stesso grafo); la L01 di 16 token è servita solo a scaldare il prefisso.
++- `STRATA_PIPELINE_TRACE` non ha scritto il file in questa corsa (serve anche `STRATA_PIPELINE_DEBUG=1`, come in
++  `DET-cp-nsys5`): il confronto con F0−L0 / F1−L1 usa `DET-cp-clean`.
++- Il micro-bench è sintetico (selezioni da punteggi casuali, unione 75-85%); le pendenze nel motore (§3) lo confermano.
++- `STRATA_QSA_ROWS=1` a T = 4 usa 94 registri (2 CTA per SM): sulla 3060 il guadagno a T = 4 è un terzo, non la metà.
++- Le stime di recupero delle leve 1 e 3 sono dall'efficienza misurata (banda, µs per chiamata), non da un prototipo.
++
++## Stato della build
++
++Compilato sì (`build_lock.py`, CUDA 12.6, sm_75+86, test spenti): `strata.exe` dal codice di `4d8ba8bb`
++(`STRATA_QSA_ROWS=1` opt-in; senza la variabile i lanci sono quelli di `lab/ports1` `295d6e7f`), sha256 vedi
++`build.json`, copiato con `qsa_rows_bench.exe`, i log dei bench e `build.json` in
++nella cartella delle corse del lab (fuori dal repo), `build-qsarows-<sha>\`.
++Installato no, provato no (il motore sotto nsys è stato avviato sulla build `743b2d07`, non su questa); micro-bench sì
++sulle due schede sotto `bench.lock` (parità bit per bit e µs del §2 e del §4). La build precedente (`c6fd0440`, solo
++bench e documento) è in `build-qsarows-c6fd0440\` con sha256 `68c6413615cd06de854cb472e6a4bad51c949851d571e382d9b535a892e64b22`.
++
++## File toccati
++
++- `src/kernels/cuda/qsa_select.cu`, `include/strata/kernels/qsa_select.hpp`: `block_scores_rows_kernel<NQ>`,
++  `qsa_block_scores_rows`, `STRATA_QSA_ROWS` in `qsa_block_scores`.
++- `src/kernels/qsa_rows_bench.cpp`, `CMakeLists.txt` (target `qsa_rows_bench`, `EXCLUDE_FROM_ALL`; `--rows` = parità e µs).
++- `docs/QSAROWS.md`, `docs/qsa_rows_bench_2026-10-12.txt`, `docs/qsa_rows_bench_rows_2026-10-12.txt` (uscite grezze).
++- Fuori dal repo (cartella delle corse del lab): `run_nsys.py` (run_long + `--cases`,
++  `--first-tokens`, variabili di iniezione nsys), `nsys_rows.py`, `pipe_rows.py`, `DET-qsarows-nsys2\`.
+diff --git a/docs/qsa_rows_bench_2026-10-12.txt b/docs/qsa_rows_bench_2026-10-12.txt
+new file mode 100644
+index 00000000..b49d21eb
+--- /dev/null
++++ b/docs/qsa_rows_bench_2026-10-12.txt
+@@ -0,0 +1,59 @@
++bench.lock taken after 162 s
++=== device 0, STRATA_ATTN_DAILY=unset
++qsa_rows_bench on device 0 (NVIDIA GeForce RTX 2080 Ti, 7.5), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     47.3 T=2     57.1 T=3     80.6 T=4    103.0  | +18.6 us a row
++  topk    qsa_block_topk                       T=1    110.9 T=2     81.0 T=3     82.3 T=4     82.9  | +-9.3 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1     67.0 T=2     74.5 T=3    106.2 T=4    138.6  | +23.9 us a row
++  append  native_qsa_indexer_append_steps      T=1      7.0 T=2      7.1 T=3      7.5 T=4      7.8  | +0.3 us a row
++  layer   append + scores + topk + attn        T=1    245.9 T=2    223.7 T=3    276.1 T=4    333.3  | +29.1 us a row
++-- the drafter's dense window (32768 cells a row): the shape the hypothesis's ~240 us a query comes from
++  dense   qsa_decode_attn_batch cap 32768      T=1    651.3 T=2   1079.1 T=3   1525.4 T=4   1956.7  | +435.1 us a row
++-- per row: 29.1 us a QSA layer -> x4 layers (stage 0) 0.12 ms, x8 layers (stage 1) 0.23 ms
++qsa_rows_bench: done
++  rc 0
++=== device 1, STRATA_ATTN_DAILY=unset
++qsa_rows_bench on device 1 (NVIDIA GeForce RTX 3060, 8.6), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     64.4 T=2    106.1 T=3    152.6 T=4    194.2  | +43.3 us a row
++  topk    qsa_block_topk                       T=1    106.5 T=2     87.7 T=3     86.6 T=4     86.7  | +-6.6 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1    101.7 T=2    145.6 T=3    202.8 T=4    242.8  | +47.0 us a row
++  append  native_qsa_indexer_append_steps      T=1      6.9 T=2      7.1 T=3      8.3 T=4      7.0  | +0.1 us a row
++  layer   append + scores + topk + attn        T=1    263.7 T=2    340.6 T=3    449.6 T=4    527.3  | +87.9 us a row
++-- the drafter's dense window (32768 cells a row): the shape the hypothesis's ~240 us a query comes from
++  dense   qsa_decode_attn_batch cap 32768      T=1   1032.2 T=2   1826.6 T=3   2565.8 T=4   3311.4  | +759.7 us a row
++-- per row: 87.9 us a QSA layer -> x4 layers (stage 0) 0.35 ms, x8 layers (stage 1) 0.70 ms
++qsa_rows_bench: done
++  rc 0
++=== device 0, STRATA_ATTN_DAILY=1
++qsa_rows_bench on device 0 (NVIDIA GeForce RTX 2080 Ti, 7.5), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells, STRATA_ATTN_DAILY set
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     47.4 T=2     59.2 T=3     81.3 T=4    105.9  | +19.5 us a row
++  topk    qsa_block_topk                       T=1    111.1 T=2     82.3 T=3     82.4 T=4     83.0  | +-9.3 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1     37.3 T=2     42.1 T=3     59.0 T=4     78.0  | +13.6 us a row
++  append  native_qsa_indexer_append_steps      T=1      8.9 T=2      7.6 T=3      7.0 T=4      8.3  | +-0.2 us a row
++  layer   append + scores + topk + attn        T=1    209.2 T=2    191.1 T=3    230.1 T=4    275.4  | +22.1 us a row
++-- the drafter's dense window (32768 cells a row): the shape the hypothesis's ~240 us a query comes from
++  dense   qsa_decode_attn_batch cap 32768      T=1    395.7 T=2    547.4 T=3    801.3 T=4   1060.9  | +221.7 us a row
++-- per row: 22.1 us a QSA layer -> x4 layers (stage 0) 0.09 ms, x8 layers (stage 1) 0.18 ms
++qsa_rows_bench: done
++  rc 0
++=== device 1, STRATA_ATTN_DAILY=1
++qsa_rows_bench on device 1 (NVIDIA GeForce RTX 3060, 8.6), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells, STRATA_ATTN_DAILY set
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     80.1 T=2    102.4 T=3    145.2 T=4    207.4  | +42.4 us a row
++  topk    qsa_block_topk                       T=1     98.1 T=2    100.2 T=3     84.1 T=4     92.1  | +-2.0 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1     41.3 T=2     71.0 T=3    110.3 T=4    131.4  | +30.0 us a row
++  append  native_qsa_indexer_append_steps      T=1      6.7 T=2      6.0 T=3      7.4 T=4      8.2  | +0.5 us a row
++  layer   append + scores + topk + attn        T=1    223.1 T=2    280.3 T=3    361.3 T=4    434.7  | +70.5 us a row
++-- the drafter's dense window (32768 cells a row): the shape the hypothesis's ~240 us a query comes from
++  dense   qsa_decode_attn_batch cap 32768      T=1    475.3 T=2    869.1 T=3   1289.7 T=4   1728.8  | +417.8 us a row
++-- per row: 70.5 us a QSA layer -> x4 layers (stage 0) 0.28 ms, x8 layers (stage 1) 0.56 ms
++qsa_rows_bench: done
++  rc 0
++bench.lock released
++rc=0
+diff --git a/docs/qsa_rows_bench_rows_2026-10-12.txt b/docs/qsa_rows_bench_rows_2026-10-12.txt
+new file mode 100644
+index 00000000..46502c2b
+--- /dev/null
++++ b/docs/qsa_rows_bench_rows_2026-10-12.txt
+@@ -0,0 +1,67 @@
++bench.lock taken after 0 s
++=== device 0, STRATA_ATTN_DAILY=unset
++qsa_rows_bench on device 0 (NVIDIA GeForce RTX 2080 Ti, 7.5), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     47.2 T=2     56.9 T=3     78.2 T=4    101.2  | +18.0 us a row
++  topk    qsa_block_topk                       T=1    111.0 T=2     80.5 T=3     79.7 T=4     79.8  | +-10.4 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1     66.7 T=2     74.3 T=3    103.4 T=4    134.8  | +22.7 us a row
++  append  native_qsa_indexer_append_steps      T=1      7.4 T=2      7.2 T=3      7.0 T=4      8.1  | +0.2 us a row
++  layer   append + scores + topk + attn        T=1    246.2 T=2    221.0 T=3    270.6 T=4    326.0  | +26.6 us a row
++-- per row: 26.6 us a QSA layer -> x4 layers (stage 0) 0.11 ms, x8 layers (stage 1) 0.21 ms
++-- STRATA_QSA_ROWS: qsa_block_scores_rows against qsa_block_scores (multi), scores and ids bit for bit
++  parity: 8 cases, 0 differ -> bit-identical
++  scores  qsa_block_scores (multi, reference)  T=1     47.2 T=2     56.9 T=3     78.2 T=4    101.2  | +18.0 us a row
++  scores  qsa_block_scores_rows                T=1     36.2 T=2     38.0 T=3     49.2 T=4     54.6  | +6.1 us a row
++qsa_rows_bench: done
++  rc 0
++=== device 1, STRATA_ATTN_DAILY=unset
++qsa_rows_bench on device 1 (NVIDIA GeForce RTX 3060, 8.6), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     73.4 T=2    109.4 T=3    151.9 T=4    193.5  | +40.0 us a row
++  topk    qsa_block_topk                       T=1     91.4 T=2     96.1 T=3     85.8 T=4     82.2  | +-3.1 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1     78.0 T=2    141.2 T=3    195.9 T=4    240.5  | +54.2 us a row
++  append  native_qsa_indexer_append_steps      T=1      7.0 T=2      6.9 T=3      8.8 T=4      8.4  | +0.5 us a row
++  layer   append + scores + topk + attn        T=1    254.4 T=2    338.7 T=3    421.3 T=4    530.9  | +92.2 us a row
++-- per row: 92.2 us a QSA layer -> x4 layers (stage 0) 0.37 ms, x8 layers (stage 1) 0.74 ms
++-- STRATA_QSA_ROWS: qsa_block_scores_rows against qsa_block_scores (multi), scores and ids bit for bit
++  parity: 8 cases, 0 differ -> bit-identical
++  scores  qsa_block_scores (multi, reference)  T=1     73.4 T=2    109.4 T=3    151.9 T=4    193.5  | +40.0 us a row
++  scores  qsa_block_scores_rows                T=1     63.3 T=2     75.5 T=3     98.0 T=4    130.2  | +22.3 us a row
++qsa_rows_bench: done
++  rc 0
++=== device 0, STRATA_ATTN_DAILY=1
++qsa_rows_bench on device 0 (NVIDIA GeForce RTX 2080 Ti, 7.5), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells, STRATA_ATTN_DAILY set
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     47.2 T=2     77.2 T=3     79.0 T=4    100.9  | +17.9 us a row
++  topk    qsa_block_topk                       T=1    110.9 T=2     85.9 T=3     80.4 T=4     79.7  | +-10.4 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1     36.5 T=2     42.1 T=3     57.5 T=4     75.7  | +13.0 us a row
++  append  native_qsa_indexer_append_steps      T=1      8.7 T=2      7.9 T=3      7.5 T=4      7.6  | +-0.4 us a row
++  layer   append + scores + topk + attn        T=1    208.8 T=2    188.4 T=3    224.6 T=4    266.9  | +19.4 us a row
++-- per row: 19.4 us a QSA layer -> x4 layers (stage 0) 0.08 ms, x8 layers (stage 1) 0.15 ms
++-- STRATA_QSA_ROWS: qsa_block_scores_rows against qsa_block_scores (multi), scores and ids bit for bit
++  parity: 8 cases, 0 differ -> bit-identical
++  scores  qsa_block_scores (multi, reference)  T=1     47.2 T=2     77.2 T=3     79.0 T=4    100.9  | +17.9 us a row
++  scores  qsa_block_scores_rows                T=1     36.1 T=2     38.0 T=3     49.0 T=4     54.5  | +6.1 us a row
++qsa_rows_bench: done
++  rc 0
++=== device 1, STRATA_ATTN_DAILY=1
++qsa_rows_bench on device 1 (NVIDIA GeForce RTX 3060, 8.6), 100 iterations: context 131072, capacity 262144 cells (max_blocks 65538), selection cap 2051, int8 pools over 131140 cells, STRATA_ATTN_DAILY set
++  selections: width 2051 a row; union of 2 rows 2474 cells (1.21x one row) union of 3 rows 2759 cells (1.35x one row) union of 4 rows 2903 cells (1.42x one row)
++-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)
++  scores  qsa_block_scores (multi)             T=1     74.6 T=2    100.6 T=3    154.7 T=4    178.6  | +34.7 us a row
++  topk    qsa_block_topk                       T=1     96.1 T=2     95.1 T=3     87.7 T=4     77.7  | +-6.1 us a row
++  attn    qsa_decode_attn_batch cap 2051       T=1     41.2 T=2     65.2 T=3     98.2 T=4    118.3  | +25.7 us a row
++  append  native_qsa_indexer_append_steps      T=1      6.8 T=2      6.6 T=3      7.2 T=4      7.3  | +0.2 us a row
++  layer   append + scores + topk + attn        T=1    206.1 T=2    260.3 T=3    317.3 T=4    396.1  | +63.3 us a row
++-- per row: 63.3 us a QSA layer -> x4 layers (stage 0) 0.25 ms, x8 layers (stage 1) 0.51 ms
++-- STRATA_QSA_ROWS: qsa_block_scores_rows against qsa_block_scores (multi), scores and ids bit for bit
++  parity: 8 cases, 0 differ -> bit-identical
++  scores  qsa_block_scores (multi, reference)  T=1     74.6 T=2    100.6 T=3    154.7 T=4    178.6  | +34.7 us a row
++  scores  qsa_block_scores_rows                T=1     55.6 T=2     74.1 T=3     94.5 T=4    125.3  | +23.2 us a row
++qsa_rows_bench: done
++  rc 0
++bench.lock released
++rc=0
+diff --git a/include/strata/kernels/qsa_select.hpp b/include/strata/kernels/qsa_select.hpp
+index 21fa27e7..5235c222 100644
+--- a/include/strata/kernels/qsa_select.hpp
++++ b/include/strata/kernels/qsa_select.hpp
+@@ -29,6 +29,13 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
+                       int64_t active_blocks = -1);   ///< perf-review C-1: > 0 launches only this many blocks (the
+                                                      ///< batch's largest n_bid + 1; not for a captured graph)
+ 
++/// QSAROWS (docs/QSAROWS.md): block_scores_multi_kernel's scores for a call of up to 4 queries, bit for bit, with the
++/// queries in registers and the four heads reduce-scattered (six shuffles instead of twenty a block and query).
++/// qsa_block_scores takes it with STRATA_QSA_ROWS=1; false (nothing launched) above 4 queries or on another geometry.
++/// For qsa_rows_bench's parity and timing it is callable on its own.
++bool qsa_block_scores_rows(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
++                           int64_t max_blocks, const QsaShapes& s, float* scores, void* stream);
++
+ /// The same scores on tensor cores (3xTF32, FP32-level accuracy but another summation order: not bitwise; the tail
+ /// block n_bid is the warp kernel's arithmetic). For the prompt path; false (nothing launched) on another geometry.
+ /// On AMD it is the gfx12 (RDNA4) WMMA kernel (a three-way bf16 split, six products); false on any other AMD target.
+diff --git a/src/kernels/cuda/qsa_select.cu b/src/kernels/cuda/qsa_select.cu
+index a815c14d..0f4ea820 100644
+--- a/src/kernels/cuda/qsa_select.cu
++++ b/src/kernels/cuda/qsa_select.cu
+@@ -865,6 +865,82 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(co
+     }
+ }
+ 
++// QSAROWS (docs/QSAROWS.md, STRATA_QSA_ROWS=1): block_scores_multi_kernel's work for NQ <= 4 queries with less issue
++// pressure per (block, query).  nsys of a 131k decode window (DET-qsarows-nsys2): the multi kernel costs ~20 us more a
++// call for every row of the window on both cards - per (block, query) it reads the four query slices from shared memory
++// (4 x LDS.128) and reduces each head's lane products with its own five shuffles (20 a block and query), and those two
++// pipes bound it, not the key reads (the keys are read once for all the queries, as there).  Here (1) the lane's slices
++// of the NQ queries (4 heads x 4 floats each) live in registers for the whole kernel, (2) the four heads' lane products
++// are reduce-scattered with warp_sum's pairing (xor 16, 8, then 4, 2, 1: six shuffles for the four heads) and gathered
++// to lane 0 in head order (three more).  Every sum adds the same two operands as block_scores_kernel's warp_sum at the
++// same level (float add commutes), the dot expression is the same text in the same file, the relu-and-add runs over the
++// heads in the same order: the same score bits.  The tail block and the +1e9 are as in the multi kernel.
++template <int NQ>
++__global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_rows_kernel(const float* __restrict__ pooled,
++                                                                             const float* __restrict__ dead,
++                                                                             const float* __restrict__ q_idx,
++                                                                             const int32_t* __restrict__ steps, int nq,
++                                                                             int64_t max_blocks, float* __restrict__ out) {
++    __shared__ int64_t s_nkv[NQ], s_nbid[NQ];
++    if (threadIdx.x < nq) {
++        s_nkv[threadIdx.x] = steps[threadIdx.x * kStepCount + kStepNKv];
++        s_nbid[threadIdx.x] = steps[threadIdx.x * kStepCount + kStepNBid];
++    }
++    __syncthreads();
++    int64_t top = 0;
++    for (int q = 0; q < nq; ++q) top = s_nbid[q] > top ? s_nbid[q] : top;
++    if ((int64_t) blockIdx.x * SCORE_WARPS > top) return;   // the multi kernel's early exit (CTA-uniform)
++    const int lane = threadIdx.x & 31;
++    float4 qr[NQ][IDX_HEADS];
++#pragma unroll
++    for (int qi = 0; qi < NQ; ++qi)
++#pragma unroll
++        for (int h = 0; h < IDX_HEADS; ++h)
++            qr[qi][h] = qi < nq ? *reinterpret_cast<const float4*>(q_idx + qi * IDX_HEADS * IDX_DIM + h * IDX_DIM + lane * 4)
++                                : make_float4(0.f, 0.f, 0.f, 0.f);
++    const float4 kd = *reinterpret_cast<const float4*>(dead + lane * 4);
++    const bool hi16 = (lane & 16) != 0, hi8 = (lane & 8) != 0;
++    const int64_t wstride = (int64_t) gridDim.x * SCORE_WARPS;
++    for (int64_t b = (int64_t) blockIdx.x * SCORE_WARPS + (threadIdx.x >> 5); b <= top && b < max_blocks; b += wstride) {
++        const float4 kp = *reinterpret_cast<const float4*>(pooled + b * IDX_DIM + lane * 4);
++#pragma unroll
++        for (int qi = 0; qi < NQ; ++qi) {
++            if (qi >= nq) break;
++            const int64_t n_bid = s_nbid[qi];
++            if (b > n_bid) continue;
++            const float4 k4 = (b == n_bid) ? kd : kp;
++            float d[IDX_HEADS];
++#pragma unroll
++            for (int h = 0; h < IDX_HEADS; ++h) {
++                const float4 q4 = qr[qi][h];
++                d[h] = k4.x * q4.x + k4.y * q4.y + k4.z * q4.z + k4.w * q4.w;
++            }
++            // reduce-scatter: after xor 16 the lane keeps heads {0,1} (bit 4 clear) or {2,3}; after xor 8 one head
++            float r2[2];
++#pragma unroll
++            for (int i = 0; i < 2; ++i)
++                r2[i] = (hi16 ? d[i + 2] : d[i]) + __shfl_xor_sync(0xffffffffu, hi16 ? d[i] : d[i + 2], 16);
++            float r = (hi8 ? r2[1] : r2[0]) + __shfl_xor_sync(0xffffffffu, hi8 ? r2[0] : r2[1], 8);
++            r += __shfl_xor_sync(0xffffffffu, r, 4);
++            r += __shfl_xor_sync(0xffffffffu, r, 2);
++            r += __shfl_xor_sync(0xffffffffu, r, 1);
++            // lane 8h holds head h's full sum: gather to lane 0 and add the relus in head order, as the warp kernel
++            const float s1 = __shfl_sync(0xffffffffu, r, 8);
++            const float s2 = __shfl_sync(0xffffffffu, r, 16);
++            const float s3 = __shfl_sync(0xffffffffu, r, 24);
++            if (lane == 0) {
++                float score = 0.0f;
++                score += r > 0.0f ? r : 0.0f;
++                score += s1 > 0.0f ? s1 : 0.0f;
++                score += s2 > 0.0f ? s2 : 0.0f;
++                score += s3 > 0.0f ? s3 : 0.0f;
++                if (b == n_bid && s_nkv[qi] % R != 0) score += 1e9f;
++                out[qi * max_blocks + b] = score;
++            }
++        }
++    }
++}
++
+ #if !defined(__HIPCC__)
+ // ---- the decode top-k on a thread-block cluster (sm_90+; S19).  One CTA per query (block_topk_reg_kernel, or
+ // block_topk_kernel above 33,792 blocks: a --max-context over ~135K) makes four radix passes and two scans over up to
+@@ -1099,6 +1175,9 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
+     // a block past a query's n_bid returns at once: the grid need only reach the batch's largest n_bid (C-1)
+     static const bool multi = [] { const char* v = std::getenv("STRATA_SCORES_MULTI"); return v == nullptr || std::atoi(v) != 0; }();
+     if (multi && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
++        // QSAROWS: STRATA_QSA_ROWS=1 (exactly) takes block_scores_rows_kernel for calls of up to 4 queries - the same bits
++        static const bool rows_env = [] { const char* v = std::getenv("STRATA_QSA_ROWS"); return v != nullptr && v[0] == '1' && v[1] == '\0'; }();
++        if (rows_env && qsa_block_scores_rows(pooled, dead, q_idx, steps, nq, max_blocks, s, scores, stream)) return;
+         // STRATA_QSA_EARLY_EXIT=0 keeps the old staging (every CTA loads the queries first); the scores are the same bits
+         static const bool early = [] { const char* v = std::getenv("STRATA_QSA_EARLY_EXIT"); return v == nullptr || std::atoi(v) != 0; }();
+         block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
+@@ -1115,6 +1194,21 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
+     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores: %s\n", cudaGetErrorString(e)); std::exit(1); }
+ }
+ 
++bool qsa_block_scores_rows(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
++                           int64_t max_blocks, const QsaShapes& s, float* scores, void* stream) {
++    if (nq <= 0) return true;
++    if (nq > 4 || s.idx_dim != IDX_DIM || s.idx_n_head != IDX_HEADS || s.idx_block != R) return false;
++    cudaStream_t st = (cudaStream_t) stream;
++    const int n = (int) nq;
++    if (n == 1) block_scores_rows_kernel<1><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
++    else if (n == 2) block_scores_rows_kernel<2><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
++    else if (n == 3) block_scores_rows_kernel<3><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
++    else block_scores_rows_kernel<4><<<256, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, n, max_blocks, scores);
++    const cudaError_t e = cudaGetLastError();
++    if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores rows: %s\n", cudaGetErrorString(e)); std::exit(1); }
++    return true;
++}
++
+ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
+                          int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t active_blocks) {
+     if (nq <= 0) return true;
+diff --git a/src/kernels/qsa_rows_bench.cpp b/src/kernels/qsa_rows_bench.cpp
+new file mode 100644
+index 00000000..e397d1bb
+--- /dev/null
++++ b/src/kernels/qsa_rows_bench.cpp
+@@ -0,0 +1,354 @@
++// src/kernels/qsa_rows_bench.cpp - QSAROWS (docs/QSAROWS.md): what the T rows of a verification window cost in a QSA
++// layer's decode kernels at a long context, row by row.  GPU, synthetic data at the real geometry (24 query heads x
++// 256, 2 KV heads, indexer 4 x 128, blocks of 4 cells, top-k 2048), INT8 pools, no model.
++//
++// The hypothesis under test: "the decode attention of the QSA layers works row by row, re-reading K/V for every row of
++// the window, so 8 layers x ~0.25 ms explain the ~2.5 ms a row the stage costs".  The kernels measured here are the
++// ones verify.cpp launches for a window of T rows at the Daily's options (--max-context 262144, --kv int8):
++//
++//   scores   qsa_block_scores   (block_scores_multi_kernel: every pooled key read ONCE for the T queries)
++//   topk     qsa_block_topk     (one CTA per query; max_blocks 65538 -> block_topk_wide_kernel)
++//   attn     qsa_decode_attn_batch over each row's own selection, cap 2051 (33 chunks x 2 KV heads x T blocks)
++//   append   native_qsa_indexer_append_steps for the T raw indexer keys (one CTA, the steps in sequence)
++//   dense    qsa_decode_attn_batch over a 32768-cell window per row: the drafter's shape, which the hypothesis's
++//            "~240 us a query" comes from (the drafter runs it with ONE query per step: capture_round's record_rest)
++//
++// --rows: block_scores_rows_kernel (STRATA_QSA_ROWS=1, docs/QSAROWS.md) against the multi kernel, scores and ids bit for
++// bit, and its microseconds beside the reference's.
++//
++//   qsa_rows_bench [--device N] [--iters 100] [--ctx 131072] [--max-context 262144] [--rows] [--no-dense]
++//   exit 0 (77: no GPU; 1: a --rows parity failure)
++#include "strata/kernels/kv_q8.hpp"
++#include "strata/kernels/native_qsa_indexer.hpp"
++#include "strata/kernels/qsa.hpp"
++#include "strata/kernels/qsa_decode_attn.hpp"
++#include "strata/kernels/qsa_select.hpp"
++#include "strata/kernels/rope_scaling.hpp"
++
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++#include <set>
++#include <string>
++#include <vector>
++
++namespace k = strata::kernels;
++
++namespace {
++cudaStream_t st = nullptr;
++void ck(cudaError_t e, const char* what) {
++    if (e != cudaSuccess) {
++        std::fprintf(stderr, "qsa_rows_bench: %s: %s\n", what, cudaGetErrorString(e));
++        std::exit(2);
++    }
++}
++template <typename T> T* dalloc(size_t n) {
++    T* p = nullptr;
++    ck(cudaMalloc((void**) &p, n * sizeof(T) + 256), "cudaMalloc");
++    ck(cudaMemset(p, 0, n * sizeof(T) + 256), "cudaMemset");
++    return p;
++}
++template <typename T> T* upload(const std::vector<T>& h) {
++    T* d = dalloc<T>(h.size());
++    ck(cudaMemcpy(d, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice), "upload");
++    return d;
++}
++template <typename T> std::vector<T> download(const T* d, size_t n) {
++    std::vector<T> h(n);
++    ck(cudaMemcpy(h.data(), d, n * sizeof(T), cudaMemcpyDeviceToHost), "download");
++    return h;
++}
++uint16_t f16_scale_q8(uint32_t r) { return (uint16_t) ((9u << 10) | (r & 0x3FFu)); }
++
++struct Timer {
++    cudaEvent_t e0 = nullptr, e1 = nullptr;
++    Timer() { ck(cudaEventCreate(&e0), "event"); ck(cudaEventCreate(&e1), "event"); }
++    ~Timer() { cudaEventDestroy(e0); cudaEventDestroy(e1); }
++    // microseconds per call over `iters` back-to-back calls, warmed; the median of three such runs
++    template <typename F> double us(F&& f, int iters) {
++        double r[3];
++        for (int a = 0; a < 3; ++a) {
++            for (int i = 0; i < 4; ++i) f();
++            ck(cudaDeviceSynchronize(), "warm");
++            ck(cudaEventRecord(e0, st), "record");
++            for (int i = 0; i < iters; ++i) f();
++            ck(cudaEventRecord(e1, st), "record");
++            ck(cudaEventSynchronize(e1), "sync");
++            float ms = 0.0f;
++            ck(cudaEventElapsedTime(&ms, e0, e1), "elapsed");
++            r[a] = 1000.0 * ms / iters;
++        }
++        std::sort(r, r + 3);
++        return r[1];
++    }
++};
++
++constexpr int NH = 24, HD = 256, NKV = 2, IQ = 4, ID = 128;
++constexpr int MAXT = 4;
++
++struct Table {   // us[T] for T = 1..MAXT
++    double us[MAXT + 1] = {};
++    void print(const char* what) const {
++        std::printf("  %-44s", what);
++        for (int T = 1; T <= MAXT; ++T) std::printf(" T=%d %8.1f", T, us[T]);
++        std::printf("  | +%.1f us a row\n", (us[MAXT] - us[1]) / (MAXT - 1));
++    }
++};
++}  // namespace
++
++int main(int argc, char** argv) {
++    int device = 0, iters = 100;
++    int64_t ctx = 131072, max_ctx = 262144;
++    bool rows = false, dense = true;
++    for (int i = 1; i < argc; ++i) {
++        if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) device = std::atoi(argv[++i]);
++        else if (std::strcmp(argv[i], "--iters") == 0 && i + 1 < argc) iters = std::atoi(argv[++i]);
++        else if (std::strcmp(argv[i], "--ctx") == 0 && i + 1 < argc) ctx = std::atoll(argv[++i]);
++        else if (std::strcmp(argv[i], "--max-context") == 0 && i + 1 < argc) max_ctx = std::atoll(argv[++i]);
++        else if (std::strcmp(argv[i], "--rows") == 0) rows = true;
++        else if (std::strcmp(argv[i], "--no-dense") == 0) dense = false;
++        else {
++            std::fprintf(stderr, "usage: qsa_rows_bench [--device N] [--iters 100] [--ctx 131072] [--max-context 262144] "
++                                 "[--rows] [--no-dense]\n");
++            return 2;
++        }
++    }
++    int devices = 0;
++    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
++        std::puts("SKIP: no GPU");
++        return 77;
++    }
++    ck(cudaSetDevice(device), "cudaSetDevice");
++    ck(cudaStreamCreate(&st), "stream");
++    cudaDeviceProp prop{};
++    ck(cudaGetDeviceProperties(&prop, device), "cudaGetDeviceProperties");
++    const k::QsaShapes s = k::qsa_real_shapes();
++    const int64_t PS = s.page_size;
++    const int64_t max_cells = (max_ctx + PS - 1) / PS * PS;
++    const int64_t max_blocks = max_cells / s.idx_block + 2;                       // verify.cpp: max_blocks_
++    const int64_t cap = k::qsa_selection_width(k::kTopkMaxCells, s);              // verify.cpp: cap_ (2051)
++    const int64_t cells = (ctx + MAXT + 64 + PS - 1) / PS * PS;                     // the pools' rows: resident cells
++    const int64_t pages = cells / PS, prows = pages * NKV * PS;
++    const int64_t dense_win = 32768, dense_cap = dense_win;                       // the drafter's --mtp-window
++    std::printf("qsa_rows_bench on device %d (%s, %d.%d), %d iterations: context %lld, capacity %lld cells (max_blocks "
++                "%lld), selection cap %lld, int8 pools over %lld cells%s%s\n",
++                device, prop.name, prop.major, prop.minor, iters, (long long) ctx, (long long) max_cells,
++                (long long) max_blocks, (long long) cap, (long long) cells,
++                std::getenv("STRATA_ATTN_DAILY") ? ", STRATA_ATTN_DAILY set" : "",
++                std::getenv("STRATA_QSA_ROWS") ? ", STRATA_QSA_ROWS set" : "");
++    std::mt19937 rng(20261012u);
++    std::normal_distribution<float> nd(0.0f, 1.0f);
++
++    // ---- INT8 K/V pools, every page resident, identity page table
++    std::vector<int8_t> c8((size_t) (prows * HD));
++    for (auto& x : c8) x = (int8_t) ((int) (rng() % 255u) - 127);
++    int8_t* k8 = upload(c8);
++    for (auto& x : c8) x = (int8_t) ((int) (rng() % 255u) - 127);
++    int8_t* v8 = upload(c8);
++    c8.clear(); c8.shrink_to_fit();
++    std::vector<uint16_t> sc((size_t) (prows * (HD / k::KV_Q8_GROUP)));
++    for (auto& x : sc) x = f16_scale_q8(rng());
++    uint16_t* k8s = upload(sc);
++    for (auto& x : sc) x = f16_scale_q8(rng());
++    uint16_t* v8s = upload(sc);
++    std::vector<int32_t> tab((size_t) pages);
++    for (int64_t i = 0; i < pages; ++i) tab[(size_t) i] = (int32_t) i;
++    int32_t* table = upload(tab);
++    k::QsaAttnPools pools;
++    pools.page_table = table;
++    pools.k_q = k8; pools.v_q = v8; pools.k_scale = k8s; pools.v_scale = v8s;
++
++    // ---- the indexer's state: pooled keys (unit-ish rows), the spare, a tail, the block position
++    std::vector<float> hp((size_t) (max_blocks * ID));
++    for (auto& x : hp) x = nd(rng) * 0.09f;
++    float* pooled = upload(hp);
++    hp.clear(); hp.shrink_to_fit();
++    std::vector<float> hd((size_t) ID);
++    for (auto& x : hd) x = nd(rng) * 0.09f;
++    float* dead = upload(hd);
++    float* tail = dalloc<float>((size_t) (s.idx_block - 1) * ID);
++    int32_t* block_pos = dalloc<int32_t>(1);
++    std::vector<float> hg((size_t) ID, 1.0f);
++    float* gamma = upload(hg);
++    // the T rows' indexer queries: one query perturbed a little per row, so the selections overlap as a window's do
++    std::vector<float> hq0((size_t) (IQ * ID)), hqi((size_t) (MAXT * IQ * ID));
++    for (auto& x : hq0) x = nd(rng);
++    for (int t = 0; t < MAXT; ++t)
++        for (int i = 0; i < IQ * ID; ++i) hqi[(size_t) t * IQ * ID + i] = hq0[(size_t) i] + 0.15f * nd(rng);
++    float* q_idx = upload(hqi);
++    std::vector<float> hraw((size_t) (MAXT * ID));
++    for (auto& x : hraw) x = nd(rng);
++    float* raw = upload(hraw);
++    // the attention queries [MAXT, NH, HD]
++    std::vector<float> hq((size_t) (MAXT * NH * HD));
++    for (auto& x : hq) x = nd(rng);
++    float* q = upload(hq);
++    // step records for rows 0..MAXT-1 at cells ctx .. ctx + MAXT - 1 (verify: pos, n_kv, n_bid, width)
++    std::vector<int32_t> hst((size_t) (MAXT * k::kStepCount));
++    for (int t = 0; t < MAXT; ++t) {
++        const int64_t pos = ctx + t, n_kv = pos + 1;
++        hst[(size_t) t * k::kStepCount + k::kStepPos] = (int32_t) pos;
++        hst[(size_t) t * k::kStepCount + k::kStepNKv] = (int32_t) n_kv;
++        hst[(size_t) t * k::kStepCount + k::kStepNBid] = (int32_t) (n_kv / s.idx_block);
++        hst[(size_t) t * k::kStepCount + k::kStepWidth] = (int32_t) k::qsa_selection_width(n_kv, s);
++    }
++    int32_t* steps = upload(hst);
++    // the drafter's dense window: the same cells, width = the window
++    std::vector<int32_t> hsd(hst);
++    for (int t = 0; t < MAXT; ++t) hsd[(size_t) t * k::kStepCount + k::kStepWidth] = (int32_t) dense_win;
++    int32_t* steps_d = upload(hsd);
++    std::vector<int32_t> hwid((size_t) (MAXT * dense_cap));
++    for (int t = 0; t < MAXT; ++t)
++        for (int64_t j = 0; j < dense_win; ++j) hwid[(size_t) t * dense_cap + j] = (int32_t) (ctx + t + 1 - dense_win + j);
++    int32_t* ids_d = upload(hwid);
++    hwid.clear(); hwid.shrink_to_fit();
++
++    float* scores = dalloc<float>((size_t) (MAXT * max_blocks));
++    int32_t* ids = dalloc<int32_t>((size_t) (MAXT * cap));
++    const size_t scr_floats = (size_t) k::qsa_decode_attn_scratch_floats(cap, s);
++    float* scratch = dalloc<float>(scr_floats * MAXT);
++    float* attn = dalloc<float>((size_t) (MAXT * NH * HD));
++    const size_t scr_floats_d = (size_t) k::qsa_decode_attn_scratch_floats(dense_cap, s);
++    float* scratch_d = dalloc<float>(scr_floats_d * MAXT);
++    float* attn_d = dalloc<float>((size_t) (MAXT * NH * HD));
++    const k::QsaIndexerBuffers ib{tail, dead, pooled, block_pos};
++    const k::RopeScaling scaling;
++
++    // ---- the selections once (the attention's inputs), and how much the rows' selections overlap
++    k::qsa_block_scores(pooled, dead, q_idx, steps, MAXT, max_blocks, s, scores, st);
++    k::qsa_block_topk(scores, steps, MAXT, max_blocks, cap, s, ids, st);
++    ck(cudaDeviceSynchronize(), "selection");
++    {
++        const std::vector<int32_t> hid = download(ids, (size_t) (MAXT * cap));
++        std::printf("  selections: width %d a row;", hst[k::kStepWidth]);
++        for (int T = 2; T <= MAXT; ++T) {
++            std::set<int32_t> u;
++            for (int t = 0; t < T; ++t)
++                for (int j = 0; j < hst[(size_t) t * k::kStepCount + k::kStepWidth]; ++j) u.insert(hid[(size_t) t * cap + j]);
++            std::printf(" union of %d rows %zu cells (%.2fx one row)", T, u.size(), (double) u.size() / hst[k::kStepWidth]);
++        }
++        std::puts("");
++    }
++
++    Timer tm;
++    Table t_scores, t_topk, t_attn, t_append, t_layer, t_dense;
++    for (int T = 1; T <= MAXT; ++T) {
++        t_scores.us[T] = tm.us([&] { k::qsa_block_scores(pooled, dead, q_idx, steps, T, max_blocks, s, scores, st); }, iters);
++        t_topk.us[T] = tm.us([&] { k::qsa_block_topk(scores, steps, T, max_blocks, cap, s, ids, st); }, iters);
++        t_attn.us[T] = tm.us([&] { k::qsa_decode_attn_batch(q, pools, ids, steps, cap, s, scratch, attn, T, st); }, iters);
++        // the append writes the tail / pooled / block_pos the scores read; its own cells (ctx .. ctx + T - 1) land in
++        // the tail (ctx % 4 == 0) and, at T == 4, complete block ctx / 4: the same state every call
++        t_append.us[T] = tm.us([&] {
++            k::native_qsa_indexer_append_steps(raw, steps + k::kStepPos, (int) k::kStepCount, T, 0, gamma, 1e-6f, ib, s,
++                                               max_cells, scaling, st);
++        }, iters);
++        t_layer.us[T] = tm.us([&] {
++            k::native_qsa_indexer_append_steps(raw, steps + k::kStepPos, (int) k::kStepCount, T, 0, gamma, 1e-6f, ib, s,
++                                               max_cells, scaling, st);
++            k::qsa_block_scores(pooled, dead, q_idx, steps, T, max_blocks, s, scores, st);
++            k::qsa_block_topk(scores, steps, T, max_blocks, cap, s, ids, st);
++            k::qsa_decode_attn_batch(q, pools, ids, steps, cap, s, scratch, attn, T, st);
++        }, iters);
++        if (dense)
++            t_dense.us[T] = tm.us([&] {
++                k::qsa_decode_attn_batch(q, pools, ids_d, steps_d, dense_cap, s, scratch_d, attn_d, T, st);
++            }, iters);
++    }
++    std::puts("-- a QSA layer's decode kernels at the verification window's shape (us a call, median of 3 runs)");
++    t_scores.print("scores  qsa_block_scores (multi)");
++    t_topk.print("topk    qsa_block_topk");
++    t_attn.print("attn    qsa_decode_attn_batch cap 2051");
++    t_append.print("append  native_qsa_indexer_append_steps");
++    t_layer.print("layer   append + scores + topk + attn");
++    if (dense) {
++        std::puts("-- the drafter's dense window (32768 cells a row): the shape the hypothesis's ~240 us a query comes from");
++        t_dense.print("dense   qsa_decode_attn_batch cap 32768");
++    }
++    const double per_row = (t_layer.us[MAXT] - t_layer.us[1]) / (MAXT - 1);
++    std::printf("-- per row: %.1f us a QSA layer -> x4 layers (stage 0) %.2f ms, x8 layers (stage 1) %.2f ms\n", per_row,
++                4 * per_row / 1000.0, 8 * per_row / 1000.0);
++
++    bool ok = true;
++    if (rows) {
++        // QSAROWS: block_scores_rows_kernel (STRATA_QSA_ROWS=1) against block_scores_multi_kernel, bit for bit on the scores
++        // and on the ids the top-k draws from them, at every T; then the microseconds of the two
++        std::puts("-- STRATA_QSA_ROWS: qsa_block_scores_rows against qsa_block_scores (multi), scores and ids bit for bit");
++        float* scores_b = dalloc<float>((size_t) (MAXT * max_blocks));
++        int32_t* ids_b = dalloc<int32_t>((size_t) (MAXT * cap));
++        long long cases = 0, failed = 0;
++        Table t_rows;
++        for (int T = 1; T <= MAXT; ++T) {
++            ck(cudaMemset(scores, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
++            ck(cudaMemset(scores_b, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
++            ck(cudaMemset(ids, 0x7F, (size_t) MAXT * cap * 4), "fill");
++            ck(cudaMemset(ids_b, 0x7F, (size_t) MAXT * cap * 4), "fill");
++            k::qsa_block_scores(pooled, dead, q_idx, steps, T, max_blocks, s, scores, st);
++            if (!k::qsa_block_scores_rows(pooled, dead, q_idx, steps, T, max_blocks, s, scores_b, st)) {
++                std::printf("  FAIL T=%d: qsa_block_scores_rows refused the call\n", T);
++                ++cases; ++failed;
++                continue;
++            }
++            k::qsa_block_topk(scores, steps, T, max_blocks, cap, s, ids, st);
++            k::qsa_block_topk(scores_b, steps, T, max_blocks, cap, s, ids_b, st);
++            ck(cudaDeviceSynchronize(), "rows sync");
++            const std::vector<float> a = download(scores, (size_t) T * max_blocks), b = download(scores_b, (size_t) T * max_blocks);
++            const std::vector<int32_t> ia = download(ids, (size_t) T * cap), ib2 = download(ids_b, (size_t) T * cap);
++            ++cases;
++            const bool same_s = std::memcmp(a.data(), b.data(), a.size() * 4) == 0;
++            const bool same_i = std::memcmp(ia.data(), ib2.data(), ia.size() * 4) == 0;
++            if (!same_s || !same_i) {
++                ++failed;
++                size_t count = 0, first = a.size();
++                for (size_t i = 0; i < a.size(); ++i)
++                    if (std::memcmp(&a[i], &b[i], 4) != 0) { if (first == a.size()) first = i; ++count; }
++                std::printf("  FAIL T=%d: scores %s (%zu of %zu differ, first at query %zu block %zu), ids %s\n", T,
++                            same_s ? "same" : "DIFFER", count, a.size(), first / (size_t) max_blocks, first % (size_t) max_blocks,
++                            same_i ? "same" : "DIFFER");
++            }
++            t_rows.us[T] = tm.us([&] { k::qsa_block_scores_rows(pooled, dead, q_idx, steps, T, max_blocks, s, scores_b, st); },
++                                 iters);
++        }
++        // a short context too (n_bid small, the tail block with cells): rows at cells 100..103
++        {
++            std::vector<int32_t> hs2(hst);
++            for (int t = 0; t < MAXT; ++t) {
++                const int64_t pos = 100 + t, n_kv = pos + 1;
++                hs2[(size_t) t * k::kStepCount + k::kStepPos] = (int32_t) pos;
++                hs2[(size_t) t * k::kStepCount + k::kStepNKv] = (int32_t) n_kv;
++                hs2[(size_t) t * k::kStepCount + k::kStepNBid] = (int32_t) (n_kv / s.idx_block);
++                hs2[(size_t) t * k::kStepCount + k::kStepWidth] = (int32_t) k::qsa_selection_width(n_kv, s);
++            }
++            int32_t* steps2 = upload(hs2);
++            for (int T = 1; T <= MAXT; ++T) {
++                ck(cudaMemset(scores, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
++                ck(cudaMemset(scores_b, 0xFF, (size_t) MAXT * max_blocks * 4), "fill");
++                k::qsa_block_scores(pooled, dead, q_idx, steps2, T, max_blocks, s, scores, st);
++                k::qsa_block_scores_rows(pooled, dead, q_idx, steps2, T, max_blocks, s, scores_b, st);
++                ck(cudaDeviceSynchronize(), "rows sync");
++                const std::vector<float> a = download(scores, (size_t) T * max_blocks), b = download(scores_b, (size_t) T * max_blocks);
++                ++cases;
++                if (std::memcmp(a.data(), b.data(), a.size() * 4) != 0) { ++failed; std::printf("  FAIL short context T=%d\n", T); }
++            }
++            ck(cudaFree(steps2), "free");
++        }
++        std::printf("  parity: %lld cases, %lld differ -> %s\n", cases, failed, failed ? "FAIL" : "bit-identical");
++        ok = failed == 0;
++        t_scores.print("scores  qsa_block_scores (multi, reference)");
++        t_rows.print("scores  qsa_block_scores_rows");
++        ck(cudaFree(scores_b), "free");
++        ck(cudaFree(ids_b), "free");
++    }
++    for (void* p : {(void*) k8, (void*) v8, (void*) k8s, (void*) v8s, (void*) table, (void*) pooled, (void*) dead,
++                    (void*) tail, (void*) block_pos, (void*) gamma, (void*) q_idx, (void*) raw, (void*) q, (void*) steps,
++                    (void*) steps_d, (void*) ids_d, (void*) scores, (void*) ids, (void*) scratch, (void*) attn,
++                    (void*) scratch_d, (void*) attn_d})
++        ck(cudaFree(p), "free");
++    std::printf("qsa_rows_bench: %s\n", ok ? "done" : "FAIL");
++    return ok ? 0 : 1;
++}
