@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: imanu <imanu86@gmail.com>
+Date: Mon, 12 Oct 2026 07:34:18 +0200
+Subject: [PATCH] FABLE-STRATA-Porta su 0.1.43 la PR upstream #1503: mai
+ parcheggiare una conversazione col K/V di un'altra
+
+Da lab/candidate2 03da168d, applicata pulita.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/include/strata/core/conversation_cache.hpp b/include/strata/core/conversation_cache.hpp
+index 08e9cb80..67b0b6d2 100644
+--- a/include/strata/core/conversation_cache.hpp
++++ b/include/strata/core/conversation_cache.hpp
+@@ -57,10 +57,14 @@ struct ConversationKvReuse {
+     std::vector<ConversationKv> kv;
+     // Original image extent for validation, and the earliest subsequent rewrite.
+     int64_t captured_tokens = 0, unchanged_tokens = 0;
++    // The conversation the image was captured from: a park reuses it only for the prefix it shares with the
++    // conversation then in the main session (a slot may have replaced that session's K/V since).
++    std::vector<int32_t> ids;
+     // With a layer split: the later stages' own retained K/V, one per stage, same extents (empty: none)
+     std::vector<ConversationKvReuse> stages;
+     size_t bytes() const {
+-        size_t n = kv.capacity() * sizeof(ConversationKv) + stages.capacity() * sizeof(ConversationKvReuse);
++        size_t n = kv.capacity() * sizeof(ConversationKv) + stages.capacity() * sizeof(ConversationKvReuse) +
++                   ids.capacity() * sizeof(int32_t);
+         for (const auto& layer : kv) n += layer.bytes();
+         for (const auto& s : stages) n += s.bytes();
+         return n;
+@@ -217,11 +221,12 @@ public:
+     // Retain only the restored K/V buffers, not duplicate running checkpoints.
+     // This optimization never evicts a parked conversation to make itself fit.
+     // `stage_kv`: with a layer split, the later stages' restored K/V (one per stage), retained with the first's.
++    // `ids`: the conversation the K/V belongs to (take_reuse_for refuses it for any other; none: never reused).
+     void retain(std::vector<ConversationKv>&& kv, int64_t tokens,
+-                std::vector<std::vector<ConversationKv>>&& stage_kv = {}) {
++                std::vector<std::vector<ConversationKv>>&& stage_kv = {}, std::vector<int32_t> ids = {}) {
+         reuse_ = {};
+-        ConversationKvReuse candidate{std::move(kv), tokens, tokens, {}};
+-        for (auto& k : stage_kv) candidate.stages.push_back(ConversationKvReuse{std::move(k), tokens, tokens, {}});
++        ConversationKvReuse candidate{std::move(kv), tokens, tokens, std::move(ids), {}};
++        for (auto& k : stage_kv) candidate.stages.push_back(ConversationKvReuse{std::move(k), tokens, tokens, {}, {}});
+         if (enabled() && candidate.bytes() <= budget_ - bytes_) reuse_ = std::move(candidate);
+     }
+     void limit_reuse(int64_t first_dirty) {
+@@ -230,7 +235,22 @@ public:
+         if (reuse_.unchanged_tokens <= 0) reuse_ = {};
+     }
+     ConversationKvReuse take_reuse() { return std::exchange(reuse_, {}); }
++    // The retained K/V for parking `live`: limited to the prefix `live` shares with the conversation it was captured
++    // from, and nothing when they share none.  Without this a park after a slot gave its conversation back to the main
++    // session wrote the RESTORED conversation's K/V into the new one's image (2026-10-08 cross-conversation leak).
++    template<class Token>
++    ConversationKvReuse take_reuse_for(const std::vector<Token>& live) {
++        ConversationKvReuse r = std::exchange(reuse_, {});
++        const int64_t n = std::min<int64_t>((int64_t) r.ids.size(), (int64_t) live.size());
++        int64_t same = 0;
++        while (same < n && (int64_t) r.ids[(size_t) same] == (int64_t) live[(size_t) same]) ++same;
++        r.unchanged_tokens = std::min(r.unchanged_tokens, same);
++        for (auto& st : r.stages) st.unchanged_tokens = std::min(st.unchanged_tokens, same);
++        if (r.unchanged_tokens <= 0) return {};
++        return r;
++    }
+     size_t retained_bytes() const { return reuse_.bytes(); }
++    int64_t retained_tokens() const { return reuse_.kv.empty() ? 0 : reuse_.unchanged_tokens; }
+     bool can_fit(size_t incoming, size_t held = 0) const {
+         return enabled() && held <= budget_ && incoming <= budget_ - held &&
+                entries_.size() < slots_ && bytes() <= budget_ - held - incoming;
+diff --git a/src/core/conversation_cache_test.cpp b/src/core/conversation_cache_test.cpp
+index 665513e3..b342e460 100644
+--- a/src/core/conversation_cache_test.cpp
++++ b/src/core/conversation_cache_test.cpp
+@@ -328,6 +328,41 @@ int main() {
+         auto none = conversation_checkpoints_split({}, 3);
+         check(conversation_checkpoints_merge(std::move(none), back) && back.empty(), "no checkpoints: nothing to do");
+     }
++    {
++        // 2026-10-08 cross-conversation leak: the retained K/V of a restored conversation must never be reused to
++        // park ANOTHER conversation the main session later holds (a slot gave its conversation back)
++        auto kv = [](size_t n) {
++            std::vector<ConversationKv> v(2);
++            for (auto& l : v) l.k.resize(n, 1);
++            return v;
++        };
++        ConversationCache cache(1 << 20, 4);
++        const std::vector<int32_t> a = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
++        std::vector<std::vector<ConversationKv>> st;
++        st.push_back(kv(100));
++        cache.retain(kv(500), 16, std::move(st), a);
++        std::vector<int32_t> b(16, 99);
++        auto other = cache.take_reuse_for(b);
++        check(other.kv.empty() && other.stages.empty() && other.unchanged_tokens == 0,
++              "another conversation never gets the retained K/V");
++        check(cache.retained_bytes() == 0, "the retained K/V is dropped once refused");
++        cache.retain(kv(500), 16, {}, a);
++        check(cache.retained_tokens() == 16, "the retained extent is reported");
++        std::vector<int32_t> cont(a.begin(), a.begin() + 10);
++        cont.push_back(42);
++        cont.push_back(43);
++        auto partly = cache.take_reuse_for(cont);
++        check(partly.unchanged_tokens == 10, "a conversation that diverges reuses only the shared prefix");
++        std::vector<std::vector<ConversationKv>> st2;
++        st2.push_back(kv(100));
++        cache.retain(kv(500), 16, std::move(st2), a);
++        cache.limit_reuse(9);
++        auto same = cache.take_reuse_for(a);
++        check(same.unchanged_tokens == 9 && same.stages.size() == 1 && same.stages[0].unchanged_tokens == 9,
++              "the same conversation keeps the first rewrite's limit, on every stage");
++        cache.retain(kv(500), 16);
++        check(cache.take_reuse_for(a).kv.empty(), "retained K/V of unknown identity is never reused");
++    }
+     {
+         // the later stages' retained K/V, kept with the first stage's and limited together
+         auto kv = [](size_t n) {
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 914c9a68..afaf0f3a 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -8189,7 +8189,12 @@ int main(int argc, char** argv) {
+                 ~MergeBack() { if (on && !strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear(); }
+             } merge_back{cs, checks, n_st > 0};
+             const strata::core::ConversationView view{live, live_imgs, n_st > 0 ? cs.stage0 : checks, cvec_cached};
+-            auto reuse = conversations.take_reuse();
++            const int64_t retained_n = conversations.retained_tokens();
++            auto reuse = conversations.take_reuse_for(live);   // never another conversation's K/V
++            if (retained_n > 0 && reuse.unchanged_tokens < retained_n)
++                std::fprintf(stderr, "strata serve: conversation cache: retained K/V reused for %lld of its %lld tokens "
++                                     "(the rest is not this conversation's)\n", (long long) reuse.unchanged_tokens,
++                             (long long) retained_n);
+             std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
+             stage_reuse.resize(n_st);
+             reuse.stages.clear();
+@@ -9916,6 +9921,8 @@ int main(int argc, char** argv) {
+         // conversation an idle slot holds reads on from there.  Every stage, the same calls.
+         // `at`: one of the slot's checkpoints - only the K/V up to it is copied and its state restored instead
+         auto copy_from_slot = [&](int b, const ConvCheckpoint* at, std::string& e) -> bool {
++            // the main session's K/V is replaced by the slot's: K/V retained from a restore described the old one
++            conversations.take_reuse();
+             const int64_t upto = at != nullptr ? (int64_t) at->ids.size() : (int64_t) bs[(size_t) b].ids.size();
+             if (at != nullptr && at->stage_parts.size() != stages.size()) { e = "a checkpoint without its stage parts"; return false; }
+             for (size_t k = 0; k < bslot_ss.size(); ++k) {
+@@ -11119,7 +11126,7 @@ int main(int argc, char** argv) {
+                 if (std::getenv("STRATA_SNAPSHOT_FULL_CAPTURE") == nullptr) {
+                     std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park
+                     for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));
+-                    conversations.retain(std::move(incoming->kv), int64_t(live.size()), std::move(stage_kv));
++                    conversations.retain(std::move(incoming->kv), int64_t(live.size()), std::move(stage_kv), live);
+                 }
+                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
+                 if (incoming_disk)
+diff --git a/sycl/src/program/generate.cpp b/sycl/src/program/generate.cpp
+index 0b23795d..2d9fcfce 100644
+--- a/sycl/src/program/generate.cpp
++++ b/sycl/src/program/generate.cpp
+@@ -7450,7 +7450,12 @@ int main(int argc, char **argv) try {
+                 ~MergeBack() { if (on && !strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear(); }
+             } merge_back{cs, checks, n_st > 0};
+             const strata::core::ConversationView view{live, live_imgs, n_st > 0 ? cs.stage0 : checks, cvec_cached};
+-            auto reuse = conversations.take_reuse();
++            const int64_t retained_n = conversations.retained_tokens();
++            auto reuse = conversations.take_reuse_for(live);   // never another conversation's K/V
++            if (retained_n > 0 && reuse.unchanged_tokens < retained_n)
++                std::fprintf(stderr, "strata serve: conversation cache: retained K/V reused for %lld of its %lld tokens "
++                                     "(the rest is not this conversation's)\n", (long long) reuse.unchanged_tokens,
++                             (long long) retained_n);
+             std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
+             stage_reuse.resize(n_st);
+             reuse.stages.clear();
+@@ -8739,6 +8744,8 @@ int main(int argc, char **argv) try {
+         // `at`: one of the slot's checkpoints - only the K/V up to it is copied and its state restored instead
+         auto copy_from_slot = [&](int b, const ConvCheckpoint *at,
+                                   std::string &e) -> bool {
++            // the main session's K/V is replaced by the slot's: K/V retained from a restore described the old one
++            conversations.take_reuse();
+             try {
+         const int64_t upto = at != nullptr ? (int64_t)at->ids.size()
+                                            : (int64_t)bs[(size_t)b].ids.size();
+@@ -9733,7 +9740,7 @@ int main(int argc, char **argv) try {
+                 if (std::getenv("STRATA_SNAPSHOT_FULL_CAPTURE") == nullptr) {
+                     std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park
+                     for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));
+-                    conversations.retain(std::move(incoming->kv), int64_t(live.size()), std::move(stage_kv));
++                    conversations.retain(std::move(incoming->kv), int64_t(live.size()), std::move(stage_kv), live);
+                 }
+                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
+                 std::fprintf(stderr, "strata serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu\n",

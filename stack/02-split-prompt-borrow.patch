@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: imanu <imanu86@gmail.com>
+Date: Mon, 12 Oct 2026 07:33:17 +0200
+Subject: [PATCH] FABLE-STRATA-Porta su 0.1.43 la stima del prestito del prompt
+ sul device del proprio blocco (PR #1417)
+
+Da lab/candidate2 abf69469, applicata pulita.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 63ed7409..395edcc6 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -1199,7 +1199,8 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
+         err = "prefill: device buffers for a chunk of " + std::to_string(chunk) + " tokens do not fit (" +
+               std::to_string(fb >> 20) + " of " + std::to_string(tb >> 20) + " MiB free at the failure; " +
+               std::to_string(o.used >> 20) + " MiB taken, the failing buffer wanted " +
+-              std::to_string(o.failed_bytes >> 20) + " MiB)";
++              std::to_string(o.failed_bytes >> 20) + " MiB" +
++              (o.base != nullptr ? "; the loan holds " + std::to_string(o.cap >> 20) + " MiB" : std::string()) + ")";
+         return false;
+     }
+     return true;
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index c9a87b64..c0970ce2 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -7058,6 +7058,9 @@ int main(int argc, char** argv) {
+                                                      (uint64_t) strata::kernels::cpu::expert_layout().max_blob, need);
+         };
+         auto part_slots = [&](const PfPart& p, int64_t c) -> int64_t {
++            // counted on the part's own device, as `init` and the other `bytes_needed` callers in this block are: the
++            // count follows `init`, whose per-device choices (prompt_f16) are the stage device's, not CUDA0's
++            const strata::core::OnDevice on(p.dev);
+             return cache_slots_for(*p.cache, strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr));
+         };
+         auto part_bytes = [&](const PfPart& p, int32_t first) -> uint64_t {
