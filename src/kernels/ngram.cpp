@@ -9,6 +9,8 @@
 #include "strata/platform/memory.hpp"
 
 #include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -339,6 +341,40 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
         if (GlobalMemoryStatusEx(&ms) && need > ms.ullTotalPhys / 2)
             std::fprintf(stderr, "strata: warning: --ple-io ram locks %.1f GiB, more than half of this PC's %.1f GiB of RAM\n",
                          (double) need / (1ull << 30), (double) ms.ullTotalPhys / (1ull << 30));
+        // SPEED5 STRATA_PLE_RAM_PREFETCH=1 (opt-in): before the lock, PrefetchVirtualMemory asks the memory manager for
+        // the whole mapped table in 256 MiB ranges (large sequential reads), then 8 threads touch it, so VirtualLock
+        // finds the pages resident instead of faulting them in one cluster at a time from one thread.  The bytes are the
+        // file's, so the rows are the same; only the start-up time changes (most for a SATA drive).
+        static const bool ple_prefetch = [] {
+            const char* v = std::getenv("STRATA_PLE_RAM_PREFETCH");
+            return v != nullptr && v[0] == '1';
+        }();
+        if (ple_prefetch) {
+            const auto t0 = std::chrono::steady_clock::now();
+            constexpr uint64_t kRange = 256ull << 20;
+            std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+            for (uint64_t off = 0; off < need; off += kRange)
+                ranges.push_back({(PVOID) (impl_->data + off), (SIZE_T) std::min<uint64_t>(kRange, need - off)});
+            const BOOL pf = PrefetchVirtualMemory(GetCurrentProcess(), ranges.size(), ranges.data(), 0);
+            constexpr uint64_t kPiece = 64ull << 20;
+            const uint64_t pieces = (need + kPiece - 1) / kPiece;
+            std::atomic<uint64_t> next{0};
+            auto touch = [&] {
+                volatile uint8_t sink = 0;
+                for (uint64_t i; (i = next.fetch_add(1)) < pieces;)
+                    for (uint64_t off = i * kPiece, e = std::min(need, off + kPiece); off < e; off += 4096)
+                        sink = sink + impl_->data[off];
+                (void) sink;
+            };
+            std::vector<std::thread> pool;
+            for (int t = 0; t < 8; ++t) pool.emplace_back(touch);
+            for (auto& t : pool) t.join();
+            std::fprintf(stderr, "strata: PLE table prefetched (STRATA_PLE_RAM_PREFETCH=1): %.1f GiB in %.1f s "
+                                 "(PrefetchVirtualMemory %s, 8 touching threads)\n",
+                         (double) need / (1ull << 30),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                         pf ? "ok" : "failed");
+        }
         const strata::platform::LockResult lr =
             strata::platform::lock_resident((void*) impl_->data, need);
         if (lr.ok && lr.locked_bytes >= need) {
