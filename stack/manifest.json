@@ -7,7 +7,7 @@
     "tag": "v0.1.43",
     "commit": "7695859aa13afb248bdb4d36f9b2e95707db079d"
   },
-  "stack_head": "cf953ee90fbea9eb0d1cd4e883b3e18332e7e1b7",
+  "stack_head": "22ce9d88daa11b4d4bca55103f0600923c3744d0",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -1425,9 +1425,9 @@
           "file": "src/core/expert_cache.cpp",
           "symbol": "size_t device_free_bytes() {",
           "anchor": [
-            "            if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);",
             "        }",
-            "    }"
+            "    }",
+            "#endif"
           ],
           "status_in_base": "unique",
           "hunk": 2
@@ -1462,6 +1462,13 @@
         "include/strata/core/expert_cache.hpp",
         "src/core/expert_cache.cpp",
         "src/program/generate.cpp"
+      ],
+      "follow_up_subjects": [
+        "FABLE-STRATA-Togli STRATA_EC_NVML_FREE"
+      ],
+      "notes": "The fork's always-defined build macro STRATA_EC_NVML_FREE around the NVML code was removed (follow-up commit, no behaviour change).",
+      "follow_up_commits": [
+        "22ce9d88daa11b4d4bca55103f0600923c3744d0"
       ]
     },
     {

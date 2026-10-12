@@ -2,7 +2,7 @@
 
 The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata, one lever each, in the order they apply. Written for a two-card Windows box (RTX 2080 Ti 22 GB as stage 1, RTX 3060 12 GB as stage 0, `--layer-split 16 --trim-stage-weights --pipeline-windows 2`), but every lever is a plain switch and most are bitwise with the default path. The registry exists so that the next upstream version can be checked and re-based mechanically: run `check_anchors.py --check` on the new tag, read what moved, re-apply.
 
-Base: upstream `Niko1221/Strata` **v0.1.43** (`7695859a`). Stack head: `cf953ee9`. 17 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.1.43** (`7695859a`). Stack head: `22ce9d88`. 17 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -760,6 +760,7 @@ Insertion points (19):
 - **Upstream**: PR open; not in 0.1.43
 - **Measured**: Fixes the 7-36 t/s collapses under WDDM paging on the 3060 (CUDA saw 9.7 GB free, NVML 8.1): with it the stage holds 77 t/s. Daily default since 11 Oct.
 - **Depends on**: 01
+- **Notes**: The fork's always-defined build macro STRATA_EC_NVML_FREE around the NVML code was removed (follow-up commit, no behaviour change).
 - **Docs**: docs/UPSYNC.md
 - **Files**: `docs/DETAILS.md`, `include/strata/core/expert_cache.hpp`, `src/core/expert_cache.cpp`, `src/program/generate.cpp`
 
@@ -783,9 +784,9 @@ Insertion points (6):
   ```
 - `src/core/expert_cache.cpp` · `size_t device_free_bytes() {` → [07-4](BLOCKS.md#07-4)
   ```
-              if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);
           }
       }
+  #endif
   ```
 - `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [07-5](BLOCKS.md#07-5)
   ```

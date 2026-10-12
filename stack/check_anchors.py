@@ -16,9 +16,11 @@ top) are generated from manifest.json and the patches; nothing in them is writte
         own worktrees: everything happens in a throw-away worktree that is removed at the end.
 
     python stack/check_anchors.py --build <repo> --range <base>..<head>
-        Regenerates the patches from the lever commits in <base>..<head> (commits that touch only stack/ are skipped),
-        in the order of manifest.json's entries, recomputes the anchors from each patch's hunks against its parent
-        commit, and rewrites manifest.json (anchors only; the hand-written fields are kept), INDEX.md and BLOCKS.md.
+        Regenerates the patches from the lever commits in <base>..<head> (commits that touch only stack/, docs/ or a
+        README are skipped), in the order of manifest.json's entries, recomputes the anchors from each patch's hunks
+        against its parent commit, and rewrites manifest.json (anchors only; the hand-written fields are kept),
+        INDEX.md and BLOCKS.md.  Published history is never rewritten: a later fix to a lever is a commit whose subject
+        starts with one of the entry's `follow_up_subjects`, and --build squashes it into that lever's patch.
 
     python stack/check_anchors.py --verify-docs
         Checks that INDEX.md and BLOCKS.md are exactly what manifest.json and the patches generate (CI-style).
@@ -202,8 +204,22 @@ def lever_commits(repo, rng, skip_subjects=()):
 def build(repo, rng):
     repo = Path(repo).resolve()
     m = load_manifest()
-    commits = lever_commits(repo, rng, tuple(m.get('skip_subjects', [])))
     entries = m['patches']
+    # follow-ups: commits whose subject starts with an entry's `follow_up_subjects` belong to that lever, not to a new one
+    follow_ups = {}
+    fu_prefixes = []
+    for e in entries:
+        for pref in e.get('follow_up_subjects', []):
+            fu_prefixes.append((pref, e['name']))
+    all_commits = lever_commits(repo, rng, tuple(m.get('skip_subjects', [])))
+    commits = []
+    for sha in all_commits:
+        subject = git(['log', '-1', '--format=%s', sha], repo).stdout.strip()
+        owner = next((name for pref, name in fu_prefixes if subject.startswith(pref)), None)
+        if owner:
+            follow_ups.setdefault(owner, []).append(sha)
+        else:
+            commits.append(sha)
     if len(commits) != len(entries):
         raise SystemExit(f'{len(commits)} lever commits in {rng} but {len(entries)} manifest entries:\n' +
                          '\n'.join(f'  {s[:8]} ' + git(['log', '-1', '--format=%s', s], repo).stdout.strip()[:100]
@@ -219,7 +235,33 @@ def build(repo, rng):
         e['patch'] = fname
         e['commit'] = sha
         e['title'] = git(['log', '-1', '--format=%s', sha], repo).stdout.strip()
-        text = git(['format-patch', '-1', '--stdout', '--no-stat', '--no-signature', '--zero-commit', sha], repo).stdout
+        patch_sha = sha
+        if follow_ups.get(e['name']):
+            # published history is never rewritten: a later fix to a lever is a follow-up commit, squashed here into the
+            # lever's patch (cherry-picked onto the lever commit in a throw-away worktree)
+            tmp = Path(tempfile.mkdtemp(prefix='stack-squash-'))
+            wt = tmp / 'wt'
+            try:
+                git(['worktree', 'add', '--detach', '-q', str(wt), sha], repo)
+                env = dict(os.environ, GIT_AUTHOR_NAME='stack-build', GIT_AUTHOR_EMAIL='stack@build',
+                           GIT_COMMITTER_NAME='stack-build', GIT_COMMITTER_EMAIL='stack@build')
+                for f in follow_ups[e['name']]:
+                    r = subprocess.run(['git', 'cherry-pick', '-n', '-X', 'patience', f], cwd=str(wt), capture_output=True, text=True)
+                    if r.returncode:
+                        raise SystemExit(f"follow-up {f[:8]} does not squash onto {e['name']} ({sha[:8]}):\n{r.stderr}")
+                # one commit from the lever's parent: the lever's diff plus the follow-ups
+                git(['reset', '-q', '--soft', sha + '^'], wt)
+                msg = git(['log', '-1', '--format=%B', sha], repo).stdout.rstrip() + '\n\nFollow-ups squashed into this patch:\n' + \
+                    ''.join(f"- {f[:8]} {git(['log', '-1', '--format=%s', f], repo).stdout.strip()}\n" for f in follow_ups[e['name']])
+                subprocess.run(['git', 'commit', '-q', '--no-verify', '-F', '-'], cwd=str(wt), input=msg, text=True,
+                               capture_output=True, env=env)
+                patch_sha = git(['rev-parse', 'HEAD'], wt).stdout.strip()
+                e['follow_up_commits'] = follow_ups[e['name']]
+            finally:
+                subprocess.run(['git', 'worktree', 'remove', '--force', str(wt)], cwd=str(repo), capture_output=True)
+                shutil.rmtree(tmp, ignore_errors=True)
+                subprocess.run(['git', 'worktree', 'prune'], cwd=str(repo), capture_output=True)
+        text = git(['format-patch', '-1', '--stdout', '--no-stat', '--no-signature', '--zero-commit', patch_sha], repo).stdout
         # the first line "From 000... Mon Sep 17 00:00:00 2001" is deterministic with --zero-commit
         (HERE / fname).write_text(text, encoding='utf-8', newline='\n')
         files, _ = parse_patch(text)
