@@ -108,12 +108,21 @@ Tempi sulla 2080 Ti (µs per chiamata, def → miglior wr):
   stimati. I kernel di default stavano già al 60-74% del picco e il WR li porta al 65-78%: il vincolo bitwise fissa la
   mappa lane → elementi, quindi i byte in volo per warp restano R × 2,7 KB.
 
-### Passata 2 (questo commit)
+### Passata 2 (commit 49ddc63f, build `build-speed2-49ddc63f`, 12/10 10:47)
 
-Caricamenti dei pesi delle 4 catene × R righe **tutti prima** dell'applicazione (indirizzi clampati all'ultimo blocco /
-ultima riga, applicati solo dove il default li applica): 4R frammenti in volo per lane invece di uno per catena.
-Scelte del bench: `def,wr,wr:r1,wr:r4,wr:b2,wr:s1,wr:a1:k0,wr:a1:k0:r4,wr:a1:k0:b2`. Esito: da misurare.
+Caricamenti dei pesi delle 4 catene × R righe tutti prima dell'applicazione (indirizzi clampati). **Peggio**: sulla
+2080 Ti il guadagno complessivo sulle celle prese scende dal 6,6% al 2,9% e il `wr` di default perde su qkv Q4_K T=2
+(−7%) e Q5_K T=2 (−11%) dove la passata 1 guadagnava +10/+7%: pressione sui registri, ptxas sovrappone meglio da sé
+nella forma con la guardia. Bench: 576 celle per scheda tutte `identical 1col=ok`. Il run engine `DET-x7-speed2b-wr`
+ha però dato un **`L02.txt` diverso** dai 5 run precedenti (tutti identici fra loro); il run `off` gemello si è
+bloccato (deadline di generazione, log fermo a «everything loaded»): in corso un secondo giro off/wr sullo stesso build
+(`DET-x7-speed2c-*`) per distinguere un bug del kernel da un run non deterministico.
+
+### Passata 3 (questo commit)
+
+Ciclo dei blocchi riportato alla forma della passata 1 (guardia per catena, pesi caricati dentro la guardia); restano
+i default nuovi (`STAGE=0`, tipi 12/13/23, `MAXIN=2560`). Da ricompilare e riverificare off/wr sullo stesso build.
 
 ## Stato
 
-- 12/10 10:45: passata 1 compilata e misurata (sopra); passata 2 scritta, **compilato no / provato no**.
+- 12/10 11:15: passata 3 scritta, **compilato no / provato no**; determinismo del run engine in verifica.

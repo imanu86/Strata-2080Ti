@@ -1535,27 +1535,14 @@ __global__ void dense_wr_kernel(const typename F::Block* __restrict__ w, const Q
 #pragma unroll
             for (int vy = 0; vy < WARPS; ++vy) acc[c][r][vy] = 0.0f;
     const int kqs = F::kqs(lane);
+    // Pass 2 (49ddc63f) loaded the weight fragments of the four chains x R rows up front with clamped addresses: slower
+    // on both cards (register pressure; the guarded form below lets ptxas overlap what fits), so the guarded form stays.
     for (int kb0 = 0; kb0 < blocks_per_row; kb0 += F::BPI) {   // the default kernel's iterations, in order
-        // the weight fragments of the four chains x R rows are loaded first, unconditionally (a chain with no block in
-        // this iteration, or a row past n_out, reads the row's last block / the last row: valid memory, never applied),
-        // so they are in flight together; then each is applied exactly where the default kernel applies it
-        typename XB::W wv[WARPS][R];
-        bool ok[WARPS];
 #pragma unroll
         for (int vy = 0; vy < WARPS; ++vy) {                // the chain of thread 32 vy + lane
             const int kbx = kb0 + vy * (WARP / F::T) + lane / F::T;
-            ok[vy] = kbx < blocks_per_row;
-            const int kc = ok[vy] ? kbx : blocks_per_row - 1;
-#pragma unroll
-            for (int r = 0; r < R; ++r) {
-                const int rr = row0 + r < n_out ? row0 + r : n_out - 1;
-                wv[vy][r] = XB::wload(w + std::size_t(rr) * blocks_per_row + kc, kqs);
-            }
-        }
-#pragma unroll
-        for (int vy = 0; vy < WARPS; ++vy) {
-            if (ok[vy]) {
-                const int kby = (kb0 + vy * (WARP / F::T) + lane / F::T) * F::KBY;
+            if (kbx < blocks_per_row) {
+                const int kby = kbx * F::KBY;
                 typename XB::X xv[NCOLS];
 #pragma unroll
                 for (int c = 0; c < NCOLS; ++c) {
@@ -1565,8 +1552,9 @@ __global__ void dense_wr_kernel(const typename F::Block* __restrict__ w, const Q
 #pragma unroll
                 for (int r = 0; r < R; ++r) {
                     if (row0 + r < n_out) {
+                        const typename XB::W wv = XB::wload(w + std::size_t(row0 + r) * blocks_per_row + kbx, kqs);
 #pragma unroll
-                        for (int c = 0; c < NCOLS; ++c) acc[c][r][vy] += XB::dot(wv[vy][r], xv[c]);
+                        for (int c = 0; c < NCOLS; ++c) acc[c][r][vy] += XB::dot(wv, xv[c]);
                     }
                 }
             }
