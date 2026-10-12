@@ -243,8 +243,10 @@ def build(repo, rng):
             wt = tmp / 'wt'
             try:
                 git(['worktree', 'add', '--detach', '-q', str(wt), sha], repo)
-                env = dict(os.environ, GIT_AUTHOR_NAME='stack-build', GIT_AUTHOR_EMAIL='stack@build',
-                           GIT_COMMITTER_NAME='stack-build', GIT_COMMITTER_EMAIL='stack@build')
+                # the lever's author and dates, so that rebuilding the stack leaves an unchanged patch unchanged
+                an, ae, ad = git(['log', '-1', '--format=%an%n%ae%n%aI', sha], repo).stdout.strip().split('\n')
+                env = dict(os.environ, GIT_AUTHOR_NAME=an, GIT_AUTHOR_EMAIL=ae, GIT_AUTHOR_DATE=ad,
+                           GIT_COMMITTER_NAME=an, GIT_COMMITTER_EMAIL=ae, GIT_COMMITTER_DATE=ad)
                 for f in follow_ups[e['name']]:
                     r = subprocess.run(['git', 'cherry-pick', '-n', '-X', 'patience', f], cwd=str(wt), capture_output=True, text=True)
                     if r.returncode:
