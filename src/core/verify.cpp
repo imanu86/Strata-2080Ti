@@ -138,6 +138,17 @@ inline bool g_qdedup() { static const bool on = [] { const char* v = std::getenv
 // fork F4 (Eddoursul): 2-4 token dense projections read an interleaved copy of the q8_1 activations (bitwise the same
 // outputs); STRATA_MMVQ_IL=0 keeps native_mmvq's multi-column kernels
 inline bool g_mmvq_il() { static const bool on = [] { const char* v = std::getenv("STRATA_MMVQ_IL"); return v == nullptr || v[0] != '0'; }(); return on; }
+// lab/speed1 (CUDA builds): the 143-amdk node cuts below (STRATA_QFUSE_HC, STRATA_FUSE_WAIT, STRATA_FUSE_HITS,
+// STRATA_FUSE_CONVAB) are gfx12 defaults and were never enabled on CUDA; the kernels compile on both.  A CUDA build turns
+// them on only by env: the knob's own variable wins (=0 / 1); STRATA_NODECUT=1 / 0 turns the measured set (QFUSE_HC,
+// FUSE_WAIT, FUSE_HITS) on / off together.  FUSE_CONVAB stays on its own variable (gfx1201 measured it -0.3%).
+inline int nodecut_env(const char* name, bool in_set) {
+    const char* v = std::getenv(name);
+    if (v != nullptr) return std::atoi(v) != 0 ? 1 : 0;
+    if (!in_set) return -1;
+    const char* u = std::getenv("STRATA_NODECUT");
+    return u != nullptr ? (std::atoi(u) != 0 ? 1 : 0) : -1;
+}
 // 143-amdk: STRATA_QFUSE_HC - only the hyper-connection read writes its consumer's q8_1 image (not the GDN recurrence): gfx12 default (=0 / 1 forces off / on)
 inline bool g_qfuse_hc() {
 #if defined(STRATA_USE_HIP)
@@ -151,7 +162,8 @@ inline bool g_qfuse_hc() {
     }();
     return on;
 #else
-    return false;
+    static const bool on = nodecut_env("STRATA_QFUSE_HC", true) == 1;   // lab/speed1: opt-in on CUDA
+    return on;
 #endif
 }
 // fork 34a35db + b063c13 (Eddoursul), STRATA_SIDE_MIXER=1 / =2 (opt-in): the mixer's work that reads only the layer's
@@ -229,7 +241,7 @@ bool head_mix_multi_enabled() {
 // 143-amdk: the wait for a host flag folded into the copy that follows it (wait_copy_i32_from_mapped,
 // copy_rows_from_mapped_after): same reads, same values, one kernel node fewer each.  A dependent kernel costs ~2.4 us in a
 // gfx1201 graph whatever it does; measured on gfx12 only, so it is on there by default.  STRATA_FUSE_WAIT=0 / 1 forces it
-// off / on (HIP builds; a CUDA build never fuses).
+// off / on (HIP builds; a CUDA build fuses only by env: STRATA_FUSE_WAIT=1 or STRATA_NODECUT=1, lab/speed1).
 bool fuse_wait_on() {
 #if defined(STRATA_USE_HIP)
     static const int env = [] {
@@ -246,7 +258,8 @@ bool fuse_wait_on() {
     }
     return per_dev[dev] == 2;
 #else
-    return false;
+    static const bool on = nodecut_env("STRATA_FUSE_WAIT", true) == 1;
+    return on;
 #endif
 }
 
@@ -256,7 +269,8 @@ bool fuse_convab_on() {
     static const bool on = [] { const char* v = std::getenv("STRATA_FUSE_CONVAB"); return v != nullptr && std::atoi(v) != 0; }();
     return on;
 #else
-    return false;
+    static const bool on = nodecut_env("STRATA_FUSE_CONVAB", false) == 1;   // lab/speed1: opt-in on CUDA, not in STRATA_NODECUT
+    return on;
 #endif
 }
 
@@ -274,7 +288,23 @@ bool fuse_hits_on() {
     }
     return per_dev[dev] == 2;
 #else
-    return false;
+    static const bool on = nodecut_env("STRATA_FUSE_HITS", true) == 1;
+    return on;
+#endif
+}
+
+// lab/speed1: one line in the log when a CUDA build runs with any of the node cuts (what the window graph lost)
+void nodecut_note() {
+#if !defined(STRATA_USE_HIP)
+    static const bool once = [] {
+        const int w = fuse_wait_on() ? 1 : 0, h = fuse_hits_on() ? 1 : 0, q = g_qfuse_hc() ? 1 : 0, c = fuse_convab_on() ? 1 : 0;
+        if (w || h || q || c)
+            std::fprintf(stderr, "strata nodecut: CUDA fuse_wait %d fuse_hits %d qfuse_hc %d fuse_convab %d (kernel nodes cut from each "
+                                 "layer of the window graph: wait+plan copy, wait+rows copy, hit add into combine, experts' quantize, conv+a/b)\n",
+                         w, h, q, c);
+        return true;
+    }();
+    (void) once;
 #endif
 }
 
@@ -862,6 +892,7 @@ const float* Verifier::final_R(int t) const { return R_ + (size_t) t * (size_t) 
 // state), never A's experts, so nothing waits that did not wait before.  Every token's arithmetic is unchanged.
 bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     using namespace strata::kernels;
+    nodecut_note();
     const ModelGeometry& g = *g_;
     const WeightTable& wt = *wt_;
     SessionState& ss = *ss_;
