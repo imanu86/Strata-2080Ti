@@ -220,7 +220,15 @@ Il codice resta su `lab/critpath2` e `lab/chainfuse`. `stack/` rigenerato: **17 
 
 ## 11. Build e controllo dopo la pulizia
 
-(in corso)
+Build del worktree ripulito (`60d1130d`, codice = `aa617085`): `build_lock.py`, rc 0, 299 s, 38 passi. `strata.exe` sha256
+**`211d26979c81fb5f1e26e66e8cee63b958738c36222a6d11efc609356fbc3c32`**, copiata con `build.json`, `strata-vision.exe`
+(`93441f40…`), `source\serve` e `source	ools` in `corse_2080ti61004_routed_keepuild-upsync43-60d1130d\`.
+Compilato sì, installato no.
+
+Controllo del testo: `DET-x10-u43p-b` (`det_force.sh`, argomenti di `coda_cand2.sh`, braccio B) contro `DET-x7-cand2-b1`
+(Daily r2): **in coda dietro il pilota MTP** (`bench.lock` preso alle 08:28 per 200 min). Script pronto:
+`20261006_due_schede\coda_u43p.sh` (stampa UGUALE/DIVERSO per L01/L02). Finché non gira: provato no. Atteso identico:
+le due leve tolte erano opt-in e spente nella config.
 
 ## 12. Le nostre PR su upstream (autore imanu86, controllate il 12/10 con `gh`, sola lettura)
 
