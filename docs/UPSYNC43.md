@@ -117,7 +117,7 @@ identico a quello compilato (l'autosquash ha toccato solo tre doc).
 
 ## 6. Verifica
 
-Vedi §9 (aggiornato a fine sessione).
+Vedi §9.
 
 ## 7. Piano per smettere di portarci dietro la pila
 
@@ -162,6 +162,23 @@ Senza di loro la pila scende a 17 leve e 275 innesti.
 - Compilare una volta con `--tests` e far girare `qsa_merge_daily_parity`, `mmvq_il_parity`, `qsa_rows_bench --rows`,
   `expdec_bench` sulla build 0.1.43.
 
-## 9. Esito della verifica
+## 9. Esito della verifica (12/10, 07:55-07:59, sotto `bench.lock`)
 
-(in attesa del `bench.lock`: compilato sì, installato no, provato no)
+Compilato sì, installato no, **provato sì** (due prove brevi, nessun B-A-B):
+
+1. **Avvio** con una copia di `strata-0142-daily.json` (stessi argomenti ed env del Daily r2; exe `build-upsync43-9676fdda`,
+   `--prompt-cache-file` e log propri, porta 8101): `/health` `loaded: true` dopo **70 s**, `images: true`, modello
+   `qwen3.8-flash-next-iq3_xxs` a 262144 di contesto; una richiesta di 61 token servita (24 generati, 61 t/s a freddo).
+   Nel log: `STRATA_VRAM_FREE=device` (NVML 7357 MiB contro 9679 di CUDA), sonda PLE 91 220 righe/s («fine», diretta),
+   elastica a due zone, `strata ram core` dev1 5500 slot senza copia RAM, privata 77,54 → 67,37 GiB, working set 48,70 →
+   33,63 GiB, riletti 0, finestre 1-6 catturate. Nessun errore.
+2. **Banco forzato** `DET-x8-upsync43-b` (`det_force.sh` con gli argomenti di `coda_cand2.sh`, braccio B: `STRATA_EXPDEC=1
+   STRATA_QSA_ROWS=1`): **L01.txt e L02.txt identici byte per byte** a quelli del Daily r2 (`DET-x7-cand2-b1`, sha
+   `fd37c80c…` / `45d230d2…`); 521 e 600 finestre come il riferimento, `theta 0.10`, speculative 493/537, riletti 0,
+   fuori posto 0, prefill 131 248 token in 72,9 s (1800 tok/s).
+
+Velocità di quella singola corsa (non è un B-A-B, nessun braccio A, subito dopo la cattura MTP di un altro agente):
+L01 69,7 t/s, L02 63,1 t/s contro 73,7/68,0 di `DET-x7-cand2-b1` (−5,5/−7,2%). **Da misurare col B-A-B del
+coordinatore** prima di trarne conclusioni; se la differenza regge, i sospetti sono le novità di 0.1.43 attive anche con
+la nostra config (guardia NaN `STRATA_NAN_GUARD=0` per escluderla, buffer pinned #1712, riordino degli scambi) o lo stato
+delle schede dopo la corsa precedente.
