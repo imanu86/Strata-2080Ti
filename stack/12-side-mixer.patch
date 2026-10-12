@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: imanu <imanu86@gmail.com>
+From: Strata-2080Ti stack <stack@noreply.github.com>
 Date: Mon, 12 Oct 2026 07:37:53 +0200
 Subject: [PATCH] FABLE-STRATA-Porta su 0.1.43 STRATA_SIDE_MIXER=1/2 (PR
  #1889): il lavoro del mixer che legge solo l'input su rami del grafo
