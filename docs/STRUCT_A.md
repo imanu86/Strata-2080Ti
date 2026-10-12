@@ -149,7 +149,63 @@ l'undo ha finito) e guadagna fino alla decisione di T=2 (~V+2,15): ~0,9 ms sulle
 prima della decisione di T ≥ 3 (~V+3,1) e non ritarda nulla. Stima rivista: ~−0,27 ms per finestra fresca, **~−0,2 ms a
 finestra (~0,8%)**, sotto la risoluzione del B-A-B (±2%).
 
+## 6. Misure della build finale (`build-structa-075ce875`)
+
+L02 256 token, cache fissa 1500 senza `--elastic`, **residenza statica** (`--adapt-every 0`), una corsa per braccio, PC
+in uso (prefill 79-295 s). Serie `DET-x18-sa6-*` (+ `DET-x18-sa4-soff/soff2` della build prima, stesso testo).
+
+**Testo.** `L02.txt` identico a `soff` in tutti i bracci: `sbet`, `sboth`, `schain`, `sprio`, `schainprio`, `sall`
+(1199 caratteri; e `sa4`: `soff2`, `sbet` con le scommesse T=1, `sboth`). Con le teste confermate: 30 code T=2 nella
+build finale, 36 T=1 + 20 T=2 nella precedente.
+
+Perché a residenza statica: col tier adattivo acceso (il default, anche a cache fissa) la residenza segue i tempi della
+corsa. A 256 token due `off` della stessa build differiscono fra loro dal carattere 352 (`DET-x18-sa3-off` contro
+`-off2`, 644 contro 679 scambi del tier), e `bet`/`both` coincidono con `off2`. A 64 token il tier non arriva a
+cambiare nulla: `DET-x18-sa2-*` identici a `off` (`5fefd82e`), compreso `both`.
+
+**Per finestra (M, mediane).**
+
+| | `off` (3 corse) | `STRATA_SA_BET=1` | note |
+|---|---|---|---|
+| fresche T=2 dopo un undo, `V`→fine stadio 0 | 15,39 · 14,34 · 15,95 | **13,54 · 13,97** (`sbet` · `sboth`, n 24) | −0,9/−1,9 ms, dove la stima (§5) diceva ~−0,9 |
+| fresche T=3 / T=4 (testa T=2 persa) | 17,9-25,7 / 23,0-27,1 | 17,8-18,8 / 22,4-23,0 | nessun ritardo visibile |
+| scommesse T=2 | — | 71-72 piazzate, 30 confermate | testa a V+1,26, coda a V+2,36 |
+
+| classe speculativa, ms | bracci senza catena a passi | bracci con `STRATA_SA_CHAIN=1` |
+|---|---|---|
+| `DET-x18-sa6` + `sa4` | 22,36 · 22,25 · 22,35 (`off`) · 22,15 (`sbet`) · 22,29 (`sprio`) | 21,21 · 21,69 · 21,77 · 21,32 (sa6) · 21,79 (sa4) |
+
+- **Catena a passi**: −0,6/−1,1 ms per finestra speculativa, coerente in cinque bracci; 46 uscite non eseguite su 31
+  catene forzate. La catena arriva a B di poco più tardi (3,80 contro 3,70 ms).
+- **Priorità della catena** (segnalazione di struct-b: `STRATA_MTP_PRIORITY=0`, stream del drafter a priorità di
+  default invece che massima; esiste già): classe speculativa 22,29, nessun guadagno, e la catena forzata arriva a B
+  più tardi (4,30 contro 3,70 ms). Con la catena a passi la contesa che resta è piccola; la priorità non va toccata.
+- **Classe fresca e ms/finestra**: nel rumore. Due `off` identici differiscono di ~1 ms sulla classe fresca
+  (37,37 / 36,40 / 38,65); i bracci con la scommessa stanno a 36,1-36,3.
+
+Valore atteso sulla media (S, pesando le misure sulle quote di finestre): scommessa −1,3 ms × 21% di fresche T=2 ×
+~78% di fresche = **~−0,2 ms a finestra**; catena a passi −0,7 ms × 22-27% di speculative = **~−0,15/−0,2 ms a
+finestra**. Insieme **~−0,4 ms a
+finestra (~1,5%)**: sotto la risoluzione di un B-A-B a tre bracci (±2%), da leggere con `strata pipeline classes` e
+`strata struct-a:` per finestra più che dai t/s.
+
+## 7. Per il B-A-B del coordinatore
+
+- Build `build-structa-075ce875`, `strata.exe` sha256 `9ef62e54337515c8f1c7d40f3adcebaec3f3ce23d2094d0f9f6140d04c8c00b0`
+  (codice `075ce875`; i doc dopo non toccano il codice).
+- Braccio A: env attuale (speed4 braccio B compreso). Braccio B: A + `STRATA_SA_BET=1 STRATA_SA_CHAIN=1`. Non
+  aggiungere `STRATA_MTP_PRIORITY=0`.
+- Nel log di B: `strata struct-a: STRATA_SA_BET: heads of 2 layers on CUDA0, bets T=2..2` all'avvio e, per richiesta,
+  `strata struct-a: head bets (placed/tail/dropped) …; forced chains fed a step at a time N, outputs not run M`.
+- Righe da leggere: `strata pipeline classes` (speculative −0,6/−1 ms; fresche −0,2/−0,4), `the chain from its launch
+  to B: forced` (pari o +0,1).
+- Manopole: `STRATA_SA_BET_MINT=1` riaccende le scommesse T=1 (peggio, §5), `STRATA_SA_BET_MAXT=3` la T=3 (stimata a
+  somma zero), `STRATA_SA_BET_LAYERS` (2), `STRATA_SA_CHAIN_AHEAD` (0: un passo alla volta).
+- Effetti collaterali nei log: le teste perse passano dal pool (esperti CPU dei loro layer), quindi `GPU-reach wait` e
+  `CPU experts` del `decode timing` contano un po' di lavoro in più; il tier non le conta (`ExpertDispatch::no_usage`).
+
 ## Stato
 
-Disegno e stima: §1-4. Prima misura e correzione: §5. Codice: `3e309ed7` (leve), `7c1a7aca` (servizio della testa sul suo
+Disegno e stima: §1-4. Prima misura e correzione: §5. Misure finali: §6. Compilato sì (`build-structa-075ce875`),
+provato sì (corse brevi a cache fissa, testo identico), B-A-B no, installato no. Codice: `3e309ed7` (leve), `7c1a7aca` (servizio della testa sul suo
 evento: senza, «layer 1 never rang» se l'host passava prima che la testa suonasse; niente secondo snapshot GDN).
