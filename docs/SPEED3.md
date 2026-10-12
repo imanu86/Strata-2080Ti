@@ -60,6 +60,10 @@ banco.**
 | 3060 | 3 | 1271 (+10%) | **1157** | 1416 (+22%) | 1144 (−1%) | 1411 (+22%) | 1557 (+35%) |
 | 3060 | 4 | 1409 (+14%) | **1233** | 1484 (+20%) | 1225 (−1%) | 1462 (+19%) | 1693 (+37%) |
 
+Rumore: dalle 12:20 alle 12:57 OktoCGControl era in primo piano e disegnava sulla 3060, che pilota il monitor 8K, e
+usava la CPU. I µs della 3060 (`device 1` del bench) e i t/s dei run engine sono quindi rumorosi. Il verdetto si regge
+sulla 2080 Ti (`device 0` del bench, scheda senza monitor), dove WT perde da solo il 18-25%. La parità non ne risente.
+
 2080 Ti, T=2, µs del gate/up per coppia (`dec` → `dec:t1`): IQ2_XXS 67,8 → 72,3; IQ2_XS 73,1 → 79,5; IQ3_XXS 79,6 →
 98,0; IQ3_S 89,5 → 100,0; **IQ2_S 77,4 → 134,5 (+74%)**. Con `dec` il gate/up IQ3_XXS a T=2 muove 25 MB in 79,6 µs =
 315 GB/s (51% del picco), IQ2_XXS 249 GB/s (40%).
