@@ -57,6 +57,12 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
 /// build below sm_90, or a capacity whose keys do not fit one cluster's shared memory. Capturable.
 bool qsa_block_topk_cluster(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                             const QsaShapes& s, int32_t* ids, void* stream);
+/// SPEED4: the same ids on 8 ordinary CTAs per query that trade their histograms through global memory (any CUDA card,
+/// sm_70+). qsa_block_topk takes it for decode calls (no active-block count) of up to 8 queries with STRATA_TOPK_GRID=1
+/// (opt-in). False (nothing launched) on HIP, past 393K cells of capacity, when the grid would not fit the card with a
+/// query to spare, or when the device's 8 exchange areas are taken by other `ids` buffers. Capturable.
+bool qsa_block_topk_grid(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
+                         const QsaShapes& s, int32_t* ids, void* stream);
 /// The original kernel (256 threads, one shared histogram, keys read from memory on every radix pass), for tests and
 /// STRATA_TOPK_OLD=1: the same ids.
 void qsa_block_topk_ref(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,

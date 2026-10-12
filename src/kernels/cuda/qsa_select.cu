@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <utility>
 
 namespace strata::kernels {
 namespace {
@@ -1162,6 +1165,208 @@ __global__ void __launch_bounds__(CL_T) block_topk_cluster_kernel(const float* _
     __trap();
 #endif
 }
+
+// ---- SPEED4: the decode top-k on GR_N ordinary CTAs per query (sm_70+, any CUDA card; STRATA_TOPK_GRID=1, opt-in).
+// block_topk_cluster_kernel's algorithm without thread-block clusters: CTA r of a query holds the keys of blocks
+// [r * per, (r + 1) * per) in shared memory and writes the digit histogram of each pass into slot r of the query's
+// GLOBAL exchange area (a __device__ pool, so nothing is allocated at capture); a per-query arrival counter in global
+// memory replaces barrier.cluster (cooperative_groups' grid.sync pattern: CTA barrier, fence, atomic arrive, acquire
+// spin, CTA barrier).  The digits, the threshold, `above`, the per-CTA counts and the write positions are the cluster
+// kernel's, so the ids are the same by the same argument (integer histograms summed in any order; ties at thr to the
+// lowest cell; ascending order).  On sm_75 a decode call at 131K ran four radix passes and two scans over 32,769
+// blocks on ONE SM per query (block_topk_wide_kernel, 80-110 us).
+//
+// Progress: the spin needs the GR_N CTAs of a query resident together.  The grid is GR_N x nq <= 8 x 8 CTAs of
+// GR_T threads; the host checks once per device that twice that many fit (occupancy x SMs) and otherwise returns
+// false.  CTAs of other streams finish on their own, so a CTA that waits never waits on itself.
+// Reuse: the counter only grows during a call (targets GR_N, 2 GR_N, ... 5 GR_N); after the last barrier every CTA
+// bumps `leave`, and the one that brings it to GR_N resets both to 0 - no CTA is spinning by then, and the next call
+// is a later kernel on the stream.  Each distinct `ids` pointer (a caller's selection buffer: one per verifier and
+// stage) gets its own slot of the pool on its device, so two graphs replaying at once never share an exchange area.
+constexpr int GR_N = 8;        // CTAs per query
+constexpr int GR_T = 512;      // threads per CTA
+constexpr int GR_MAXQ = 8;     // queries per call (decode windows have 1-5)
+constexpr int GR_SLOTS = 8;    // exchange areas per device
+struct GrQuery {
+    int hist[2][GR_N][256];
+    unsigned long long cnt[GR_N];
+    unsigned bar, leave, pad[2];
+};
+__device__ GrQuery g_topk_grid[GR_SLOTS][GR_MAXQ];
+
+__device__ __forceinline__ unsigned gr_ld_acquire(const unsigned* p) {
+    unsigned v;
+    asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n" : "=r"(v) : "l"(p) : "memory");
+    return v;
+}
+__device__ __forceinline__ void gr_sync(unsigned* bar, unsigned target) {
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        __threadfence();
+        atomicAdd(bar, 1u);
+        while (gr_ld_acquire(bar) < target) __nanosleep(32);
+        __threadfence();
+    }
+    __syncthreads();
+}
+__device__ __forceinline__ unsigned long long gr_excl_scan64(unsigned long long v, unsigned long long* s_warp,
+                                                             unsigned long long& total) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    unsigned long long x = v;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+        const unsigned long long y = __shfl_up_sync(0xffffffffu, x, o);
+        if (lane >= o) x += y;
+    }
+    if (lane == 31) s_warp[warp] = x;
+    __syncthreads();
+    if (warp == 0) {
+        const unsigned long long w = lane < GR_T / 32 ? s_warp[lane] : 0ull;
+        unsigned long long z = w;
+#pragma unroll
+        for (int o = 1; o < 32; o <<= 1) {
+            const unsigned long long y = __shfl_up_sync(0xffffffffu, z, o);
+            if (lane >= o) z += y;
+        }
+        if (lane < GR_T / 32) s_warp[lane] = z - w;
+        if (lane == 31) s_warp[32] = z;
+    }
+    __syncthreads();
+    total = s_warp[32];
+    return s_warp[warp] + x - v;
+}
+
+// grid (GR_N, nq), GR_T threads, dynamic shared memory: ceil(max_blocks / GR_N) keys
+__global__ void __launch_bounds__(GR_T) block_topk_grid_kernel(const float* __restrict__ scores,
+                                                               const int32_t* __restrict__ steps, int64_t max_blocks,
+                                                               int64_t cap, int32_t* __restrict__ ids, int slot) {
+    extern __shared__ uint32_t keys[];
+    __shared__ __align__(16) int hloc[2][256];
+    __shared__ unsigned long long s_warp[33];
+    __shared__ uint32_t s_prefix;
+    __shared__ int s_above;
+    const int rank = (int) blockIdx.x;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int64_t qi = blockIdx.y;
+    GrQuery& g = g_topk_grid[slot][qi];
+    const int32_t* st = steps + qi * kStepCount;
+    const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
+    int32_t* out = ids + qi * cap;
+    if (n_kv <= width) {                                // the identity, split over the CTAs; no exchange
+        for (int64_t j = (int64_t) rank * GR_T + t; j < n_kv; j += (int64_t) GR_N * GR_T) out[j] = (int32_t) j;
+        return;
+    }
+    const int wtail = (int) (n_kv - n_bid * R);
+    const int64_t nbe = n_bid + (wtail > 0 ? 1 : 0);
+    const int64_t per = (nbe + GR_N - 1) / GR_N;
+    const int64_t lo = (int64_t) rank * per < nbe ? (int64_t) rank * per : nbe;
+    const int64_t hi = lo + per < nbe ? lo + per : nbe;
+    const int n = (int) (hi - lo);
+    const int tail_i = (wtail > 0 && n_bid >= lo && n_bid < hi) ? (int) (n_bid - lo) : -1;
+    const float* sc = scores + qi * max_blocks + lo;
+    for (int i = t; i < n; i += GR_T) keys[i] = order_key(sc[i]);
+    for (int i = t; i < 2 * 256; i += GR_T) (&hloc[0][0])[i] = 0;
+    __syncthreads();
+    uint32_t prefix = 0;
+    int above = 0;
+    for (int pass = 0; pass < 4; ++pass) {
+        const int shift = 24 - 8 * pass;
+        const uint32_t hmask = pass == 0 ? 0u : (0xffffffffu << (shift + 8));
+        int* hl = hloc[pass & 1];
+        for (int i0 = 0; i0 < n; i0 += GR_T) {          // warp-aggregated: the scores share their top bits
+            const int i = i0 + t;
+            int bin = -1;
+            if (i < n) {
+                const uint32_t k = keys[i];
+                if ((k & hmask) == prefix) bin = (int) ((k >> shift) & 255);
+            }
+            const unsigned same = __match_any_sync(0xffffffffu, bin);
+            if (bin >= 0 && lane == __ffs(same) - 1) atomicAdd(&hl[bin], __popc(same) * R);
+            if (bin >= 0 && i == tail_i) atomicAdd(&hl[bin], wtail - R);
+        }
+        __syncthreads();
+        for (int i = t; i < 256; i += GR_T) {
+            g.hist[pass & 1][rank][i] = hl[i];
+            hloc[(pass + 1) & 1][i] = 0;
+        }
+        gr_sync(&g.bar, (unsigned) (GR_N * (pass + 1)));
+        if (warp == 0) {                                // the cluster kernel's digit search over the GR_N slots
+            const int need = (int) width - above;
+            int tot[8], part = 0;
+#pragma unroll
+            for (int k = 0; k < 8; ++k) {
+                const int d = 255 - 8 * lane - k;
+                int v = 0;
+#pragma unroll
+                for (int r = 0; r < GR_N; ++r) v += __ldcg(&g.hist[pass & 1][r][d]);
+                tot[k] = v;
+                part += v;
+            }
+            int incl = part;
+#pragma unroll
+            for (int o = 1; o < 32; o <<= 1) {
+                const int y = __shfl_up_sync(0xffffffffu, incl, o);
+                if (lane >= o) incl += y;
+            }
+            const int excl = incl - part;
+            const unsigned hit = __ballot_sync(0xffffffffu, excl < need && incl >= need);
+            const int who = hit ? __ffs(hit) - 1 : 31;
+            if (lane == who) {
+                int acc = excl, k = 0;
+                for (; k < 7; ++k) {
+                    if (acc + tot[k] >= need) break;
+                    acc += tot[k];
+                }
+                s_prefix = prefix | ((uint32_t) (255 - 8 * lane - k) << shift);
+                s_above = above + acc;
+            }
+        }
+        __syncthreads();
+        prefix = s_prefix;
+        above = s_above;
+    }
+    const uint32_t thr = prefix;
+    const int64_t eq_budget = width - above;
+    int seg = (n + GR_T - 1) / GR_T;
+    if ((seg & 1) == 0 && seg > 0) ++seg;
+    const int s0 = t * seg < n ? t * seg : n, s1 = s0 + seg < n ? s0 + seg : n;
+    uint32_t gt = 0, eq = 0;
+    for (int i = s0; i < s1; ++i) {
+        const uint32_t k = keys[i], w = i == tail_i ? (uint32_t) wtail : (uint32_t) R;
+        if (k > thr) gt += w;
+        else if (k == thr) eq += w;
+    }
+    unsigned long long cta;
+    const unsigned long long before =
+        gr_excl_scan64((unsigned long long) gt | ((unsigned long long) eq << 32), s_warp, cta);
+    if (t == 0) g.cnt[rank] = cta;
+    gr_sync(&g.bar, (unsigned) (GR_N * 5));
+    int64_t gt_off = 0, eq_off = 0;
+    for (int r = 0; r < rank; ++r) {
+        const unsigned long long c = __ldcg(&g.cnt[r]);
+        gt_off += (int64_t) (c & 0xffffffffu);
+        eq_off += (int64_t) (c >> 32);
+    }
+    __syncthreads();                                    // every thread has read cnt before this CTA leaves
+    if (t == 0 && atomicAdd(&g.leave, 1u) == (unsigned) (GR_N - 1)) {
+        atomicExch(&g.bar, 0u);
+        atomicExch(&g.leave, 0u);
+    }
+    const int64_t eq_before = eq_off + (int64_t) (before >> 32);
+    int64_t wpos = gt_off + (int64_t) (before & 0xffffffffu) + (eq_before < eq_budget ? eq_before : eq_budget);
+    int64_t eq_left = eq_budget - eq_before;
+    if (eq_left < 0) eq_left = 0;
+    for (int i = s0; i < s1; ++i) {
+        const uint32_t k = keys[i];
+        const int w = i == tail_i ? wtail : R;
+        const int64_t b = lo + i;
+        if (k > thr) {
+            for (int c = 0; c < w; ++c) out[wpos++] = (int32_t) (b * R + c);
+        } else if (k == thr) {
+            for (int c = 0; c < w && eq_left > 0; ++c, --eq_left) out[wpos++] = (int32_t) (b * R + c);
+        }
+    }
+}
 #endif  // !__HIPCC__
 }  // namespace
 
@@ -1387,6 +1592,61 @@ bool qsa_block_topk_cluster(const float* scores, const int32_t* steps, int64_t n
 #endif
 }
 
+#if !defined(__HIPCC__)
+// SPEED4: qsa_block_topk_grid (see block_topk_grid_kernel). Capturable: no allocation, no synchronization; the per-device
+// checks (occupancy) and the slot of an `ids` pointer are host-side and happen at the first call for that pointer.
+bool qsa_block_topk_grid(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
+                         const QsaShapes& s, int32_t* ids, void* stream) {
+    if (nq <= 0) return true;
+    if (nq > GR_MAXQ || s.idx_block != R || cap < qsa_selection_width(kTopkMaxCells, s)) return false;
+    const size_t smem = (size_t) ((max_blocks + GR_N - 1) / GR_N) * sizeof(uint32_t);
+    if (smem > 48 * 1024) return false;                 // past 393K cells: the one-CTA kernels
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    static std::mutex mu;
+    static std::map<std::pair<int, size_t>, int> resident;   // per device and key bytes: CTAs that fit at once
+    static std::map<std::pair<int, const void*>, int> slots;
+    static int used[64] = {};
+    int slot = -1;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        auto rit = resident.find(std::make_pair(dev, smem));
+        if (rit == resident.end()) {
+            int per_sm = 0, sms = 0;
+            if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, block_topk_grid_kernel, GR_T, smem) !=
+                    cudaSuccess ||
+                cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess) {
+                cudaGetLastError();
+                per_sm = 0;
+            }
+            rit = resident.emplace(std::make_pair(dev, smem), per_sm * sms).first;
+        }
+        // the whole grid plus one more query's CTAs must fit: room for other streams' work while a query waits
+        if (rit->second < GR_N * ((int) nq + 1)) return false;
+        const auto key = std::make_pair(dev, (const void*) ids);
+        const auto it = slots.find(key);
+        if (it != slots.end()) slot = it->second;
+        else if (used[dev] < GR_SLOTS) slots.emplace(key, slot = used[dev]++);
+        else return false;                              // pool full: this buffer keeps the one-CTA kernels
+    }
+    block_topk_grid_kernel<<<dim3(GR_N, (unsigned) nq), GR_T, smem, (cudaStream_t) stream>>>(scores, steps, max_blocks,
+                                                                                            cap, ids, slot);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk grid: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        std::fprintf(stderr, "strata topk grid: CUDA%d %d CTAs x %d threads per query, %zu B of keys per CTA, slot %d "
+                             "(STRATA_TOPK_GRID=1; the same ids as the one-CTA kernels)\n", dev, GR_N, GR_T, smem, slot);
+    }
+    return true;
+}
+#else
+bool qsa_block_topk_grid(const float*, const int32_t*, int64_t, int64_t, int64_t, const QsaShapes&, int32_t*, void*) {
+    return false;
+}
+#endif
+
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                     const QsaShapes& s, int32_t* ids, void* stream, int64_t active_blocks) {
     // keys in registers when every query's blocks fit (contexts up to ~135K cells), else (CUDA) the same threads
@@ -1401,6 +1661,11 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
         return !v || std::atoi(v) != 0;
     }();
     if (cluster && !old && nq <= CL_MAXQ && qsa_block_topk_cluster(scores, steps, nq, max_blocks, cap, s, ids, stream))
+        return;
+    // SPEED4: STRATA_TOPK_GRID=1 (opt-in): GR_N ordinary CTAs per query for the decode calls (no active-block count) of
+    // up to GR_MAXQ queries, on any CUDA card; the same ids
+    static const bool grid = [] { const char* v = std::getenv("STRATA_TOPK_GRID"); return v && v[0] == '1' && v[1] == '\0'; }();
+    if (grid && !old && active_blocks <= 0 && qsa_block_topk_grid(scores, steps, nq, max_blocks, cap, s, ids, stream))
         return;
 #endif
     // the blocks a query can have: the call's active count when the caller knows it (the prompt path), else the capacity.

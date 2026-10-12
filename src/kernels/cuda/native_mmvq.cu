@@ -35,6 +35,7 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <type_traits>
 
 #include <algorithm>
 #include <cstdint>
@@ -1357,8 +1358,8 @@ template<> struct B6X<IQ4XSTraits> {
     }
 };
 
-template<typename F, int NCOLS, int ROWS>
-__launch_bounds__(WARPS * WARP, 1)
+template<typename F, int NCOLS, int ROWS, int MINB = 1>
+__launch_bounds__(WARPS * WARP, MINB)
 __global__ void b6_mmvq_rows_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
                                     float* __restrict__ y, int n_in, int n_out) {
     using XB = B6X<F>;
@@ -1413,6 +1414,19 @@ bool b6_launch(const typename F::Block* w, const Q81Block* x, float* y, int n_in
         if (g_b6_rows <= 0 || !g_multi_exact || s26_tsum_on() || n_in / F::DIV < 1) return false;
         const int rows = g_b6_rows == 1 ? 2 : g_b6_rows;
         const dim3 threads(WARP, WARPS);
+        if constexpr (std::is_same_v<F, Q5KTraits> && NCOLS >= 3) {
+            // SPEED4 STRATA_B6_HEAD_MINB=6|8 (opt-in): the head (n_out >= 65536) at 3-8 columns with __launch_bounds__
+            // asking for that many blocks per SM - fewer registers (89 at T=4 on sm_75), more warps in flight; the same
+            // arithmetic in the same order, so the same bits
+            static const int head_minb = [] { const char* v = std::getenv("STRATA_B6_HEAD_MINB"); return v ? std::atoi(v) : 0; }();
+            if (rows == 2 && n_out >= 65536 && (head_minb == 6 || head_minb == 8)) {
+                if (head_minb == 6)
+                    b6_mmvq_rows_kernel<F, NCOLS, 2, 6><<<unsigned((n_out + 1) / 2), threads, 0, s>>>(w, x, y, n_in, n_out);
+                else
+                    b6_mmvq_rows_kernel<F, NCOLS, 2, 8><<<unsigned((n_out + 1) / 2), threads, 0, s>>>(w, x, y, n_in, n_out);
+                return true;
+            }
+        }
         if (rows == 2)
             b6_mmvq_rows_kernel<F, NCOLS, 2><<<unsigned((n_out + 1) / 2), threads, 0, s>>>(w, x, y, n_in, n_out);
         else if (rows == 8)
