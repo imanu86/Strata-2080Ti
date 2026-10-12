@@ -7974,6 +7974,10 @@ int main(int argc, char** argv) {
         if (pipe && o.pipeline_windows >= 2) {
             pl_snap_ok = true;
             pl_snap_overlap = [] { const char* v = pipe_dbg_env("STRATA_PIPELINE_SNAP_OVERLAP"); return v == nullptr || std::atoi(v) != 0; }();
+            // lab/struct-c (docs/STRUCT_C.md) STRATA_SC_SNAP_INLINE=1: the snapshot copied only when a speculative window
+            // launches, in line right before the speculative commit (= STRATA_PIPELINE_SNAP_OVERLAP=0 without the debug
+            // gate): one 39 MB copy per B instead of two per window beside stage 0, the same bytes restored
+            if (const char* v = std::getenv("STRATA_SC_SNAP_INLINE"); v != nullptr && std::atoi(v) != 0) pl_snap_overlap = false;
             for (int st = 0; st < pl_nf && pl_snap_ok; ++st) {
                 PlSnap& sn = pl_snaps[(size_t) st];
                 strata::core::SessionState& sst = st == 0 ? ss : stages[(size_t) st - 1]->ss;
