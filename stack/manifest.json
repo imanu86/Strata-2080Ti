@@ -7,7 +7,7 @@
     "tag": "v0.1.43",
     "commit": "7695859aa13afb248bdb4d36f9b2e95707db079d"
   },
-  "stack_head": "22ce9d88daa11b4d4bca55103f0600923c3744d0",
+  "stack_head": "8d63a5b5ee4ae64f22668599dd5ced26ccfbeb22",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -1139,7 +1139,7 @@
       "switch": "`--prompt-cache-file <path>` (off)",
       "origin": "fork",
       "upstream_status": "never proposed (upstream has `--prompt-cache-tail/-every` in RAM only)",
-      "measured": "TTFT of a Claude Code session: ~42 s to 16-20 s on the first 40k prompt after a restart (docs/TTFT.md on the lab branch). The file identity covers exe, args and STRATA_*/CUDA_* variables.",
+      "measured": "Restart of an agent session: the shared 40-130K prefix is restored from the file instead of being read again (a 40K first prompt took ~42 s to read here). Restore time: see the fork's smoke test of the PR branch. The file identity covers exe, args and STRATA_*/CUDA_* variables.",
       "notes": "Uses upstream's `available_host_bytes()` (0.1.42 removed `conversation_available_memory`).",
       "docs": "docs/UPSYNC.md",
       "patch": "06-prefix-disk.patch",
