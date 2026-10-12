@@ -125,6 +125,39 @@ rilascio può precedere il lancio (il grafo trova la parola già a 1 e corre). `
 corse identiche (3/3/4/3/5; 39/36 nel B-A-B di EXPDEC: dipende da quali esperti finiscono sulla CPU), non è un segno
 della leva.
 
-## 5. Esito
+## 5. Esito (nsys, build `72fc813a`, `DET-x3-hostgap-nsys{A,B,B2}`: 96 finestre di L02 sotto nsys, stesso banco forzato)
 
-In corso (modo 2).
+| | A (`STRATA_EXPDEC=1`) | B (`+ HG_PRELAUNCH=1`) | B2 (`+ HG_PRELAUNCH=2`) |
+|---|---|---|---|
+| `decode timing` L02, ms/finestra | 36,37 | 36,82 | **35,19 (−3,2%)** |
+| classe fresh / speculative, ms | 40,47 / 26,84 | 40,15 / 26,76 | **38,97 / 24,97** |
+| fine stadio 0 → primo kernel utile dello stadio 1 | 4,93 | 0,01 | 0,01 |
+| idle dentro il grafo prima di `gr_up_multi` (la bolla del lancio) | 2,15 | 0,10 | ~0 |
+| muro del grafo dello stadio 0 (3060) | 12,84 | 13,20 | 12,96 |
+| durata utile dello stadio 1 (dal rilascio all'ultimo kernel) | 18,55 | 19,69 | 18,94 |
+| periodo (fine stadio 1 → fine stadio 1 successivo), mediana | 35,39 | 35,56 | **34,40** |
+| prelanci / rilasci | - | 72 / 72 | 70 / 70 |
+| `accepted … drafts`, token | 104/154, 200 | 104/154, 200 | 104/154, 200 |
+
+Sotto nsys il lancio dei 1397 nodi costa 2,8 ms: il modo 2 ne toglie ~1,2 ms per finestra (−3%); sul banco pulito il
+lancio è ~1-1,2 ms e il polling di F0 ~0,3-1, quindi l'attesa è **−0,5/−1 ms per finestra (−2/−4%)**, concentrata
+sulle finestre fresche. Il modo 1 non va usato (sposta il costo sullo stadio 0). `target picks replaced` 3 / 5 / 4:
+varia fra corse identiche (quali esperti finiscono sulla CPU), non è la leva; i draft accettati sono gli stessi.
+
+**Per il B-A-B** (lo lancia l'owner): `build-hostgap-72fc813a\strata.exe`, config del candidato + `STRATA_EXPDEC=1` in
+entrambi i bracci, B con `STRATA_HG_PRELAUNCH=2`; nel log di B `strata hostgap: STRATA_HG_PRELAUNCH: N stage-1 windows
+prelaunched at their stage-0 launch, N released at stage 0's end`; da leggere `strata pipeline classes: fresh … ms`.
+
+**Dopo.** (a) La parola dell'hand-off scritta dal **device** dello stadio 0 (ultimo nodo del suo grafo, come i
+doorbell) invece che dall'host a F0: toglie anche il polling di F0 (~0,1-0,3 ms) e il giro del ciclo; (b) lo stesso
+prelancio per lo stadio 0 della finestra successiva non si può fare (i token arrivano dal verdetto), ma il suo lancio
+(712 nodi, 0,35-0,7 ms) può andare su un thread mentre il ciclo legge la catena; (c) i ~1,3 ms di buchi fra i nodi e
+i 0,2 ms prima del sampler restano per le fusioni (§2).
+
+## Stato
+
+Build di `72fc813a` (codice; questa pagina è stata aggiornata dopo): compilata con `build_lock.py` (Release, CUDA
+75;86, test spenti), rc 0. `strata.exe` sha256 `61aca041fa290eea04b5f8a31ca08870e65952de0e82b80f4b8f1dbf7bbf04c6`,
+copiata con `build.json` in `moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\
+build-hostgap-72fc813a\` (accanto `build-hostgap-f1e6c639`, il modo 1 solo). **Compilato sì, nsys nel motore sì,
+installato no, B-A-B no.**
