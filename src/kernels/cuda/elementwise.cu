@@ -374,6 +374,40 @@ void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei
                                                                           ids_out, weights_out, d_seq, value);
 }
 
+// critpath STRATA_CP_RESPLAN: see elementwise.hpp.  The unplanned branch is doorbell_publish_value_kernel's body.
+__global__ void doorbell_publish_cp_kernel(const float* __restrict__ x, const int32_t* __restrict__ ids,
+                                           const float* __restrict__ w, int n, int k, float* x_out, int32_t* ids_out,
+                                           float* w_out, uint32_t* seq, uint32_t value, const uint32_t* skip,
+                                           uint32_t* map, int32_t* ids_log) {
+    const bool planned = skip != nullptr && *(const volatile uint32_t*) skip == value;
+    if (planned) {
+        if ((int) threadIdx.x < k) ids_log[threadIdx.x] = ids[threadIdx.x];
+    } else {
+        for (int i = threadIdx.x; i < n; i += blockDim.x) x_out[i] = x[i];
+        if ((int) threadIdx.x < k) { ids_out[threadIdx.x] = ids[threadIdx.x]; w_out[threadIdx.x] = w[threadIdx.x]; }
+    }
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        __threadfence_system();
+        if (map != nullptr) {
+            *(volatile uint32_t*) (map + value) = planned ? 1u : 2u;
+            __threadfence_system();
+        }
+        *(volatile uint32_t*) seq = value;
+        __threadfence_system();
+    }
+}
+
+void doorbell_publish_cp(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
+                         int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value, const uint32_t* skip,
+                         uint32_t* map, int32_t* ids_log, void* stream) {
+    if (k > 1024) { std::fprintf(stderr, "doorbell_publish_cp: k too large\n"); std::exit(1); }
+    doorbell_publish_cp_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, weights, (int) n, (int) k, x_out, ids_out,
+                                                                       weights_out, d_seq, value, skip, map, ids_log);
+    check_launch("doorbell_publish_cp");
+}
+
 void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream) {
     if (k > 1024) { std::fprintf(stderr, "doorbell_publish: k too large\n"); std::exit(1); }

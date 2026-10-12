@@ -63,6 +63,20 @@ bool mtp_catchup_all() {
     }();
     return on;
 }
+// critpath STRATA_CP_CHAIN_FUSE=1 (opt-in; docs/CRITPATH.md): the chain's graphs with fewer launches, every word the
+// same - the round copies every step's staged row at once (the host stages them all before the round, in chain_launch
+// and draft() alike, and chain_prelaunch's device verdict writes them all), so a step no longer copies its own; and
+// force_token rides in mtp_select.  The argmax graphs only; coupled sampling keeps its own.
+bool cp_chain_fuse() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_CP_CHAIN_FUSE");
+        const bool f = v != nullptr && v[0] != '\0' && v[0] != '0';
+        if (f) std::fprintf(stderr, "strata critpath: STRATA_CP_CHAIN_FUSE: the round copies every step row, mtp_select "
+                                    "forces the token (2 launches fewer a step)\n");
+        return f;
+    }();
+    return on;
+}
 constexpr int GGML_Q8_0 = 8;
 constexpr int GGML_Q4_0 = 2;
 using Clock = std::chrono::steady_clock;
@@ -155,6 +169,7 @@ MtpDrafter::~MtpDrafter() {
     if (owns_draft_head_ && dhead_) { strata::kernels::native_q6_k_unpack(dhead_); cudaFree(dhead_); }
     if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
     if (ev_chain_) cudaEventDestroy(ev_chain_);
+    if (ev_pre_) cudaEventDestroy(ev_pre_);
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
     for (void* h : hosts) if (h) cudaFreeHost(h);
@@ -1070,9 +1085,12 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
     copy_i32_from_mapped(step_ + ra * 4, m_step_ + ra * 4, 4, cs_);
     copy_i32_from_mapped(pos_ + ra * NH, m_pos_ + ra * NH, NH, cs_);
 #else   // the draft round's seven inputs in one launch
+    // critpath STRATA_CP_CHAIN_FUSE: rows max_t .. 2 max_t - 1 (every step's and output 0's, ra the last of them)
+    const bool fuse = cp_chain_fuse() && !coupled;
+    const int64_t r0 = fuse ? max_t_ : ra, nr = fuse ? max_t_ : 1;
     const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
-                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
-                              {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
+                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + r0 * 4, m_step_ + r0 * 4, nr * 4},
+                              {pos_ + r0 * NH, m_pos_ + r0 * NH, nr * NH}};
     copy_from_mapped_multi(in, 7, cs_);
 #endif
     ok = record_front(T, 0, cs_, err);
@@ -1086,8 +1104,9 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
         ok = record_rest(ra, cs_, err);
         coupled_rec_ = false;
     }
-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
-    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
+    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
+    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
+    if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
 }
 
@@ -1104,16 +1123,19 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
     copy_i32_from_mapped(step_ + row * 4, m_step_ + row * 4, 4, cs_);
     copy_i32_from_mapped(pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head, cs_);
 #else
-    const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
-                              {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
-    copy_from_mapped_multi(in, 2, cs_);
+    if (!(cp_chain_fuse() && !coupled)) {   // critpath STRATA_CP_CHAIN_FUSE: the round copied this row already
+        const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
+                                  {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
+        copy_from_mapped_multi(in, 2, cs_);
+    }
 #endif
     coupled_rec_ = coupled;
     coupled_j_ = j;
     bool ok = record_forward(1, row, cs_, err);
     coupled_rec_ = false;
-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
-    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
+    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
+    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
+    if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
 }
 
@@ -1258,7 +1280,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
                        float* probs, float min_p, int* n_drafts) {
     const OnDevice on_device(device_);
     if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = "mtp: draft arguments out of range"; return false; }
-    if (chain_live_) { err = "mtp: a pipelined chain is still in flight"; return false; }
+    if (chain_live_ || pre_live_) { err = "mtp: a pipelined chain is still in flight"; return false; }
     // #783 PR-i (stuchapin909): the round runs for the cells up to the accepted row a (T = a + 1): the K/V of the rejected
     // rows is not caught up - no later read reaches a cell past the one being drafted and the next round writes it first
     if (!mtp_catchup_all()) T = a + 1;
@@ -1483,7 +1505,15 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
 }
 
 int MtpDrafter::chain_poll(std::string& err) {
-    if (!chain_live_) return 1;
+    if (!chain_live_) {
+        if (!pre_live_) return 1;
+        const OnDevice on_device(device_);   // critpath: a pre-launched chain nobody adopted (the request ended)
+        const cudaError_t q = cudaEventQuery(ev_pre_);
+        if (q == cudaErrorNotReady) return 0;
+        pre_live_ = false;
+        if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
+        return 1;
+    }
     const OnDevice on_device(device_);
     const cudaError_t q = cudaEventQuery(ev_chain_);
     if (q == cudaErrorNotReady) return 0;
@@ -1494,6 +1524,104 @@ int MtpDrafter::chain_poll(std::string& err) {
         chain_prob_[j] = ((volatile float*) h_prob_)[j];
     }
     for (int j = chain_n_; j < 8; ++j) { chain_tok_[j] = 0; chain_prob_[j] = 0.0f; }
+    return 1;
+}
+
+bool MtpDrafter::chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev,
+                                 const int32_t* out_host, cudaEvent_t after, const float* src_R, int pre_steps,
+                                 std::string& err) {
+    const OnDevice on_device(device_);
+    if (chain_live_ || pre_live_) { err = "mtp: a chain is already in flight"; return false; }
+    if (!force_on_ || ev_chain_ == nullptr || h_force_ == nullptr) { err = "mtp: chains need prepare_chain"; return false; }
+    const int T = v.T;
+    if (T < 1 || T > max_t_ || pre_steps < 0 || pre_steps > max_t_ - 2 || v.b_T < 0 || v.b_T > 8 || out_dev == nullptr ||
+        out_host == nullptr || after == nullptr || round_exec_[T] == nullptr) {
+        err = "mtp: pre-launched chain arguments out of range";
+        return false;
+    }
+    for (int j = 1; j <= pre_steps; ++j)
+        if (step_exec_[j] == nullptr) { err = "mtp: chain graphs not prepared"; return false; }
+    if (ev_pre_ == nullptr && cudaEventCreateWithFlags(&ev_pre_, cudaEventDisableTiming) != cudaSuccess) {
+        err = "mtp: event creation failed";
+        return false;
+    }
+    const Clock::time_point t0 = Clock::now();
+    strata::kernels::MtpChainVerdict w = v;
+    w.max_t = max_t_;
+    w.nh = (int) g_->n_head;
+    // behind the window: its picks, its residual rows; then the inputs chain_launch stages, the round and the steps
+    bool ok = cudaStreamWaitEvent(cs_, after, 0) == cudaSuccess;
+    if (ok && src_R != nullptr && src_R != window_R_)
+        ok = cudaMemcpyAsync((void*) window_R_, src_R, (size_t) T * (size_t) (g_->hc * g_->n_embd) * sizeof(float),
+                             cudaMemcpyDeviceToDevice, cs_) == cudaSuccess;
+    if (ok) strata::kernels::mtp_chain_verdict(w, out_dev, m_tok_, m_step_, m_pos_, m_row_, m_force_, cs_);
+    ok = ok && cudaGraphLaunch(round_exec_[T], cs_) == cudaSuccess && cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
+    for (int j = 1; ok && j <= pre_steps; ++j)
+        ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess && cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
+    ok = ok && cudaEventRecord(ev_pre_, cs_) == cudaSuccess;
+    if (!ok) {
+        err = std::string("mtp pre-launched chain: ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
+    (void) cudaStreamQuery(cs_);   // WDDM: submit now
+    pre_live_ = true;
+    pre_steps_ = pre_steps;
+    pre_v_ = w;
+    pre_out_host_ = out_host;
+    ++pre_launched;
+    ms_draft += ms_since(t0);
+    return true;
+}
+
+int MtpDrafter::chain_adopt(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
+                            int n_early, std::string& err) {
+    if (!pre_live_) return 0;
+    const OnDevice on_device(device_);
+    const strata::kernels::MtpChainVerdict& v = pre_v_;
+    // what the device derived from the window's picks - the mapped rows and replacements the host read too
+    int a_dev = 0;
+    while (a_dev < v.T - 1 && v.a_tok[a_dev + 1] == tokens[a_dev]) ++a_dev;
+    const bool on_dev = v.b_launched != 0 && a_dev == v.T - 1 && v.b_tok[0] == tokens[v.T - 1];
+    const int nf_dev = on_dev ? std::max(0, v.b_T - 1) : 0;
+    bool same = v.T == T && v.p == (long long) p && a_dev == a && nf_dev == n_force && n_out >= pre_steps_ + 1 &&
+                n_out <= max_t_ - 1;
+    for (int j = 0; same && j < n_force; ++j) same = force[j] == v.b_tok[1 + j];
+    // and the rows themselves: what the device read (the mapped picks, or the forced bench's) is what the host passes
+    for (int t = 0; same && t < T; ++t)
+        same = tokens[t] == (v.repl[t] >= 0 ? v.repl[t] : ((const volatile int32_t*) pre_out_host_)[t]);
+    if (!same) {
+        // it ran on another guess (B changed after it was queued): it wrote only what a launch writes again, so let it
+        // finish and the caller launches the chain as before
+        cudaError_t q;
+        while ((q = cudaEventQuery(ev_pre_)) == cudaErrorNotReady) {
+#if defined(_WIN32) || defined(__x86_64__)
+            _mm_pause();
+#endif
+        }
+        pre_live_ = false;
+        ++pre_redone;
+        if (q != cudaSuccess) { err = std::string("mtp pre-launched chain: ") + cudaGetErrorString(q); return -1; }
+        return 0;
+    }
+    const Clock::time_point t0 = Clock::now();
+    chain_early_ = std::max(0, std::min(n_early, n_out));
+    bool ok = true;
+    for (int j = pre_steps_ + 1; ok && j < n_out; ++j) {
+        ok = step_exec_[j] != nullptr && cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
+        if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
+    }
+    if (!ok || cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {
+        err = std::string("mtp chain: ") + cudaGetErrorString(cudaGetLastError());
+        return -1;
+    }
+    (void) cudaStreamQuery(cs_);
+    pre_live_ = false;
+    steps_seen_ = 0;
+    chain_live_ = true;
+    chain_n_ = n_out;
+    ++pre_adopted;
+    ms_draft += ms_since(t0);
+    ++rounds;
     return 1;
 }
 
