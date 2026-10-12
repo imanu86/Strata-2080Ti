@@ -24,7 +24,7 @@ Delle nostre cose **nulla** è entrato in 0.1.43: `--elastic`, `--prompt-cache-f
 `STRATA_TC_SM75`, `STRATA_PLE_AUTO_MMAP`, `STRATA_EXPDEC`, `STRATA_QSA_ROWS` non esistono su 0.1.43 puro. Le PR #1117,
 #1417, #1418, #1419 (nostre), #1911, #1503, #1889, #1437 (di altri) sono tutte ancora **aperte** (controllato il 12/10).
 
-## 2. Inventario della pila (70 commit di `lab/candidate2` → 19 leve + 1 commit di soli doc)
+## 2. Inventario della pila (70 commit di `lab/candidate2` → 19 leve + 1 commit di soli doc; dopo la pulizia di §10 ne restano 17, rinumerate in `stack/`)
 
 | # | Leva (`stack/`) | Interruttore (default) | Origine | Upstream | Su 0.1.43 | Valore misurato |
 |---|---|---|---|---|---|---|
@@ -39,8 +39,8 @@ Delle nostre cose **nulla** è entrato in 0.1.43: `--elastic`, `--prompt-cache-f
 | 09 | pipeline-architectds | `STRATA_PIPELINE_ELASTIC` (on) | nostra | mai proposta | pulita | senza: −4,6/−7,3/−7,8%; con (+11): +0,7% = pari |
 | 10 | attn-daily | `STRATA_ATTN_DAILY=1` (off) | nostra (corpo #540, merge Hardin22) | chunk pre75 solo sm_60; merge v2 no | pulita | `attn_chunk_kernel` 99,8 → 46,4 µs (3060) |
 | 11 | df-defaults | `STRATA_DF_BRANCH/PLE` on (upstream opt-in) | nostra (default di #904) | #904 chiuso/merged opt-in | pulita | +2,4% / +3,3% nel Daily |
-| 12 | critpath-levers | `STRATA_CP_*` (off) | nostra | mai proposta | adattata (`hits_in_combine`) | rumore (−0,4/−2,5/+0,1/−0,1%) |
-| 13 | chain-fuse | `STRATA_CHAIN_FUSE2` (off) | nostra | mai proposta | pulita | +0,4% rumore |
+| 12 | critpath-levers | `STRATA_CP_*` (off) | nostra | mai proposta | adattata (`hits_in_combine`) | rumore (−0,4/−2,5/+0,1/−0,1%) — **ritirata 12/10 (§10)** |
+| 13 | chain-fuse | `STRATA_CHAIN_FUSE2` (off) | nostra | mai proposta | pulita | +0,4% rumore — **ritirata 12/10 (§10)** |
 | 14 | side-mixer | `STRATA_SIDE_MIXER=1/2` (off) | PR #1889 (KarlGrier) | aperta | adattata (senza #1437, `FUSE_CONVAB`) | `=2` +0,9% |
 | 15 | ple-direct | diretto; `STRATA_PLE_AUTO_MMAP=1` per mmap | nostra | mai proposta | pulita | prefill 131k 260 → 75 s, decode +3,9% |
 | 16 | prefill-sm75 | `STRATA_SELECT_SIMT=0`, `STRATA_TC_SM75=0` spengono | nostra (SIMT da #1091) | #1091 merged opt-in; il resto mai | pulita | prefill 100 → 75 s (con 15) |
@@ -182,3 +182,59 @@ L01 69,7 t/s, L02 63,1 t/s contro 73,7/68,0 di `DET-x7-cand2-b1` (−5,5/−7,2%
 coordinatore** prima di trarne conclusioni; se la differenza regge, i sospetti sono le novità di 0.1.43 attive anche con
 la nostra config (guardia NaN `STRATA_NAN_GUARD=0` per escluderla, buffer pinned #1712, riordino degli scambi) o lo stato
 delle schede dopo la corsa precedente.
+
+## 10. B-A-B del coordinatore e pulizia (12/10)
+
+**B-A-B `DET-x9-u43`** (A = Daily r2 `build-candidate2-ac6065dc`, B = `build-upsync43-9676fdda`, stesse env): B2 = A
+(72,3/65,8 contro 72,2/65,8 t/s, **+0,1%**); B1 −4,5% ma outlier dimostrato: PLE a freddo (gather 0,88/0,53 ms per
+finestra contro 0,01-0,02 negli altri bracci), primo braccio dopo il pilota MTP che aveva svuotato la cache del disco.
+**La 0.1.43 con la pila è al livello del Daily r2.** Il −5/−7% della singola corsa di §9 era la stessa cosa.
+
+**Regola del banco** (owner): quando il braccio precedente era un altro lavoro (pilota MTP, build, altra coda), prima di
+`b1` si fa **una corsa di riscaldamento che non si misura**; `bab_verdict.py` legge solo i bracci nominati.
+
+**Pulizia** (decisione dell'owner: via le leve senza guadagno misurato): tolte da `lab/upsync43` con un rebase che scarta
+i due commit (backup locale `backup/upsync43-pre-pulizia`), 19 file, −2 532 righe, un solo conflitto (CMake, il blocco
+`chain_step_bench` accanto a `qsa_rows_bench`):
+
+| Leva | Perché |
+|---|---|
+| 12 critpath-levers (`STRATA_CP_*`) | tutte nel rumore; 42 innesti in `generate.cpp`/`verify.cpp`/`mtp.cpp` |
+| 13 chain-fuse (`STRATA_CHAIN_FUSE2*`, `chain_step_bench`) | +0,4% rumore, attenzione fusa più lenta; 29 innesti |
+
+Il codice resta su `lab/critpath2` e `lab/chainfuse`. `stack/` rigenerato: **17 patch, 275 innesti**, sezione
+«Retired» in `INDEX.md`. Compilazione e banco forzato di controllo: §11.
+
+**Altri candidati a codice morto, elencati e NON tolti** (si tolgono solo con l'ok dell'owner):
+
+| Interruttore | Leva | Stato nel Daily | Verdetto proposto |
+|---|---|---|---|
+| `STRATA_ELASTIC_TRACE` | 01 | mai acceso | diagnostica dell'elastica, parte della PR #1117: tenere |
+| `STRATA_ELASTIC_CORE_ADAPT`, `STRATA_PIPELINE_ELASTIC_STEP_MIB/_TAIL_MIB` | 05 | default (1,5 GiB / 128 MiB) | manopole del default: tenere |
+| `STRATA_PREFIX_PORTABLE_SHA` | 06 | mai acceso | identità del file del prefisso senza i percorsi: tenere (serve a spostare il file) |
+| `STRATA_EC_NVML_FREE` | 07 | mai acceso | alias di #1911 per la sola cache: **da togliere** se #1911 resta con `STRATA_VRAM_FREE` |
+| `STRATA_PIPELINE_LOOKUP_ANY/_NEXT`, `STRATA_PIPELINE_YIELD` | 09 | default del profilo | sotto-interruttori del profilo architectds, servono ai B-A-B: tenere |
+| `STRATA_ATTN_CHUNK_SEL`, `STRATA_ATTN_MERGE_V2`, `STRATA_ATTN_PRE75` | 10 | solo via `ATTN_DAILY=1` | le due metà separate per la parità: tenere finché `qsa_merge_daily_parity` non gira |
+| `STRATA_EXPDEC_D20/_RB/_DRB/_MINBLK` | 17 | mai accesi | manopole del bench, nel PR branch: decidere con la PR |
+| env del vecchio Daily nella config del banco: `STRATA_PARALLEL_INTERMEDIATE_QUANT`, `STRATA_PREFILL_EXACT_SMALL`, `STRATA_QSA_PREFILL_MULTI`, `STRATA_IQ_MT_MIN` | — | nella config di `run_long.py` | già morte in 0.1.42: **da togliere dalla config del banco** (nessun effetto, solo rumore nei log) |
+
+## 11. Build e controllo dopo la pulizia
+
+(in corso)
+
+## 12. Le nostre PR su upstream (autore imanu86, controllate il 12/10 con `gh`, sola lettura)
+
+| PR | Titolo | Stato | Codice | Verdetto |
+|---|---|---|---|---|
+| #512 | prefill: active QSA top-k bounds on Turing | CLOSED (2/10) | non nella pila; upstream ha il top-k largo su Turing (`c3d6bb2c`) | superata, già chiusa |
+| #614 | serve: checkpoint an existing chunk near the prompt tail | CLOSED (3/10) | upstream ha `--prompt-cache-tail/-every` | superata, già chiusa |
+| #1030 | --elastic (0.1.39) | CLOSED (6/10) | risottomessa come #1117 | superata, già chiusa |
+| #1063, #1110 | fix --batch-mtp draft-vocab head | CLOSED (6-7/10) | upstream ha #1329 | superate, già chiuse |
+| #1117 | --elastic (0.1.40) | **OPEN** | pila 01 | resta aperta |
+| #1417 | split loan estimate per device | **OPEN** | pila 02 | resta aperta |
+| #1418 | B6 MMVQ rows | **OPEN** | pila 04 (default del Daily; vince su IL sulla 2080 Ti) | resta aperta |
+| #1419 | forced bench | **OPEN** | pila 03 | resta aperta |
+
+Niente da chiudere: le cinque superate erano già chiuse, le quattro aperte sono tutte nella pila. Le PR nuove
+(qsa-rows, expdec, …, §7) si aprono solo ora che la 0.1.43 è al livello del Daily r2, nell'ordine di §7, su ok dell'owner.
+
