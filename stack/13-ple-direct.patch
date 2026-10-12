@@ -11,10 +11,10 @@ mmap (SATA a freddo: prefill 131k 75 -> 260 s).
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
-index a58341b6..5de6f152 100644
+index 2f064a1f..e0127ca1 100644
 --- a/include/strata/core/verify.hpp
 +++ b/include/strata/core/verify.hpp
-@@ -331,6 +331,8 @@ public:
+@@ -304,6 +304,8 @@ public:
      /// the pool never plans a PCIe share (--pcie-frac 0): the window skips that path.  Before the first run.
  
      double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;
@@ -37,7 +37,7 @@ index 2884817e..75a2aaef 100644
      uint64_t keepalive_reads = 0; ///< pages read only to keep the SSD awake (not in `reads`, `bytes` or latencies)
      double keepalive_us_max = 0;  ///< the slowest of them
 diff --git a/src/core/verify.cpp b/src/core/verify.cpp
-index d457cee6..f2374e5b 100644
+index 01abf329..412e696f 100644
 --- a/src/core/verify.cpp
 +++ b/src/core/verify.cpp
 @@ -67,6 +67,7 @@ constexpr float EPS = 1e-6f;
@@ -48,7 +48,7 @@ index d457cee6..f2374e5b 100644
  inline bool g_lfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_LFUSE"); return v != nullptr && v[0] == '1'; }(); return on; }
  // STRATA_ROUTE_RESIDENT=<margin logits> (+ STRATA_ROUTE_RESIDENT_RANKS=lo-hi, default 6-9): residency-biased routing.
  struct RouteResidentCfg;
-@@ -2399,6 +2400,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+@@ -2340,6 +2341,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
              _mm_sfence();
              *flag = 1;
              ms_host += ms_since(tp);
@@ -56,7 +56,7 @@ index d457cee6..f2374e5b 100644
          } else {
              *flag = 1;
          }
-@@ -2481,6 +2483,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+@@ -2422,6 +2424,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
              std::atomic_thread_fence(std::memory_order_seq_cst);
              _mm_sfence();
              ms_host += ms_since(tp);
@@ -64,7 +64,7 @@ index d457cee6..f2374e5b 100644
          }
          if (!(test_stall && k + 1 == steps)) *flag = want;
          ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
-@@ -3635,6 +3638,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
+@@ -3454,6 +3457,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
          std::atomic_thread_fence(std::memory_order_seq_cst);
          _mm_sfence();
          ms_host += ms_since(tp);
@@ -128,10 +128,10 @@ index 395edcc6..d25f6a60 100644
          };
          for (int64_t t = 0; t < T; ++t) { prev[0] = prev[1]; prev[1] = (int32_t) tokens[c0 + t]; }
 diff --git a/src/program/generate.cpp b/src/program/generate.cpp
-index 4468dcc1..70ca9eb5 100644
+index d89b6d86..94a91bb8 100644
 --- a/src/program/generate.cpp
 +++ b/src/program/generate.cpp
-@@ -3356,13 +3356,21 @@ int main(int argc, char** argv) {
+@@ -3339,13 +3339,21 @@ int main(int argc, char** argv) {
          }
          // Recommend, never force: when the default direct reads measure slow, switch to the mapped reads (40-100x
          // faster on the reporters' drives); an explicit --ple-io direct is kept and only warned about.
@@ -154,7 +154,7 @@ index 4468dcc1..70ca9eb5 100644
                      std::fprintf(stderr, "strata generate: --ple-io direct measures slow here (%.0f rows/s, about %.0f MB/s of "
                                           "random 4 KiB reads): using --ple-io mmap instead (the OS file cache holds the pages; "
                                           "--ple-io direct forces the old mode, --ple-io ram keeps the table in RAM)\n",
-@@ -3378,7 +3386,9 @@ int main(int argc, char** argv) {
+@@ -3361,7 +3369,9 @@ int main(int argc, char** argv) {
                      std::fprintf(stderr, "strata generate: WARNING: --ple-io direct measures slow here (%.0f rows/s, about %.0f "
                                           "MB/s of random 4 KiB reads): a prompt can spend minutes reading layer 1 and trip the "
                                           "stall watchdog (#1425, #1629). --ple-io mmap was 40-100x faster on such drives; "
@@ -165,7 +165,7 @@ index 4468dcc1..70ca9eb5 100644
                  }
              }
          }
-@@ -12016,12 +12026,15 @@ int main(int argc, char** argv) {
+@@ -11998,12 +12008,15 @@ int main(int argc, char** argv) {
              const Clock::time_point d0 = Clock::now();
              // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
              static const bool dec_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;
@@ -183,7 +183,7 @@ index 4468dcc1..70ca9eb5 100644
                                 drive.d.ms_run, drive.d.multi_misses, drive.d.multi_entries, drive.d.cache_hits,
                                 drive.d.pcie_experts};
              };
-@@ -13321,6 +13334,17 @@ int main(int argc, char** argv) {
+@@ -13145,6 +13158,17 @@ int main(int argc, char** argv) {
                      if (st == 0) std::fprintf(stderr, "strata decode GPU stages (ms/window):%s\n", pr.c_str());   // text as before
                      else std::fprintf(stderr, "strata decode GPU stages, stage %d (ms/window):%s\n", st, pr.c_str());
                  }

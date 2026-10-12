@@ -192,7 +192,9 @@ def lever_commits(repo, rng, skip_subjects=()):
         subject = git(['log', '-1', '--format=%s', sha], repo).stdout.strip()
         if any(subject.startswith(s) for s in skip_subjects):
             continue
-        if any(not f.startswith('stack/') for f in files):
+        # a lever changes code: a commit that touches only stack/, docs/ or a README is documentation, not a lever
+        if any(not (f.startswith('stack/') or f.startswith('docs/') or f.split('/')[-1].lower().startswith('readme'))
+               for f in files):
             out.append(sha)
     return out
 
@@ -287,6 +289,12 @@ def render_index(m):
                    f"{md_escape(e['switch'])} | {md_escape(e['origin'])} | {md_escape(e['upstream_status'])} | "
                    f"{md_escape(e['measured'])} |")
     out.append('')
+    if m.get('retired'):
+        out += ['## Retired', '', "Levers that were in the stack and were dropped (code stays on the fork's lab branches):", '',
+                '| name | what | measured | why |', '|---|---|---|---|']
+        for r in m['retired']:
+            out.append(f"| {r['name']} | {md_escape(r['summary'])} | {md_escape(r['measured'])} | {md_escape(r['retired'])} |")
+        out.append('')
     for e in m['patches']:
         out += [f"## {e['id']} {e['name']}", '',
                 f"`{e['patch']}` — {e['title']}", '',

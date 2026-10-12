@@ -10,12 +10,12 @@ Da lab/candidate2 5dffa63f + c6fd0440 + 4d8ba8bb + f69f5e99 (lab/qsarows), appli
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index a3c5ca1b..0027880f 100644
+index 00d813b5..b579874d 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -429,6 +429,14 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
-     target_include_directories(chain_step_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-     target_link_libraries(chain_step_bench PRIVATE strata_kernels CUDA::cudart)
+@@ -421,6 +421,14 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+     set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
+                          SKIP_RETURN_CODE 77)
    endif()
 +  # QSAROWS (docs/QSAROWS.md): what the T rows of a verification window cost in a QSA layer's decode kernels at a long
 +  # context (block scores, top-k, attention over each row's selection, indexer append), row by row; GPU, synthetic, no

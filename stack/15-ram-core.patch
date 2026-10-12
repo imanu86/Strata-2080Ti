@@ -388,10 +388,10 @@ index ad28f56f..3d1b0434 100644
      // this class over `FileExpertSource`.
      return base_ + strata::kernels::cpu::expert_layout().blob_offset(layer, expert);
 diff --git a/src/program/generate.cpp b/src/program/generate.cpp
-index e622004c..77aa30f7 100644
+index 11c2d350..d5c2ebb0 100644
 --- a/src/program/generate.cpp
 +++ b/src/program/generate.cpp
-@@ -6563,7 +6563,8 @@ int main(int argc, char** argv) {
+@@ -6546,7 +6546,8 @@ int main(int argc, char** argv) {
      // fork (Daily 12a6f553): beside the pipeline the prompt path may borrow the core too - nothing decodes while a prompt
      // is read, and the lent slots are refilled before the decode as the tail's are (with only the 1.5 GiB tail lent the
      // 131k prompt read fell from ~85 s to 134 s)
@@ -401,7 +401,7 @@ index e622004c..77aa30f7 100644
      // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
      // or with --prefill auto the largest chunk whose buffers take at most kAutoLendPct % of the slots (a
      // lent slot's expert is streamed during the prompt and refilled after it; measured on a 12 GB card, 32K Q2_0
-@@ -7225,6 +7226,7 @@ int main(int argc, char** argv) {
+@@ -7208,6 +7209,7 @@ int main(int argc, char** argv) {
              int32_t first_now = -1;        // where its buffers are laid out now
              int64_t lent_chunk = 0;
              std::vector<std::pair<int32_t, int32_t>> lent;
@@ -409,7 +409,7 @@ index e622004c..77aa30f7 100644
          };
          // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
          // per layer), otherwise max_blob each.
-@@ -7250,6 +7252,45 @@ int main(int argc, char** argv) {
+@@ -7233,6 +7235,45 @@ int main(int argc, char** argv) {
          // keeps the pinned-share rule.  STRATA_SPLIT_RING=N: N slots on a split; 0: the pinned-share rule.
          // (decided above, before the lend regions were sized: a no-op here unless the resident RAM mode skipped it)
          decide_split_ring();
@@ -455,7 +455,7 @@ index e622004c..77aa30f7 100644
          std::vector<PfPart> pf_parts;
          // a cache too small to lend the prompt path its buffers would make it allocate them on top - on a card
          // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
-@@ -7258,6 +7299,7 @@ int main(int argc, char** argv) {
+@@ -7241,6 +7282,7 @@ int main(int argc, char** argv) {
              pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}});
              for (auto& st : stages)
                  pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});
@@ -463,7 +463,7 @@ index e622004c..77aa30f7 100644
              // The two tests plan_lend makes for CUDA0 alone, one participant at a time: a loan must leave the
              // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
              // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
-@@ -7265,6 +7307,7 @@ int main(int argc, char** argv) {
+@@ -7248,6 +7290,7 @@ int main(int argc, char** argv) {
              auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
                  const int64_t k = part_slots(p, c);
                  if (p.cache == &xcache && k > xcache.slots() - el_lend_floor) return false;
@@ -471,7 +471,7 @@ index e622004c..77aa30f7 100644
                  if (k <= 0 || k + 128 > p.cache->slots()) return false;
                  return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
              };
-@@ -7301,6 +7344,7 @@ int main(int argc, char** argv) {
+@@ -7284,6 +7327,7 @@ int main(int argc, char** argv) {
                                                                    kAutoLendPct * p.cache->slots() / 100));
                      // --elastic: the two-zone cache lends only its tail (fits_one refuses the core as well)
                      if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_lend_floor));
@@ -479,7 +479,7 @@ index e622004c..77aa30f7 100644
                      const uint64_t avail = part_bytes(p, (int32_t) (p.cache->slots() - budget));
                      const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
                      room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
-@@ -7651,7 +7695,31 @@ int main(int argc, char** argv) {
+@@ -7634,7 +7678,31 @@ int main(int argc, char** argv) {
                  }
              }
          }
@@ -511,7 +511,7 @@ index e622004c..77aa30f7 100644
          // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last
          // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for
          // the widest window; a request without penalties gets a null buffer and takes the byte-for-byte
-@@ -8762,7 +8830,9 @@ int main(int argc, char** argv) {
+@@ -8744,7 +8812,9 @@ int main(int argc, char** argv) {
                      if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
                      // --elastic: the core never leaves - unless core_adapt; beside the pipeline el_core counts CUDA0's
                      // slots and a later stage's layers hold slots of their own cache
@@ -522,7 +522,7 @@ index e622004c..77aa30f7 100644
                          vict.emplace_back(u[e], e);
                  }
                  if (cand.empty() || vict.empty()) continue;
-@@ -8783,6 +8853,7 @@ int main(int argc, char** argv) {
+@@ -8765,6 +8835,7 @@ int main(int argc, char** argv) {
                  agate.has.assign((size_t) g.n_layers, 0);
                  for (const Swap& s : swaps) agate.has[(size_t) s.layer] = 1;
              }
@@ -530,7 +530,7 @@ index e622004c..77aa30f7 100644
              // the copies back read the cache of the card that owns each layer (see resident_stage_swaps)
              auto home_of = [&](int64_t layer) -> SwapHome {
                  const int stn = multi_gpu ? stage_of(layer) : 0;
-@@ -8918,7 +8989,9 @@ int main(int argc, char** argv) {
+@@ -8900,7 +8971,9 @@ int main(int argc, char** argv) {
          static const bool el_trace = std::getenv("STRATA_ELASTIC_TRACE") != nullptr;
          const int64_t el_step_max = 512ll << 20;   // at most this much per growth step (its copies are async)
          const int64_t el_shrink_step = std::max<int64_t>(64ll << 20, (int64_t) o.elastic_shrink_step_mib << 20);
@@ -541,7 +541,7 @@ index e622004c..77aa30f7 100644
          const int64_t el_chunk_max = sp_chunk_max > 0 ? sp_chunk_max : o.prefill_chunk;
          Clock::time_point el_last{};
          Clock::time_point el_stable_since = Clock::now();
-@@ -8946,6 +9019,8 @@ int main(int argc, char** argv) {
+@@ -8928,6 +9001,8 @@ int main(int argc, char** argv) {
              int64_t c = el_chunk_max;
              const int64_t k = plan_lend(c);
              if (k <= 0 || c > el_chunk_max) return;   // nothing fits (not above el_min_slots): keep the plan
@@ -550,7 +550,7 @@ index e622004c..77aa30f7 100644
              o.prefill_chunk = c;
              // 0.1.30: the loan lives in the participant (CUDA0 is the first; the elastic cache is single-GPU)
              pf_parts[0].first = (int32_t) (xcache.slots() - part_slots(pf_parts[0], c));
-@@ -8966,7 +9041,7 @@ int main(int argc, char** argv) {
+@@ -8948,7 +9023,7 @@ int main(int argc, char** argv) {
              for (int64_t l = 0; l < g.n_layers; ++l)
                  for (int32_t ex = 0; ex < (int32_t) g.n_expert && el_layer(l); ++ex) {
                      const size_t i = (size_t) (l * g.n_expert + ex);
@@ -559,7 +559,7 @@ index e622004c..77aa30f7 100644
                      const float u = have_usage ? drive.d.usage[i] : 0.0f;
                      (host_res[i] >= n ? tail : keep)[(size_t) l].emplace_back(u, ex);
                  }
-@@ -9255,7 +9330,7 @@ int main(int argc, char** argv) {
+@@ -9237,7 +9312,7 @@ int main(int argc, char** argv) {
                  const int32_t* r = a_res.data() + l * g.n_expert;
                  for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {
                      if (r[e] < 0) { if (u[e] >= 2.0f && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
@@ -568,7 +568,7 @@ index e622004c..77aa30f7 100644
                  }
                  if (cand.empty() || vict.empty()) continue;
                  std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
-@@ -9599,6 +9674,78 @@ int main(int argc, char** argv) {
+@@ -9581,6 +9656,78 @@ int main(int argc, char** argv) {
              std::fprintf(stderr, "strata trace: %s %lld %lld\n", what, a, b);
              std::fflush(stderr);
          };
@@ -647,7 +647,7 @@ index e622004c..77aa30f7 100644
          {
              // what is left once everything is allocated: under WDDM a GPU filled to the brim does not fail, it pages -
              // and a page-in while the verify graph spins on a host flag stalls the request for good
-@@ -9806,8 +9953,8 @@ int main(int argc, char** argv) {
+@@ -9788,8 +9935,8 @@ int main(int argc, char** argv) {
              const int64_t want_free = (int64_t) reserve << 20, mapped = xcache.mapped_bytes();
              const int64_t before = xcache.slots();
              // what stays at least: the prompt path's smallest loan (256 tokens) and the 128 slots it must leave
@@ -658,7 +658,7 @@ index e622004c..77aa30f7 100644
              std::string note;
              if ((int64_t) free_b < want_free) {
                  const int64_t floor_b = xcache.bytes_of(floor_slots);
-@@ -13525,6 +13672,7 @@ int main(int argc, char** argv) {
+@@ -13349,6 +13496,7 @@ int main(int argc, char** argv) {
                          (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
                          (long long) req_offload, chain_txt);
              std::fflush(stdout);

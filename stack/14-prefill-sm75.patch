@@ -557,7 +557,7 @@ index d25f6a60..6619e951 100644
                  } else {
                      gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
 diff --git a/src/program/generate.cpp b/src/program/generate.cpp
-index 70ca9eb5..e622004c 100644
+index 94a91bb8..11c2d350 100644
 --- a/src/program/generate.cpp
 +++ b/src/program/generate.cpp
 @@ -81,6 +81,7 @@
@@ -592,7 +592,7 @@ index 70ca9eb5..e622004c 100644
  namespace {
  // Windows' WDDM driver model: native Windows, or WSL2 (its GPU goes through /dev/dxg to the Windows driver).  There,
  // pinning a large arena into two CUDA contexts leaves WDDM refusing every later allocation (the 5080 + 3090 rig);
-@@ -3835,8 +3853,9 @@ int main(int argc, char** argv) {
+@@ -3818,8 +3836,9 @@ int main(int argc, char** argv) {
          const int64_t pf = search && split_own_auto && !place_with_reserve ? 0 : split_pf_mib;
          const int64_t base_reserve =
              later && o.vram_reserve_later_mib >= 0 ? o.vram_reserve_later_mib : o.vram_reserve_mib;
@@ -604,7 +604,7 @@ index 70ca9eb5..e622004c 100644
          return std::max<int64_t>((int64_t) fb - reserve, 0);
      };
      if (multi_gpu && split_auto) {
-@@ -5035,7 +5054,8 @@ int main(int argc, char** argv) {
+@@ -5018,7 +5037,8 @@ int main(int argc, char** argv) {
          if (stages.empty())
              for (const auto& d : slot_mtp)
                  mtp_bind += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);
@@ -614,7 +614,7 @@ index 70ca9eb5..e622004c 100644
          const int64_t blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
          int64_t slots = ((int64_t) free_b - reserve) / blob;
          if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
-@@ -5120,7 +5140,8 @@ int main(int argc, char** argv) {
+@@ -5103,7 +5123,8 @@ int main(int argc, char** argv) {
          size_t free_b = 0, total_b = 0;
          free_b = strata::core::device_free_bytes(); (void) total_b;
          const int64_t prefill_mib = owned_prefill_mib();

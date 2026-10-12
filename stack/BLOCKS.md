@@ -4601,2345 +4601,11 @@ Block (hunk 2 of `src/core/verify.cpp` in the patch, 15 lines):
              // #783 PR-g (stuchapin909): the window's residual writes in one launch (STRATA_NO_MULTI_GR=1: per token)
 ```
 
-## 12 critpath-levers
+## 12 side-mixer
 
-`12-critpath-levers.patch` — FABLE-STRATA-Porta su 0.1.43 le leve CRITPATH del percorso critico (STRATA_CP_L1FIRST/S1FIRST/CHAIN_PRE/CHAIN_FUSE/RESPLAN, tutte opt-in)
+`12-side-mixer.patch` — FABLE-STRATA-Porta su 0.1.43 STRATA_SIDE_MIXER=1/2 (PR #1889): il lavoro del mixer che legge solo l'input su rami del grafo
 
 ### 12-1
-
-`docs/CRITPATH.md` · (new file)
-
-New file, 200 lines: see the patch.
-
-### 12-2
-
-`include/strata/core/mtp.hpp` · (file scope)
-
-Anchor:
-```
-#include "strata/core/layer.hpp"
-#include "strata/core/session.hpp"
-#include "strata/kernels/sampler.hpp"
-```
-Block (hunk 1 of `include/strata/core/mtp.hpp` in the patch, 7 lines):
-```diff
- #include "strata/core/layer.hpp"
- #include "strata/core/session.hpp"
- #include "strata/kernels/sampler.hpp"
-+#include "strata/kernels/verify_kernels.hpp"   // critpath: MtpChainVerdict
-
- #include <cuda_runtime.h>
-
-```
-
-### 12-3
-
-`include/strata/core/mtp.hpp` · public:
-
-Anchor:
-```
-    /// chain_tok()/chain_prob(); -1: an error.  A window's size is often decided by its first outputs (a draft below
-    /// spec_min_p ends it), so the next launch need not wait for all of them.
-    int chain_outputs_ready(std::string& err);
-```
-Block (hunk 2 of `include/strata/core/mtp.hpp` in the patch, 23 lines):
-```diff
-     /// chain_tok()/chain_prob(); -1: an error.  A window's size is often decided by its first outputs (a draft below
-     /// spec_min_p ends it), so the next launch need not wait for all of them.
-     int chain_outputs_ready(std::string& err);
--    bool chain_live() const { return chain_live_; }
-+    /// A chain in flight, or a pre-launched one not yet adopted (critpath STRATA_CP_CHAIN_PRE).
-+    bool chain_live() const { return chain_live_ || pre_live_; }
-+
-+    // ---- critpath STRATA_CP_CHAIN_PRE (docs/CRITPATH.md): the next chain's round and first `pre_steps` steps queued
-+    // on the drafter's stream behind the last stage's window (`after`), their inputs derived on the device from the
-+    // window's picks (`out_dev`, mtp_chain_verdict) - no host turn between the window's end and the round.  At the
-+    // verdict chain_adopt takes it as the chain the host would launch (the same inputs: then only the remaining steps
-+    // are launched), or lets it finish and returns 0 so the caller launches the chain as before.
-+    /// `out_host`: the host view of `out_dev` (chain_adopt checks the rows the device read against the host's).
-+    bool chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev, const int32_t* out_host,
-+                         cudaEvent_t after, const float* src_R, int pre_steps, std::string& err);
-+    /// chain_launch's arguments: 1 = adopted (the chain is live, as after chain_launch), 0 = not (nothing in flight
-+    /// any more: launch it), -1 = an error.  No pre-launched chain: 0 at once.
-+    int chain_adopt(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
-+                    int n_early, std::string& err);
-+    int64_t pre_launched = 0, pre_adopted = 0, pre_redone = 0;
-     const int32_t* chain_tok() const { return chain_tok_; }
-     const float* chain_prob() const { return chain_prob_; }
-
-```
-
-### 12-4
-
-`include/strata/core/mtp.hpp` · private:
-
-Anchor:
-```
-    cudaEvent_t ev_chain_ = nullptr;
-    cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs
-    int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
-```
-Block (hunk 3 of `include/strata/core/mtp.hpp` in the patch, 11 lines):
-```diff
-     cudaEvent_t ev_chain_ = nullptr;
-     cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs
-     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
-+    bool pre_live_ = false;                             ///< critpath STRATA_CP_CHAIN_PRE: queued, not adopted
-+    int pre_steps_ = 0;
-+    cudaEvent_t ev_pre_ = nullptr;                      ///< after the pre-launched round and steps
-+    strata::kernels::MtpChainVerdict pre_v_;
-+    const int32_t* pre_out_host_ = nullptr;             ///< the window's picks as the host reads them
-     int32_t chain_tok_[8] = {};
-     float chain_prob_[8] = {};
-     int64_t n_vocab_ = 0;
-```
-
-### 12-5
-
-`include/strata/core/verify.hpp` · public:
-
-Anchor:
-```
-    /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
-    void diag_pipelined(std::FILE* f, const char* name) const;
-```
-Block (hunk 1 of `include/strata/core/verify.hpp` in the patch, 33 lines):
-```diff
-     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
-     void diag_pipelined(std::FILE* f, const char* name) const;
-
-+    // ---- critical-path levers of the pipelined windows (docs/CRITPATH.md); all opt-in, the default graphs unchanged.
-+    /// STRATA_CP_S1FIRST: the window in flight has a ring the host has not served yet (its GPU waits on it now).
-+    bool pl_rang() const {
-+        return fl_active_ && fl_k_ < fl_total_ && !ar_on() && *(volatile const uint32_t*) h_seq_ >= (uint32_t) (fl_k_ + 1);
-+    }
-+    /// ... has layers left for the host to serve (its GPU will ring again).
-+    bool pl_serving() const { return fl_active_ && fl_k_ < fl_total_ && !ar_on(); }
-+    int64_t pl_served() const { return fl_k_; }
-+    /// STRATA_CP_CHAIN_PRE: the event after the last pipelined window's graph, and its picks on the device (the mapped
-+    /// argmax rows), for a chain launched behind it on the device.
-+    cudaEvent_t done_event() const { return ev_done_; }
-+    const int32_t* out_dev() const { return m_out_; }
-+    const int32_t* out_host() const { return h_out_; }
-+    /// pl_finish samples on the host (a sampled request, penalties, a logit bias): the graph's rows are not the picks.
-+    bool host_sampling() const {
-+        const bool sampled = !sampling_.greedy && sampling_.temperature > 0.0f;
-+        return head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr);
-+    }
-+    /// STRATA_CP_RESPLAN: the routes of a group the device planned (no host service) are still counted - the adaptive
-+    /// tier ranks its victims by them.  Called with the pool's `user` instead of the pool.
-+    using CpNoteFn = void (*)(void* user, const int32_t* ids, int64_t n, int64_t layer);
-+    void set_cp_note(CpNoteFn fn) { cp_note_ = fn; }
-+    int64_t cp_planned = 0;      ///< STRATA_CP_RESPLAN: layer-groups the device planned (no host service)
-+    int64_t cp_host = 0;         ///< ... layer-groups of those layers the host served (a route outside VRAM)
-+    int64_t cp_uploads = 0;      ///< ... residency table uploads before a launch (the host table had moved)
-+    int cp_layers() const { int n = 0; for (uint8_t m : cp_mask_) n += m; return n; }
-+
-     /// Measurement hook (STRATA_LOGPOS): after run(), write one line per row t of the last window's head -
-     /// "pos target logprob top top_logprob hit extra_logprob target_logprob_without_extra" - where row t is the
-     /// distribution at pos0 + t, targets[t] is the token at pos0 + t + 1, extra_logprob is the log-probability of
-```
-
-### 12-6
-
-`include/strata/core/verify.hpp` · private:
-
-Anchor:
-```
-    double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;
-    int32_t pl_prev_[2] = {-1, -1};
-    std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served
-```
-Block (hunk 2 of `include/strata/core/verify.hpp` in the patch, 24 lines):
-```diff
-     double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;
-     int32_t pl_prev_[2] = {-1, -1};
-     std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served
-+    // critpath STRATA_CP_RESPLAN (capture_all): the pipelined graphs plan on the device the groups of the layers in
-+    // cp_mask_ whose routes are all in VRAM, and the host never serves those (see record_window, service)
-+    bool cp_rec_ = false;                 ///< record_window is capturing the RESPLAN variant
-+    bool cp_win_ = false;                 ///< the window in flight runs it
-+    std::vector<uint8_t> cp_mask_;        ///< per layer of [lb_, le_): planned on the device when every route hits
-+    cudaGraphExec_t exec_cp_[9] = {};
-+    uint32_t* h_cpmap_ = nullptr; uint32_t* m_cpmap_ = nullptr;   ///< per ring: 1 device-planned, 2 served by the host
-+    int32_t* h_cpids_ = nullptr; int32_t* m_cpids_ = nullptr;     ///< per ring: the planned group's routed ids
-+    static constexpr int kCpRings = 2 * 64 + 2;
-+    CpNoteFn cp_note_ = nullptr;
-+    std::vector<int32_t> cp_shadow_;      ///< the host table's [lb_, le_) rows as last queued to the device
-+    std::vector<uint64_t> cp_off_shadow_; ///< the slot offsets as last queued (an elastic arena moves them)
-+    unsigned long long* cp_off_d_ = nullptr;   ///< the device copy, room for every (layer, expert) slot
-+    uint8_t* cp_pin_ = nullptr;           ///< pinned copies for the uploads: the rows, then the offsets
-+    cudaEvent_t cp_up_ev_ = nullptr;      ///< after the last upload (the pinned copies are free again)
-+    bool cp_sync_res(std::string& err);   ///< the stage's residency rows to the device when the host's moved
-+    bool cp_prepare(std::string& err);    ///< capture_all: the mask and the RESPLAN graphs (once)
-+    bool capture_into(int T, cudaGraphExec_t& exec_t, std::string& err);
-     bool capture_commit_batch(const int* rows, int S, int hbase, std::string& err);
-     bool stage_batch(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos, std::string& err);
-     strata::kernels::SamplerParams sampling_ = [] {
-```
-
-### 12-7
-
-`include/strata/kernels/elementwise.hpp` · void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei
-
-Anchor:
-```
-                            void* stream);
-void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,
-                          float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream);
-```
-Block (hunk 1 of `include/strata/kernels/elementwise.hpp` in the patch, 13 lines):
-```diff
-                             void* stream);
- void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,
-                           float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream);
-+/// critpath STRATA_CP_RESPLAN (docs/CRITPATH.md): the pipelined window's doorbell, ring STORED as `value`.  `skip` null:
-+/// doorbell_publish_value.  Else, when *skip == value (resident_plan planned the group on the device: every routed
-+/// expert in VRAM) only the k routed ids go to `ids_log` and map[value] = 1 - the host has nothing to serve; otherwise
-+/// the payload as doorbell_publish_value and map[value] = 2.  The map word is visible before the ring.
-+void doorbell_publish_cp(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
-+                         int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value, const uint32_t* skip,
-+                         uint32_t* map, int32_t* ids_log, void* stream);
- /// SYCL: publishes launched or recorded while `on` store the payload with plain stores instead of uncached ones, for
- /// a caller that reads the payload only after the publishing kernel has ended (the stepped verify window).
- void doorbell_plain_payload(bool on);
-```
-
-### 12-8
-
-`include/strata/kernels/verify_kernels.hpp` · void add_streams_broadcast(const float* h, const float* e, float* R, int64_t n_e
-
-Anchor:
-```
-void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream);
-/// The draft chain's next input: R_dst[:] = R_src[row], tok_dst[0] = ids[row], out[j] = ids[row], with
-/// row = *row_dev (device memory).  `out` may be mapped host memory.
-```
-Block (hunk 1 of `include/strata/kernels/verify_kernels.hpp` in the patch, 29 lines):
-```diff
- void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream);
- /// The draft chain's next input: R_dst[:] = R_src[row], tok_dst[0] = ids[row], out[j] = ids[row], with
- /// row = *row_dev (device memory).  `out` may be mapped host memory.
-+/// `force` (critpath STRATA_CP_CHAIN_FUSE, mapped host memory): force_token folded in - *tok_dst = force[j] when it is
-+/// >= 0, the pick otherwise; out[j] stays the pick.  The same words as mtp_select then force_token.
- void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
-                 int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs = nullptr,
--                float* out_p = nullptr);
-+                float* out_p = nullptr, const int32_t* force = nullptr);
- /// --pipeline-windows, the drafter's chain teacher forced: `*tok = force[j]` when force[j] >= 0 (`force` is mapped
- /// host memory, read when the kernel runs), else `*tok` is left as it is.
- void force_token(int32_t* tok, const int32_t* force, int j, void* stream);
-+/// critpath STRATA_CP_CHAIN_PRE (docs/CRITPATH.md): the next chain's inputs from the verified window's picks, on the
-+/// device, so the round can follow the last stage's graph with no host turn.  `out` = the window's picks (the last
-+/// stage's mapped argmax rows); row t's token is repl[t] when >= 0 (the forced bench), else out[t].  a = the accepted
-+/// drafts (a_tok[t + 1] == token t), on = b_launched && a == T - 1 && b_tok[0] == token T - 1.  Writes what
-+/// MtpDrafter::chain_launch stages on the host: tok[0, T), the step/pos rows of cells p + t (t < T), of p + a (row
-+/// 2 max_t - 1) and of p + a + j (row max_t + j - 1, 1 <= j <= max_t - 2), row = {a, 0}, force[16] = b_tok[1 + j]
-+/// for j < b_T - 1 when on, else -1.  All outputs mapped host memory (device aliases).
-+struct MtpChainVerdict {
-+    int T = 0, max_t = 0, nh = 0, b_launched = 0, b_T = 0;
-+    long long p = 0;
-+    int32_t a_tok[8] = {}, repl[8] = {}, b_tok[8] = {};
-+};
-+void mtp_chain_verdict(const MtpChainVerdict& v, const int32_t* out, int32_t* tok, int32_t* step, int32_t* pos,
-+                       int32_t* row, int32_t* force, void* stream);
- /// Row *row_dev of a, b and c (a_n, b_n, c_n floats a row) copied to their row 0 (the draft layer's rest runs on
- /// row 0).  Graph-capturable: the row is read on the device.
- void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, int64_t b_n, float* c, int64_t c_n,
-```
-
-### 12-9
-
-`src/core/mtp.cpp` · bool mtp_catchup_all() {
-
-Anchor:
-```
-    }();
-    return on;
-}
-```
-Block (hunk 1 of `src/core/mtp.cpp` in the patch, 20 lines):
-```diff
-     }();
-     return on;
- }
-+// critpath STRATA_CP_CHAIN_FUSE=1 (opt-in; docs/CRITPATH.md): the chain's graphs with fewer launches, every word the
-+// same - the round copies every step's staged row at once (the host stages them all before the round, in chain_launch
-+// and draft() alike, and chain_prelaunch's device verdict writes them all), so a step no longer copies its own; and
-+// force_token rides in mtp_select.  The argmax graphs only; coupled sampling keeps its own.
-+bool cp_chain_fuse() {
-+    static const bool on = [] {
-+        const char* v = std::getenv("STRATA_CP_CHAIN_FUSE");
-+        const bool f = v != nullptr && v[0] != '\0' && v[0] != '0';
-+        if (f) std::fprintf(stderr, "strata critpath: STRATA_CP_CHAIN_FUSE: the round copies every step row, mtp_select "
-+                                    "forces the token (2 launches fewer a step)\n");
-+        return f;
-+    }();
-+    return on;
-+}
- constexpr int GGML_Q8_0 = 8;
- constexpr int GGML_Q4_0 = 2;
- using Clock = std::chrono::steady_clock;
-```
-
-### 12-10
-
-`src/core/mtp.cpp` · MtpDrafter::~MtpDrafter() {
-
-Anchor:
-```
-    if (owns_draft_head_ && dhead_) { strata::kernels::native_q6_k_unpack(dhead_); cudaFree(dhead_); }
-    if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
-    if (ev_chain_) cudaEventDestroy(ev_chain_);
-```
-Block (hunk 2 of `src/core/mtp.cpp` in the patch, 7 lines):
-```diff
-     if (owns_draft_head_ && dhead_) { strata::kernels::native_q6_k_unpack(dhead_); cudaFree(dhead_); }
-     if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
-     if (ev_chain_) cudaEventDestroy(ev_chain_);
-+    if (ev_pre_) cudaEventDestroy(ev_pre_);
-     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
-     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
-     for (void* h : hosts) if (h) cudaFreeHost(h);
-```
-
-### 12-11
-
-`src/core/mtp.cpp` · bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
-
-Anchor:
-```
-    copy_i32_from_mapped(step_ + ra * 4, m_step_ + ra * 4, 4, cs_);
-    copy_i32_from_mapped(pos_ + ra * NH, m_pos_ + ra * NH, NH, cs_);
-#else   // the draft round's seven inputs in one launch
-```
-Block (hunk 3 of `src/core/mtp.cpp` in the patch, 14 lines):
-```diff
-     copy_i32_from_mapped(step_ + ra * 4, m_step_ + ra * 4, 4, cs_);
-     copy_i32_from_mapped(pos_ + ra * NH, m_pos_ + ra * NH, NH, cs_);
- #else   // the draft round's seven inputs in one launch
-+    // critpath STRATA_CP_CHAIN_FUSE: rows max_t .. 2 max_t - 1 (every step's and output 0's, ra the last of them)
-+    const bool fuse = cp_chain_fuse() && !coupled;
-+    const int64_t r0 = fuse ? max_t_ : ra, nr = fuse ? max_t_ : 1;
-     const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
--                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
--                              {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
-+                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + r0 * 4, m_step_ + r0 * 4, nr * 4},
-+                              {pos_ + r0 * NH, m_pos_ + r0 * NH, nr * NH}};
-     copy_from_mapped_multi(in, 7, cs_);
- #endif
-     ok = record_front(T, 0, cs_, err);
-```
-
-### 12-12
-
-`src/core/mtp.cpp` · bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
-
-Anchor:
-```
-        ok = record_rest(ra, cs_, err);
-        coupled_rec_ = false;
-    }
-```
-Block (hunk 4 of `src/core/mtp.cpp` in the patch, 11 lines):
-```diff
-         ok = record_rest(ra, cs_, err);
-         coupled_rec_ = false;
-     }
--    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
--    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
-+    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
-+    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
-+    if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
-     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
- }
-
-```
-
-### 12-13
-
-`src/core/mtp.cpp` · bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
-
-Anchor:
-```
-    copy_i32_from_mapped(step_ + row * 4, m_step_ + row * 4, 4, cs_);
-    copy_i32_from_mapped(pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head, cs_);
-#else
-```
-Block (hunk 5 of `src/core/mtp.cpp` in the patch, 24 lines):
-```diff
-     copy_i32_from_mapped(step_ + row * 4, m_step_ + row * 4, 4, cs_);
-     copy_i32_from_mapped(pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head, cs_);
- #else
--    const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
--                              {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
--    copy_from_mapped_multi(in, 2, cs_);
-+    if (!(cp_chain_fuse() && !coupled)) {   // critpath STRATA_CP_CHAIN_FUSE: the round copied this row already
-+        const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
-+                                  {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
-+        copy_from_mapped_multi(in, 2, cs_);
-+    }
- #endif
-     coupled_rec_ = coupled;
-     coupled_j_ = j;
-     bool ok = record_forward(1, row, cs_, err);
-     coupled_rec_ = false;
--    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
--    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
-+    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
-+    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
-+    if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
-     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
- }
-
-```
-
-### 12-14
-
-`src/core/mtp.cpp` · bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
-
-Anchor:
-```
-                       float* probs, float min_p, int* n_drafts) {
-    const OnDevice on_device(device_);
-    if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = "mtp: draft arguments out of range"; return false; }
-```
-Block (hunk 6 of `src/core/mtp.cpp` in the patch, 8 lines):
-```diff
-                        float* probs, float min_p, int* n_drafts) {
-     const OnDevice on_device(device_);
-     if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = "mtp: draft arguments out of range"; return false; }
--    if (chain_live_) { err = "mtp: a pipelined chain is still in flight"; return false; }
-+    if (chain_live_ || pre_live_) { err = "mtp: a pipelined chain is still in flight"; return false; }
-     // #783 PR-i (stuchapin909): the round runs for the cells up to the accepted row a (T = a + 1): the K/V of the rejected
-     // rows is not caught up - no later read reaches a cell past the one being drafted and the next round writes it first
-     if (!mtp_catchup_all()) T = a + 1;
-```
-
-### 12-15
-
-`src/core/mtp.cpp` · int MtpDrafter::chain_outputs_ready(std::string& err) {
-
-Anchor:
-```
-}
-
-int MtpDrafter::chain_poll(std::string& err) {
-```
-Block (hunk 7 of `src/core/mtp.cpp` in the patch, 16 lines):
-```diff
- }
-
- int MtpDrafter::chain_poll(std::string& err) {
--    if (!chain_live_) return 1;
-+    if (!chain_live_) {
-+        if (!pre_live_) return 1;
-+        const OnDevice on_device(device_);   // critpath: a pre-launched chain nobody adopted (the request ended)
-+        const cudaError_t q = cudaEventQuery(ev_pre_);
-+        if (q == cudaErrorNotReady) return 0;
-+        pre_live_ = false;
-+        if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
-+        return 1;
-+    }
-     const OnDevice on_device(device_);
-     const cudaError_t q = cudaEventQuery(ev_chain_);
-     if (q == cudaErrorNotReady) return 0;
-```
-
-### 12-16
-
-`src/core/mtp.cpp` · int MtpDrafter::chain_poll(std::string& err) {
-
-Anchor:
-```
-    return 1;
-}
-```
-Block (hunk 8 of `src/core/mtp.cpp` in the patch, 104 lines):
-```diff
-     return 1;
- }
-
-+bool MtpDrafter::chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev,
-+                                 const int32_t* out_host, cudaEvent_t after, const float* src_R, int pre_steps,
-+                                 std::string& err) {
-+    const OnDevice on_device(device_);
-+    if (chain_live_ || pre_live_) { err = "mtp: a chain is already in flight"; return false; }
-+    if (!force_on_ || ev_chain_ == nullptr || h_force_ == nullptr) { err = "mtp: chains need prepare_chain"; return false; }
-+    const int T = v.T;
-+    if (T < 1 || T > max_t_ || pre_steps < 0 || pre_steps > max_t_ - 2 || v.b_T < 0 || v.b_T > 8 || out_dev == nullptr ||
-+        out_host == nullptr || after == nullptr || round_exec_[T] == nullptr) {
-+        err = "mtp: pre-launched chain arguments out of range";
-+        return false;
-+    }
-+    for (int j = 1; j <= pre_steps; ++j)
-+        if (step_exec_[j] == nullptr) { err = "mtp: chain graphs not prepared"; return false; }
-+    if (ev_pre_ == nullptr && cudaEventCreateWithFlags(&ev_pre_, cudaEventDisableTiming) != cudaSuccess) {
-+        err = "mtp: event creation failed";
-+        return false;
-+    }
-+    const Clock::time_point t0 = Clock::now();
-+    strata::kernels::MtpChainVerdict w = v;
-+    w.max_t = max_t_;
-... 80 more lines: see 12-critpath-levers.patch
-```
-
-### 12-17
-
-`src/core/verify.cpp` · Verifier::~Verifier() {
-
-Anchor:
-```
-        if (e) cudaGraphExecDestroy(e);
-    for (auto& e : exec_nr_)
-        if (e) cudaGraphExecDestroy(e);
-```
-Block (hunk 1 of `src/core/verify.cpp` in the patch, 13 lines):
-```diff
-         if (e) cudaGraphExecDestroy(e);
-     for (auto& e : exec_nr_)
-         if (e) cudaGraphExecDestroy(e);
-+    for (auto& e : exec_cp_)
-+        if (e) cudaGraphExecDestroy(e);
-+    if (cp_up_ev_) { cudaEventSynchronize(cp_up_ev_); cudaEventDestroy(cp_up_ev_); }
-+    if (cp_pin_) cudaFreeHost(cp_pin_);
-+    if (cp_off_d_) cudaFree(cp_off_d_);
-+    if (h_cpmap_) cudaFreeHost(h_cpmap_);
-+    if (h_cpids_) cudaFreeHost(h_cpids_);
-     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
-     for (auto& kv : exec_bm_)
-         if (kv.second) cudaGraphExecDestroy(kv.second);
-```
-
-### 12-18
-
-`src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
-
-Anchor:
-```
-            resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
-                          hits_.cache_base, slot_off_d_, (long long) hits_.blob,
-                          plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, nullptr, 0, cs, m_plan_err_);
-```
-Block (hunk 2 of `src/core/verify.cpp` in the patch, 25 lines):
-```diff
-             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
-                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
-                           plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, nullptr, 0, cs, m_plan_err_);
-+        } else if (cp_rec_) {
-+            // critpath STRATA_CP_RESPLAN: a layer of cp_mask_ plans its group on the device when every route is in VRAM
-+            // (resident_plan writes skip_[grp] = ring); its doorbell then carries only the routed ids (the host counts
-+            // their usage and serves nothing) and its waits below return at once.  Every ring is STORED (a planned
-+            // group does not ring the host), so the host reads the ring's map word before it serves a masked layer.
-+            const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
-+            const bool cpl = cp_mask_[(size_t) (l - lb_)] != 0;
-+            if (cpl)
-+                resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
-+                              hits_.cache_base, hits_.slot_off != nullptr ? cp_off_d_ : nullptr, (long long) hits_.blob,
-+                              plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
-+                              ring, cs);
-+            doorbell_publish_cp(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
-+                                m_ids_ + tb * K, m_w_ + tb * K, m_seq_, ring, cpl ? skip_ + grp : nullptr,
-+                                cpl ? m_cpmap_ : nullptr, m_cpids_ + (size_t) ring * (size_t) (max_t_ * K), cs);
-+            if (sh_fork_late) {
-+                cudaEventRecord(ev_fork_, cs);
-+                cudaStreamWaitEvent(sh_cs_, ev_fork_, 0);
-+            }
-         } else {
-             if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
-                 resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
-```
-
-### 12-19
-
-`src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
-
-Anchor:
-```
-            }
-        };
-        bool hits_in_combine = false;
-```
-Block (hunk 3 of `src/core/verify.cpp` in the patch, 36 lines):
-```diff
-             }
-         };
-         bool hits_in_combine = false;
--        if (ar_on()) {
-+        // critpath STRATA_CP_RESPLAN: a masked layer's group waits like E-6's (returns at once when the device planned
-+        // it) but copies only the CPU's rows, as the host-planned path does: a planned group's plan lists every entry as
-+        // a GPU row, so copy_rows_from_mapped writes zeros and reads nothing over PCIe (E-6 copied all n*k rows).
-+        const bool cpl = cp_rec_ && !ar_on() && cp_mask_[(size_t) (l - lb_)] != 0;
-+        if (cpl) {
-+            wait_flag_ge_or(m_flagA_, ring, skip_ + grp, cs);
-+            copy_i32_from_mapped_unless(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, skip_ + grp, ring, cs);
-+            stamp(l, 19, grp);
-+            grouped(p_ptr, p_start, p_counts, 0, hit_out);
-+            stamp(l, 20, grp);
-+            wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
-+            if (sink_.pcie_mode == 2) {
-+                const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
-+                uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
-+                fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
-+                rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs);
-+            }
-+            stamp(l, 21, grp);
-+            grouped(p_ptr2, p_start2, p_counts + 2, kPcieGroupRows, hit_out);
-+            stamp(l, 22, grp);
-+            wait_flag_ge_or(m_flag_, ring, skip_ + grp, cs);
-+            stamp(l, 23, grp);
-+            if (dec_batch)
-+                copy_rows_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K, N, p_dst, p_counts + 1, cs);
-+            else
-+                copy_or_zero_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (long long) n * K * N, skip_ + grp,
-+                                         ring, cs);
-+            moe_hit_add(parts_out, hit_out, p_dst, p_counts + 1, cap, N, cs);
-+        } else if (ar_on()) {
-             stamp(l, 19, grp);
-             grouped(p_ptr, p_start, p_counts, 0, parts_out);
-             stamp(l, 20, grp);
-```
-
-### 12-20
-
-`src/core/verify.cpp` · void Verifier::refresh_ar() {
-
-Anchor:
-```
-}
-
-bool Verifier::capture(int T, std::string& err) {
-```
-Block (hunk 4 of `src/core/verify.cpp` in the patch, 12 lines):
-```diff
- }
-
- bool Verifier::capture(int T, std::string& err) {
--    cudaGraphExec_t& exec_t = ar_off_ ? exec_nr_[T] : exec_[T];
-+    return capture_into(T, ar_off_ ? exec_nr_[T] : exec_[T], err);
-+}
-+
-+// the window graph into `exec_t` (exec_ / exec_nr_ by ar_off_, or exec_cp_ while cp_rec_ is set)
-+bool Verifier::capture_into(int T, cudaGraphExec_t& exec_t, std::string& err) {
-     if (exec_t != nullptr) return true;
-     {   // said before the capture: a process that exits inside it (#1275: Windows, 313 MiB free) leaves this line as the trace
-         size_t free_b = 0, total_b = 0;
-```
-
-### 12-21
-
-`src/core/verify.cpp` · void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
-
-Anchor:
-```
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    last_t_ = T;
-    last_pos0_ = pos0;
-```
-Block (hunk 5 of `src/core/verify.cpp` in the patch, 7 lines):
-```diff
-     *(volatile uint32_t*) h_flag_ = 0;
-     *(volatile uint32_t*) h_flagA_ = 0;
-     *(volatile uint32_t*) h_flagB_ = 0;
-+    if (h_cpmap_ != nullptr) std::memset(h_cpmap_, 0, (size_t) kCpRings * 4);   // critpath STRATA_CP_RESPLAN
-     std::atomic_thread_fence(std::memory_order_seq_cst);
-     last_t_ = T;
-     last_pos0_ = pos0;
-```
-
-### 12-22
-
-`src/core/verify.cpp` · bool Verifier::capture_all(std::string& err) {
-
-Anchor:
-```
-        cudaGetLastError();
-    }
-    pl_ple_rows_.assign((size_t) strata::kernels::kVerifyMaxT * strata::kernels::PLE_N_HEADS, 0u);
-```
-Block (hunk 6 of `src/core/verify.cpp` in the patch, 125 lines):
-```diff
-         cudaGetLastError();
-     }
-     pl_ple_rows_.assign((size_t) strata::kernels::kVerifyMaxT * strata::kernels::PLE_N_HEADS, 0u);
-+    if (!cp_prepare(err)) return false;
-+    return true;
-+}
-+
-+// critpath STRATA_CP_RESPLAN=1 (opt-in; docs/CRITPATH.md): the pipelined windows' second graph set.  A layer of this
-+// stage whose experts are resident at least STRATA_CP_RESPLAN_MIN (default 1.0: all 512) when the graphs are captured
-+// plans each group on the device when every route of the group is in VRAM (resident_plan, E-6), and then neither rings
-+// the host nor waits for it; the host skips it (service) and only counts its routes' usage (set_cp_note).  A group with
-+// a route outside VRAM rings and is served as always.  The device table follows the host's before every launch
-+// (cp_sync_res): an expert the tier evicts is -1 on the host before its slot is reused, so a later window never plans
-+// a stale slot; a window launched before is covered by the tier's fence, as the doorbell path is.
-+namespace {
-+double cp_resplan_min() {
-+    static const double v = [] {
-+        const char* e = std::getenv("STRATA_CP_RESPLAN");
-+        if (e == nullptr || e[0] == 0 || e[0] == '0') return -1.0;
-+        const char* m = std::getenv("STRATA_CP_RESPLAN_MIN");
-+        const double x = m != nullptr ? std::atof(m) : 1.0;
-+        return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
-+    }();
-+    return v;
-... 101 more lines: see 12-critpath-levers.patch
-```
-
-### 12-23
-
-`src/core/verify.cpp` · bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
-
-Anchor:
-```
-    fl_total_ = (le_ - lb_) * G;
-    fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;
-    if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);   // #649: this window's breadcrumbs only
-```
-Block (hunk 7 of `src/core/verify.cpp` in the patch, 14 lines):
-```diff
-     fl_total_ = (le_ - lb_) * G;
-     fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;
-     if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);   // #649: this window's breadcrumbs only
-+    // critpath STRATA_CP_RESPLAN: the RESPLAN graph, behind the residency rows the host holds now
-+    cp_win_ = exec_cp_[T] != nullptr;
-+    if (cp_win_ && !cp_sync_res(err)) return false;
-     std::atomic_thread_fence(std::memory_order_seq_cst);
-     trace_ev("WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
-     ms_host += ms_since(t0);
--    const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
-+    const cudaError_t le = cudaGraphLaunch(cp_win_ ? exec_cp_[T] : exec_[T], cs_);
-     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
-     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
-     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
-```
-
-### 12-24
-
-`src/core/verify.cpp` · int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
-
-Anchor:
-```
-        const Clock::time_point b = Clock::now();
-        ms_wait += now_ms() - fl_since_ms_;
-        const int grp = (int) (fl_k_ % G);
-```
-Block (hunk 8 of `src/core/verify.cpp` in the patch, 22 lines):
-```diff
-             }
-             return 0;
-         }
-+        if (cp_win_ && cp_mask_[(size_t) (l - lb_)]) {   // critpath STRATA_CP_RESPLAN: did the device plan this group?
-+            const uint32_t m = *(volatile uint32_t*) (h_cpmap_ + want);
-+            if (m == 1) {   // yes: its GPU waits for nothing; its routes still count for the adaptive tier
-+                const int grp = (int) (fl_k_ % G);
-+                const int n = gte[grp] - gtb[grp];
-+                if (cp_note_ != nullptr && pool != nullptr)
-+                    cp_note_(user, h_cpids_ + (size_t) want * (size_t) (max_t_ * ss.k), (int64_t) n * ss.k, l);
-+                ++cp_planned;
-+                ++fl_k_;
-+                const double now = now_ms();
-+                ms_wait += now - fl_since_ms_;
-+                fl_since_ms_ = fl_flush_ms_ = now;
-+                continue;
-+            }
-+            ++cp_host;
-+        }
-         const Clock::time_point b = Clock::now();
-         ms_wait += now_ms() - fl_since_ms_;
-         const int grp = (int) (fl_k_ % G);
-```
-
-### 12-25
-
-`src/core/verify.cpp` · bool Verifier::pl_commit_async(int n_keep, std::string& err) {
-
-Anchor:
-```
-void Verifier::absorb_stats(Verifier& o) {
-    ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
-    windows += o.windows;
-```
-Block (hunk 9 of `src/core/verify.cpp` in the patch, 8 lines):
-```diff
- void Verifier::absorb_stats(Verifier& o) {
-     ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
-     windows += o.windows;
-+    cp_planned += o.cp_planned; cp_host += o.cp_host; cp_uploads += o.cp_uploads;   // critpath STRATA_CP_RESPLAN
-+    o.cp_planned = o.cp_host = o.cp_uploads = 0;
-     o.ms_wait = o.ms_pool = o.ms_host = o.ms_commit = 0;
-     o.windows = 0;
-     for (int k = 0; k < 2; ++k)
-```
-
-### 12-26
-
-`src/kernels/cuda/elementwise.cu` · void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei
-
-Anchor:
-```
-                                                                          ids_out, weights_out, d_seq, value);
-}
-```
-Block (hunk 1 of `src/kernels/cuda/elementwise.cu` in the patch, 40 lines):
-```diff
-                                                                           ids_out, weights_out, d_seq, value);
- }
-
-+// critpath STRATA_CP_RESPLAN: see elementwise.hpp.  The unplanned branch is doorbell_publish_value_kernel's body.
-+__global__ void doorbell_publish_cp_kernel(const float* __restrict__ x, const int32_t* __restrict__ ids,
-+                                           const float* __restrict__ w, int n, int k, float* x_out, int32_t* ids_out,
-+                                           float* w_out, uint32_t* seq, uint32_t value, const uint32_t* skip,
-+                                           uint32_t* map, int32_t* ids_log) {
-+    const bool planned = skip != nullptr && *(const volatile uint32_t*) skip == value;
-+    if (planned) {
-+        if ((int) threadIdx.x < k) ids_log[threadIdx.x] = ids[threadIdx.x];
-+    } else {
-+        for (int i = threadIdx.x; i < n; i += blockDim.x) x_out[i] = x[i];
-+        if ((int) threadIdx.x < k) { ids_out[threadIdx.x] = ids[threadIdx.x]; w_out[threadIdx.x] = w[threadIdx.x]; }
-+    }
-+    __threadfence_system();
-+    __syncthreads();
-+    if (threadIdx.x == 0) {
-+        __threadfence_system();
-+        if (map != nullptr) {
-+            *(volatile uint32_t*) (map + value) = planned ? 1u : 2u;
-+            __threadfence_system();
-+        }
-+        *(volatile uint32_t*) seq = value;
-+        __threadfence_system();
-+    }
-+}
-+
-+void doorbell_publish_cp(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
-+                         int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value, const uint32_t* skip,
-+                         uint32_t* map, int32_t* ids_log, void* stream) {
-+    if (k > 1024) { std::fprintf(stderr, "doorbell_publish_cp: k too large\n"); std::exit(1); }
-+    doorbell_publish_cp_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, weights, (int) n, (int) k, x_out, ids_out,
-+                                                                       weights_out, d_seq, value, skip, map, ids_log);
-+    check_launch("doorbell_publish_cp");
-+}
-+
- void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
-                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream) {
-     if (k > 1024) { std::fprintf(stderr, "doorbell_publish: k too large\n"); std::exit(1); }
-```
-
-### 12-27
-
-`src/kernels/cuda/verify_kernels.cu` · __global__ void row_top_prob_kernel(const float* __restrict__ logits, int n_voca
-
-Anchor:
-```
-
-__global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t stride, const int32_t* __restrict__ ids,
-                                  const int32_t* __restrict__ row_dev, float* __restrict__ R_dst,
-```
-Block (hunk 1 of `src/kernels/cuda/verify_kernels.cu` in the patch, 18 lines):
-```diff
-
- __global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t stride, const int32_t* __restrict__ ids,
-                                   const int32_t* __restrict__ row_dev, float* __restrict__ R_dst,
--                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p) {
-+                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p,
-+                                  const int32_t* force) {
-     const int row = *row_dev;
-     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < stride; i += (int64_t) gridDim.x * blockDim.x)
-         R_dst[i] = R_src[(size_t) row * stride + i];
-     __syncthreads();
-     if (blockIdx.x == 0 && threadIdx.x == 0) {
-         const int32_t tok = ids[row];
--        *tok_dst = tok;
-+        const int32_t f = force != nullptr ? ((const volatile int32_t*) force)[j] : -1;   // critpath: force_token folded in
-+        *tok_dst = f >= 0 ? f : tok;
-         if (probs != nullptr && out_p != nullptr) ((volatile float*) out_p)[j] = probs[row];
-         __threadfence_system();
-         if (out != nullptr) ((volatile int32_t*) out)[j] = tok;
-```
-
-### 12-28
-
-`src/kernels/cuda/verify_kernels.cu` · __global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {
-
-Anchor:
-```
-    if (f >= 0) *tok = f;
-}
-```
-Block (hunk 2 of `src/kernels/cuda/verify_kernels.cu` in the patch, 41 lines):
-```diff
-     if (f >= 0) *tok = f;
- }
-
-+// critpath STRATA_CP_CHAIN_PRE: see mtp_chain_verdict in verify_kernels.hpp.  The rows are MtpDrafter::chain_launch's
-+// put(): {cell, cell + 1, (cell + 1) / 4, cell + 1} and nh copies of cell.
-+__global__ void mtp_chain_verdict_kernel(MtpChainVerdict v, const int32_t* out, int32_t* tok, int32_t* step,
-+                                         int32_t* pos, int32_t* row, int32_t* force) {
-+    __shared__ int32_t s_o[8];
-+    __shared__ int s_a, s_on;
-+    const int i = threadIdx.x;
-+    if (i == 0) {
-+        for (int t = 0; t < v.T; ++t) s_o[t] = v.repl[t] >= 0 ? v.repl[t] : ((const volatile int32_t*) out)[t];
-+        int a = 0;
-+        while (a < v.T - 1 && v.a_tok[a + 1] == s_o[a]) ++a;
-+        s_a = a;
-+        s_on = (v.b_launched != 0 && a == v.T - 1 && v.b_tok[0] == s_o[v.T - 1]) ? 1 : 0;
-+    }
-+    __syncthreads();
-+    const int a = s_a;
-+    const int n_rows = v.T + 1 + (v.max_t - 2);   // the window's cells, output 0's cell, every step's cell
-+    for (int r = i; r < n_rows; r += blockDim.x) {
-+        int rw;
-+        long long cell;
-+        if (r < v.T) { rw = r; cell = v.p + r; }
-+        else if (r == v.T) { rw = 2 * v.max_t - 1; cell = v.p + a; }
-+        else { const int j = r - v.T; rw = v.max_t + j - 1; cell = v.p + a + j; }
-+        step[rw * 4 + 0] = (int32_t) cell;
-+        step[rw * 4 + 1] = (int32_t) (cell + 1);
-+        step[rw * 4 + 2] = (int32_t) ((cell + 1) / 4);
-+        step[rw * 4 + 3] = (int32_t) (cell + 1);
-+        for (int h = 0; h < v.nh; ++h) pos[rw * v.nh + h] = (int32_t) cell;
-+    }
-+    if (i < v.T) tok[i] = s_o[i];
-+    if (i < 16) force[i] = (s_on && i < v.b_T - 1) ? v.b_tok[1 + i] : -1;
-+    if (i == 0) { row[0] = a; row[1] = 0; }
-+    __threadfence_system();
-+}
-+
- }  // namespace
-
- void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
-```
-
-### 12-29
-
-`src/kernels/cuda/verify_kernels.cu` · void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b,
-
-Anchor:
-```
-}
-
-void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
-```
-Block (hunk 3 of `src/kernels/cuda/verify_kernels.cu` in the patch, 25 lines):
-```diff
- }
-
- void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
--                int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs, float* out_p) {
-+                int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs, float* out_p,
-+                const int32_t* force) {
-     mtp_select_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(R_src, R_stride, ids, row_dev, R_dst, tok_dst, out, j,
--                                                            probs, out_p);
-+                                                            probs, out_p, force);
-     check("mtp_select");
- }
-
-+void mtp_chain_verdict(const MtpChainVerdict& v, const int32_t* out, int32_t* tok, int32_t* step, int32_t* pos,
-+                       int32_t* row, int32_t* force, void* stream) {
-+    if (v.T < 1 || v.T > 8 || v.max_t < 2 || v.max_t > 8 || v.b_T > 8) {
-+        std::fprintf(stderr, "mtp_chain_verdict: window size out of range\n");
-+        std::exit(1);
-+    }
-+    mtp_chain_verdict_kernel<<<1, 64, 0, (cudaStream_t) stream>>>(v, out, tok, step, pos, row, force);
-+    check("mtp_chain_verdict");
-+}
-+
- void force_token(int32_t* tok, const int32_t* force, int j, void* stream) {
-     force_token_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(tok, force, j);
-     check("force_token");
-```
-
-### 12-30
-
-`src/program/generate.cpp` · void drive_pool_split(void* user, const float* x_f, const int32_t* ids, int64_t
-
-Anchor:
-```
-    d.d.pcie_num = s->pcie_num[st];
-    drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);
-}
-```
-Block (hunk 1 of `src/program/generate.cpp` in the patch, 23 lines):
-```diff
-     d.d.pcie_num = s->pcie_num[st];
-     drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);
- }
-+/// critpath STRATA_CP_RESPLAN (Verifier::set_cp_note): a group the device planned is never served, but its routes
-+/// count as the pool would count them (usage for the adaptive tier, every entry a VRAM hit).
-+void drive_note_split(void* user, const int32_t* ids, int64_t n, int64_t layer) {
-+    SplitDrive* s = (SplitDrive*) user;
-+    strata::core::ExpertDispatch& d = s->base->d;
-+    if (!d.usage.empty())
-+        for (int64_t i = 0; i < n; ++i)
-+            if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) layer * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
-+    d.cache_hits += n;     // (the multi dispatch's counts for a window whose entries are all VRAM hits)
-+    d.experts += n;
-+    d.layers = layer + 1;
-+}
-+/// critpath (docs/CRITPATH.md): an integer lever, `dflt` when unset or empty.
-+int cp_env_int(const char* name, int dflt) {
-+    const char* v = std::getenv(name);
-+    return v != nullptr && v[0] != 0 ? std::atoi(v) : dflt;
-+}
-
- /// Layer split across GPUs: a later stage on its own device, with its own copy of the dense weights, a session, an
- /// expert cache for its layers, a verify window and a prompt path; the last one also holds the head (the drafter
-```
-
-### 12-31
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                for (int par = 0; par < 2; ++par) {
-                    stage_ver_p(st, par).set_stream(pl_stream[(size_t) st]);
-                    stage_ver_p(st, par).set_always_publish(true);
-```
-Block (hunk 2 of `src/program/generate.cpp` in the patch, 7 lines):
-```diff
-                 for (int par = 0; par < 2; ++par) {
-                     stage_ver_p(st, par).set_stream(pl_stream[(size_t) st]);
-                     stage_ver_p(st, par).set_always_publish(true);
-+                    stage_ver_p(st, par).set_cp_note(&drive_note_split);   // critpath STRATA_CP_RESPLAN (opt-in)
-                 }
-         }
-         if (n_stages > 1) {
-```
-
-### 12-32
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                std::thread pl_adapt_thr;
-                std::atomic<bool> pl_adapt_done{true};
-                bool pl_adapt_ok = true;
-```
-Block (hunk 3 of `src/program/generate.cpp` in the patch, 13 lines):
-```diff
-                 std::thread pl_adapt_thr;
-                 std::atomic<bool> pl_adapt_done{true};
-                 bool pl_adapt_ok = true;
-+                // critpath STRATA_CP_RESPLAN (docs/CRITPATH.md): the blocking tier's fence waits until this loop has passed a
-+                // point between two launches after the tier marked its evictions on the host (cp_fence_ack, at the top of
-+                // every pass): a later launch then uploads the marks before its window plans on the device (Verifier::
-+                // cp_sync_res), an earlier one is behind the fence's events.  Open once the loop ends (no launch follows).
-+                static const bool cp_resplan = cp_env_int("STRATA_CP_RESPLAN", 0) != 0;
-+                std::atomic<int64_t> cp_fence_req{0}, cp_fence_ack{0};
-+                std::atomic<bool> cp_fence_open{false};
-                 // an error ends the engine, as the serial loop's do: every GPU wait is released first (#267), so no
-                 // window in flight keeps spinning on a flag nobody raises, and the tier's thread can finish (the
-                 // asynchronous tier's job does host work alone: it ends)
-```
-
-### 12-33
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                    std::fprintf(stderr, "strata serve: pipelined decode: %s\n", m.c_str());
-                    strata::core::diag_pipeline_fn().store(nullptr);
-                    strata::core::release_gpu_waits(stderr);
-```
-Block (hunk 4 of `src/program/generate.cpp` in the patch, 7 lines):
-```diff
-                     std::fprintf(stderr, "strata serve: pipelined decode: %s\n", m.c_str());
-                     strata::core::diag_pipeline_fn().store(nullptr);
-                     strata::core::release_gpu_waits(stderr);
-+                    cp_fence_open.store(true);   // critpath: the tier's fence never waits for this loop again
-                     if (pl_adapt_thr.joinable()) pl_adapt_thr.join();
-                     if (ajob) {
-                         ajob->wait();
-```
-
-### 12-34
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                // adapt()'s fence, on the tier's thread: it waits on the HOST.  A device-side wait (the refill streams
-                // waiting for the stages' events) would queue copies behind windows that need this loop, beside it.
-                adapt_fence = [&]() {
-```
-Block (hunk 5 of `src/program/generate.cpp` in the patch, 10 lines):
-```diff
-                 // adapt()'s fence, on the tier's thread: it waits on the HOST.  A device-side wait (the refill streams
-                 // waiting for the stages' events) would queue copies behind windows that need this loop, beside it.
-                 adapt_fence = [&]() {
-+                    if (cp_resplan) {   // critpath STRATA_CP_RESPLAN: the loop past a point between launches first
-+                        const int64_t r = cp_fence_req.fetch_add(1) + 1;
-+                        while (cp_fence_ack.load() < r && !cp_fence_open.load()) std::this_thread::yield();
-+                    }
-                     stage_record(fence_ev);
-                     while (!stage_passed(fence_ev)) std::this_thread::yield();
-                 };
-```
-
-### 12-35
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                    return v == nullptr || std::atoi(v) != 0;
-                }();
-                auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
-```
-Block (hunk 6 of `src/program/generate.cpp` in the patch, 38 lines):
-```diff
-                     return v == nullptr || std::atoi(v) != 0;
-                 }();
-                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
-+                // ---- critpath levers (docs/CRITPATH.md), each opt-in; unset, the loop is the one above
-+                // STRATA_CP_L1FIRST=1: A's last stage is launched in the pass that sees its front stage finish, right after
-+                // the pumps - before the chain read, the elastic gap and B's speculative launch (its commit wait, snapshot
-+                // and staging), which held the stage-1 launch ~0.45 ms in the fresh windows.
-+                static const bool cp_l1first = cp_env_int("STRATA_CP_L1FIRST", 0) != 0;
-+                // STRATA_CP_S1FIRST=1: while A's last stage runs, a rung layer of the speculative B is served only when its
-+                // pool call fits before stage 1's next ring (the GPU's time from a served ring to the next one and B's layer
-+                // time, both measured: EMAs) or right after stage 1 was served; else B waits a pass.
-+                // STRATA_CP_S1FIRST_MAX_US (1500) bounds how long one B layer may wait.  B has slack: stage 1 takes ~17 ms,
-+                // B's stage 0 ~7-11 ms.
-+                static const bool cp_s1first = cp_env_int("STRATA_CP_S1FIRST", 0) != 0;
-+                static const double cp_s1_max = std::max(0, cp_env_int("STRATA_CP_S1FIRST_MAX_US", 1500)) / 1000.0;
-+                // STRATA_CP_CHAIN_PRE=n (1..S_mtp-1): the next chain's round and first n steps queued on the drafter's
-+                // stream behind A's stage-1 window (MtpDrafter::chain_prelaunch), adopted at the verdict
-+                static const int cp_chain_pre = cp_env_int("STRATA_CP_CHAIN_PRE", 0);
-+                int64_t cp_l1_early = 0, cp_b_held = 0, cp_b_gap = 0, cp_b_forced = 0, cp_pre_seq = -1;
-+                double cp_b_hold_ms = 0.0, cp_b_wait0 = -1.0;
-+                double cp_s1_last = -1.0, cp_s1_gap = 0.35, cp_b_cost = 0.15;   // ms: stage 1's ring gap, B's layer
-+                int64_t cp_s1_k = -1, cp_s1_seq = -1;
-+                bool cp_prev_b = false;   // the pass before served a B layer (its ring gap sample is late)
-+                const int64_t cp_pre0 = mtp.pre_launched, cp_ado0 = mtp.pre_adopted, cp_redo0 = mtp.pre_redone;
-+                // A's last stage, once every front stage is done
-+                auto launch_s1 = [&]() -> bool {
-+                    if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
-+                    if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
-+                    if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return false;
-+                    A.s1 = true;
-+                    tre("L1", A.seq, A.T);
-+                    return true;
-+                };
-                 while (true) {
-+                    if (cp_resplan) cp_fence_ack.store(cp_fence_req.load());   // critpath: between two launches
-                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
-                     g_pl_diag.a_seq.store(A.seq, std::memory_order_relaxed);
-                     g_pl_diag.a_bits.store(pw_bits(A), std::memory_order_relaxed);
-```
-
-### 12-36
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                    // verdict), and while A's last stage runs, B one layer per pass
-                    if (!pl_yield && ((doomed && !pump0(D)) || !pump0(A) || !pump0(B))) return die(err);
-                    if (pl_yield && !pump0(A)) return die(err);
-```
-Block (hunk 7 of `src/program/generate.cpp` in the patch, 23 lines):
-```diff
-                     // verdict), and while A's last stage runs, B one layer per pass
-                     if (!pl_yield && ((doomed && !pump0(D)) || !pump0(A) || !pump0(B))) return die(err);
-                     if (pl_yield && !pump0(A)) return die(err);
-+                    if (cp_l1first && A.finished && !A.s1) {   // critpath STRATA_CP_L1FIRST: stage 1 before anything else
-+                        if (!launch_s1()) return die(err);
-+                        ++cp_l1_early;
-+                    }
-                     if (A.s1 && !A.s1_done) {
-                         strata::core::Verifier& v = V1(A);
-+                        const double cp_t_in = cp_s1first ? ms_now() : 0.0;
-+                        const int64_t cp_k0 = v.pl_served();
-+                        const bool cp_rang = cp_s1first && v.pl_rang();
-                         if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);
-+                        if (cp_s1first && v.pl_served() > cp_k0) {   // critpath STRATA_CP_S1FIRST: stage 1's ring gap
-+                            if (cp_rang && cp_s1_seq == A.seq && cp_s1_last >= 0.0 && !cp_prev_b && cp_k0 == cp_s1_k)
-+                                cp_s1_gap += 0.125 * ((cp_t_in - cp_s1_last) - cp_s1_gap);
-+                            cp_s1_last = ms_now();
-+                            cp_s1_k = v.pl_served();
-+                            cp_s1_seq = A.seq;
-+                        }
-                         if (v.done(err)) {
-                             if (!v.pl_finish(outp.data(), err)) return die(err);
-                             force_rows_out(outp.data(), A.T, produced_n);   // lab bench: STRATA_FORCE_IDS
-```
-
-### 12-37
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                            tre("F1", A.seq, A.T);
-                        } else if (!err.empty()) return die(err);
-                    }
-```
-Block (hunk 8 of `src/program/generate.cpp` in the patch, 51 lines):
-```diff
-                             tre("F1", A.seq, A.T);
-                         } else if (!err.empty()) return die(err);
-                     }
--                    if (pl_yield && ((doomed && !pump0(D)) || !pump0(B, A.s1 && !A.s1_done ? 1 : 0))) return die(err);
-+                    if (pl_yield) {
-+                        if (doomed && !pump0(D)) return die(err);
-+                        // critpath STRATA_CP_S1FIRST: B's rung layer waits while stage 1 is about to ring (see above)
-+                        bool serve_b = true;
-+                        const double cp_now = cp_s1first ? ms_now() : 0.0;
-+                        if (cp_s1first && A.s1 && !A.s1_done && B.fl && VF(B.fr, B).pl_rang()) {
-+                            strata::core::Verifier& v1 = V1(A);
-+                            bool hold = v1.pl_rang();   // stage 1 rang meanwhile: the next pass serves it first
-+                            // else B goes when its layer fits before the predicted ring, or right after stage 1 was
-+                            // served (the start of its gap: the least B can delay it when the layer does not fit)
-+                            if (!hold && v1.pl_serving() && cp_s1_seq == A.seq && cp_s1_last >= 0.0)
-+                                hold = cp_now + cp_b_cost > cp_s1_last + cp_s1_gap - 0.03 && cp_now - cp_s1_last > 0.05;
-+                            bool bound = false;
-+                            if (hold) {
-+                                if (cp_b_wait0 < 0.0) cp_b_wait0 = cp_now;
-+                                if (cp_now - cp_b_wait0 > cp_s1_max) {   // the bound: B's layer goes now
-+                                    hold = false;
-+                                    bound = true;
-+                                    ++cp_b_forced;
-+                                }
-+                            }
-+                            if (hold) {
-+                                ++cp_b_held;
-+                                serve_b = false;
-+                            } else if (!bound) {
-+                                ++cp_b_gap;
-+                            }
-+                        }
-+                        if (serve_b && cp_b_wait0 >= 0.0) {
-+                            cp_b_hold_ms += cp_now - cp_b_wait0;
-+                            cp_b_wait0 = -1.0;
-+                        }
-+                        cp_prev_b = false;
-+                        if (serve_b) {
-+                            strata::core::Verifier* vb = B.fl ? &VF(B.fr, B) : nullptr;
-+                            const int64_t kb0 = vb != nullptr ? vb->pl_served() : 0;
-+                            if (!pump0(B, A.s1 && !A.s1_done ? 1 : 0)) return die(err);
-+                            if (cp_s1first && vb != nullptr && vb->pl_served() > kb0) {   // B's layer time
-+                                const double dt = ms_now() - cp_now;
-+                                cp_b_cost += 0.125 * (dt - cp_b_cost);
-+                                cp_prev_b = true;
-+                            }
-+                        }
-+                    }
-                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
-                     if (!el_gap()) return die(err);   // fork: the elastic tail at a gap of stage 0
-                     // ---- a wrong speculative window has stopped (it is launched on no further stage once doomed):
-```
-
-### 12-38
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                        }
-                    }
-                    // ---- the last stage: A, once every front stage is done
-```
-Block (hunk 9 of `src/program/generate.cpp` in the patch, 44 lines):
-```diff
-                         }
-                     }
-                     // ---- the last stage: A, once every front stage is done
--                    if (A.finished && !A.s1) {
--                        if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
--                        if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
--                        if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
--                        A.s1 = true;
--                        tre("L1", A.seq, A.T);
-+                    if (A.finished && !A.s1 && !launch_s1()) return die(err);
-+                    // ---- critpath STRATA_CP_CHAIN_PRE: the chain after A's verdict, queued behind A's stage-1 window on the
-+                    // drafter's stream, its inputs derived on the device from A's picks (MtpDrafter::chain_prelaunch).  Once
-+                    // the chain that made B is done and B's launch is settled (B is part of the verdict); greedy rows only
-+                    if (cp_chain_pre > 0 && A.s1 && !A.s1_done && cp_pre_seq != A.seq && chain_kind == 0 &&
-+                        !mtp.chain_live() && !(B.ready && !B.launched) && !ending && S_mtp >= 2 && mtp.max_t() >= 3 &&
-+                        A.T <= mtp.max_t()) {
-+                        strata::core::Verifier& v1 = V1(A);
-+                        if (!v1.host_sampling() && mtp.device() == v1.device()) {
-+                            strata::kernels::MtpChainVerdict cv;
-+                            cv.T = A.T;
-+                            cv.p = (long long) A.p;
-+                            cv.b_launched = B.launched ? 1 : 0;
-+                            cv.b_T = B.launched ? B.T : 0;
-+                            for (int i = 0; i < 8; ++i) {
-+                                cv.a_tok[i] = A.tok[i];
-+                                cv.b_tok[i] = B.tok[i];
-+                                cv.repl[i] = -1;
-+                            }
-+                            if (forced != nullptr)   // the forced bench: the rows force_rows_out replaces at the verdict
-+                                for (int i = 0; i < A.T; ++i) {
-+                                    const int64_t k = produced_n + i;
-+                                    if (k >= (int64_t) forced->size()) break;
-+                                    cv.repl[i] = (*forced)[(size_t) k];
-+                                }
-+                            const int pre = std::max(1, std::min(cp_chain_pre, std::min(S_mtp - 1, mtp.max_t() - 2)));
-+                            if (!mtp.chain_prelaunch(cv, v1.out_dev(), v1.out_host(), v1.done_event(), v1.final_R(0), pre,
-+                                                     err))
-+                                return die(err);
-+                            tre("CP", A.seq, pre);
-+                        }
-+                        cp_pre_seq = A.seq;   // once per A (also when it could not be queued)
-                     }
-                     // ---- A's verdict
-                     if (!A.s1_done) continue;
-```
-
-### 12-39
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                        // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
-                        mtp.set_source_R(V1(A).final_R(0));
-                        chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
-```
-Block (hunk 10 of `src/program/generate.cpp` in the patch, 13 lines):
-```diff
-                         // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
-                         mtp.set_source_R(V1(A).final_R(0));
-                         chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
--                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
-+                        int cp_ad = 0;   // critpath STRATA_CP_CHAIN_PRE: the chain queued behind A's window, if it fits
-+                        if (cp_pre_seq == A.seq &&
-+                            (cp_ad = mtp.chain_adopt(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err)) < 0)
-+                            return die(err);
-+                        if (cp_ad == 0 &&
-+                            !mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
-                             return die(err);
-                         chain_kind = 1;
-                         tre("CL", A.seq, 1);
-```
-
-### 12-40
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                        if (!last) {
-                            mtp.set_source_R(V1(A).final_R(0));
-                            chain_n = strata::kernels::kVerifyMaxT - 1;
-```
-Block (hunk 11 of `src/program/generate.cpp` in the patch, 12 lines):
-```diff
-                         if (!last) {
-                             mtp.set_source_R(V1(A).final_R(0));
-                             chain_n = strata::kernels::kVerifyMaxT - 1;
--                            if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
-+                            int cp_ad = 0;   // critpath STRATA_CP_CHAIN_PRE (see above)
-+                            if (cp_pre_seq == A.seq &&
-+                                (cp_ad = mtp.chain_adopt(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err)) < 0)
-+                                return die(err);
-+                            if (cp_ad == 0 && !mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
-                                 return die(err);
-                             chain_kind = 2;
-                             tre("CL", A.seq, 2);
-```
-
-### 12-41
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                    if (!last && ajob && !adapt_tick(false)) return die("an adaptive refill failed");
-                    if (last) ending = true;
-                }
-```
-Block (hunk 12 of `src/program/generate.cpp` in the patch, 7 lines):
-```diff
-                     if (!last && ajob && !adapt_tick(false)) return die("an adaptive refill failed");
-                     if (last) ending = true;
-                 }
-+                cp_fence_open.store(true);   // critpath: no launch follows, the tier's fence never waits for the loop
-                 pl_drain();   // nothing in flight: both stages' commits and the drafter have landed
-                 strata::core::diag_pipeline_fn().store(nullptr);
-                 if (pl_adapt_thr.joinable()) pl_adapt_thr.join();   // its copies waited only for finished work
-```
-
-### 12-42
-
-`src/program/generate.cpp` · int main(int argc, char** argv) {
-
-Anchor:
-```
-                }
-                // the odd windows' counters and GPU profiles into the verifiers that report them
-                for (int st = 0; st < n_stages; ++st) stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 1));
-```
-Block (hunk 13 of `src/program/generate.cpp` in the patch, 28 lines):
-```diff
-                 }
-                 // the odd windows' counters and GPU profiles into the verifiers that report them
-                 for (int st = 0; st < n_stages; ++st) stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 1));
-+                // critpath (docs/CRITPATH.md): one line per request with every lever's counters while any is on
-+                static const bool cp_any = cp_l1first || cp_s1first || cp_chain_pre > 0 || cp_resplan ||
-+                                           cp_env_int("STRATA_CP_CHAIN_FUSE", 0) != 0;
-+                if (cp_any) {
-+                    std::string rp;
-+                    for (int st = 0; st < n_stages; ++st) {
-+                        const strata::core::Verifier& v = stage_ver_p(st, 0);
-+                        char b[160];
-+                        std::snprintf(b, sizeof b, " stage %d: %d layers, %lld planned / %lld host, %lld uploads;", st,
-+                                      v.cp_layers(), (long long) v.cp_planned, (long long) v.cp_host,
-+                                      (long long) v.cp_uploads);
-+                        rp += b;
-+                    }
-+                    std::fprintf(stderr, "strata critpath: L1FIRST %lld early stage-1 launches | S1FIRST B held %lld passes "
-+                                         "(%.1f ms), %lld B layers in a stage-1 gap, %lld past the bound; stage-1 ring gap "
-+                                         "%.3f ms, B layer %.3f ms | CHAIN_PRE %lld queued, %lld adopted, %lld redone | "
-+                                         "RESPLAN (all requests):%s\n",
-+                                 (long long) cp_l1_early, (long long) cp_b_held, cp_b_hold_ms, (long long) cp_b_gap,
-+                                 (long long) cp_b_forced, cp_s1_gap, cp_b_cost, (long long) (mtp.pre_launched - cp_pre0),
-+                                 (long long) (mtp.pre_adopted - cp_ado0), (long long) (mtp.pre_redone - cp_redo0),
-+                                 rp.c_str());
-+                }
-                 if (!pl_adapt_ok) {
-                     std::printf("ERR an adaptive refill failed\n");
-                     return 1;
-```
-
-## 13 chain-fuse
-
-`13-chain-fuse.patch` — FABLE-STRATA-Porta su 0.1.43 le fusioni della catena MTP del drafter (STRATA_CHAIN_FUSE2, STRATA_CHAIN_FUSE2_MASK, STRATA_CHAIN_FUSE2_ATTN, opt-in) e chain_step_bench
-
-### 13-1
-
-`CMakeLists.txt` · if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
-
-Anchor:
-```
-    set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
-                         SKIP_RETURN_CODE 77)
-  endif()
-```
-Block (hunk 1 of `CMakeLists.txt` in the patch, 14 lines):
-```diff
-     set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
-                          SKIP_RETURN_CODE 77)
-   endif()
-+  # chainfuse (docs/CHAINFUSE.md): the MTP chain step's fused segments (STRATA_CHAIN_FUSE2) against the default kernel
-+  # sequences, bit for bit, with the microseconds of each (GPU, synthetic, no model).  Not in the default build:
-+  # `cmake --build <dir> --target chain_step_bench`.
-+  if(STRATA_ENABLE_CUDA)
-+    add_executable(chain_step_bench EXCLUDE_FROM_ALL src/kernels/chain_step_bench.cpp)
-+    target_include_directories(chain_step_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-+    target_link_libraries(chain_step_bench PRIVATE strata_kernels CUDA::cudart)
-+  endif()
-   # the QSA selection (block scores on the warp kernel and the tensor-core one, top-k): a GPU bench with a
-   # scorer-vs-scorer comparison and an FP64 accuracy gate (synthetic, no model); the ctest runs a 32K context under a
-   # 262144-cell capacity (the top-k dispatch follows the capacity) and exits non-zero on a failed gate
-```
-
-### 13-2
-
-`docs/CHAINFUSE.md` · (new file)
-
-New file, 209 lines: see the patch.
-
-### 13-3
-
-`include/strata/core/mtp.hpp` · private:
-
-Anchor:
-```
-    float* probs_ = nullptr;
-    uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' and row_top_prob_split's partials and counters
-    uint8_t* top_scratch_ = nullptr;
-```
-Block (hunk 1 of `include/strata/core/mtp.hpp` in the patch, 7 lines):
-```diff
-     float* probs_ = nullptr;
-     uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' and row_top_prob_split's partials and counters
-     uint8_t* top_scratch_ = nullptr;
-+    uint8_t* tail_scratch_ = nullptr;  ///< chainfuse: mtp_head_tail's partials and counter (docs/CHAINFUSE.md)
-     // device
-     int32_t *tok_ = nullptr, *step_ = nullptr, *pos_ = nullptr, *row_ = nullptr, *ident_ = nullptr;
-     float *Rin_ = nullptr, *R_ = nullptr, *emb_ = nullptr, *en_ = nullptr, *e2_ = nullptr, *hn_ = nullptr, *h2_ = nullptr;
-```
-
-### 13-4
-
-`include/strata/kernels/native_gr_postops.hpp` · void native_gr_post_multi(const float* residual, const float* block_out, const f
-
-Anchor:
-```
-void native_gr_post_multi(const float* residual, const float* block_out, const float* inject,
-                          float* output, int n_embd, int hc, int n_tok, void* stream);
-```
-Block (hunk 1 of `include/strata/kernels/native_gr_postops.hpp` in the patch, 14 lines):
-```diff
- void native_gr_post_multi(const float* residual, const float* block_out, const float* inject,
-                           float* output, int n_embd, int hc, int n_tok, void* stream);
-
-+// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): native_moe_combine (k = 10, shared row, the vec4 kernel's
-+// expression: native_moe.cu compiles with the same --use_fast_math) and native_gr_post in one launch for one token:
-+// y = sum_k parts[k] * weights[k] + shared (the first product rounded, then one fmaf per expert in order, then the
-+// shared row), output[c][:] = fmaf(y, 2 sigmoid(inject[c] / hc), residual[c][:]) for the hc streams.  `y_out`
-+// (nullable) also receives y.  parts (10 x n_embd), shared, residual, output and y_out 16-byte aligned, n_embd a
-+// multiple of 4; output may equal residual exactly.
-+void native_moe_combine_k10_post(const float* parts, const float* weights, const float* shared, float* y_out,
-+                                 const float* residual, const float* inject, float* output, int n_embd, int hc,
-+                                 void* stream);
-+
- } // namespace strata::kernels
-```
-
-### 13-5
-
-`include/strata/kernels/native_qsa.hpp` · void native_qsa_rms_norm_grouped(const float* input, const float* gamma, float*
-
-Anchor:
-```
-void native_qsa_gate_apply(const float* attn, const float* q_full, float* output,
-                           int n_head, int head_dim, void* stream);
-```
-Block (hunk 1 of `include/strata/kernels/native_qsa.hpp` in the patch, 16 lines):
-```diff
- void native_qsa_gate_apply(const float* attn, const float* q_full, float* output,
-                            int n_head, int head_dim, void* stream);
-
-+// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): native_qsa_rms_norm_weighted followed by native_quantize_q8_1
-+// of its output (n_cols * n_rows contiguous values, n_cols a multiple of 32) in ONE launch: the norm kernel, then the
-+// quantizer's expressions in its epilogue on the warp's 32 consecutive columns (the quantizer's own block and lane
-+// order).  `output` may be null (the normalized row is not kept); `x_q8_1` is native_q8_1_bytes(n_cols, n_rows).
-+// Same file and flags as the norm, the quantizer's helpers (q8_1_finite.hpp) under those flags: the same bytes.
-+void native_qsa_rms_norm_q8_1(const float* input, const float* gamma, float* output, void* x_q8_1,
-+                              int n_cols, int n_rows, float epsilon, void* stream);
-+// native_qsa_gate_apply followed by native_quantize_q8_1 of its output (n_head * head_dim a multiple of 32) in one
-+// launch; `output` may be null.
-+void native_qsa_gate_q8_1(const float* attn, const float* q_full, float* output, void* x_q8_1,
-+                          int n_head, int head_dim, void* stream);
-+
- } // namespace strata::kernels
-```
-
-### 13-6
-
-`include/strata/kernels/qsa_decode_attn.hpp` · void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
-
-Anchor:
-```
-void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
-                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);
-```
-Block (hunk 1 of `include/strata/kernels/qsa_decode_attn.hpp` in the patch, 29 lines):
-```diff
- void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
-                            int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);
-
--/// For src/kernels/qsa_merge_daily_parity.cpp only: qsa_decode_attn_batch's two passes apart, whatever the environment
--/// says.  `chunks_only` runs the chunk pass into `scratch` with `daily_chunk` 0: attn_chunk_kernel (upstream's default),
--/// 1: the Daily's (attn_chunk_kernel_pre75, what STRATA_ATTN_DAILY=1 picks on CUDA).  `merge_only` merges those
--/// partials with `v2` 0: attn_merge_kernel, 1: attn_merge_v2_kernel (STRATA_ATTN_MERGE_V2, on with STRATA_ATTN_DAILY).
-+/// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1; the MTP drafter's dense attention): qsa_decode_attn_batch with
-+/// the staged chunk kernel (`variant` 1..4 = attn_chunk_kernel_stage<M, KPF, EARLY>: the values of a stage of cells
-+/// through shared memory with one 16-byte load a thread, 1: plain, 2: the next pair of keys prefetched, 3: the first
-+/// stage of values fetched before the scores, 4: both; 0: the environment's chunk kernel; INT8 and FP16 pools, other
-+/// formats take the environment's chunk kernel) and, with `merge` 1, the staged merge (attn_merge_v3_kernel).  Bit for
-+/// bit the output of attn_chunk_kernel_pre75 + attn_merge_v2_kernel (the same expressions in the same order; only how
-+/// the loads are issued changes).  CUDA only: elsewhere, or where the pre75 kernel is not built, it is
-+/// qsa_decode_attn_batch.  `qsa_decode_attn_fuse2_built()` says which.
-+void qsa_decode_attn_batch_fuse2(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
-+                                 int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, int variant,
-+                                 int merge, void* stream);
-+bool qsa_decode_attn_fuse2_built();
-+
-+/// For src/kernels/qsa_merge_daily_parity.cpp and src/kernels/chain_step_bench.cpp only: qsa_decode_attn_batch's two
-+/// passes apart, whatever the environment says.  `chunks_only` runs the chunk pass into `scratch` with `daily_chunk`
-+/// 0: attn_chunk_kernel (upstream's default), 1: the Daily's (attn_chunk_kernel_pre75, what STRATA_ATTN_DAILY=1 picks
-+/// on CUDA), 2 / 3 / 4 / 5: chainfuse's attn_chunk_kernel_stage variants 1 / 2 / 3 / 4 (INT8 and FP16 pools; a Q4_0
-+/// pool takes the environment's kernel).  `merge_only` merges those partials with `v2` 0: attn_merge_kernel,
-+/// 1: attn_merge_v2_kernel (STRATA_ATTN_MERGE_V2, on with STRATA_ATTN_DAILY), 2: chainfuse's attn_merge_v3_kernel.
- /// Width must not exceed an unaligned cap (the chunk pass keeps its upstream contract); for aligned caps the grid
- /// bounds widths above cap.  One input can go through every pair and the outputs be compared bit for bit.
- void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
-```
-
-### 13-7
-
-`include/strata/kernels/verify_kernels.hpp` · bool multi_block_head_ops();
-
-Anchor:
-```
-/// True where the verify head's and the draft's greedy pick should be argmax_rows: sm_80 to sm_89 (the one-block
-/// kernel is slow there; sm_90+ has sample_tokens' cluster kernel, other cards keep sample_tokens).
-bool argmax_rows_wanted();
-```
-Block (hunk 1 of `include/strata/kernels/verify_kernels.hpp` in the patch, 16 lines):
-```diff
- /// True where the verify head's and the draft's greedy pick should be argmax_rows: sm_80 to sm_89 (the one-block
- /// kernel is slow there; sm_90+ has sample_tokens' cluster kernel, other cards keep sample_tokens).
- bool argmax_rows_wanted();
-+/// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): a draft step's tail in one launch, the same words as
-+/// sample_tokens (greedy) + row_top_prob(_split) + map_ids (`table`, null = none) + mtp_select (+ force_token via
-+/// `force`) on row 0 of `logits` (n_vocab values): out_ids[0] and probs_dev[0] get the mapped pick and its probability,
-+/// then R_dst[:] = R_src[*row_dev], *tok_dst = force[j] >= 0 ? force[j] : out_ids[*row_dev], out_p[j] =
-+/// probs_dev[*row_dev], out[j] = out_ids[*row_dev] (out / out_p / force may be mapped host memory).  `scratch`:
-+/// mtp_head_tail_scratch_bytes(), zero before the first launch (left so).  Graph-capturable.  CUDA only.
-+uint64_t mtp_head_tail_scratch_bytes();
-+void mtp_head_tail(const float* logits, int n_vocab, const int32_t* table, const float* R_src, int64_t R_stride,
-+                   const int32_t* row_dev, float* R_dst, int32_t* out_ids, float* probs_dev, int32_t* tok_dst,
-+                   int32_t* out, int j, float* out_p, const int32_t* force, void* scratch, void* stream);
- /// Dense-attention step records for `n` cells: [cell, cell+1, (cell+1)/4, cell+1] from cells[i] (device memory).
- void dense_steps(const int32_t* cells, int n, int32_t* steps, void* stream);
- /// A sliding attention window: for `n` step records (kStepCount ints each, n_kv at [1]) the selection becomes the
-```
-
-### 13-8
-
-`src/core/mtp.cpp` · (file scope)
-
-Anchor:
-```
-#include "strata/kernels/gr.hpp"
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/kv_q8.hpp"
-```
-Block (hunk 1 of `src/core/mtp.cpp` in the patch, 7 lines):
-```diff
- #include "strata/kernels/gr.hpp"
- #include "strata/kernels/kv_q4.hpp"
- #include "strata/kernels/kv_q8.hpp"
-+#include "strata/kernels/native_gr_postops.hpp"   // chainfuse: native_moe_combine_k10_post
- #include "strata/kernels/native_moe.hpp"
- #include "strata/kernels/native_mmvq.hpp"
- #include "strata/kernels/native_qsa.hpp"
-```
-
-### 13-9
-
-`src/core/mtp.cpp` · bool cp_chain_fuse() {
-
-Anchor:
-```
-constexpr int GGML_Q8_0 = 8;
-constexpr int GGML_Q4_0 = 2;
-using Clock = std::chrono::steady_clock;
-```
-Block (hunk 2 of `src/core/mtp.cpp` in the patch, 46 lines):
-```diff
-     }();
-     return on;
- }
-+// chainfuse (docs/CHAINFUSE.md): STRATA_CHAIN_FUSE2=1 (opt-in) - the drafter's step and round graphs with fused kernels,
-+// every word the same (the same expressions in the same order; only launches and loads in flight change).
-+// STRATA_CHAIN_FUSE2_MASK (default 62) picks the fusions for an A/B one at a time: 2 the staged attention merge, 4 norm +
-+// q8_1, 8 gate + q8_1, 16 the head tail (argmax + top prob + map_ids + mtp_select + force in one launch), 32 combine +
-+// residual write.  The attention CHUNK kernel is its own variable, so it can be measured apart (the first version lost):
-+// STRATA_CHAIN_FUSE2_ATTN = 1..4 picks attn_chunk_kernel_stage's variant (1 plain staged values, 2 + the next keys
-+// prefetched, 3 + the first values before the scores, 4 both; 0 / unset: pre75 as before).  The argmax graphs only
-+// (coupled sampling keeps its own); CUDA only.
-+int chain_fuse2_attn_env() {
-+    const char* a = std::getenv("STRATA_CHAIN_FUSE2_ATTN");
-+    const int n = a != nullptr ? std::atoi(a) : 0;
-+    return n >= 1 && n <= 4 ? n : 0;
-+}
-+int chain_fuse2_mask() {
-+    static const int mask = [] {
-+        const char* v = std::getenv("STRATA_CHAIN_FUSE2");
-+        const bool on = v != nullptr && v[0] != '\0' && v[0] != '0';
-+        if (!on) return 0;
-+        int m = 62;
-+        const char* mv = std::getenv("STRATA_CHAIN_FUSE2_MASK");
-+        if (mv != nullptr && mv[0] != '\0') m = std::atoi(mv) & 62;
-+#if defined(STRATA_USE_HIP)
-+        std::fprintf(stderr, "strata chainfuse: STRATA_CHAIN_FUSE2 is CUDA only: off\n");
-+        return 0;
-+#else
-+        int attn = chain_fuse2_attn_env();
-+        if (!strata::kernels::qsa_decode_attn_fuse2_built()) { m &= ~2; attn = 0; }
-+        if (attn) m |= 1;
-+        std::fprintf(stderr, "strata chainfuse: STRATA_CHAIN_FUSE2 mask %d (%s%s%s%s%s), attention chunk variant %d\n", m,
-+                     (m & 2) ? "attn-merge " : "", (m & 4) ? "norm+q8 " : "", (m & 8) ? "gate+q8 " : "",
-+                     (m & 16) ? "head-tail " : "", (m & 32) ? "combine+post" : "", attn);
-+        return m;
-+#endif
-+    }();
-+    return mask;
-+}
-+bool chain_fuse2(int bit) { return (chain_fuse2_mask() & bit) != 0; }
-+int chain_fuse2_attn() { return chain_fuse2(1) ? chain_fuse2_attn_env() : 0; }
-+constexpr int kFuse2AttnChunk = 1, kFuse2AttnMerge = 2, kFuse2NormQ8 = 4, kFuse2GateQ8 = 8, kFuse2HeadTail = 16,
-+              kFuse2CombinePost = 32;
- constexpr int GGML_Q8_0 = 8;
- constexpr int GGML_Q4_0 = 2;
- using Clock = std::chrono::steady_clock;
-```
-
-### 13-10
-
-`src/core/mtp.cpp` · bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
-
-Anchor:
-```
-        probs_ = b.take<float>(T + 4);
-        arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
-        top_scratch_ = b.take<uint8_t>(strata::kernels::row_top_prob_scratch_bytes((int) T));
-```
-Block (hunk 3 of `src/core/mtp.cpp` in the patch, 7 lines):
-```diff
-         probs_ = b.take<float>(T + 4);
-         arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
-         top_scratch_ = b.take<uint8_t>(strata::kernels::row_top_prob_scratch_bytes((int) T));
-+        tail_scratch_ = b.take<uint8_t>(std::max<uint64_t>(64, strata::kernels::mtp_head_tail_scratch_bytes()));
-         dummy_inj_ = b.take<float>(HC);
-     };
-     Bump count;
-```
-
-### 13-11
-
-`src/core/mtp.cpp` · bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
-
-Anchor:
-```
-            embedding_gather_dev(codes, scales, offsets, tok_, T, we->ne0, we->code_bits, we->code_bias, we->group_elems,
-                                 (uint64_t) (we->ne0 / (8 / we->code_bits)), (uint64_t) (we->ne0 / we->group_elems), emb_, cs);
-        }
-```
-Block (hunk 4 of `src/core/mtp.cpp` in the patch, 23 lines):
-```diff
-             embedding_gather_dev(codes, scales, offsets, tok_, T, we->ne0, we->code_bits, we->code_bias, we->group_elems,
-                                  (uint64_t) (we->ne0 / (8 / we->code_bits)), (uint64_t) (we->ne0 / we->group_elems), emb_, cs);
-         }
--        native_qsa_rms_norm_weighted(emb_, f32("pre_fc_norm_embedding.weight"), en_, (int) N, T, EPS, cs);
--        native_quantize_q8_1(en_, xq_, (int) N, T, cs);
-+        // chainfuse (docs/CHAINFUSE.md): one row (a chain step, a T = 1 round) - the norm and its q8_1 quantization in
-+        // one launch (the same bytes in xq_; en_ / hn_ are not kept: nothing else reads them)
-+        const bool fuse_nq = T == 1 && chain_fuse2(kFuse2NormQ8);
-+        if (fuse_nq) {
-+            native_qsa_rms_norm_q8_1(emb_, f32("pre_fc_norm_embedding.weight"), nullptr, xq_, (int) N, T, EPS, cs);
-+        } else {
-+            native_qsa_rms_norm_weighted(emb_, f32("pre_fc_norm_embedding.weight"), en_, (int) N, T, EPS, cs);
-+            native_quantize_q8_1(en_, xq_, (int) N, T, cs);
-+        }
-         native_mmvq(wt_fc_embedding, wp_fc_embedding, xq_, e2_, (int) N, (int) N, T, cs);
-+        if (fuse_nq && !hnorm_stream_ && HC <= 8) {
-+            // one RMS over the hc * N values, quantized as the HC columns the loop below quantizes in one chunk
-+            native_qsa_rms_norm_q8_1(Rin_, f32("pre_fc_norm_hidden.weight"), nullptr, xq_, (int) (HC * N), T, EPS, cs);
-+            native_mmvq(wt_fc_hidden, wp_fc_hidden, xq_, h2_, (int) N, (int) N, (int) HC, cs);
-+        } else {
-         if (hnorm_stream_)   // --mtp-hnorm stream: one RMS per stream, each scaled by its slice of the weight
-             native_qsa_rms_norm_grouped(Rin_, f32("pre_fc_norm_hidden.weight"), hn_, (int) N, (int) HC, (int) (T * HC), EPS, cs);
-         else
-```
-
-### 13-12
-
-`src/core/mtp.cpp` · bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
-
-Anchor:
-```
-            native_quantize_q8_1(hn_ + (size_t) c0 * N, xq_, (int) N, nc, cs);
-            native_mmvq(wt_fc_hidden, wp_fc_hidden, xq_, h2_ + (size_t) c0 * N, (int) N, (int) N, nc, cs);
-        }
-```
-Block (hunk 5 of `src/core/mtp.cpp` in the patch, 7 lines):
-```diff
-             native_quantize_q8_1(hn_ + (size_t) c0 * N, xq_, (int) N, nc, cs);
-             native_mmvq(wt_fc_hidden, wp_fc_hidden, xq_, h2_ + (size_t) c0 * N, (int) N, (int) N, nc, cs);
-         }
-+        }
-         add_streams_broadcast(h2_, e2_, R_, N, (int) HC, T, cs);
-         // ---- the attention hyper-connection
-         {
-```
-
-### 13-13
-
-`src/core/mtp.cpp` · bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
-
-Anchor:
-```
-        if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);
-        const QsaAttnPools pools = qsa_attn_pools(st_);
-        if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
-```
-Block (hunk 6 of `src/core/mtp.cpp` in the patch, 23 lines):
-```diff
-         if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);
-         const QsaAttnPools pools = qsa_attn_pools(st_);
-         if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
--        qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
-+        // chainfuse (docs/CHAINFUSE.md): the deeper-pipelined chunk kernel and / or the staged merge, the same partials
-+        // and the same output (bit for bit) with more loads in flight
-+        if (chain_fuse2(kFuse2AttnChunk) || chain_fuse2(kFuse2AttnMerge))
-+            qsa_decode_attn_batch_fuse2(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, chain_fuse2_attn(),
-+                                        chain_fuse2(kFuse2AttnMerge) ? 1 : 0, cs);
-+        else
-+            qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
-         if (st_.kv_rot) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
--        native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
--        native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
-+        if (chain_fuse2(kFuse2GateQ8)) {   // chainfuse: the gate and its q8_1 quantization in one launch (attn32_ not kept)
-+            native_qsa_gate_q8_1(attn_, qfull_, nullptr, xq_, (int) (T * NH), (int) HD, cs);
-+        } else {
-+            native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
-+            native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
-+        }
-         native_mmvq(wt_o_proj, wp_o_proj, xq_, bo_, (int) (NH * HD), (int) N, T, cs);
-         // ---- the MLP hyper-connection (the attention write folded in)
-         {
-```
-
-### 13-14
-
-`src/core/mtp.cpp` · bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
-
-Anchor:
-```
-            const char* v = std::getenv("STRATA_NO_MULTI_GR");
-            return v != nullptr && v[0] != '\0' && v[0] != '0';
-        }();
-```
-Block (hunk 7 of `src/core/mtp.cpp` in the patch, 14 lines):
-```diff
-             const char* v = std::getenv("STRATA_NO_MULTI_GR");
-             return v != nullptr && v[0] != '\0' && v[0] != '0';
-         }();
-+        // chainfuse (docs/CHAINFUSE.md): the combine and the residual write in one launch (T = 1, the native combine's
-+        // k = 10 vec4 kernel and gr_write's native post: the same expressions)
-+        const bool fuse_cp = T == 1 && !fuse_head_gr && chain_fuse2(kFuse2CombinePost) && native_moe_combine_enabled() &&
-+                             K == 10 && gr_native_mmvf_enabled() && (N & 3) == 0 &&
-+                             (((uintptr_t) parts_ | (uintptr_t) shared_ | (uintptr_t) R_ | (uintptr_t) y_) & 15u) == 0;
-+        if (fuse_cp) {
-+            native_moe_combine_k10_post(parts_, w_, shared_, y_, R_, inj2_, R_, (int) N, (int) HC, cs);
-+        } else {
-         for (int t = 0; t < T; ++t) {
-             if (!(T > 1 && native_moe_combine_enabled())) {
-                 if (native_moe_combine_enabled())
-```
-
-### 13-15
-
-`src/core/mtp.cpp` · bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
-
-Anchor:
-```
-        // its own, so doing them after the loop changes nothing)
-        if (!fuse_head_gr && !no_multi_gr)
-            gr_write_multi(R_, y_, inj2_, gs, R_, T, cs);
-```
-Block (hunk 8 of `src/core/mtp.cpp` in the patch, 7 lines):
-```diff
-         // its own, so doing them after the loop changes nothing)
-         if (!fuse_head_gr && !no_multi_gr)
-             gr_write_multi(R_, y_, inj2_, gs, R_, T, cs);
-+        }
-         // ---- the final mixer and the main model's head
-         if (fuse_head_gr) {
-             FusedGrArgs fa[kFusedGrMaxT];
-```
-
-### 13-16
-
-`src/core/mtp.cpp` · bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
-
-Anchor:
-```
-                                     cparams_, cring_, kCoupledHistCap, coupled_j_, step, cscratch_, out_ids_, probs_, cs);
-            return true;
-        }
-```
-Block (hunk 9 of `src/core/mtp.cpp` in the patch, 9 lines):
-```diff
-                                      cparams_, cring_, kCoupledHistCap, coupled_j_, step, cscratch_, out_ids_, probs_, cs);
-             return true;
-         }
-+        // chainfuse (docs/CHAINFUSE.md): the pick, its probability, map_ids and mtp_select run as one launch recorded by
-+        // the caller (capture_round / capture_step: mtp_head_tail) - the same words
-+        if (chain_fuse2(kFuse2HeadTail)) return true;
-         if (argmax_rows_wanted()) {
-             argmax_rows(head_logits_, T, (int) nv, arg_scratch_, out_ids_, cs);
-         } else {
-```
-
-### 13-17
-
-`src/core/mtp.cpp` · bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
-
-Anchor:
-```
-        coupled_rec_ = false;
-    }
-    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
-```
-Block (hunk 10 of `src/core/mtp.cpp` in the patch, 16 lines):
-```diff
-         coupled_rec_ = false;
-     }
-     const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
-+    if (ok && !coupled && chain_fuse2(kFuse2HeadTail)) {
-+        // chainfuse: record_rest left the head logits; the pick, its probability, map_ids, mtp_select and the forcing in
-+        // one launch
-+        mtp_head_tail(head_logits_, (int) (dhead_ != nullptr ? n_dvocab_ : n_vocab_), dhead_ != nullptr ? dvocab_ : nullptr,
-+                      R_, HCN, row_ + 1, Rin_, out_ids_, probs_, tok_, m_out_, 0, m_prob_, force_on_ ? m_force_ : nullptr,
-+                      tail_scratch_, cs_);
-+    } else {
-     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
-     if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
-+    }
-     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
- }
-
-```
-
-### 13-18
-
-`src/core/mtp.cpp` · bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
-
-Anchor:
-```
-    bool ok = record_forward(1, row, cs_, err);
-    coupled_rec_ = false;
-    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
-```
-Block (hunk 11 of `src/core/mtp.cpp` in the patch, 14 lines):
-```diff
-     bool ok = record_forward(1, row, cs_, err);
-     coupled_rec_ = false;
-     const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
-+    if (ok && !coupled && chain_fuse2(kFuse2HeadTail)) {   // chainfuse: the step's tail in one launch (capture_round)
-+        mtp_head_tail(head_logits_, (int) (dhead_ != nullptr ? n_dvocab_ : n_vocab_), dhead_ != nullptr ? dvocab_ : nullptr,
-+                      R_, HCN, row_ + 1, Rin_, out_ids_, probs_, tok_, m_out_, j, m_prob_, force_on_ ? m_force_ : nullptr,
-+                      tail_scratch_, cs_);
-+    } else {
-     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
-     if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
-+    }
-     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
- }
-
-```
-
-### 13-19
-
-`src/kernels/chain_step_bench.cpp` · (new file)
-
-New file, 568 lines: see the patch.
-
-### 13-20
-
-`src/kernels/cuda/native_gr_postops.cu` · void native_gr_post_multi(const float* residual, const float* block_out, const f
-
-Anchor:
-```
-        residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc), r_stride, b_stride, i_stride);
-    check_launch();
-}
-```
-Block (hunk 1 of `src/kernels/cuda/native_gr_postops.cu` in the patch, 67 lines):
-```diff
-         residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc), r_stride, b_stride, i_stride);
-     check_launch();
- }
-+
-+// ======================= chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1) ==========================================
-+// native_moe_combine's combine_k10_vec4 (native_moe.cu, compiled with the same --use_fast_math as this file) and `post`
-+// above in ONE launch for one token: a thread owns 4 columns; y = the vec4 kernel's expression (the first product
-+// rounded on its own, one fmaf per expert in order, the shared row added), then post's expression per stream,
-+// `__fmaf_rn(y, weight_c, residual)`.  `y_out` (nullable) also keeps the combined row.  output may equal residual
-+// exactly (each thread reads and writes only its own elements).
-+namespace {
-+__global__ void combine_k10_post(const float4* __restrict__ parts4, const float* __restrict__ weights,
-+                                 const float4* __restrict__ shared4, float4* __restrict__ y4, const float* residual,
-+                                 const float* __restrict__ inject, float* output, int n_embd, int hc, float scale,
-+                                 long long n4) {
-+    const long long c4 = (long long) blockIdx.x * blockDim.x + threadIdx.x;
-+    if (c4 >= n4) return;
-+    const float w0 = __ldg(weights + 0);
-+    const float4 p0 = parts4[c4];
-+    float4 sum = make_float4(p0.x * w0, p0.y * w0, p0.z * w0, p0.w * w0);
-+#pragma unroll
-+    for (int expert = 1; expert < 10; ++expert) {
-+        const float w = __ldg(weights + expert);
-+        const float4 p = parts4[(long long) expert * n4 + c4];
-+        sum.x = fmaf(p.x, w, sum.x);
-+        sum.y = fmaf(p.y, w, sum.y);
-+        sum.z = fmaf(p.z, w, sum.z);
-+        sum.w = fmaf(p.w, w, sum.w);
-+    }
-+    const float4 sh = shared4[c4];
-+    sum.x += sh.x;
-+    sum.y += sh.y;
-+    sum.z += sh.z;
-+    sum.w += sh.w;
-+    if (y4 != nullptr) y4[c4] = sum;
-+    for (int c = 0; c < hc; ++c) {
-+        const float weight = scale_zero_bias(sigmoid(scale_zero_bias(inject[c], scale)), 2.0f);
-+        const std::size_t o = std::size_t(c) * n_embd + std::size_t(c4) * 4;
-+        const float4 r = *reinterpret_cast<const float4*>(residual + o);
-+        float4 v;
-+        v.x = __fmaf_rn(sum.x, weight, r.x);
-+        v.y = __fmaf_rn(sum.y, weight, r.y);
-+        v.z = __fmaf_rn(sum.z, weight, r.z);
-+        v.w = __fmaf_rn(sum.w, weight, r.w);
-+        *reinterpret_cast<float4*>(output + o) = v;
-+    }
-+}
-+} // namespace
-+
-+void native_moe_combine_k10_post(const float* parts, const float* weights, const float* shared, float* y_out,
-+                                 const float* residual, const float* inject, float* output, int n_embd, int hc,
-+                                 void* stream) {
-+    check_shape(n_embd, hc);
-+    check_pointer(parts); check_pointer(weights); check_pointer(shared); check_pointer(residual);
-+    check_pointer(inject); check_pointer(output);
-+    if (n_embd % 4 != 0 ||
-+        ((reinterpret_cast<std::uintptr_t>(parts) | reinterpret_cast<std::uintptr_t>(shared) |
-+          reinterpret_cast<std::uintptr_t>(residual) | reinterpret_cast<std::uintptr_t>(output) |
-+          reinterpret_cast<std::uintptr_t>(y_out)) & 15u) != 0)
-+        throw std::invalid_argument("native combine+post requires n_embd a multiple of 4 and 16-byte aligned rows");
-+    const long long n4 = n_embd / 4;
-+    combine_k10_post<<<unsigned((n4 + 127) / 128), 128, 0, static_cast<cudaStream_t>(stream)>>>(
-+        reinterpret_cast<const float4*>(parts), weights, reinterpret_cast<const float4*>(shared),
-+        reinterpret_cast<float4*>(y_out), residual, inject, output, n_embd, hc, 1.0f / float(hc), n4);
-+    check_launch();
-+}
- } // namespace strata::kernels
-```
-
-### 13-21
-
-`src/kernels/cuda/native_qsa.cu` · (file scope)
-
-Anchor:
-```
-// SOFTWARE.
-
-#include "strata/kernels/native_qsa.hpp"
-```
-Block (hunk 1 of `src/kernels/cuda/native_qsa.cu` in the patch, 8 lines):
-```diff
- // SOFTWARE.
-
- #include "strata/kernels/native_qsa.hpp"
-+#include "strata/kernels/q8_1_finite.hpp"   // chainfuse: the q8_1 quantizer's helpers (native_mmvq.cu's)
-+#include <cuda_fp16.h>
- #include <cuda_runtime.h>
- #include <atomic>
- #include <cmath>
-```
-
-### 13-22
-
-`src/kernels/cuda/native_qsa.cu` · void native_qsa_gate_apply(const float* attn, const float* q_full, float* output
-
-Anchor:
-```
-    gate<<<unsigned((count + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(attn, q_full, output, n_head, head_dim);
-    check_launch();
-}
-```
-Block (hunk 2 of `src/kernels/cuda/native_qsa.cu` in the patch, 99 lines):
-```diff
-     gate<<<unsigned((count + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(attn, q_full, output, n_head, head_dim);
-     check_launch();
- }
-+
-+// ======================= chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1) ==========================================
-+// The MTP drafter's chain quantizes the norm's and the gate's outputs to q8_1 right away (native_quantize_q8_1_kernel,
-+// native_mmvq.cu: thread i is element i, so a warp is one 32-element block; amax = warp_max, sum = warp_sum of the raw
-+// values, d = q8_1_finite(amax / 127), q = roundf(x / d) clamped, ds = (d, sum) as fp16).  Here the quantizer's
-+// expressions run in the producing kernel's epilogue on the same lanes: in `norm` lane l of warp w holds column
-+// 32 w + l + BlockSize k, so a warp's 32 columns are exactly one block in the quantizer's lane order (n_cols is a
-+// multiple of 32, so a warp is whole or absent in every iteration); in `gate` thread i is element i as there.
-+// This file compiles with --use_fast_math like native_mmvq.cu, and q8_1_finite.hpp's helpers inline under the same
-+// flags: the same bytes as the two launches.  Parity: src/kernels/chain_step_bench.cpp.
-+namespace {
-+struct Q81Out { __half2 ds; int8_t qs[32]; };   // native_mmvq.cu's Q81Block layout (36 bytes)
-+static_assert(sizeof(Q81Out) == 36 && alignof(Q81Out) == 4, "q8_1 block layout");
-+__device__ __forceinline__ float warp_max(float value) {   // native_mmvq.cu's warp_max: the same pairing order
-+#pragma unroll
-+    for (int offset = 16; offset; offset >>= 1)
-+        value = fmaxf(value, __shfl_xor_sync(0xffffffffu, value, offset, 32));
-+    return value;
-+}
-+// the quantizer's block on the warp's 32 lanes: `v` is this lane's value, `i` its element index
-+__device__ __forceinline__ void q8_1_block(float v, std::size_t i, Q81Out* y) {
-... 75 more lines: see 13-chain-fuse.patch
-```
-
-### 13-23
-
-`src/kernels/cuda/qsa_decode_attn.cu` · __global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restri
-
-Anchor:
-```
-#if defined(STRATA_HIP_GFX906)
-// The compat backend can target other architectures. Check the calling thread's current device,
-// caching only its last ordinal so a layer split or another thread cannot reuse the wrong answer.
-```
-Block (hunk 1 of `src/kernels/cuda/qsa_decode_attn.cu` in the patch, 365 lines):
-```diff
-     attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;
- }
-
-+// ======================= chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): the drafter's dense attention =========
-+// attn_chunk_kernel_pre75's block is a chain of dependent memory round trips: a warp scores its 8 cells two at a time
-+// (4 trips), a thread folds the 64 cells' values four at a time (16 trips).  On the 2080 Ti over 32k cells (1024
-+// blocks, 3 a SM, 5 waves) a wave takes ~48 us: 240 us for one query (nsys, DET-cp-nsys5).  attn_merge_v2_kernel
-+// (24 blocks, 32 batches of 16 dependent loads a thread) takes another 50 us.
-+// The kernels below keep EVERY expression and EVERY fold order of attn_chunk_kernel_pre75<M, 2, false> and
-+// attn_merge_v2_kernel<16> - the same scores (the same dot expression per cell, reduce12), the same chunk max / sum /
-+// cell-major probabilities, the same ascending fold of the values, the same merge of the chunks in chunk order - and
-+// change only how the loads are issued: the values of a stage of cells come through shared memory with one 16-byte
-+// load a thread (the next stage fetched while this one folds), the next pair of keys' raw words may be fetched before
-+// the current pair's scores (KPF), the first stage of values before the score phase (EARLY); the merge stages each
-+// chunk's m, l and weight in shared memory once per block (every dimension needs the same three numbers) and keeps U
-+// accumulator loads in flight.  Raw words are converted with load8 / load_v1's own expressions at use.
-+// A first attempt (all 8 keys of a warp prefetched, 8-32 single-byte values a thread in flight, one cell at a time)
-+// was 1.5-2.5x SLOWER than pre75 on the 2080 Ti: 80 registers with spills (cuobjdump: STACK 40-224 B against pre75's
-+// 73 / 0) and twice the shared-memory traffic for q.  Hence the pre75 structure kept here.
-+// CUDA only, INT8 and FP16 pools (the drafter's: --kv int8 / f16); Q4_0 pools keep attn_chunk_kernel_pre75.
-+// Parity: src/kernels/chain_step_bench.cpp (memcmp of the partials and of the output against the pre75 + v2 pair).
-+#if !defined(__HIPCC__) && defined(STRATA_ATTN_PRE75_BUILT)
-+template <int KV_MODE> struct RawK;   // one lane's 8 key values, undecoded
-+template <> struct RawK<0> { uint4 w; };
-... 341 more lines: see 13-chain-fuse.patch
-```
-
-### 13-24
-
-`src/kernels/cuda/qsa_decode_attn.cu` · int attn_merge_v2() {
-
-Anchor:
-```
-// the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel, 1 attn_merge_v2_kernel (bitwise the same output)
-void launch_merge(int v2, const float* part_acc, const float* part_m, const float* part_l, int n_chunks,
-                  const int32_t* steps, float* attn, long long stride, unsigned n_head, unsigned n_q, cudaStream_t st) {
-```
-Block (hunk 2 of `src/kernels/cuda/qsa_decode_attn.cu` in the patch, 12 lines):
-```diff
- // the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel, 1 attn_merge_v2_kernel (bitwise the same output)
- void launch_merge(int v2, const float* part_acc, const float* part_m, const float* part_l, int n_chunks,
-                   const int32_t* steps, float* attn, long long stride, unsigned n_head, unsigned n_q, cudaStream_t st) {
-+#if defined(STRATA_ATTN_FUSE2_BUILT)
-+    if (v2 == 2)   // chainfuse: the staged merge (bit for bit v2's output)
-+        attn_merge_v3_kernel<kMergeV3U><<<dim3(n_head, n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, steps,
-+                                                                           attn, stride);
-+    else
-+#endif
-     if (v2)
-         attn_merge_v2_kernel<kMergeU><<<dim3(n_head, n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, steps,
-                                                                          attn, stride);
-```
-
-### 13-25
-
-`src/kernels/cuda/qsa_decode_attn.cu` · void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
-
-Anchor:
-```
-    const float scale = 1.0f / sqrtf((float) HD);
-    const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
-#if defined(STRATA_ATTN_PRE75_BUILT)
-```
-Block (hunk 3 of `src/kernels/cuda/qsa_decode_attn.cu` in the patch, 29 lines):
-```diff
-     const float scale = 1.0f / sqrtf((float) HD);
-     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
- #if defined(STRATA_ATTN_PRE75_BUILT)
--    const bool pre = kernel < 0 ? pre75_attn() : kernel == 1;
-+    // kernel >= 2 (chainfuse) on a Q4_0 pool: the environment's chunk kernel, as the ready-made engine
-+    const bool pre = (kernel < 0 || kernel >= 2) ? pre75_attn() : kernel == 1;
-+#endif
-+#if defined(STRATA_ATTN_FUSE2_BUILT)
-+    // chainfuse (docs/CHAINFUSE.md): 2..5 = attn_chunk_kernel_stage<M, KPF, EARLY> - 2: (0, 0), 3: (1, 0), 4: (0, 1),
-+    // 5: (1, 1); INT8 and FP16 pools only (the drafter's), bit for bit attn_chunk_kernel_pre75's partials
-+    if (kernel >= 2 && (kv_mode == 0 || kv_mode == 1)) {
-+#define STRATA_ATTN_STAGE(M, KPF, EARLY) attn_chunk_kernel_stage<M, KPF, EARLY><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
-+        if (kv_mode == 1) {
-+            if (kernel == 2) STRATA_ATTN_STAGE(1, false, false);
-+            else if (kernel == 3) STRATA_ATTN_STAGE(1, true, false);
-+            else if (kernel == 4) STRATA_ATTN_STAGE(1, false, true);
-+            else STRATA_ATTN_STAGE(1, true, true);
-+        } else {
-+            if (kernel == 2) STRATA_ATTN_STAGE(0, false, false);
-+            else if (kernel == 3) STRATA_ATTN_STAGE(0, true, false);
-+            else if (kernel == 4) STRATA_ATTN_STAGE(0, false, true);
-+            else STRATA_ATTN_STAGE(0, true, true);
-+        }
-+#undef STRATA_ATTN_STAGE
-+        return;
-+    }
- #endif
-     // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
-     static const bool lane_cell_env = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
-```
-
-### 13-26
-
-`src/kernels/cuda/qsa_decode_attn.cu` · void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, cons
-
-Anchor:
-```
-                                 int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, int daily_chunk,
-                                 void* stream) {
-    if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||
-```
-Block (hunk 4 of `src/kernels/cuda/qsa_decode_attn.cu` in the patch, 17 lines):
-```diff
-                                  int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, int daily_chunk,
-                                  void* stream) {
-     if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||
--        !q || !ids || !steps || !pools.page_table || (daily_chunk != 0 && daily_chunk != 1)) {
-+        !q || !ids || !steps || !pools.page_table || daily_chunk < 0 || daily_chunk > 5) {
-         std::fprintf(stderr, "qsa_decode_attn_chunks_only: unsupported geometry or missing buffers\n");
-         std::exit(1);
-     }
-+#if !defined(STRATA_ATTN_FUSE2_BUILT)
-+    if (daily_chunk >= 2) {
-+        std::fprintf(stderr, "qsa_decode_attn_chunks_only: the chainfuse chunk kernel is not built here\n");
-+        std::exit(1);
-+    }
-+#endif
-     launch_chunks_batch(q, pools, ids, steps, cap, s, scratch, n_q, (cudaStream_t) stream, daily_chunk);
-     const cudaError_t e = cudaGetLastError();
-     if (e != cudaSuccess) {
-```
-
-### 13-27
-
-`src/kernels/cuda/qsa_decode_attn.cu` · void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, cons
-
-Anchor:
-```
-        (v2 != 0 && v2 != 1) || !steps || !attn) {
-```
-Block (hunk 5 of `src/kernels/cuda/qsa_decode_attn.cu` in the patch, 50 lines):
-```diff
-     }
- }
-
-+bool qsa_decode_attn_fuse2_built() {
-+#if defined(STRATA_ATTN_FUSE2_BUILT)
-+    return true;
-+#else
-+    return false;
-+#endif
-+}
-+
-+void qsa_decode_attn_batch_fuse2(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
-+                                 int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, int variant,
-+                                 int merge, void* stream) {
-+    if (n_q <= 0) return;
-+    if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
-+        !pools.page_table || n_q > 65535 || variant < 0 || variant > 4 || (merge != 0 && merge != 1)) {
-+        std::fprintf(stderr, "qsa_decode_attn_batch_fuse2: unsupported geometry or missing buffers\n");
-+        std::exit(1);
-+    }
-+#if defined(STRATA_ATTN_FUSE2_BUILT)
-+    cudaStream_t st = (cudaStream_t) stream;
-+    // variant 0: the environment's chunk kernel (STRATA_ATTN_DAILY), only the merge changes; 1..4: the staged kernel
-+    launch_chunks_batch(q, pools, ids, steps, cap, s, scratch, n_q, st, variant == 0 ? -1 : variant + 1);
-+    launch_merge_batch(steps, cap, s, scratch, attn, n_q, merge ? 2 : attn_merge_v2(), st);
-+    const cudaError_t e = cudaGetLastError();
-+    if (e != cudaSuccess) {
-+        std::fprintf(stderr, "qsa_decode_attn_batch_fuse2: %s\n", cudaGetErrorString(e));
-+        std::exit(1);
-+    }
-+#else
-+    (void) variant; (void) merge;
-+    qsa_decode_attn_batch(q, pools, ids, steps, cap, s, scratch, attn, n_q, stream);
-+#endif
-+}
-+
- void qsa_decode_attn_merge_only(const int32_t* steps, int64_t cap, const QsaShapes& s, const float* scratch,
-                                 float* attn, int64_t n_q, int v2, void* stream) {
-+#if !defined(STRATA_ATTN_FUSE2_BUILT)
-+    if (v2 == 2) {
-+        std::fprintf(stderr, "qsa_decode_attn_merge_only: the chainfuse merge is not built here\n");
-+        std::exit(1);
-+    }
-+#endif
-     if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||
--        (v2 != 0 && v2 != 1) || !steps || !attn) {
-+        v2 < 0 || v2 > 2 || !steps || !attn) {
-         std::fprintf(stderr, "qsa_decode_attn_merge_only: unsupported geometry or missing buffers\n");
-         std::exit(1);
-     }
-```
-
-### 13-28
-
-`src/kernels/cuda/verify_kernels.cu` · __global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int
-
-Anchor:
-```
-    rows[row].counter = 0;
-}
-```
-Block (hunk 1 of `src/kernels/cuda/verify_kernels.cu` in the patch, 104 lines):
-```diff
-     rows[row].counter = 0;
- }
-
-+// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): a draft step's tail in ONE launch - sample_tokens' greedy pick
-+// over the draft head's row 0 (argmax_rows' slices and rule: the lowest index of the largest value above -inf, NaN
-+// never, 0 when there is none), row_top_prob's probability of it (row_top_prob_split's tree: virtual thread vt of 1024
-+// sums i = vt, vt + 1024, ... with __expf(l[i] - m), xor warp sums, the 32 warp sums added in order, 1 / tot), map_ids
-+// (`table`, null for the whole vocabulary) and mtp_select with force_token folded in (the same words).  Grid (nb),
-+// 1024 threads: every block copies its share of mtp_select's R row and scans its slice of the logits; the last block
-+// to finish merges the picks and does the rest.  Replaces five launches (sampler_greedy / row_top_prob_split /
-+// map_ids / mtp_select / force_token), ~34 us of one-block kernels on the 2080 Ti.  `scratch`: an ArgRow (zero before
-+// the first launch, left so).  Row 0 only: the drafter's full layer runs one row at a time (record_rest).
-+__global__ void __launch_bounds__(1024) mtp_head_tail_kernel(const float* __restrict__ logits, int n, int per_block,
-+                                                            const int32_t* __restrict__ table,
-+                                                            const float* __restrict__ R_src, int64_t stride,
-+                                                            const int32_t* __restrict__ row_dev,
-+                                                            float* __restrict__ R_dst, int32_t* out_ids,
-+                                                            float* probs_dev, int32_t* tok_dst, int32_t* out, int j,
-+                                                            float* out_p, const int32_t* force, ArgRow* __restrict__ sc) {
-+    const int b = (int) blockIdx.x, nb = (int) gridDim.x;
-+    const int row = *row_dev;
-+    // mtp_select's copy of row `row`, spread over every block
-+    for (int64_t i = (int64_t) b * blockDim.x + threadIdx.x; i < stride; i += (int64_t) nb * blockDim.x)
-+        R_dst[i] = R_src[(size_t) row * stride + i];
-... 80 more lines: see 13-chain-fuse.patch
-```
-
-### 13-29
-
-`src/kernels/cuda/verify_kernels.cu` · void argmax_rows(const float*, int, int, void*, int32_t*, void*) {
-
-Anchor:
-```
-    std::fprintf(stderr, "argmax_rows: not built for this backend\n");
-    std::exit(1);
-}
-```
-Block (hunk 2 of `src/kernels/cuda/verify_kernels.cu` in the patch, 12 lines):
-```diff
-     std::fprintf(stderr, "argmax_rows: not built for this backend\n");
-     std::exit(1);
- }
-+uint64_t mtp_head_tail_scratch_bytes() { return 0; }
-+void mtp_head_tail(const float*, int, const int32_t*, const float*, int64_t, const int32_t*, float*, int32_t*, float*,
-+                   int32_t*, int32_t*, int, float*, const int32_t*, void*, void*) {
-+    std::fprintf(stderr, "mtp_head_tail: not built for this backend (STRATA_CHAIN_FUSE2 is CUDA only)\n");
-+    std::exit(1);
-+}
- uint64_t row_top_prob_scratch_bytes(int) { return 0; }
- void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int32_t* ids, float* probs, void*,
-                         void* stream) {
-```
-
-## 14 side-mixer
-
-`14-side-mixer.patch` — FABLE-STRATA-Porta su 0.1.43 STRATA_SIDE_MIXER=1/2 (PR #1889): il lavoro del mixer che legge solo l'input su rami del grafo
-
-### 14-1
 
 `include/strata/core/verify.hpp` · private:
 
@@ -6966,7 +4632,7 @@ Block (hunk 1 of `include/strata/core/verify.hpp` in the patch, 13 lines):
      // mapped staging (host pointer, device alias)
 ```
 
-### 14-2
+### 12-2
 
 `src/core/verify.cpp` · inline bool g_qfuse_hc() {
 
@@ -6988,7 +4654,7 @@ Block (hunk 1 of `src/core/verify.cpp` in the patch, 9 lines):
 
 ```
 
-### 14-3
+### 12-3
 
 `src/core/verify.cpp` · Verifier::~Verifier() {
 
@@ -7012,7 +4678,7 @@ Block (hunk 2 of `src/core/verify.cpp` in the patch, 10 lines):
      if (ev_commit_) cudaEventDestroy(ev_commit_);
 ```
 
-### 14-4
+### 12-4
 
 `src/core/verify.cpp` · bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
 
@@ -7045,7 +4711,7 @@ Block (hunk 3 of `src/core/verify.cpp` in the patch, 19 lines):
              for (int i = 0; i < 2 && okb; ++i)
 ```
 
-### 14-5
+### 12-5
 
 `src/core/verify.cpp` · bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
 
@@ -7075,7 +4741,7 @@ Block (hunk 4 of `src/core/verify.cpp` in the patch, 16 lines):
      {
 ```
 
-### 14-6
+### 12-6
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7106,7 +4772,7 @@ Block (hunk 5 of `src/core/verify.cpp` in the patch, 17 lines):
          if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);   // #649
 ```
 
-### 14-7
+### 12-7
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7128,7 +4794,7 @@ Block (hunk 6 of `src/core/verify.cpp` in the patch, 8 lines):
          cudaStreamWaitEvent(df_side_[i], df_fork_, 0);
 ```
 
-### 14-8
+### 12-8
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7172,7 +4838,7 @@ Block (hunk 7 of `src/core/verify.cpp` in the patch, 30 lines):
                      gdn_ab_multi(xm, (const uint16_t*) wa->data, (const uint16_t*) wb->data, (const float*) wdt->data,
 ```
 
-### 14-9
+### 12-9
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7196,7 +4862,7 @@ Block (hunk 8 of `src/core/verify.cpp` in the patch, 10 lines):
                      for (int t = tb; t < te;) {
 ```
 
-### 14-10
+### 12-10
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7233,7 +4899,7 @@ Block (hunk 9 of `src/core/verify.cpp` in the patch, 23 lines):
                  if (batch_rec_) {   // each slot's recurrence over its own proposed-token group
 ```
 
-### 14-11
+### 12-11
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7269,10 +4935,10 @@ Block (hunk 10 of `src/core/verify.cpp` in the patch, 129 lines):
 +                    if (qb) bf16_gemv_fp32_mmvf_multi(mixed_ + tb * N, N, (const uint16_t*) wik->data, idx_raw + tb * ID, ID, N, ID, n, ns);
 +                    else for (int t = tb; t < te; ++t)
 +                        bf16_gemv_fp32_mmvf(mixed_ + t * N, (const uint16_t*) wik->data, idx_raw + t * ID, (int) N, (int) ID, ns);
-... 105 more lines: see 14-side-mixer.patch
+... 105 more lines: see 12-side-mixer.patch
 ```
 
-### 14-12
+### 12-12
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7300,7 +4966,7 @@ Block (hunk 11 of `src/core/verify.cpp` in the patch, 14 lines):
                  if (dec_batch && !g_no_batch_kv && !batch_rec_) {
 ```
 
-### 14-13
+### 12-13
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7378,7 +5044,7 @@ Block (hunk 12 of `src/core/verify.cpp` in the patch, 64 lines):
                  if (batch_rec_) {   // each row selects and attends over its own slot's K/V
 ```
 
-### 14-14
+### 12-14
 
 `src/core/verify.cpp` · bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 
@@ -7411,11 +5077,11 @@ Block (hunk 13 of `src/core/verify.cpp` in the patch, 19 lines):
                  qsa_kv_resolve(st, *g_, sel_ + (size_t) tb * cap_, step_ + tb * kStepCount, n, cap_, cs);
 ```
 
-## 15 ple-direct
+## 13 ple-direct
 
-`15-ple-direct.patch` — FABLE-STRATA-Porta su 0.1.43 la PLE in lettura diretta anche con la sonda lenta (STRATA_PLE_AUTO_MMAP=1 per il passaggio a mmap) e la diagnostica PLE di prefill e decode
+`13-ple-direct.patch` — FABLE-STRATA-Porta su 0.1.43 la PLE in lettura diretta anche con la sonda lenta (STRATA_PLE_AUTO_MMAP=1 per il passaggio a mmap) e la diagnostica PLE di prefill e decode
 
-### 15-1
+### 13-1
 
 `include/strata/core/verify.hpp` · public:
 
@@ -7437,7 +5103,7 @@ Block (hunk 1 of `include/strata/core/verify.hpp` in the patch, 8 lines):
      /// window), as one line; empty when off.
 ```
 
-### 15-2
+### 13-2
 
 `include/strata/ngram/ple_reader.hpp` · struct ReaderStats {
 
@@ -7459,7 +5125,7 @@ Block (hunk 1 of `include/strata/ngram/ple_reader.hpp` in the patch, 8 lines):
      double keepalive_us_max = 0;  ///< the slowest of them
 ```
 
-### 15-3
+### 13-3
 
 `src/core/verify.cpp` · constexpr float EPS = 1e-6f;
 
@@ -7480,7 +5146,7 @@ Block (hunk 1 of `src/core/verify.cpp` in the patch, 7 lines):
  struct RouteResidentCfg;
 ```
 
-### 15-4
+### 13-4
 
 `src/core/verify.cpp` · bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
 
@@ -7501,7 +5167,7 @@ Block (hunk 2 of `src/core/verify.cpp` in the patch, 7 lines):
          }
 ```
 
-### 15-5
+### 13-5
 
 `src/core/verify.cpp` · bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
 
@@ -7522,7 +5188,7 @@ Block (hunk 3 of `src/core/verify.cpp` in the patch, 7 lines):
          ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
 ```
 
-### 15-6
+### 13-6
 
 `src/core/verify.cpp` · int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
 
@@ -7543,7 +5209,7 @@ Block (hunk 4 of `src/core/verify.cpp` in the patch, 7 lines):
      if (ar_on()) {   // the zero-doorbell graph never rings: it waits only for flag 1 (stage 0's PLE rows).
 ```
 
-### 15-7
+### 13-7
 
 `src/kernels/ngram.cpp` · void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_del
 
@@ -7565,7 +5231,7 @@ Block (hunk 1 of `src/kernels/ngram.cpp` in the patch, 8 lines):
                    "blocked %.3f ms total (submit %.3f ms), cache %llu/%llu rows",
 ```
 
-### 15-8
+### 13-8
 
 `src/kernels/ngram.cpp` · std::string PleTable::io_report() const {
 
@@ -7589,7 +5255,7 @@ Block (hunk 2 of `src/kernels/ngram.cpp` in the patch, 10 lines):
                        (unsigned long long) s.keepalive_reads, s.keepalive_us_max / 1000.0);
 ```
 
-### 15-9
+### 13-9
 
 `src/ngram/ple_reader.cpp` · struct PleReader::Impl {
 
@@ -7611,7 +5277,7 @@ Block (hunk 1 of `src/ngram/ple_reader.cpp` in the patch, 8 lines):
      }
 ```
 
-### 15-10
+### 13-10
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -7638,7 +5304,7 @@ Block (hunk 1 of `src/prefill/prefill.cpp` in the patch, 13 lines):
          for (int64_t t = 0; t < T; ++t) { prev[0] = prev[1]; prev[1] = (int32_t) tokens[c0 + t]; }
 ```
 
-### 15-11
+### 13-11
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -7674,7 +5340,7 @@ Block (hunk 1 of `src/program/generate.cpp` in the patch, 22 lines):
                                           "--ple-io direct forces the old mode, --ple-io ram keeps the table in RAM)\n",
 ```
 
-### 15-12
+### 13-12
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -7698,7 +5364,7 @@ Block (hunk 2 of `src/program/generate.cpp` in the patch, 10 lines):
          }
 ```
 
-### 15-13
+### 13-13
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -7729,7 +5395,7 @@ Block (hunk 3 of `src/program/generate.cpp` in the patch, 17 lines):
              };
 ```
 
-### 15-14
+### 13-14
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -7760,17 +5426,17 @@ Block (hunk 4 of `src/program/generate.cpp` in the patch, 17 lines):
              if (!cancelled) {
 ```
 
-## 16 prefill-sm75
+## 14 prefill-sm75
 
-`16-prefill-sm75.patch` — FABLE-STRATA-Porta su 0.1.43 il prefill del Daily su sm_75: STRATA_SELECT_SIMT di default sotto sm_80, dequant con store da 16 B e hc16 sui tensor core FP16 (STRATA_TC_SM75=0 li spegne)
+`14-prefill-sm75.patch` — FABLE-STRATA-Porta su 0.1.43 il prefill del Daily su sm_75: STRATA_SELECT_SIMT di default sotto sm_80, dequant con store da 16 B e hc16 sui tensor core FP16 (STRATA_TC_SM75=0 li spegne)
 
-### 16-1
+### 14-1
 
 `include/strata/core/tc_sm75.hpp` · (new file)
 
 New file, 28 lines: see the patch.
 
-### 16-2
+### 14-2
 
 `include/strata/kernels/qsa_select.hpp` · void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
 
@@ -7792,7 +5458,7 @@ Block (hunk 1 of `include/strata/kernels/qsa_select.hpp` in the patch, 8 lines):
 
 ```
 
-### 16-3
+### 14-3
 
 `include/strata/prefill/kernels.hpp` · namespace strata::prefill {
 
@@ -7821,7 +5487,7 @@ Block (hunk 1 of `include/strata/prefill/kernels.hpp` in the patch, 15 lines):
                int64_t T, void* stream, uint16_t* mixed_h = nullptr, uint16_t* mixed16_lo = nullptr);
 ```
 
-### 16-4
+### 14-4
 
 `include/strata/prefill/kernels.hpp` · bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const
 
@@ -7855,7 +5521,7 @@ Block (hunk 2 of `include/strata/prefill/kernels.hpp` in the patch, 20 lines):
  /// mixed[t, d] = mean_c xn[t, c, d] * sigmoid(gated[t, c, d]); FP32, BF16 and FP16 (either image may be null).
 ```
 
-### 16-5
+### 14-5
 
 `include/strata/prefill/kernels.hpp` · void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in
 
@@ -7878,7 +5544,7 @@ Block (hunk 3 of `include/strata/prefill/kernels.hpp` in the patch, 9 lines):
  /// Expert blob -> FP16 (Q2_0 values are exact in FP16).
 ```
 
-### 16-6
+### 14-6
 
 `src/kernels/cuda/dequant_bf16.cu` · (file scope)
 
@@ -7899,7 +5565,7 @@ Block (hunk 1 of `src/kernels/cuda/dequant_bf16.cu` in the patch, 7 lines):
  #include <cuda_fp16.h>
 ```
 
-### 16-7
+### 14-7
 
 `src/kernels/cuda/dequant_bf16.cu` · __device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row
 
@@ -7942,7 +5608,7 @@ Block (hunk 2 of `src/kernels/cuda/dequant_bf16.cu` in the patch, 30 lines):
  // Q8_0 with four threads per block, 8 values each: the warp reads 8 consecutive blocks and writes 512 consecutive
 ```
 
-### 16-8
+### 14-8
 
 `src/kernels/cuda/dequant_bf16.cu` · void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
 
@@ -7976,7 +5642,7 @@ Block (hunk 3 of `src/kernels/cuda/dequant_bf16.cu` in the patch, 20 lines):
      case 6: STRATA_DQ(6);
 ```
 
-### 16-9
+### 14-9
 
 `src/kernels/cuda/qsa_select.cu` · bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
 
@@ -8005,7 +5671,7 @@ Block (hunk 1 of `src/kernels/cuda/qsa_select.cu` in the patch, 15 lines):
              const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
 ```
 
-### 16-10
+### 14-10
 
 `src/prefill/kernels.cu` · unsigned blocks_for(int64_t n, int t = 256) { return (unsigned) ((n + t - 1) / t
 
@@ -8028,7 +5694,7 @@ Block (hunk 1 of `src/prefill/kernels.cu` in the patch, 9 lines):
      const int c = (int) (row % HC);
 ```
 
-### 16-11
+### 14-11
 
 `src/prefill/kernels.cu` · __global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restr
 
@@ -8057,7 +5723,7 @@ Block (hunk 2 of `src/prefill/kernels.cu` in the patch, 15 lines):
      const int c = (int) (row % HC);
 ```
 
-### 16-12
+### 14-12
 
 `src/prefill/kernels.cu` · __global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __re
 
@@ -8078,7 +5744,7 @@ Block (hunk 3 of `src/prefill/kernels.cu` in the patch, 7 lines):
  __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __restrict__ rs, const float* __restrict__ w,
 ```
 
-### 16-13
+### 14-13
 
 `src/prefill/kernels.cu` · __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
 
@@ -8101,7 +5767,7 @@ Block (hunk 4 of `src/prefill/kernels.cu` in the patch, 9 lines):
      const int64_t t = row / HC;
 ```
 
-### 16-14
+### 14-14
 
 `src/prefill/kernels.cu` · __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
 
@@ -8122,7 +5788,7 @@ Block (hunk 5 of `src/prefill/kernels.cu` in the patch, 7 lines):
  // S23 (opt-in STRATA_CVEC_FUSE=1): a steered layer's FFN write, its control vector and the next half's norm in one
 ```
 
-### 16-15
+### 14-15
 
 `src/prefill/kernels.cu` · __global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(
 
@@ -8144,7 +5810,7 @@ Block (hunk 6 of `src/prefill/kernels.cu` in the patch, 8 lines):
      const int64_t row = blockIdx.x;                 // t * 4 + c
 ```
 
-### 16-16
+### 14-16
 
 `src/prefill/kernels.cu` · __global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(
 
@@ -8170,7 +5836,7 @@ Block (hunk 7 of `src/prefill/kernels.cu` in the patch, 12 lines):
      const float x = lo[i] / (float) HC;
 ```
 
-### 16-17
+### 14-17
 
 `src/prefill/kernels.cu` · __global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restric
 
@@ -8191,7 +5857,7 @@ Block (hunk 8 of `src/prefill/kernels.cu` in the patch, 7 lines):
                                uint16_t* __restrict__ mixed16, int64_t T, uint16_t* __restrict__ mixed_h,
 ```
 
-### 16-18
+### 14-18
 
 `src/prefill/kernels.cu` · __global__ void to_f16_kernel(const float* __restrict__ x, uint16_t* __restrict_
 
@@ -8218,7 +5884,7 @@ Block (hunk 9 of `src/prefill/kernels.cu` in the patch, 13 lines):
          y[i] = __half2float(__float2half_rn(x[i]));
 ```
 
-### 16-19
+### 14-19
 
 `src/prefill/kernels.cu` · void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo
 
@@ -8256,7 +5922,7 @@ Block (hunk 10 of `src/prefill/kernels.cu` in the patch, 25 lines):
  void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
 ```
 
-### 16-20
+### 14-20
 
 `src/prefill/kernels.cu` · bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const
 
@@ -8298,7 +5964,7 @@ Block (hunk 11 of `src/prefill/kernels.cu` in the patch, 28 lines):
  void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16, int64_t T, void* stream,
 ```
 
-### 16-21
+### 14-21
 
 `src/prefill/prefill.cpp` · (file scope)
 
@@ -8319,7 +5985,7 @@ Block (hunk 1 of `src/prefill/prefill.cpp` in the patch, 7 lines):
  #include "strata/kernels/cpu/native_expert.hpp"
 ```
 
-### 16-22
+### 14-22
 
 `src/prefill/prefill.cpp` · inline bool hcd_exact() {
 
@@ -8360,7 +6026,7 @@ Block (hunk 2 of `src/prefill/prefill.cpp` in the patch, 27 lines):
      return v;
 ```
 
-### 16-23
+### 14-23
 
 `src/prefill/prefill.cpp` · struct Prefill::Impl {
 
@@ -8383,7 +6049,7 @@ Block (hunk 3 of `src/prefill/prefill.cpp` in the patch, 9 lines):
      bool f16_io = false;   // HIP, STRATA_HIP_PROMPT_F16=1: this stage's 16-bit GEMMs run FP16 in and out (set in init)
 ```
 
-### 16-24
+### 14-24
 
 `src/prefill/prefill.cpp` · bool Prefill::carve(size_t T, void* alloc) {
 
@@ -8407,7 +6073,7 @@ Block (hunk 4 of `src/prefill/prefill.cpp` in the patch, 10 lines):
      m.mixed_h = o.take<uint16_t>(T * N, ok);
 ```
 
-### 16-25
+### 14-25
 
 `src/prefill/prefill.cpp` · bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
 
@@ -8429,7 +6095,7 @@ Block (hunk 5 of `src/prefill/prefill.cpp` in the patch, 8 lines):
          gr_silu(lo, lo16, nb, m.cs);
 ```
 
-### 16-26
+### 14-26
 
 `src/prefill/prefill.cpp` · uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
 
@@ -8456,7 +6122,7 @@ Block (hunk 6 of `src/prefill/prefill.cpp` in the patch, 13 lines):
      const bool f16_io = prompt_f16();   // the current device's mode (the stage's), as Prefill::init will decide it
 ```
 
-### 16-27
+### 14-27
 
 `src/prefill/prefill.cpp` · bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y,
 
@@ -8491,7 +6157,7 @@ Block (hunk 7 of `src/prefill/prefill.cpp` in the patch, 21 lines):
 
 ```
 
-### 16-28
+### 14-28
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -8526,7 +6192,7 @@ Block (hunk 8 of `src/prefill/prefill.cpp` in the patch, 21 lines):
                  bool hdown = false;
 ```
 
-### 16-29
+### 14-29
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -8555,7 +6221,7 @@ Block (hunk 9 of `src/prefill/prefill.cpp` in the patch, 15 lines):
                      if (checks > 0) {   // the default pair first, kept for the comparison
 ```
 
-### 16-30
+### 14-30
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -8583,7 +6249,7 @@ Block (hunk 10 of `src/prefill/prefill.cpp` in the patch, 14 lines):
                      gr_mix(m.xn, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h, m.mixed_bf_lo);
 ```
 
-### 16-31
+### 14-31
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -8615,7 +6281,7 @@ Block (hunk 11 of `src/prefill/prefill.cpp` in the patch, 18 lines):
                      gdn_conv(conv, m.qkv, (const float*) wc->data, m.hbuf, T, EPS, m.cs);
 ```
 
-### 16-32
+### 14-32
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -8637,7 +6303,7 @@ Block (hunk 12 of `src/prefill/prefill.cpp` in the patch, 8 lines):
                          if (old_sel || !strata::kernels::qsa_block_scores_tc(st.idx_pooled, st.idx_dead, m.q_idx + t0 * 512,
 ```
 
-### 16-33
+### 14-33
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -8659,7 +6325,7 @@ Block (hunk 13 of `src/prefill/prefill.cpp` in the patch, 8 lines):
                          cudaMemcpyAsync(a.data(), m.R, a.size() * 4, cudaMemcpyDeviceToHost, m.cs);
 ```
 
-### 16-34
+### 14-34
 
 `src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
 
@@ -8686,7 +6352,7 @@ Block (hunk 14 of `src/prefill/prefill.cpp` in the patch, 13 lines):
                      gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
 ```
 
-### 16-35
+### 14-35
 
 `src/program/generate.cpp` · (file scope)
 
@@ -8707,7 +6373,7 @@ Block (hunk 1 of `src/program/generate.cpp` in the patch, 7 lines):
  #endif
 ```
 
-### 16-36
+### 14-36
 
 `src/program/generate.cpp` · (file scope)
 
@@ -8743,7 +6409,7 @@ Block (hunk 2 of `src/program/generate.cpp` in the patch, 23 lines):
  // pinning a large arena into two CUDA contexts leaves WDDM refusing every later allocation (the 5080 + 3090 rig);
 ```
 
-### 16-37
+### 14-37
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -8768,7 +6434,7 @@ Block (hunk 3 of `src/program/generate.cpp` in the patch, 11 lines):
      if (multi_gpu && split_auto) {
 ```
 
-### 16-38
+### 14-38
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -8791,7 +6457,7 @@ Block (hunk 4 of `src/program/generate.cpp` in the patch, 9 lines):
          if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
 ```
 
-### 16-39
+### 14-39
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -8814,7 +6480,7 @@ Block (hunk 5 of `src/program/generate.cpp` in the patch, 9 lines):
              // a WARNING that names the knob: the user asked for this size, and gets fewer slots
 ```
 
-### 16-40
+### 14-40
 
 `sycl/src/prefill/kernels.dp.cpp` · void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo
 
@@ -8836,7 +6502,7 @@ Block (hunk 1 of `sycl/src/prefill/kernels.dp.cpp` in the patch, 8 lines):
              sycl::ext::oneapi::experimental::use_root_sync};
 ```
 
-### 16-41
+### 14-41
 
 `sycl/src/prefill/kernels.dp.cpp` · void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t
 
@@ -8858,7 +6524,7 @@ Block (hunk 2 of `sycl/src/prefill/kernels.dp.cpp` in the patch, 8 lines):
              sycl::ext::oneapi::experimental::use_root_sync};
 ```
 
-### 16-42
+### 14-42
 
 `sycl/src/prefill/kernels.dp.cpp` · bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const
 
@@ -8880,7 +6546,7 @@ Block (hunk 3 of `sycl/src/prefill/kernels.dp.cpp` in the patch, 8 lines):
              sycl::ext::oneapi::experimental::use_root_sync};
 ```
 
-### 16-43
+### 14-43
 
 `sycl/src/prefill/kernels.dp.cpp` · void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_l
 
@@ -8902,7 +6568,7 @@ Block (hunk 4 of `sycl/src/prefill/kernels.dp.cpp` in the patch, 8 lines):
              sycl::ext::oneapi::experimental::use_root_sync};
 ```
 
-### 16-44
+### 14-44
 
 `sycl/src/prefill/kernels.dp.cpp` · void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t
 
@@ -8924,17 +6590,17 @@ Block (hunk 5 of `sycl/src/prefill/kernels.dp.cpp` in the patch, 8 lines):
              sycl::ext::oneapi::experimental::use_root_sync};
 ```
 
-## 17 ram-core
+## 15 ram-core
 
-`17-ram-core.patch` — FABLE-STRATA-Porta su 0.1.43 il nucleo fisso per scheda senza copia RAM (STRATA_RAM_CORE=1, STRATA_RAM_CORE_SLOTS_DEV<n>)
+`15-ram-core.patch` — FABLE-STRATA-Porta su 0.1.43 il nucleo fisso per scheda senza copia RAM (STRATA_RAM_CORE=1, STRATA_RAM_CORE_SLOTS_DEV<n>)
 
-### 17-1
+### 15-1
 
 `docs/RAM_CORE.md` · (new file)
 
 New file, 114 lines: see the patch.
 
-### 17-2
+### 15-2
 
 `include/strata/core/expert_source.hpp` · private:
 
@@ -8956,7 +6622,7 @@ Block (hunk 1 of `include/strata/core/expert_source.hpp` in the patch, 8 lines):
      ArenaExpertSource& operator=(const ArenaExpertSource&) = delete;
 ```
 
-### 17-3
+### 15-3
 
 `include/strata/core/expert_source.hpp` · public:
 
@@ -9007,7 +6673,7 @@ Block (hunk 2 of `include/strata/core/expert_source.hpp` in the patch, 38 lines)
      uint64_t map_bytes_ = 0;
 ```
 
-### 17-4
+### 15-4
 
 `src/core/expert_source.cpp` · LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
 
@@ -9042,10 +6708,10 @@ Block (hunk 1 of `src/core/expert_source.cpp` in the patch, 164 lines):
 +    if (e < s) e = s;
 +}
 +bool rc_read(const std::string& path, uint64_t at, uint64_t n, uint8_t* dst) {
-... 140 more lines: see 17-ram-core.patch
+... 140 more lines: see 15-ram-core.patch
 ```
 
-### 17-5
+### 15-5
 
 `src/core/expert_source.cpp` · bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
 
@@ -9067,7 +6733,7 @@ Block (hunk 2 of `src/core/expert_source.cpp` in the patch, 8 lines):
      slice_bytes_ = a->slice_bytes;
 ```
 
-### 17-6
+### 15-6
 
 `src/core/expert_source.cpp` · void ArenaExpertSource::close() {
 
@@ -9088,7 +6754,7 @@ Block (hunk 3 of `src/core/expert_source.cpp` in the patch, 7 lines):
          arena_ = nullptr;
 ```
 
-### 17-7
+### 15-7
 
 `src/core/expert_source.cpp` · void ArenaExpertSource::close() {
 
@@ -9110,7 +6776,7 @@ Block (hunk 4 of `src/core/expert_source.cpp` in the patch, 8 lines):
  void ArenaExpertSource::prefetch(int64_t layer, int64_t expert) {
 ```
 
-### 17-8
+### 15-8
 
 `src/core/expert_source.cpp` · const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
 
@@ -9133,7 +6799,7 @@ Block (hunk 5 of `src/core/expert_source.cpp` in the patch, 9 lines):
      return base_ + strata::kernels::cpu::expert_layout().blob_offset(layer, expert);
 ```
 
-### 17-9
+### 15-9
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9156,7 +6822,7 @@ Block (hunk 1 of `src/program/generate.cpp` in the patch, 9 lines):
      // lent slot's expert is streamed during the prompt and refilled after it; measured on a 12 GB card, 32K Q2_0
 ```
 
-### 17-10
+### 15-10
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9177,7 +6843,7 @@ Block (hunk 2 of `src/program/generate.cpp` in the patch, 7 lines):
          // per layer), otherwise max_blob each.
 ```
 
-### 17-11
+### 15-11
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9236,7 +6902,7 @@ Block (hunk 3 of `src/program/generate.cpp` in the patch, 45 lines):
          // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
 ```
 
-### 17-12
+### 15-12
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9257,7 +6923,7 @@ Block (hunk 4 of `src/program/generate.cpp` in the patch, 7 lines):
              // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
 ```
 
-### 17-13
+### 15-13
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9278,7 +6944,7 @@ Block (hunk 5 of `src/program/generate.cpp` in the patch, 7 lines):
              };
 ```
 
-### 17-14
+### 15-14
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9299,7 +6965,7 @@ Block (hunk 6 of `src/program/generate.cpp` in the patch, 7 lines):
                      room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
 ```
 
-### 17-15
+### 15-15
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9344,7 +7010,7 @@ Block (hunk 7 of `src/program/generate.cpp` in the patch, 31 lines):
          // the widest window; a request without penalties gets a null buffer and takes the byte-for-byte
 ```
 
-### 17-16
+### 15-16
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9368,7 +7034,7 @@ Block (hunk 8 of `src/program/generate.cpp` in the patch, 10 lines):
                  if (cand.empty() || vict.empty()) continue;
 ```
 
-### 17-17
+### 15-17
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9389,7 +7055,7 @@ Block (hunk 9 of `src/program/generate.cpp` in the patch, 7 lines):
                  const int stn = multi_gpu ? stage_of(layer) : 0;
 ```
 
-### 17-18
+### 15-18
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9413,7 +7079,7 @@ Block (hunk 10 of `src/program/generate.cpp` in the patch, 10 lines):
          Clock::time_point el_stable_since = Clock::now();
 ```
 
-### 17-19
+### 15-19
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9435,7 +7101,7 @@ Block (hunk 11 of `src/program/generate.cpp` in the patch, 8 lines):
              pf_parts[0].first = (int32_t) (xcache.slots() - part_slots(pf_parts[0], c));
 ```
 
-### 17-20
+### 15-20
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9457,7 +7123,7 @@ Block (hunk 12 of `src/program/generate.cpp` in the patch, 8 lines):
                  }
 ```
 
-### 17-21
+### 15-21
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9479,7 +7145,7 @@ Block (hunk 13 of `src/program/generate.cpp` in the patch, 8 lines):
                  std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
 ```
 
-### 17-22
+### 15-22
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9571,7 +7237,7 @@ Block (hunk 14 of `src/program/generate.cpp` in the patch, 78 lines):
              // and a page-in while the verify graph spins on a host flag stalls the request for good
 ```
 
-### 17-23
+### 15-23
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9595,7 +7261,7 @@ Block (hunk 15 of `src/program/generate.cpp` in the patch, 10 lines):
                  const int64_t floor_b = xcache.bytes_of(floor_slots);
 ```
 
-### 17-24
+### 15-24
 
 `src/program/generate.cpp` · int main(int argc, char** argv) {
 
@@ -9616,24 +7282,24 @@ Block (hunk 16 of `src/program/generate.cpp` in the patch, 7 lines):
                              (int64_t) live.size() == p;
 ```
 
-## 18 qsa-rows
+## 16 qsa-rows
 
-`18-qsa-rows.patch` — FABLE-STRATA-Porta su 0.1.43 STRATA_QSA_ROWS=1: punteggi dell'indicizzatore QSA con le query in registri e le 4 teste ridotte in 6 shuffle (stessi bit) e qsa_rows_bench
+`16-qsa-rows.patch` — FABLE-STRATA-Porta su 0.1.43 STRATA_QSA_ROWS=1: punteggi dell'indicizzatore QSA con le query in registri e le 4 teste ridotte in 6 shuffle (stessi bit) e qsa_rows_bench
 
-### 18-1
+### 16-1
 
 `CMakeLists.txt` · if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
 
 Anchor:
 ```
-    target_include_directories(chain_step_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    target_link_libraries(chain_step_bench PRIVATE strata_kernels CUDA::cudart)
+    set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
+                         SKIP_RETURN_CODE 77)
   endif()
 ```
 Block (hunk 1 of `CMakeLists.txt` in the patch, 14 lines):
 ```diff
-     target_include_directories(chain_step_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-     target_link_libraries(chain_step_bench PRIVATE strata_kernels CUDA::cudart)
+     set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
+                          SKIP_RETURN_CODE 77)
    endif()
 +  # QSAROWS (docs/QSAROWS.md): what the T rows of a verification window cost in a QSA layer's decode kernels at a long
 +  # context (block scores, top-k, attention over each row's selection, indexer append), row by row; GPU, synthetic, no
@@ -9648,25 +7314,25 @@ Block (hunk 1 of `CMakeLists.txt` in the patch, 14 lines):
    # 262144-cell capacity (the top-k dispatch follows the capacity) and exits non-zero on a failed gate
 ```
 
-### 18-2
+### 16-2
 
 `docs/QSAROWS.md` · (new file)
 
 New file, 300 lines: see the patch.
 
-### 18-3
+### 16-3
 
 `docs/qsa_rows_bench_2026-10-12.txt` · (new file)
 
 New file, 59 lines: see the patch.
 
-### 18-4
+### 16-4
 
 `docs/qsa_rows_bench_rows_2026-10-12.txt` · (new file)
 
 New file, 67 lines: see the patch.
 
-### 18-5
+### 16-5
 
 `include/strata/kernels/qsa_select.hpp` · void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
 
@@ -9692,7 +7358,7 @@ Block (hunk 1 of `include/strata/kernels/qsa_select.hpp` in the patch, 13 lines)
  /// On AMD it is the gfx12 (RDNA4) WMMA kernel (a three-way bf16 split, six products); false on any other AMD target.
 ```
 
-### 18-6
+### 16-6
 
 `src/kernels/cuda/qsa_select.cu` · __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(co
 
@@ -9728,10 +7394,10 @@ Block (hunk 1 of `src/kernels/cuda/qsa_select.cu` in the patch, 82 lines):
 +        s_nkv[threadIdx.x] = steps[threadIdx.x * kStepCount + kStepNKv];
 +        s_nbid[threadIdx.x] = steps[threadIdx.x * kStepCount + kStepNBid];
 +    }
-... 58 more lines: see 18-qsa-rows.patch
+... 58 more lines: see 16-qsa-rows.patch
 ```
 
-### 18-7
+### 16-7
 
 `src/kernels/cuda/qsa_select.cu` · void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
 
@@ -9754,7 +7420,7 @@ Block (hunk 2 of `src/kernels/cuda/qsa_select.cu` in the patch, 9 lines):
          block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
 ```
 
-### 18-8
+### 16-8
 
 `src/kernels/cuda/qsa_select.cu` · void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
 
@@ -9788,17 +7454,17 @@ Block (hunk 3 of `src/kernels/cuda/qsa_select.cu` in the patch, 21 lines):
      if (nq <= 0) return true;
 ```
 
-### 18-9
+### 16-9
 
 `src/kernels/qsa_rows_bench.cpp` · (new file)
 
 New file, 354 lines: see the patch.
 
-## 19 expdec
+## 17 expdec
 
-`19-expdec.patch` — FABLE-STRATA-Porta su 0.1.43 EXPDEC: attivazioni del gruppo in shared e R righe per lane per gli esperti VRAM (STRATA_EXPDEC=1, down dietro STRATA_EXPDEC_DOWN=1) e expdec_bench
+`17-expdec.patch` — FABLE-STRATA-Porta su 0.1.43 EXPDEC: attivazioni del gruppo in shared e R righe per lane per gli esperti VRAM (STRATA_EXPDEC=1, down dietro STRATA_EXPDEC_DOWN=1) e expdec_bench
 
-### 19-1
+### 17-1
 
 `CMakeLists.txt` · if(STRATA_NATIVE_EXPERTS)
 
@@ -9825,13 +7491,13 @@ Block (hunk 1 of `CMakeLists.txt` in the patch, 13 lines):
        # at 2560/640: GPU and CPU experts against the float reference, GPU dequantizers against to_float.
 ```
 
-### 19-2
+### 17-2
 
 `docs/EXPERTDEC.md` · (new file)
 
 New file, 322 lines: see the patch.
 
-### 19-3
+### 17-3
 
 `include/strata/kernels/iq_kernels.hpp` · void native_grouped_set_v1(bool v1);
 
@@ -9873,7 +7539,7 @@ Block (hunk 1 of `include/strata/kernels/iq_kernels.hpp` in the patch, 28 lines)
  /// bitwise the same results.  Set before graph capture; captured graphs keep the kernels they captured.
 ```
 
-### 19-4
+### 17-4
 
 `src/kernels/cuda/iq_kernels.cu` · template<> struct Split<16> {   // IQ2_XXS
 
@@ -9903,7 +7569,7 @@ Block (hunk 1 of `src/kernels/cuda/iq_kernels.cu` in the patch, 16 lines):
  struct SplitLs2 {
 ```
 
-### 19-5
+### 17-5
 
 `src/kernels/cuda/iq_kernels.cu` · struct SplitLs2 {
 
@@ -9933,7 +7599,7 @@ Block (hunk 2 of `src/kernels/cuda/iq_kernels.cu` in the patch, 16 lines):
  template<> struct Split<17> : SplitLs2 {   // IQ2_XS
 ```
 
-### 19-6
+### 17-6
 
 `src/kernels/cuda/iq_kernels.cu` · template<> inline constexpr bool kSplit<18> = true;
 
@@ -9967,7 +7633,7 @@ Block (hunk 3 of `src/kernels/cuda/iq_kernels.cu` in the patch, 20 lines):
              r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
 ```
 
-### 19-7
+### 17-7
 
 `src/kernels/cuda/iq_kernels.cu` · template<> struct Split<18> {   // IQ3_XXS
 
@@ -10018,7 +7684,7 @@ Block (hunk 4 of `src/kernels/cuda/iq_kernels.cu` in the patch, 37 lines):
              r.g[l0 + 0] = __vsub4(grid_pos.x ^ signs0, signs0);
 ```
 
-### 19-8
+### 17-8
 
 `src/kernels/cuda/iq_kernels.cu` · template<> struct Split<21> {   // IQ3_S
 
@@ -10046,7 +7712,7 @@ Block (hunk 5 of `src/kernels/cuda/iq_kernels.cu` in the patch, 14 lines):
  template<> struct Split<29> {   // IQ1_M
 ```
 
-### 19-9
+### 17-9
 
 `src/kernels/cuda/iq_kernels.cu` · template<> struct Split<20> {   // IQ4_NL
 
@@ -10076,7 +7742,7 @@ Block (hunk 6 of `src/kernels/cuda/iq_kernels.cu` in the patch, 16 lines):
  template<> struct Split<23> {   // IQ4_XS
 ```
 
-### 19-10
+### 17-10
 
 `src/kernels/cuda/iq_kernels.cu` · template<> struct Split<42> {   // Q2_0
 
@@ -10106,7 +7772,7 @@ Block (hunk 7 of `src/kernels/cuda/iq_kernels.cu` in the patch, 16 lines):
  // One row against the n <= NC activations x + off[0..n) (n >= 1, warp-uniform; offsets in q8_1 blocks, 32-bit to
 ```
 
-### 19-11
+### 17-11
 
 `src/kernels/cuda/iq_kernels.cu` · __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
 
@@ -10142,10 +7808,10 @@ Block (hunk 8 of `src/kernels/cuda/iq_kernels.cu` in the patch, 369 lines):
 +#endif
 +constexpr int ED_NC = GRP_NC;   // entries staged at once
 +constexpr int ED_XB = 80;       // q8_1 blocks of a gate/up row (n_embd 2560)
-... 345 more lines: see 19-expdec.patch
+... 345 more lines: see 17-expdec.patch
 ```
 
-### 19-12
+### 17-12
 
 `src/kernels/cuda/iq_kernels.cu` · void s27_launch_ts(bool ts, const NativeExpertLayout& L, int64_t cap_groups, cud
 
@@ -10180,10 +7846,10 @@ Block (hunk 9 of `src/kernels/cuda/iq_kernels.cu` in the patch, 144 lines):
 +int expdec_dr() { return g_expdec_dr == 1 || g_expdec_dr == 2 ? g_expdec_dr : 4; }
 +
 +bool expdec_gu_ok(const NativeExpertLayout& L) {
-... 120 more lines: see 19-expdec.patch
+... 120 more lines: see 17-expdec.patch
 ```
 
-### 19-13
+### 17-13
 
 `src/kernels/cuda/iq_kernels.cu` · bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
 
@@ -10232,7 +7898,7 @@ Block (hunk 10 of `src/kernels/cuda/iq_kernels.cu` in the patch, 36 lines):
                             int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
 ```
 
-### 19-14
+### 17-14
 
 `src/kernels/cuda/iq_kernels.cu` · void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 
@@ -10253,7 +7919,7 @@ Block (hunk 11 of `src/kernels/cuda/iq_kernels.cu` in the patch, 7 lines):
          STRATA_GU_FMTS(STRATA_GU)
 ```
 
-### 19-15
+### 17-15
 
 `src/kernels/cuda/iq_kernels.cu` · void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 
@@ -10274,7 +7940,7 @@ Block (hunk 12 of `src/kernels/cuda/iq_kernels.cu` in the patch, 7 lines):
          STRATA_D_FMTS(STRATA_DOWN)
 ```
 
-### 19-16
+### 17-16
 
 `src/kernels/expdec_bench.cpp` · (new file)
 

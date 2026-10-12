@@ -12,10 +12,10 @@ SIDE_MIXER acceso perche' a/b stanno sul ramo. Con STRATA_SIDE_MIXER acceso STRA
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
-index f2cccfc8..a58341b6 100644
+index 875ae1db..2f064a1f 100644
 --- a/include/strata/core/verify.hpp
 +++ b/include/strata/core/verify.hpp
-@@ -495,6 +495,13 @@ private:
+@@ -450,6 +450,13 @@ private:
      cudaEvent_t df_join_[2] = {};
      cudaGraphExec_t exec_[9] = {};
      cudaGraphExec_t exec_nr_[9] = {};   // #871: the doorbell variant of a stage that is all-resident otherwise
@@ -30,7 +30,7 @@ index f2cccfc8..a58341b6 100644
  
      // mapped staging (host pointer, device alias)
 diff --git a/src/core/verify.cpp b/src/core/verify.cpp
-index 2d734f0c..d457cee6 100644
+index 833ab8c1..01abf329 100644
 --- a/src/core/verify.cpp
 +++ b/src/core/verify.cpp
 @@ -153,6 +153,9 @@ inline bool g_qfuse_hc() {
@@ -43,7 +43,7 @@ index 2d734f0c..d457cee6 100644
  inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_QFUSE"); return v != nullptr && std::atoi(v) != 0; }(); return on; }
  #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
  
-@@ -507,6 +510,10 @@ Verifier::~Verifier() {
+@@ -500,6 +503,10 @@ Verifier::~Verifier() {
      if (cs_ && cs_ != ext_stream_) cudaStreamDestroy(cs_);   // set_stream: the stage's stream, shared, not ours
      if (sh_cs_) cudaStreamDestroy(sh_cs_);
      if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
@@ -54,7 +54,7 @@ index 2d734f0c..d457cee6 100644
      if (commit_done_) cudaEventDestroy(commit_done_);
      if (ev_done_) cudaEventDestroy(ev_done_);
      if (ev_commit_) cudaEventDestroy(ev_commit_);
-@@ -761,6 +768,19 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
+@@ -754,6 +761,19 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
  #else
          df_branch_ = v != nullptr && std::atoi(v) != 0;
  #endif
@@ -74,7 +74,7 @@ index 2d734f0c..d457cee6 100644
          if (df_branch_ && df_fork_ == nullptr) {
              bool okb = cudaEventCreateWithFlags(&df_fork_, cudaEventDisableTiming) == cudaSuccess;
              for (int i = 0; i < 2 && okb; ++i)
-@@ -791,6 +811,16 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
+@@ -784,6 +804,16 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
              all_resident_ = all_ok;
          }
      }
@@ -91,7 +91,7 @@ index 2d734f0c..d457cee6 100644
      // E-6: a layer whose routed experts are all resident is planned on the device (STRATA_VERIFY_DEVICE_PLAN=1: on;
      // exact, but neutral on RIBPC 1-2 GPUs: off by default)
      {
-@@ -856,6 +886,17 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -849,6 +879,17 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
      // Pipelined windows must wait for the host verdict/snapshot fence before mutating state.
      const bool self_commit = T == 1 && !always_publish_ && !batch_rec_ && !g_qfuse() && one_token_self_commit();   // see Verifier::commit
      static const bool dec_batch = [] { const char* v = std::getenv("STRATA_DEC_BATCH"); return v == nullptr || std::atoi(v) != 0; }();
@@ -109,7 +109,7 @@ index 2d734f0c..d457cee6 100644
      auto stamp = [&](int64_t l, int i, int grp) {
          if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
          if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);   // #649
-@@ -881,7 +922,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -874,7 +915,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
      // makes side i depend on everything captured on `cs` so far, join(i) makes `cs` depend on everything captured on
      // side i: a branch never races with what came before its fork or after its join.  Not in a split or batch window,
      // nor under the stage profiler (whose stamps are on `cs`).
@@ -118,7 +118,7 @@ index 2d734f0c..d457cee6 100644
      auto fork = [&](int i) {
          cudaEventRecord(df_fork_, cs);
          cudaStreamWaitEvent(df_side_[i], df_fork_, 0);
-@@ -1132,7 +1173,30 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1125,7 +1166,30 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                  float* hb = h_L_ + (size_t) gi * MT * C;
                  float* gate = gate_L_ + (size_t) gi * MT * HV;
                  float* beta = beta_L_ + (size_t) gi * MT * HV;
@@ -149,7 +149,7 @@ index 2d734f0c..d457cee6 100644
                  if (br) {   // STRATA_DF_BRANCH: a/b and z beside q/k/v and the conv; all of them read only this layer's input
                      fork(0);
                      gdn_ab_multi(xm, (const uint16_t*) wa->data, (const uint16_t*) wb->data, (const float*) wdt->data,
-@@ -1142,8 +1206,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1135,8 +1199,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                      native_mmvq(wg->native_type, wg->native_data, xq_, z_ + (size_t) tb * ZV, (int) N, (int) ZV, n,
                                  df_side_[1]);
                  }
@@ -160,7 +160,7 @@ index 2d734f0c..d457cee6 100644
                  stamp(l, 2, grp);
                  if (batch_rec_) {   // contiguous rows may be proposals for the same slot
                      for (int t = tb; t < te;) {
-@@ -1170,13 +1234,21 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1163,13 +1227,21 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                      join(0);
                      join(1);
                  } else {
@@ -184,7 +184,7 @@ index 2d734f0c..d457cee6 100644
                  }
                  // the recurrence from the untouched state over tokens [0, te); outputs only for this group's
                  if (batch_rec_) {   // each slot's recurrence over its own proposed-token group
-@@ -1257,9 +1329,126 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1250,9 +1322,126 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                IQ * ID, N, IQ * ID, n, df_side_[1]);
                      norm_rope_on(qidx_ + tb * IQ * ID, wiqn, (int) (n * IQ), (int) ID, pos_i + tb * IQ, df_side_[1]);
                  }
@@ -314,7 +314,7 @@ index 2d734f0c..d457cee6 100644
                  stamp(l, 7, grp);
                  mm(wk, kcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
                  mm(wv, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
-@@ -1272,13 +1461,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1265,13 +1454,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                      fwht256_inplace_cuda(vcur_ + tb * NKV * HD, (int64_t) n * NKV, cs);
                  }
                  stamp(l, 8, grp);
@@ -329,7 +329,7 @@ index 2d734f0c..d457cee6 100644
                  // #783 PR-d (stuchapin909): the window's K/V cells in one launch per pool instead of one per token (a
                  // batch's rows each have their own K/V, so that case keeps the loop)
                  if (dec_batch && !g_no_batch_kv && !batch_rec_) {
-@@ -1326,61 +1509,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1319,61 +1502,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                          kv_append_step(st.k_pool, st.v_pool, st.page_table, step_t, kcur_ + t * NKV * HD,
                                         vcur_ + t * NKV * HD, s, cs, &st.host);
                  }
@@ -394,7 +394,7 @@ index 2d734f0c..d457cee6 100644
                  }
                  stamp(l, 10, grp);
                  if (batch_rec_) {   // each row selects and attends over its own slot's K/V
-@@ -1397,10 +1532,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+@@ -1390,10 +1525,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                attn_ + t * NH * HD, 1, cs);
                      }
                  } else {

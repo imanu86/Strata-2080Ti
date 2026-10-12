@@ -10,10 +10,10 @@ Da lab/candidate2 87e0102f..52a74f6a (lab/expertdec), applicate pulite. B-A-B +1
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 0027880f..5f551b0c 100644
+index b579874d..9536e1fc 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -1550,6 +1550,13 @@ if(STRATA_NATIVE_EXPERTS)
+@@ -1542,6 +1542,13 @@ if(STRATA_NATIVE_EXPERTS)
      add_executable(native_expert_bench src/kernels/native_expert_bench.cpp)
      target_include_directories(native_expert_bench PRIVATE ${_strata_gpu_include_directories})
      target_link_libraries(native_expert_bench PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})
