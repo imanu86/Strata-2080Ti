@@ -158,4 +158,67 @@ void native_gr_post_multi(const float* residual, const float* block_out, const f
         residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc), r_stride, b_stride, i_stride);
     check_launch();
 }
+
+// ======================= chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1) ==========================================
+// native_moe_combine's combine_k10_vec4 (native_moe.cu, compiled with the same --use_fast_math as this file) and `post`
+// above in ONE launch for one token: a thread owns 4 columns; y = the vec4 kernel's expression (the first product
+// rounded on its own, one fmaf per expert in order, the shared row added), then post's expression per stream,
+// `__fmaf_rn(y, weight_c, residual)`.  `y_out` (nullable) also keeps the combined row.  output may equal residual
+// exactly (each thread reads and writes only its own elements).
+namespace {
+__global__ void combine_k10_post(const float4* __restrict__ parts4, const float* __restrict__ weights,
+                                 const float4* __restrict__ shared4, float4* __restrict__ y4, const float* residual,
+                                 const float* __restrict__ inject, float* output, int n_embd, int hc, float scale,
+                                 long long n4) {
+    const long long c4 = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+    if (c4 >= n4) return;
+    const float w0 = __ldg(weights + 0);
+    const float4 p0 = parts4[c4];
+    float4 sum = make_float4(p0.x * w0, p0.y * w0, p0.z * w0, p0.w * w0);
+#pragma unroll
+    for (int expert = 1; expert < 10; ++expert) {
+        const float w = __ldg(weights + expert);
+        const float4 p = parts4[(long long) expert * n4 + c4];
+        sum.x = fmaf(p.x, w, sum.x);
+        sum.y = fmaf(p.y, w, sum.y);
+        sum.z = fmaf(p.z, w, sum.z);
+        sum.w = fmaf(p.w, w, sum.w);
+    }
+    const float4 sh = shared4[c4];
+    sum.x += sh.x;
+    sum.y += sh.y;
+    sum.z += sh.z;
+    sum.w += sh.w;
+    if (y4 != nullptr) y4[c4] = sum;
+    for (int c = 0; c < hc; ++c) {
+        const float weight = scale_zero_bias(sigmoid(scale_zero_bias(inject[c], scale)), 2.0f);
+        const std::size_t o = std::size_t(c) * n_embd + std::size_t(c4) * 4;
+        const float4 r = *reinterpret_cast<const float4*>(residual + o);
+        float4 v;
+        v.x = __fmaf_rn(sum.x, weight, r.x);
+        v.y = __fmaf_rn(sum.y, weight, r.y);
+        v.z = __fmaf_rn(sum.z, weight, r.z);
+        v.w = __fmaf_rn(sum.w, weight, r.w);
+        *reinterpret_cast<float4*>(output + o) = v;
+    }
+}
+} // namespace
+
+void native_moe_combine_k10_post(const float* parts, const float* weights, const float* shared, float* y_out,
+                                 const float* residual, const float* inject, float* output, int n_embd, int hc,
+                                 void* stream) {
+    check_shape(n_embd, hc);
+    check_pointer(parts); check_pointer(weights); check_pointer(shared); check_pointer(residual);
+    check_pointer(inject); check_pointer(output);
+    if (n_embd % 4 != 0 ||
+        ((reinterpret_cast<std::uintptr_t>(parts) | reinterpret_cast<std::uintptr_t>(shared) |
+          reinterpret_cast<std::uintptr_t>(residual) | reinterpret_cast<std::uintptr_t>(output) |
+          reinterpret_cast<std::uintptr_t>(y_out)) & 15u) != 0)
+        throw std::invalid_argument("native combine+post requires n_embd a multiple of 4 and 16-byte aligned rows");
+    const long long n4 = n_embd / 4;
+    combine_k10_post<<<unsigned((n4 + 127) / 128), 128, 0, static_cast<cudaStream_t>(stream)>>>(
+        reinterpret_cast<const float4*>(parts), weights, reinterpret_cast<const float4*>(shared),
+        reinterpret_cast<float4*>(y_out), residual, inject, output, n_embd, hc, 1.0f / float(hc), n4);
+    check_launch();
+}
 } // namespace strata::kernels

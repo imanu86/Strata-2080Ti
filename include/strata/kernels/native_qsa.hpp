@@ -32,4 +32,16 @@ void native_qsa_rms_norm_grouped(const float* input, const float* gamma, float* 
 void native_qsa_gate_apply(const float* attn, const float* q_full, float* output,
                            int n_head, int head_dim, void* stream);
 
+// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): native_qsa_rms_norm_weighted followed by native_quantize_q8_1
+// of its output (n_cols * n_rows contiguous values, n_cols a multiple of 32) in ONE launch: the norm kernel, then the
+// quantizer's expressions in its epilogue on the warp's 32 consecutive columns (the quantizer's own block and lane
+// order).  `output` may be null (the normalized row is not kept); `x_q8_1` is native_q8_1_bytes(n_cols, n_rows).
+// Same file and flags as the norm, the quantizer's helpers (q8_1_finite.hpp) under those flags: the same bytes.
+void native_qsa_rms_norm_q8_1(const float* input, const float* gamma, float* output, void* x_q8_1,
+                              int n_cols, int n_rows, float epsilon, void* stream);
+// native_qsa_gate_apply followed by native_quantize_q8_1 of its output (n_head * head_dim a multiple of 32) in one
+// launch; `output` may be null.
+void native_qsa_gate_q8_1(const float* attn, const float* q_full, float* output, void* x_q8_1,
+                          int n_head, int head_dim, void* stream);
+
 } // namespace strata::kernels

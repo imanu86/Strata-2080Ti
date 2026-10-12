@@ -156,6 +156,16 @@ bool multi_block_head_ops();
 /// True where the verify head's and the draft's greedy pick should be argmax_rows: sm_80 to sm_89 (the one-block
 /// kernel is slow there; sm_90+ has sample_tokens' cluster kernel, other cards keep sample_tokens).
 bool argmax_rows_wanted();
+/// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): a draft step's tail in one launch, the same words as
+/// sample_tokens (greedy) + row_top_prob(_split) + map_ids (`table`, null = none) + mtp_select (+ force_token via
+/// `force`) on row 0 of `logits` (n_vocab values): out_ids[0] and probs_dev[0] get the mapped pick and its probability,
+/// then R_dst[:] = R_src[*row_dev], *tok_dst = force[j] >= 0 ? force[j] : out_ids[*row_dev], out_p[j] =
+/// probs_dev[*row_dev], out[j] = out_ids[*row_dev] (out / out_p / force may be mapped host memory).  `scratch`:
+/// mtp_head_tail_scratch_bytes(), zero before the first launch (left so).  Graph-capturable.  CUDA only.
+uint64_t mtp_head_tail_scratch_bytes();
+void mtp_head_tail(const float* logits, int n_vocab, const int32_t* table, const float* R_src, int64_t R_stride,
+                   const int32_t* row_dev, float* R_dst, int32_t* out_ids, float* probs_dev, int32_t* tok_dst,
+                   int32_t* out, int j, float* out_p, const int32_t* force, void* scratch, void* stream);
 /// Dense-attention step records for `n` cells: [cell, cell+1, (cell+1)/4, cell+1] from cells[i] (device memory).
 void dense_steps(const int32_t* cells, int n, int32_t* steps, void* stream);
 /// A sliding attention window: for `n` step records (kStepCount ints each, n_kv at [1]) the selection becomes the

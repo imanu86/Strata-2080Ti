@@ -866,7 +866,103 @@ __global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int 
     rows[row].counter = 0;
 }
 
+// chainfuse (docs/CHAINFUSE.md, STRATA_CHAIN_FUSE2=1): a draft step's tail in ONE launch - sample_tokens' greedy pick
+// over the draft head's row 0 (argmax_rows' slices and rule: the lowest index of the largest value above -inf, NaN
+// never, 0 when there is none), row_top_prob's probability of it (row_top_prob_split's tree: virtual thread vt of 1024
+// sums i = vt, vt + 1024, ... with __expf(l[i] - m), xor warp sums, the 32 warp sums added in order, 1 / tot), map_ids
+// (`table`, null for the whole vocabulary) and mtp_select with force_token folded in (the same words).  Grid (nb),
+// 1024 threads: every block copies its share of mtp_select's R row and scans its slice of the logits; the last block
+// to finish merges the picks and does the rest.  Replaces five launches (sampler_greedy / row_top_prob_split /
+// map_ids / mtp_select / force_token), ~34 us of one-block kernels on the 2080 Ti.  `scratch`: an ArgRow (zero before
+// the first launch, left so).  Row 0 only: the drafter's full layer runs one row at a time (record_rest).
+__global__ void __launch_bounds__(1024) mtp_head_tail_kernel(const float* __restrict__ logits, int n, int per_block,
+                                                            const int32_t* __restrict__ table,
+                                                            const float* __restrict__ R_src, int64_t stride,
+                                                            const int32_t* __restrict__ row_dev,
+                                                            float* __restrict__ R_dst, int32_t* out_ids,
+                                                            float* probs_dev, int32_t* tok_dst, int32_t* out, int j,
+                                                            float* out_p, const int32_t* force, ArgRow* __restrict__ sc) {
+    const int b = (int) blockIdx.x, nb = (int) gridDim.x;
+    const int row = *row_dev;
+    // mtp_select's copy of row `row`, spread over every block
+    for (int64_t i = (int64_t) b * blockDim.x + threadIdx.x; i < stride; i += (int64_t) nb * blockDim.x)
+        R_dst[i] = R_src[(size_t) row * stride + i];
+    // argmax_rows' slice [lo, hi) of the logits
+    const int lo = b * per_block, hi = min(n, lo + per_block);
+    float bv = __int_as_float(0xff800000);   // -inf
+    int bi = n;
+    for (int v = lo + (int) threadIdx.x; v < hi; v += (int) blockDim.x) {
+        const float s = logits[v];
+        if (s > bv) { bv = s; bi = v; }
+    }
+    arg_block(bv, bi, n);
+    __shared__ bool last;
+    if (threadIdx.x == 0) {
+        sc->v[b] = bv;
+        sc->i[b] = bi;
+        __threadfence();
+        last = atomicAdd(&sc->counter, 1u) == (unsigned) (nb - 1);
+    }
+    __syncthreads();
+    if (!last) return;
+    __threadfence();
+    bv = __int_as_float(0xff800000);
+    bi = n;
+    if ((int) threadIdx.x < nb) {
+        bv = ((volatile const float*) sc->v)[threadIdx.x];
+        bi = ((volatile const int*) sc->i)[threadIdx.x];
+    }
+    arg_block(bv, bi, n);
+    __shared__ int s_idx;
+    if (threadIdx.x == 0) {
+        s_idx = bi < n ? bi : 0;   // no value above -inf: 0, as sample_tokens' one-block kernel
+        sc->counter = 0;
+    }
+    __syncthreads();
+    const int idx = s_idx;
+    // row_top_prob's probability of the pick: this block's 1024 threads are row_top_prob_split's 8 x 128 virtual ones
+    const float m = logits[idx];
+    float s = 0.0f;
+    for (int i = (int) threadIdx.x; i < n; i += 1024) s += __expf(logits[i] - m);
+    for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+    __shared__ float parts[32];
+    if ((threadIdx.x & 31) == 0) parts[threadIdx.x >> 5] = s;
+    __syncthreads();
+    if (threadIdx.x != 0) return;
+    float tot = 0.0f;
+    for (int w = 0; w < 32; ++w) tot += parts[w];
+    const float prob = 1.0f / tot;
+    // what argmax + map_ids and row_top_prob left in device memory (row 0), then mtp_select's words on row `row`
+    out_ids[0] = table != nullptr ? table[idx] : idx;
+    probs_dev[0] = prob;
+    const int32_t tok = out_ids[row];
+    const int32_t f = force != nullptr ? ((const volatile int32_t*) force)[j] : -1;
+    *tok_dst = f >= 0 ? f : tok;
+    if (out_p != nullptr) ((volatile float*) out_p)[j] = probs_dev[row];
+    __threadfence_system();
+    if (out != nullptr) ((volatile int32_t*) out)[j] = tok;
+}
+
 }  // namespace
+
+uint64_t mtp_head_tail_scratch_bytes() { return sizeof(ArgRow); }
+
+void mtp_head_tail(const float* logits, int n_vocab, const int32_t* table, const float* R_src, int64_t R_stride,
+                   const int32_t* row_dev, float* R_dst, int32_t* out_ids, float* probs_dev, int32_t* tok_dst,
+                   int32_t* out, int j, float* out_p, const int32_t* force, void* scratch, void* stream) {
+    if (!logits || n_vocab <= 0 || !R_src || R_stride <= 0 || !row_dev || !R_dst || !out_ids || !probs_dev || !tok_dst ||
+        !scratch) {
+        std::fprintf(stderr, "mtp_head_tail: invalid arguments\n");
+        std::exit(1);
+    }
+    const int nb = std::min(kArgMaxBlocks, std::max(1, (n_vocab + 4095) / 4096));
+    const int per_block = (n_vocab + nb - 1) / nb;
+    mtp_head_tail_kernel<<<(unsigned) nb, 1024, 0, (cudaStream_t) stream>>>(logits, n_vocab, per_block, table, R_src,
+                                                                           R_stride, row_dev, R_dst, out_ids, probs_dev,
+                                                                           tok_dst, out, j, out_p, force,
+                                                                           (ArgRow*) scratch);
+    check("mtp_head_tail");
+}
 
 uint64_t argmax_rows_scratch_bytes(int n_rows) { return (uint64_t) n_rows * sizeof(ArgRow); }
 
@@ -892,6 +988,12 @@ void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int3
 uint64_t argmax_rows_scratch_bytes(int) { return 0; }
 void argmax_rows(const float*, int, int, void*, int32_t*, void*) {
     std::fprintf(stderr, "argmax_rows: not built for this backend\n");
+    std::exit(1);
+}
+uint64_t mtp_head_tail_scratch_bytes() { return 0; }
+void mtp_head_tail(const float*, int, const int32_t*, const float*, int64_t, const int32_t*, float*, int32_t*, float*,
+                   int32_t*, int32_t*, int, float*, const int32_t*, void*, void*) {
+    std::fprintf(stderr, "mtp_head_tail: not built for this backend (STRATA_CHAIN_FUSE2 is CUDA only)\n");
     std::exit(1);
 }
 uint64_t row_top_prob_scratch_bytes(int) { return 0; }
