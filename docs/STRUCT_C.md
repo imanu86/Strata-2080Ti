@@ -195,3 +195,29 @@ fresh+Bbeside 43,77 → 38,65, fresh+afterRB+Bbeside 34,87 → 33,44.
   path)`. Da leggere `strata pipeline classes` (fresche) e `rollback cost`. SERVE/BGAP: non proporli.
 - **Compilato sì, provato sì (corse brevi a cache fissa, bitwise con `--adapt-every 0`), B-A-B no, installato no.**
   SERVE con `--elastic` e con `--adapt-async`: compilato, mai eseguito (tutte le corse senza `--elastic`).
+
+## 6. Al banco reale del Daily (lab/struct-c2, misura prima del pool separato per la B)
+
+Banco forzato L01+L02 da 1024 token (`STRATA_FORCE_IDS`/`STRATA_FORCE_WINDOWS` del `DET-x15`), `--elastic`, cache
+auto, PLE da D:, braccio B di speed4 + `STRATA_QSA_ROWS=1`, build `build-structc-4f3cdee8`, `STRATA_SC_WAITSTAT=1`
+(`DET-x20-sc-bws`). Hit 96,8% (L01) / 97,9% (L02), 0,78 / 0,43 esperti CPU per layer-finestra, pool CPU 2,8 / 1,6 ms a
+finestra (M).
+
+| richiesta | stadio | muro GPU | waitA (attese > 0,1 ms: n, ms) | esperti VRAM | righe CPU + combine (> 0,1 ms: n, ms) |
+|---|---|---|---|---|---|
+| L01 | 0 · 3060 | 9,94 | 0,35 (0,45: 0,20) | 2,33 | 0,67 (0,78: 0,32) |
+| L01 | 1 · 2080 Ti | 15,88 | 0,59 (0,73: 0,21) | 3,67 | 1,25 (1,62: 0,34) |
+| L02 | 0 | 9,26 | 0,24 (0,21: 0,11) | 2,21 | 0,60 (0,60: 0,29) |
+| L02 | 1 | 14,78 | 0,50 (0,38: 0,14) | 3,45 | 1,00 (0,71: 0,16) |
+
+ms/finestra 26,56 (L01) / 25,32 (L02), in linea col DET-x15.
+
+**Lettura.** Al banco l'attesa della 2080 Ti sul piano è 0,5-0,6 ms a finestra, di cui solo 0,14-0,21 ms in attese
+lunghe; il resto sono ~32 attese brevi (il nodo fuso attesa+copia e la latenza dell'host, ~10-15 µs l'una). Il pool
+separato per la B toglierebbe solo la parte di quelle attese dovuta a un layer di B in corso: **tetto ~0,2-0,4 ms a
+finestra (≤ 1,5%), stima realistica ≤ 0,2 ms** (S). All'83% di hit valeva 1-2,5 ms perché il pool era occupato 9-11
+ms a finestra; al 97% lo è 1,6-2,8 ms. **Non vale 2-3 giorni.** La prova con SERVE + BGAP allo stesso banco
+(`DET-x20-sc-bgws`) è peggiore: con la PLE da D: la gather (sul thread del server) blocca anche lo stadio 1 (waitA
+1,4 ms in L01; in L02 la gather è esplosa a 35 ms di stage per finestra, corsa da buttare). Il tempo che resta fuori
+dai muri GPU nelle finestre fresche (29,8 − 9,9 − 15,9 ≈ 4 ms in L01: catena MTP, passaggio, verdetto) è più grande di
+tutte le attese sull'host messe insieme.
