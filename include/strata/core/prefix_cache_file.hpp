@@ -61,4 +61,31 @@ bool prefix_cache_read(const std::filesystem::path &path,
                        const std::vector<int32_t> &expected_prefix,
                        int32_t next_token, bool cvec, SavedConversation &out,
                        std::string &error);
+
+// Several prefixes beside one another (fork, STRATA_PREFIX_DISK_MULTI): one
+// file per prefix, named `<base>.<16 hex digits>` from a 64-bit FNV-1a of the
+// prefix ids and the frontier token, so two clients with different system
+// prompts no longer overwrite each other's file.  The name is only the
+// lookup: the file still holds its full prefix and prefix_cache_read checks
+// it token by token (a hash collision reads as a miss).
+std::filesystem::path prefix_cache_keyed_path(
+    const std::filesystem::path &base, const std::vector<int32_t> &prefix,
+    int32_t next_token);
+// The keyed files of `base` (its own directory, `<base filename>.` + 16 hex
+// digits; temporary files excluded), with their sizes and write times.
+struct PrefixCacheEntry {
+  std::filesystem::path path;
+  uint64_t bytes = 0;
+  std::filesystem::file_time_type written{};
+};
+std::vector<PrefixCacheEntry>
+prefix_cache_keyed_files(const std::filesystem::path &base);
+// Least recently written first: removes keyed files of `base` until they add
+// up to at most `cap_bytes`, never `keep`.  Returns how many were removed.
+// A read hit refreshes its file's write time (prefix_cache_touch), so the
+// order is the order of use.
+size_t prefix_cache_evict(const std::filesystem::path &base,
+                          uint64_t cap_bytes,
+                          const std::filesystem::path &keep);
+void prefix_cache_touch(const std::filesystem::path &path);
 } // namespace strata::core

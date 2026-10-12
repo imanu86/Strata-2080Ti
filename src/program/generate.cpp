@@ -8162,6 +8162,11 @@ int main(int argc, char** argv) {
             if (wchar_t* block = GetEnvironmentStringsW()) {
                 for (const wchar_t* p = block; *p; p += std::wcslen(p) + 1) {
                     if (_wcsnicmp(p, L"STRATA_", 7) && _wcsnicmp(p, L"CUDA_", 5)) continue;
+                    // fork (TTFT): the switches of the disk store and of the PLE read-ahead change no computed
+                    // value, so they do not make the saved prefixes another engine's
+                    if (!_wcsnicmp(p, L"STRATA_PREFIX_DISK_MULTI=", 25) || !_wcsnicmp(p, L"STRATA_PREFIX_DISK_SYNC=", 24) ||
+                        !_wcsnicmp(p, L"STRATA_PLE_LOOKAHEAD=", 21))
+                        continue;
                     const int count = WideCharToMultiByte(CP_UTF8, 0, p, -1, nullptr, 0, nullptr, nullptr);
                     std::string entry(size_t(count > 0 ? count : 1), '\0');
                     if (count > 0 && WideCharToMultiByte(CP_UTF8, 0, p, -1, entry.data(), count, nullptr, nullptr)) {
@@ -8172,7 +8177,10 @@ int main(int argc, char** argv) {
             } else { prefix_disk_enabled = false; err = "environment identity unavailable"; }
 #else
             for (char** p = environ; p && *p; ++p)
-                if (!std::strncmp(*p, "STRATA_", 7) || !std::strncmp(*p, "CUDA_", 5)) environment.emplace_back(*p);
+                if ((!std::strncmp(*p, "STRATA_", 7) || !std::strncmp(*p, "CUDA_", 5)) &&
+                    std::strncmp(*p, "STRATA_PREFIX_DISK_MULTI=", 25) && std::strncmp(*p, "STRATA_PREFIX_DISK_SYNC=", 24) &&
+                    std::strncmp(*p, "STRATA_PLE_LOOKAHEAD=", 21))
+                    environment.emplace_back(*p);
 #endif
             std::sort(environment.begin(), environment.end());
             settings.insert(settings.end(), environment.begin(), environment.end());
@@ -8196,6 +8204,26 @@ int main(int argc, char** argv) {
                          prefix_disk_enabled ? "" : ": ", prefix_disk_enabled ? "" : err.c_str());
             err.clear();
         }
+        // fork (TTFT): STRATA_PREFIX_DISK_MULTI=<GiB> keeps one file per prefix beside --prompt-cache-file
+        // (`<file>.<16 hex>`, prefix_cache_keyed_path), least recently used out past the cap, so two clients (Claude
+        // Code and DSH) no longer overwrite each other's system turn; the single file is still read when no keyed one
+        // matches.  Unset or 0: the one file, as before.
+        const uint64_t prefix_multi_cap = [] {
+            const char* v = std::getenv("STRATA_PREFIX_DISK_MULTI");
+            const double gib = v != nullptr ? std::atof(v) : 0.0;
+            return gib > 0.0 ? (uint64_t) (gib * 1024.0 * 1024.0 * 1024.0) : (uint64_t) 0;
+        }();
+        if (prefix_disk_enabled && prefix_multi_cap > 0)
+            std::fprintf(stderr, "strata serve: prefix disk cache: one file per prefix (%s.<key>), at most %.1f GiB\n",
+                         o.prompt_cache_file.c_str(), (double) prefix_multi_cap / (1024.0 * 1024.0 * 1024.0));
+        // fork (TTFT): the file is written on a thread once the image is on the host (the SHA-256 and the write were
+        // ~0.5 s of the 0.76 s a 26K system turn added to the first request's prompt); STRATA_PREFIX_DISK_SYNC=1
+        // writes it inline as before.  A read waits for a write in flight; the engine's exit waits for it too.
+        static const bool prefix_write_sync = [] {
+            const char* v = std::getenv("STRATA_PREFIX_DISK_SYNC");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        std::future<void> prefix_write_job;
         strata::core::ConversationCache conversations(
             o.prompt_cache > 0 ? (size_t) o.conversation_cache_mib * 1024 * 1024 : 0,
             (size_t) o.conversation_cache_slots, o.conversation_cache_min_tokens);
@@ -11164,13 +11192,22 @@ int main(int argc, char** argv) {
                 if (disk_root >= o.prompt_cache_root && disk_root <= int64_t(strata::core::prefix_cache_max_tokens) &&
                         disk_root > std::max(resume, incoming ? incoming_tokens : int64_t(0))) {
                     const auto t0 = Clock::now();
+                    if (prefix_write_job.valid()) prefix_write_job.wait();   // a save in flight: this read sees it
+                    std::vector<int32_t> prefix(ids.begin(), ids.begin() + disk_root);
+                    // STRATA_PREFIX_DISK_MULTI: this prefix's own file when there is one, else the single file
+                    std::filesystem::path disk_path = o.prompt_cache_file;
+                    if (prefix_multi_cap > 0) {
+                        std::error_code kec;
+                        auto keyed = strata::core::prefix_cache_keyed_path(o.prompt_cache_file, prefix,
+                                                                           int32_t(ids[size_t(disk_root)]));
+                        if (std::filesystem::is_regular_file(keyed, kec) && !kec) disk_path = std::move(keyed);
+                    }
                     std::error_code ec;
-                    const auto bytes = std::filesystem::file_size(o.prompt_cache_file, ec);
+                    const auto bytes = std::filesystem::file_size(disk_path, ec);
                     const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
                     const uint64_t held = incoming ? incoming->bytes() : 0;
                     if (!ec && bytes <= strata::core::prefix_cache_max_bytes + 88 &&
                             strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes + held + 1024 * 1024, floor)) {
-                        std::vector<int32_t> prefix(ids.begin(), ids.begin() + disk_root);
                         strata::core::SavedConversation image;
                         // One GPU: the whole-session form, as before.  A layer split: the same checks as a parked
                         // image - each later stage's image against its own session (the draft K/V with the last
@@ -11189,9 +11226,11 @@ int main(int argc, char** argv) {
                             return strata::core::conversation_snapshot_validate(im, ss, g,
                                        static_cast<const strata::core::QsaState*>(nullptr), err);
                         };
-                        if (strata::core::prefix_cache_read(o.prompt_cache_file, prefix_identity, prefix,
+                        if (strata::core::prefix_cache_read(disk_path, prefix_identity, prefix,
                                 int32_t(ids[size_t(disk_root)]), want_cvec, image, err) &&
                                 disk_image_valid(image)) {
+                            if (prefix_multi_cap > 0 && disk_path != o.prompt_cache_file)
+                                strata::core::prefix_cache_touch(disk_path);   // the LRU order is the order of use
                             incoming.emplace(std::move(image)); incoming_tokens = disk_root;
                             incoming_live = true; incoming_disk = true;
                             slot_source = -1;   // batch slots: the disk root is the longer match
@@ -12071,12 +12110,44 @@ int main(int argc, char** argv) {
                                 // A CUDA copy/synchronization error can poison the live session.
                                 std::printf("ERR capturing prefix disk cache: %s\n", err.c_str()); return 1;
                             }
-                            const bool stored = strata::core::prefix_cache_write(o.prompt_cache_file, prefix_identity,
-                                                    int32_t(ids[size_t(to)]), image, err);
-                            std::fprintf(stderr, "strata serve: prefix disk cache: %s %lld tokens, %zu bytes in %.1f ms%s%s\n",
-                                         stored ? "saved" : "skip saving", (long long) to, image.bytes(),
-                                         std::chrono::duration<double, std::milli>(Clock::now() - save_start).count(),
-                                         stored ? "" : ": ", stored ? "" : err.c_str());
+                            // fork (TTFT): the image is on the host, the SHA-256 and the file write need nothing of
+                            // the GPU: a thread does them (STRATA_PREFIX_DISK_SYNC=1: inline, as before)
+                            const double capture_ms = std::chrono::duration<double, std::milli>(Clock::now() - save_start).count();
+                            const std::filesystem::path disk_target = prefix_multi_cap > 0
+                                ? strata::core::prefix_cache_keyed_path(o.prompt_cache_file, prefix, int32_t(ids[size_t(to)]))
+                                : std::filesystem::path(o.prompt_cache_file);
+                            auto write_job = [img = std::make_shared<strata::core::SavedConversation>(std::move(image)),
+                                              base = std::filesystem::path(o.prompt_cache_file), disk_target,
+                                              identity = prefix_identity, next = int32_t(ids[size_t(to)]),
+                                              tokens = (long long) to, cap = prefix_multi_cap, save_start, capture_ms,
+                                              background = !prefix_write_sync]() {
+                                if (background) strata::aux_cpus::pin_current_thread();
+                                std::string we;
+                                const bool stored = strata::core::prefix_cache_write(disk_target, identity, next, *img, we);
+                                const size_t evicted = stored && cap > 0 ? strata::core::prefix_cache_evict(base, cap, disk_target) : 0;
+                                std::string tail;
+                                char buf[160];
+                                if (background) {
+                                    std::snprintf(buf, sizeof buf, " (on a thread; the request waited %.1f ms for the capture)",
+                                                  capture_ms);
+                                    tail += buf;
+                                }
+                                if (cap > 0) {
+                                    std::snprintf(buf, sizeof buf, " -> %s, %zu older removed",
+                                                  disk_target.filename().string().c_str(), evicted);
+                                    tail += buf;
+                                }
+                                std::fprintf(stderr, "strata serve: prefix disk cache: %s %lld tokens, %zu bytes in %.1f ms%s%s%s\n",
+                                             stored ? "saved" : "skip saving", tokens, img->bytes(),
+                                             std::chrono::duration<double, std::milli>(Clock::now() - save_start).count(),
+                                             stored ? "" : ": ", stored ? "" : we.c_str(), tail.c_str());
+                            };
+                            if (prefix_write_sync) {
+                                write_job();
+                            } else {
+                                if (prefix_write_job.valid()) prefix_write_job.wait();
+                                prefix_write_job = std::async(std::launch::async, std::move(write_job));
+                            }
                         } else {
                             std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (size, geometry or physical RAM admission)\n");
                         }
