@@ -199,6 +199,15 @@ you use all the time stay on the counter, and the rest waits in the pantry.
 The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Every part and its numbers:
 [the details](docs/DETAILS.md#how-it-works) and the [paper](docs/paper/Strata-Paper.pdf).
 
+## This fork's patch stack
+
+This fork (`imanu86/Strata-2080Ti`) carries a stack of patches on top of upstream Strata, one lever each, for a
+two-card Windows box (RTX 2080 Ti + RTX 3060, `--layer-split`). The registry is [`stack/`](stack/INDEX.md): what each
+patch does, its switch, where it comes from, what it measured, and for every insertion point an anchor of 2-3 unpatched
+lines. To re-base the stack on a new upstream, read `stack/INDEX.md`, then run
+`python stack/check_anchors.py --check <upstream checkout> --rev <new tag>`: it says which anchors moved and which
+patches apply clean, need a 3-way merge or a rewrite.
+
 ## Credits and license
 
 The model is [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) by the Qwen team. It was
