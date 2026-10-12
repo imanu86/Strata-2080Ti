@@ -289,6 +289,12 @@ si incollano dopo la verifica. Il commento a @Niko1221 va solo sulla prima (ple-
 
 | [#2077](https://github.com/Niko1221/Strata/pull/2077) prefisso su disco (`--prompt-cache-file`) | `pr/prefix-disk` 25e12d73 | 12/10 10:50 | build 0.1.43 rc 0 (sha `855b6c09…`); due avvii con l'opzione (identità 17-23 ms), risposte uguali; il salvataggio/ripresa vero non si esercita con un prompt di 70 token: dichiarato nel corpo (gira nel Daily dal 0.1.40) |
 
-Le altre si aprono una per una appena passano lo smoke (coda `coda_pr_u43.sh`): prefix-disk, attn-daily (parità verde),
-simt-default, dequant-sm75; hc16 sospesa; ram-core no.
+| [#2080](https://github.com/Niko1221/Strata/pull/2080) SELECT_SIMT di default sotto sm_80 | `pr/prefill-simt-default` 7b260f3a | 12/10 11:08 | build 0.1.43 rc 0 (sha `08a496ec…`), smoke ok (pronto in 77 s, risposta uguale) |
+| [#2081](https://github.com/Niko1221/Strata/pull/2081) dequant con store da 16 B su sm_75 | `pr/prefill-dequant-sm75` 58bb72bd | 12/10 11:08 | build 0.1.43 rc 0 (sha `26ad6269…`), smoke ok |
+
+Non aperte: **hc16** (`pr/prefill-hc16-sm75`): da sola **non compila** su 0.1.43 (`tc_sm75.hpp` sta nel commit del dequant,
+#2081) e si sovrappone a `STRATA_BF16_TC`; resta sospesa finché #2081 non entra e non c'è l'A/B contro `BF16_TC=1`.
+**ram-core**: dipende da #1117 (non si apre). Serie chiusa alle 11:08; coda `coda_pr_u43.sh` finita (`== fine coda PR 11:07`).
+Lo smoke di ogni PR: build con `build_lock.py` nel worktree `_tmp-up`, avvio con la config r2 senza `--elastic`/`--prompt-cache-file`
+(porta 8102), `/health` `loaded`, una risposta («2 + 2 is 4.»), stesso testo per tutte.
 
