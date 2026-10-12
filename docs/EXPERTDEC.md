@@ -58,9 +58,11 @@ remoto. Le conclusioni sopra vengono dal modello, dal SASS e dalla scomposizione
   bench 2): 4 = fino a 64 registri (4 blocchi per SM come il default, 8 B di stack), 2 = fino a 128 (2 blocchi per SM);
   il down resta a 2 (Q2_0 R 4: 106 registri).
 - Formati: gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21), IQ2_S (22) a n_embd 2560 (`n_ff` multiplo di
-  64); down Q2_0 (42) a n_ff 640, e IQ4_NL (20) solo con `STRATA_EXPDEC_D20=1` (dal bench non guadagna: il kernel di
-  default ha già l'hq in shared). Ogni ruolo decide da sé; un formato fuori lista tiene il kernel di default.
-  `STRATA_OLD_IQ_MMVQ=1` spegne EXPDEC come spegne i multi.
+  64). Il down solo con `STRATA_EXPDEC_DOWN=1` (Q2_0 (42) a n_ff 640; IQ4_NL (20) anche con `STRATA_EXPDEC_D20=1`, dal
+  bench non guadagna: il kernel di default ha già l'hq in shared): **di default EXPDEC prende il solo gate/up**, perché
+  nel motore il down Q2_0 con EXPDEC è risultato ~10% più lento del default (§7) pur essendo 0,78 nel bench. Ogni ruolo
+  decide da sé; un formato fuori lista tiene il kernel di default. `STRATA_OLD_IQ_MMVQ=1` spegne EXPDEC come spegne i
+  multi.
 - API (`iq_kernels.hpp`): `native_expert_set_expdec`, `native_expert_set_expdec_params` /
   `native_expert_expdec_params` (`NativeExpertExpdecParams`), `native_expert_expdec_takes`. Letti all'avvio
   dall'ambiente; i grafi catturati tengono i kernel catturati.
@@ -83,9 +85,10 @@ build-sm7586\expdec_bench [reps=300] [device=-1] [groups=20] [coppie=all] [scelt
 ```
 
 - Coppie: le 10 del modello (5 gate/up × 2 down) o `21/20,16/42`. Scelte: `def` (riferimento) e
-  `dec[:r<1|2>][:d<1|2|4>][:b<2|4>][:x<0|1>][:g<n>][:h<n>][:m<n>]` (r righe per lane del gate/up, d del down, b MINB
-  del gate/up, x EXPDEC anche per IQ4_NL, g/h righe per blocco con 0 = auto, m minimo di blocchi; i campi mancanti
-  dal motore, cioè dall'ambiente `STRATA_EXPDEC_*` o dai default). Forme: `real` = ogni token sceglie 10 esperti fra
+  `dec[:r<1|2>][:d<1|2|4>][:b<2|4>][:w<0|1>][:x<0|1>][:g<n>][:h<n>][:m<n>]` (r righe per lane del gate/up, d del down,
+  b MINB del gate/up, w EXPDEC anche sul down (il default del motore è il solo gate/up), x anche per IQ4_NL, g/h righe
+  per blocco con 0 = auto, m minimo di blocchi; i campi mancanti dal motore, cioè dall'ambiente `STRATA_EXPDEC_*` o dai
+  default). Le misure dei §4 e §6 sono state fatte con il down acceso (`dec` di allora = `dec:w1` di oggi). Forme: `real` = ogni token sceglie 10 esperti fra
   `groups` distinti (T = 1: 10 gruppi × 1 entrata; T = 2: 20 × 1; T = 4: 20 gruppi, 40 entrate); `single` = 10 T gruppi
   di una entrata; `both` stampa anche la scomposizione **a** = (single T=4 − real T=2) / 20 (µs per esperto) e
   **b** = (real T=4 − real T=2) / 20 (µs per entrata).
@@ -237,6 +240,74 @@ desktop compreso). Nel motore il 42% delle finestre è a T = 1.
 Pronto per il B-A-B end-to-end (lo lancia l'owner): stesso exe, braccio B con `STRATA_EXPDEC=1`, braccio A senza; testo
 identico atteso (bitwise), da guardare `strata decode timing` per T e il profilo `VRAM hits`.
 
+## 7. Nel motore: prova che i kernel girano e dove va il tempo (nsys, 12/10)
+
+Il B-A-B dell'owner (`DET-x2-expdec-{a,b1,b2}`, build `ff8614a6`, config del candidato, B con `STRATA_EXPDEC=1`) è
+neutro: −0,3% (forbice −2,2 / +1,7), 26,06 ms/finestra su L02 in entrambi i bracci; classi fresh 27,9 → 27,75 / 27,5
+ms, speculative 18,8 → 18,6 / 18,9. Il log di B non diceva nulla di EXPDEC: da `e4885f1d` `native_expert_grouped`
+scrive una riga `strata expdec: CUDAn <ruolo> type T: expdec_*_kernel R .. MINB .., N rows per block, grid X x Y (cap G
+groups), captured into a graph` la prima volta che incontra un (ruolo, formato) (e `not covered: the default kernel
+runs` per i formati fuori lista, qui il down IQ4_NL).
+
+Due catture nsys sullo stesso build `e4885f1d` (`DET-x2-expdec-nsysA` = default, `-nsysB` = `STRATA_EXPDEC=1`; banco
+forzato L01 16 token + L02 200 token = 96 finestre di L02, stesse opzioni e `STRATA_FORCE_*` del B-A-B; `nsys profile
+--trace=cuda --cuda-graph-trace=node`; `nsys_rows.py` sul `.sqlite` in `D:\ds4_work\strata\nsys\`; cartelle in
+`20261004_routed_keep\`).
+
+**I kernel girano.** In B: `expdec_gu_kernel` 6 720 lanci sulla 2080 Ti (64 per finestra = 32 layer × 2 gruppi) e 5 472
+sulla 3060; `expdec_down_kernel` 3 570 (34 per finestra: i 17 layer Q2_0 dello stadio 1) e 4 446; il down IQ4_NL resta
+`native_down_multi_kernel` (30 per finestra). Nel log di B le sette righe `strata expdec:` (gate/up 16/17/18/21/22 e
+down 42 presi, down 20 non coperto), tutte `captured into a graph`. In A zero lanci `expdec_*`.
+
+**Quanto rendono nel motore** (mediane per finestra, ms, T = 1 / 2 / 3 / 4; dev1 = 2080 Ti = stadio 1, dev0 = 3060 =
+stadio 0):
+
+| | A (default) | B (EXPDEC) |
+|---|---|---|
+| 2080 Ti gate/up kernel | 1,60 / 2,58 / 3,51 / 4,16 | **1,42 / 2,07 / 2,75 / 3,20** (−11 / −20 / −22 / −23%) |
+| 2080 Ti gate/up, pendenza per riga | +0,86 | **+0,60** |
+| 2080 Ti down (Q2_0 + IQ4_NL) | 0,73 / 1,12 / 1,50 / 1,78 | 0,82 / 1,20 / 1,60 / 1,88 (Q2_0 expdec 0,42 / 0,61 / 0,83 / 0,97 + IQ4_NL default 0,40 / 0,59 / 0,77 / 0,91) |
+| 2080 Ti famiglia esperti | 3,08 / 4,48 / 5,81 / 6,89 | 3,01 / 4,09 / 5,19 / 6,03 |
+| 2080 Ti `wait_flag_ge` (GPU che aspetta l'host) | 2,45 / 2,23 / 4,52 / 6,97 | 1,58 / 1,88 / 5,37 / 6,35 |
+| 2080 Ti buchi fra i nodi del grafo | 5,7 / 5,7 / 6,2 / 5,4 | 4,9 / 4,9 / 4,4 / 5,1 |
+| 2080 Ti muro del grafo | 19,6 / 22,5 / 27,8 / 32,9 | 18,5 / 20,7 / 26,5 / 30,4 |
+| 3060 gate/up kernel | 0,77 / 1,43 / 1,97 / 2,23 | 0,80 / 1,21 / 1,83 / 1,84 |
+| 3060 down | 0,54 / 0,95 / 1,36 / 1,62 | 0,51 / 0,78 / 1,08 / 1,18 |
+| 3060 muro del grafo | 13,0 / 14,5 / 16,4 / 19,3 | 10,9 / 12,7 / 12,9 / 17,1 |
+
+(Sotto nsys tutto è più lento del banco pulito: `decode timing` 45,4 ms/finestra in A e 41,3 in B contro 26 nel
+B-A-B, `wait_flag` 2-7 ms contro 1,5-2,6 di `DET-qsarows-nsys2`; valgono i confronti A/B, non gli assoluti.)
+
+**Lettura.**
+
+1. Il gate/up rende come nel micro-bench: −20/−23% a T ≥ 2 sulla 2080 Ti, pendenza +0,86 → +0,60 ms per riga (il bench
+   prevedeva 4,16 × 0,74 = 3,08 a T = 4; misurato 3,20). Il down Q2_0 invece nel motore è **~10% più lento** del default
+   (28,5 µs per lancio contro ~25,6 a T = 4) dove il bench dava 0,78: la differenza è la geometria. La regola `rb` auto
+   conta i blocchi su `cap_groups` = n·K (10 / 20 / 30 / 40), ma i gruppi reali di una finestra sono ~12 / 18 / 22 / 24:
+   a T = 4 sceglie 128 righe per blocco (down) e 64 (gate/up) dove il bench, con `cap` = gruppi veri, lavorava a 64 e
+   32. **Verificato con `-nsysB2`** (`STRATA_EXPDEC_RB=32 STRATA_EXPDEC_DRB=64`): gate/up 1,35 / 2,10 / 2,75 / 3,20 e
+   down Q2_0 0,42 / 0,61 / 0,82 / 1,04, identici a B: la geometria non c'entra. Il down Q2_0 nel motore resta ~10%
+   peggio (probabile la convivenza con la catena del drafter sulla stessa scheda e i 106 registri contro 61: 2 blocchi
+   per SM invece di 4; non misurato oltre). Da `e4885f1d`+1 il down è dietro `STRATA_EXPDEC_DOWN=1` e **di default
+   EXPDEC prende il solo gate/up**.
+2. Il risparmio di kernel per finestra a T medio ≈ 2 è ~0,4-0,5 ms sullo stadio 1 (gate/up −0,5, down +0,1) e ~0,4 sullo
+   stadio 0: sul banco pulito è il **2% di 26 ms**, sotto la forbice del B-A-B (±2%). Sotto nsys il muro dello stadio 1
+   è sceso di 1,1-2,5 ms per finestra, ma lì conta anche il rumore dell'host (`wait_flag`).
+3. Perché non può essere di più: sullo stadio 1 gli esperti VRAM sono il 15-20% del muro (3-7 ms su 20-33), e il resto
+   del tempo di una finestra non è nei kernel: 26 ms/finestra del B-A-B contro ~20 ms di muro del grafo a T = 2 (QSAROWS:
+   ~6 ms fra verdetto, lancio della catena, F0→L1 e GPU-reach), 1,5-2,6 ms di `wait_flag` (l'host che pianifica il layer
+   mentre la GPU aspetta; qui 2-7 ms), 3,5-5 ms di buchi fra i 1397 nodi del grafo. Un kernel esperti al 100% della
+   banda toglierebbe al massimo altri ~1 ms per finestra (−4%); le voci piatte dell'host e del grafo valgono 2-3 volte
+   tanto.
+
+**Proposta.** (a) Tenere EXPDEC acceso nel candidato (bitwise, −20/−23% sul kernel gate/up a T ≥ 2, nessun costo
+altrove) col nuovo default = solo gate/up; l'effetto atteso sul banco è −0,5 ms per finestra (~2%), misurabile solo con
+più run o con nsys, non con un B-A-B singolo a ±2%. (b) Non aspettarsi dal lato esperti più del 2-4% per finestra: il
+prossimo ms per finestra sta nei buchi fra i nodi (fusioni come `CHAINFUSE`), nell'attesa dell'host per layer
+(`CRITPATH`/`DEVPLAN`) e nei ~6 ms host fra una finestra e l'altra. (c) Il lato pesi (§5, tile in shared) resta la via
+per il gate/up a T = 1 (~1 ms piatto). (d) Il down Q2_0: capire perché nel motore perde (nsys con la catena del drafter
+spenta, o `STRATA_EXPDEC_DR=2`), prima di riaccenderlo.
+
 ## Stato
 
 Build di `ff8614a6` (codice; i commit successivi toccano solo questa pagina): compilata con `build_lock.py` (Release,
@@ -245,3 +316,7 @@ CUDA 75;86, test spenti), rc 0. `strata.exe` sha256
 `moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\build-expertdec-ff8614a6\`; accanto
 `source\serve` e `source\tools` del worktree e `strata-vision.exe` di `build-candidate-5dea5258`. **Compilato sì,
 micro-bench sì (`expdec_bench`, 2 iterazioni, bitwise), installato no, provato nel motore no.**
+
+Build di `e4885f1d` (= `ff8614a6` + la riga di log `strata expdec:`): `strata.exe` sha256
+`affd6c1ec680ab8336e0929aa80254266eda179db9974fa45bc9a38346100a0c`, in `build-expertdec-e4885f1d\` con `build.json`;
+provata nel motore solo nelle catture nsys `DET-x2-expdec-nsys{A,B,B2}` (§7). Il B-A-B lo lancia l'owner.

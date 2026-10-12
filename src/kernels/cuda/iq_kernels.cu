@@ -3098,6 +3098,10 @@ int g_expdec_r = env_int_or("STRATA_EXPDEC_R", 1);          // gate/up rows per 
 int g_expdec_dr = env_int_or("STRATA_EXPDEC_DR", 4);        // down rows per lane: 1, 2, 4 (Q2_0: R=4 wins on both cards)
 int g_expdec_minb = env_int_or("STRATA_EXPDEC_MINB", STRATA_EXPDEC_MINB);   // gate/up __launch_bounds__ min blocks: 2 (<= 128 regs) or 4 (<= 64)
 int g_expdec_d20 = env_int_or("STRATA_EXPDEC_D20", 0);      // 1: EXPDEC also for the IQ4_NL down (bench: no gain, default kernel)
+// 1: EXPDEC for the down too (Q2_0; IQ4_NL with _D20).  Default 0: in the engine (nsys DET-x2-expdec-nsysB/B2) the Q2_0
+// down with EXPDEC was ~10% slower than the default kernel although the bench alone had it at 0.78, so by default
+// EXPDEC takes the gate/up only (-20/-23% at T >= 2 on the 2080 Ti in the engine).
+int g_expdec_down = env_int_or("STRATA_EXPDEC_DOWN", 0);
 int g_expdec_rb = env_int_or("STRATA_EXPDEC_RB", 0);        // gate/up rows per block (0 = auto)
 int g_expdec_drb = env_int_or("STRATA_EXPDEC_DRB", 0);      // down rows per block (0 = auto)
 int g_expdec_minblk = env_int_or("STRATA_EXPDEC_MINBLK", 800);   // auto: the most rows per block that keep this many blocks
@@ -3109,7 +3113,8 @@ bool expdec_gu_ok(const NativeExpertLayout& L) {
     return fmt && L.n_embd == 32 * ED_XB && L.n_ff % 64 == 0 && L.n_ff > 0;
 }
 bool expdec_down_ok(const NativeExpertLayout& L) {
-    return ((L.d_type == 20 && g_expdec_d20) || L.d_type == 42) && L.n_ff == 32 * ED_HB && L.n_embd % 128 == 0 && L.n_embd > 0;
+    return g_expdec_down && ((L.d_type == 20 && g_expdec_d20) || L.d_type == 42) && L.n_ff == 32 * ED_HB && L.n_embd % 128 == 0 &&
+           L.n_embd > 0;
 }
 // rows per block: `knob` rounded up to the rows per pass, or (0) doubled from one pass while ceil(nrow / rb) x
 // cap_groups blocks stay >= g_expdec_minblk (cap_groups: the launch's group rows; every block row g >= n_groups returns)
@@ -4009,6 +4014,7 @@ void native_expert_set_expdec_params(const NativeExpertExpdecParams& p) {
     if (p.down_rows_per_lane > 0) g_expdec_dr = p.down_rows_per_lane;
     if (p.gu_min_blocks_per_sm > 0) g_expdec_minb = p.gu_min_blocks_per_sm;
     if (p.down_iq4_nl >= 0) g_expdec_d20 = p.down_iq4_nl;
+    if (p.down >= 0) g_expdec_down = p.down;
     if (p.gu_rows_per_block >= 0) g_expdec_rb = p.gu_rows_per_block;
     if (p.down_rows_per_block >= 0) g_expdec_drb = p.down_rows_per_block;
     if (p.min_blocks > 0) g_expdec_minblk = p.min_blocks;
@@ -4019,6 +4025,7 @@ NativeExpertExpdecParams native_expert_expdec_params() {
     p.down_rows_per_lane = expdec_dr();
     p.gu_min_blocks_per_sm = g_expdec_minb >= 4 ? 4 : 2;
     p.down_iq4_nl = g_expdec_d20 ? 1 : 0;
+    p.down = g_expdec_down ? 1 : 0;
     p.gu_rows_per_block = g_expdec_rb;
     p.down_rows_per_block = g_expdec_drb;
     p.min_blocks = g_expdec_minblk;

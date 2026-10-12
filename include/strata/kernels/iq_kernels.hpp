@@ -91,8 +91,10 @@ int native_expert_expdec();
 /// (2 = up to 128 registers, 4 = up to 64), EXPDEC for the IQ4_NL down too, gate/up and down rows per block (0 = auto
 /// from the launch's groups), the auto rule's minimum blocks.  In the setter a field <= 0 (< 0 for the two rows per
 /// block and down_iq4_nl) keeps the current value.
+/// `down` (STRATA_EXPDEC_DOWN, default 0): EXPDEC for the down too; by default only the gate/up (in the engine the
+/// Q2_0 down was ~10% slower with EXPDEC, docs/EXPERTDEC.md par. 7).
 struct NativeExpertExpdecParams {
-    int gu_rows_per_lane = 0, down_rows_per_lane = 0, gu_min_blocks_per_sm = 0, down_iq4_nl = -1;
+    int gu_rows_per_lane = 0, down_rows_per_lane = 0, gu_min_blocks_per_sm = 0, down_iq4_nl = -1, down = -1;
     int gu_rows_per_block = -1, down_rows_per_block = -1, min_blocks = 0;
 };
 void native_expert_set_expdec_params(const NativeExpertExpdecParams& p);

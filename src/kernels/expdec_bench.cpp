@@ -7,11 +7,12 @@
 // (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type ids ("21/20,16/42")
 // or "all" (the 10 pairs).  `choices` is a comma list of kernel choices:
 //   def                     the default kernels (STRATA_EXPDEC off); the reference for the bitwise check
-//   dec[:r<n>][:d<n>][:b<n>][:x<n>][:g<n>][:h<n>][:m<n>]
+//   dec[:r<n>][:d<n>][:b<n>][:w<n>][:x<n>][:g<n>][:h<n>][:m<n>]
 //                           EXPDEC with r = gate/up rows per lane (1, 2), d = down rows per lane (1, 2, 4), b = the
-//                           gate/up kernel's min blocks per SM (2 | 4), x = 1 EXPDEC for the IQ4_NL down too, g / h =
-//                           gate/up / down rows per block (0 = auto), m = the auto rule's minimum blocks; a missing
-//                           field takes the engine's value (the environment's STRATA_EXPDEC_* or its default)
+//                           gate/up kernel's min blocks per SM (2 | 4), w = 1 EXPDEC for the down too (the engine's
+//                           default is the gate/up only), x = 1 also for the IQ4_NL down, g / h = gate/up / down rows
+//                           per block (0 = auto), m = the auto rule's minimum blocks; a missing field takes the
+//                           engine's value (the environment's STRATA_EXPDEC_* or its default)
 // `shape`: real = every token picks 10 experts out of `groups` distinct ones (as fp_expert_bench: T=1 10 groups x 1
 // entry, T=2 20 x 1, T=4 20 groups with 40 entries); single = 10 T groups of one entry each (the same entries as `real`
 // spread over distinct experts); both = the two, plus the decomposition at the end: per-expert cost a = (single T=4 -
@@ -89,6 +90,7 @@ bool parse_choice(const std::string& s, Choice& c) {
             case 'd': if (v != 1 && v != 2 && v != 4) return false; c.p.down_rows_per_lane = v; break;
             case 'b': if (v != 2 && v != 4) return false; c.p.gu_min_blocks_per_sm = v; break;
             case 'x': if (v != 0 && v != 1) return false; c.p.down_iq4_nl = v; break;
+            case 'w': if (v != 0 && v != 1) return false; c.p.down = v; break;   // EXPDEC for the down (engine default 0)
             case 'g': if (v < 0) return false; c.p.gu_rows_per_block = v; break;
             case 'h': if (v < 0) return false; c.p.down_rows_per_block = v; break;
             case 'm': if (v <= 0) return false; c.p.min_blocks = v; break;
