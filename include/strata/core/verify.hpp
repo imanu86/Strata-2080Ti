@@ -221,6 +221,13 @@ public:
     /// Capture every window size and the commit graph now (a capture syncs the stream: never with a window in flight).
     bool capture_all(std::string& err);
     bool pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string& err);
+    /// hostgap STRATA_HG_PRELAUNCH: `pl_launch` of a later stage's window before the stage before has finished: the
+    /// graph runs up to its hand-off copies and spins there until `pl_release` (the host, once the stage before is
+    /// done).  Only when `hg_ready()`; the window then counts as in flight (service, done, pl_finish as always).
+    bool pl_prelaunch(int T, const int32_t* tokens, int64_t pos0, std::string& err);
+    void pl_release();
+    bool hg_ready() const { return exec_hg_[1] != nullptr; }
+    bool pl_prelaunched() const { return hg_win_; }
     /// Stage a window ahead of its launch (positions, and the PLE rows from `ple_prev` = the two tokens before the
     /// window as they WILL be, their pages prefetched).  A later `pl_launch` of the same window (T, pos0, tokens, and
     /// `ss.ple_prev` equal to `ple_prev` by then) skips the staging; anything else stages again.
@@ -367,6 +374,16 @@ private:
     bool cp_win_ = false;                 ///< the window in flight runs it
     std::vector<uint8_t> cp_mask_;        ///< per layer of [lb_, le_): planned on the device when every route hits
     cudaGraphExec_t exec_cp_[9] = {};
+    // hostgap STRATA_HG_PRELAUNCH=1 (capture_all, docs/HOSTGAP.md): a later stage's window graph launched while the
+    // stage before still runs, its hand-off copies behind a spin on a mapped word the host raises once that stage is
+    // done (pl_release).  The 1397-node cudaGraphLaunch (~1 ms of host) and the host's polling of the stage before
+    // leave the critical path.  Same kernels, same order: the output is bitwise the plain launch's.
+    bool hg_rec_ = false;                 ///< record_window is capturing the prelaunch variant (head spin)
+    bool hg_win_ = false;                 ///< the window in flight was prelaunched and not released yet
+    cudaGraphExec_t exec_hg_[9] = {};
+    uint32_t* h_hg_ = nullptr; uint32_t* m_hg_ = nullptr;   ///< the hand-off word: 0 at launch, 1 at release
+    bool hg_prepare(std::string& err);    ///< capture_all: the prelaunch graphs (once; off on failure)
+    bool pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool pre, std::string& err);
     uint32_t* h_cpmap_ = nullptr; uint32_t* m_cpmap_ = nullptr;   ///< per ring: 1 device-planned, 2 served by the host
     int32_t* h_cpids_ = nullptr; int32_t* m_cpids_ = nullptr;     ///< per ring: the planned group's routed ids
     static constexpr int kCpRings = 2 * 64 + 2;

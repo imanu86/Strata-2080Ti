@@ -11966,6 +11966,7 @@ int main(int argc, char** argv) {
                     float p_on = 0.0f;     // the chain's estimate that the window before is accepted whole, tok[0] its bonus
                     // launched: on stage 0; finished: done on every front stage (all but the last); s1: on the last
                     bool ready = false, launched = false, finished = false, s1 = false, s1_done = false;
+                    bool s1_pre = false;   // hostgap: the last stage's graph is launched and spinning on the hand-off word
                     int fr = 0;            // front stages done
                     bool fl = false;       // in flight on front stage `fr`
                     uint32_t com = 0;      // the front stages this window was committed on speculatively (bit per stage)
@@ -12374,6 +12375,10 @@ int main(int argc, char** argv) {
                 int64_t cal_n[10] = {}, cal_on[10] = {};   // per p_on decile: windows scored, on the path
                 double last_verdict = 0.0;
                 int64_t pl_disagree = 0, pl_late = 0;
+                // hostgap STRATA_HG_PRELAUNCH=1 (docs/HOSTGAP.md): A's last-stage graph launched at A's stage-0 launch,
+                // spinning on the hand-off word until stage 0 is done (Verifier::pl_prelaunch / pl_release)
+                static const bool hg_pre = cp_env_int("STRATA_HG_PRELAUNCH", 0) != 0;
+                int64_t hg_pre_n = 0, hg_rel_n = 0;
                 static const bool pl_prestage = [] {   // STRATA_PIPELINE_PRESTAGE=0: B staged at its launch
                     const char* v = pipe_dbg_env("STRATA_PIPELINE_PRESTAGE");
                     return v == nullptr || std::atoi(v) != 0;
@@ -12439,6 +12444,13 @@ int main(int argc, char** argv) {
                     // verdict), and while A's last stage runs, B one layer per pass
                     if (!pl_yield && ((doomed && !pump0(D)) || !pump0(A) || !pump0(B))) return die(err);
                     if (pl_yield && !pump0(A)) return die(err);
+                    if (A.s1_pre && A.finished) {   // hostgap: stage 0 is done, the prelaunched stage-1 graph may read the hand-off
+                        if (ajob) a_gap(1);   // --adapt-async: stage 1 was idle (spinning) until now
+                        V1(A).pl_release();
+                        A.s1_pre = false;
+                        ++hg_rel_n;
+                        tre("L1", A.seq, A.T);
+                    }
                     if (cp_l1first && A.finished && !A.s1) {   // critpath STRATA_CP_L1FIRST: stage 1 before anything else
                         if (!launch_s1()) return die(err);
                         ++cp_l1_early;
@@ -12633,6 +12645,16 @@ int main(int argc, char** argv) {
                         A.fl = true;
                         if (st == 0) A.launched = true;
                         tre("L0", A.seq, A.T, st);
+                        // hostgap STRATA_HG_PRELAUNCH: A's last stage launched now, behind its hand-off word (released at
+                        // F0 below): the 1397-node launch and the polling of stage 0 overlap stage 0.  Only with one front
+                        // stage and the last stage's verifier free (the window before it is done: its verdict made A)
+                        if (hg_pre && st == 0 && pl_nf == 1 && !A.s1 && V1(A).hg_ready() && !V1(A).in_flight()) {
+                            if (!V1(A).pl_prelaunch(A.T, A.tok, A.p, err)) return die(err);
+                            A.s1 = true;
+                            A.s1_pre = true;
+                            ++hg_pre_n;
+                            tre("P1", A.seq, A.T);
+                        }
                     }
                     // ---- the front stages: B, speculatively, one stage behind A.  On each stage A is committed there
                     // (its snapshot taken first) right before B launches, as stage 0 alone did with two stages
@@ -12937,6 +12959,9 @@ int main(int argc, char** argv) {
                                  cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
                                  avg(cls_ms[1], cls_n[1]), avg(cls_tok[1], cls_n[1]), (long long) pl_disagree,
                                  (long long) pl_late);
+                    if (hg_pre)
+                        std::fprintf(stderr, "strata hostgap: STRATA_HG_PRELAUNCH: %lld stage-1 windows prelaunched at their stage-0 "
+                                             "launch, %lld released at stage 0's end\n", (long long) hg_pre_n, (long long) hg_rel_n);
                     std::string cal;
                     char b[48];
                     for (int i = 0; i < 10; ++i)

@@ -887,6 +887,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     const int64_t HB = Verifier::handoff_floats(g);
     if (lb_ > 0) {
         const float* hin = hand_in_ + (size_t) hrow0 * HB;   // the group's rows: [R][bo][inj] contiguous
+        // hostgap STRATA_HG_PRELAUNCH: this graph may be launched before the stage before has written the hand-off;
+        // everything above read only what the host staged for this window, the copies below wait for pl_release
+        if (hg_rec_) wait_flag_ge(m_hg_, 1, cs);
         copy_from_mapped(R_, hin, (int64_t) T * HC * N, cs);
         copy_from_mapped(bo_, hin + (size_t) T * HC * N, (int64_t) T * N, cs);
         copy_from_mapped(inj2_, hin + (size_t) T * (HC + 1) * N, (int64_t) T * HC, cs);
@@ -3196,6 +3199,38 @@ bool Verifier::capture_all(std::string& err) {
     }
     pl_ple_rows_.assign((size_t) strata::kernels::kVerifyMaxT * strata::kernels::PLE_N_HEADS, 0u);
     if (!cp_prepare(err)) return false;
+    if (!hg_prepare(err)) return false;
+    return true;
+}
+
+// hostgap STRATA_HG_PRELAUNCH=1 (opt-in; docs/HOSTGAP.md): a later stage's second graph set, the window graph with a
+// spin on the hand-off word (m_hg_) right before the hand-off copies.  The loop launches it when the window starts on
+// the stage before (pl_prelaunch) and raises the word when that stage is done (pl_release): the host's cudaGraphLaunch
+// of the 1397 nodes and its polling of the stage before overlap the stage before instead of sitting between the two.
+bool Verifier::hg_prepare(std::string& err) {
+    static const bool on = [] { const char* e = std::getenv("STRATA_HG_PRELAUNCH"); return e != nullptr && e[0] != '\0' && e[0] != '0'; }();
+    if (!on || exec_hg_[1] != nullptr || lb_ == 0 || !always_publish_) return true;   // off, prepared, a first stage, not pipelined
+    if (exec_cp_[1] != nullptr) {   // the RESPLAN graphs would need their own prelaunch variant: one lever at a time
+        std::fprintf(stderr, "strata hostgap: STRATA_HG_PRELAUNCH: off beside STRATA_CP_RESPLAN on CUDA%d\n", device_);
+        return true;
+    }
+    bool ok = mapped(64, (void**) &h_hg_, (void**) &m_hg_);
+    if (ok) *(volatile uint32_t*) h_hg_ = 1;   // a plain launch of these graphs (never done) would not spin
+    hg_rec_ = true;
+    for (int T = 1; ok && T <= max_t_; ++T) ok = capture_into(T, exec_hg_[T], err);
+    hg_rec_ = false;
+    if (!ok) {   // the lever only: the windows run the graphs they always ran (exec_)
+        cudaGetLastError();
+        std::fprintf(stderr, "strata hostgap: STRATA_HG_PRELAUNCH: off, allocation or capture failed (%s)\n",
+                     err.empty() ? "out of memory?" : err.c_str());
+        err.clear();
+        for (int T = 1; T <= max_t_; ++T)
+            if (exec_hg_[T] != nullptr) { cudaGraphExecDestroy(exec_hg_[T]); exec_hg_[T] = nullptr; }
+        return true;
+    }
+    std::fprintf(stderr, "strata hostgap: STRATA_HG_PRELAUNCH: layers [%lld, %lld) on CUDA%d: the window graph is launched "
+                         "when the stage before starts and spins on the hand-off word until that stage is done\n",
+                 (long long) lb_, (long long) le_, device_);
     return true;
 }
 
@@ -3350,6 +3385,26 @@ bool Verifier::prestage(int T, const int32_t* tokens, int64_t pos0, const int32_
 }
 
 bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string& err) {
+    return pl_launch_impl(T, tokens, pos0, false, err);
+}
+
+bool Verifier::pl_prelaunch(int T, const int32_t* tokens, int64_t pos0, std::string& err) {
+    if (!hg_ready()) { err = "verify: prelaunch without the STRATA_HG_PRELAUNCH graphs"; return false; }
+    return pl_launch_impl(T, tokens, pos0, true, err);
+}
+
+void Verifier::pl_release() {
+    if (!hg_win_ || h_hg_ == nullptr) return;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    _mm_sfence();
+    *(volatile uint32_t*) h_hg_ = 1;   // the spin before the hand-off copies returns; the window runs from here
+    _mm_sfence();
+    hg_win_ = false;
+    fl_since_ms_ = fl_launch_ms_ = now_ms();   // the GPU-reach wait counts from the release, as from a plain launch
+    trace_ev("RELEASED (prelaunched)", -1, -1, 0);
+}
+
+bool Verifier::pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool pre, std::string& err) {
     const OnDevice on_device(device_);
     if (fl_active_) { err = "verify: a window is already in flight on this verifier"; return false; }
     if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
@@ -3375,12 +3430,17 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
     fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;
     if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);   // #649: this window's breadcrumbs only
     // critpath STRATA_CP_RESPLAN: the RESPLAN graph, behind the residency rows the host holds now
-    cp_win_ = exec_cp_[T] != nullptr;
+    cp_win_ = exec_cp_[T] != nullptr && !pre;
     if (cp_win_ && !cp_sync_res(err)) return false;
+    if (pre) {   // hostgap: the hand-off word down before the graph that spins on it is launched
+        *(volatile uint32_t*) h_hg_ = 0;
+        _mm_sfence();
+    }
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    trace_ev("WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
+    trace_ev(pre ? "WINDOW (prelaunched)" : "WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
     ms_host += ms_since(t0);
-    const cudaError_t le = cudaGraphLaunch(cp_win_ ? exec_cp_[T] : exec_[T], cs_);
+    const cudaError_t le = cudaGraphLaunch(pre ? exec_hg_[T] : cp_win_ ? exec_cp_[T] : exec_[T], cs_);
+    hg_win_ = pre;
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
