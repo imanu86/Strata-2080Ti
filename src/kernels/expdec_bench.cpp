@@ -1,15 +1,17 @@
 // src/kernels/expdec_bench.cpp - the VRAM experts of a decode verify window: the default grouped kernels against
 // EXPDEC (STRATA_EXPDEC=1, docs/EXPERTDEC.md), bit for bit and in microseconds, per card, per T, per format pair.
 //
-//     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec:1,dec:2,dec:4] [shape = real]
+//     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec,dec:r2,dec:b4,dec:r2:b4] [shape = real]
 //
 // The model's routed expert formats at its geometry (n_embd 2560, n_ff 640): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS
 // (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type ids ("21/20,16/42")
 // or "all" (the 10 pairs).  `choices` is a comma list of kernel choices:
 //   def                     the default kernels (STRATA_EXPDEC off); the reference for the bitwise check
-//   dec[:R[:RB[:DRB[:MB]]]] EXPDEC with R rows per lane (1, 2, 4), RB gate/up rows per block, DRB down rows per block
-//                           (0 = auto), MB the auto rule's minimum blocks; a missing field takes the environment's
-//                           STRATA_EXPDEC_R / _RB / _DRB / _MINBLK (2 / 0 / 0 / 800 when unset)
+//   dec[:r<n>][:d<n>][:b<n>][:x<n>][:g<n>][:h<n>][:m<n>]
+//                           EXPDEC with r = gate/up rows per lane (1, 2), d = down rows per lane (1, 2, 4), b = the
+//                           gate/up kernel's min blocks per SM (2 | 4), x = 1 EXPDEC for the IQ4_NL down too, g / h =
+//                           gate/up / down rows per block (0 = auto), m = the auto rule's minimum blocks; a missing
+//                           field takes the engine's value (the environment's STRATA_EXPDEC_* or its default)
 // `shape`: real = every token picks 10 experts out of `groups` distinct ones (as fp_expert_bench: T=1 10 groups x 1
 // entry, T=2 20 x 1, T=4 20 groups with 40 entries); single = 10 T groups of one entry each (the same entries as `real`
 // spread over distinct experts); both = the two, plus the decomposition at the end: per-expert cost a = (single T=4 -
@@ -59,49 +61,47 @@ const char* type_name(int t) {
 }
 int qk_of(int t) { return t == 20 ? 32 : t == 42 ? 64 : 256; }
 
-int env_int(const char* name, int dflt) {
-    const char* v = std::getenv(name);
-    return v != nullptr && v[0] != '\0' ? std::atoi(v) : dflt;
-}
-
 struct Choice {
     std::string name;
     bool dec = false;
-    int r = 2, rb = 0, drb = 0, minblk = 800;
+    K::NativeExpertExpdecParams p;   // every field set: the engine's startup values, then the choice's fields
 };
+K::NativeExpertExpdecParams g_engine_params;   // the engine's values at startup (environment or defaults)
 
-// "def" | "dec[:R[:RB[:DRB[:MB]]]]"; false on anything else
+// "def" | "dec[:r<n>][:d<n>][:b<n>][:x<n>][:g<n>][:h<n>][:m<n>]"; false on anything else
 bool parse_choice(const std::string& s, Choice& c) {
     c = Choice{};
     c.name = s;
-    c.r = env_int("STRATA_EXPDEC_R", 2);
-    c.rb = env_int("STRATA_EXPDEC_RB", 0);
-    c.drb = env_int("STRATA_EXPDEC_DRB", 0);
-    c.minblk = env_int("STRATA_EXPDEC_MINBLK", 800);
+    c.p = g_engine_params;
     if (s == "def") return true;
     if (s.rfind("dec", 0) != 0) return false;
     c.dec = true;
-    std::vector<int> f;
     size_t i = 3;
     while (i < s.size()) {
         if (s[i] != ':') return false;
         size_t j = s.find(':', i + 1);
         if (j == std::string::npos) j = s.size();
-        if (j == i + 1) return false;
-        f.push_back(std::atoi(s.substr(i + 1, j - i - 1).c_str()));
+        if (j < i + 3) return false;
+        const char key = s[i + 1];
+        const int v = std::atoi(s.substr(i + 2, j - i - 2).c_str());
+        switch (key) {
+            case 'r': if (v != 1 && v != 2) return false; c.p.gu_rows_per_lane = v; break;
+            case 'd': if (v != 1 && v != 2 && v != 4) return false; c.p.down_rows_per_lane = v; break;
+            case 'b': if (v != 2 && v != 4) return false; c.p.gu_min_blocks_per_sm = v; break;
+            case 'x': if (v != 0 && v != 1) return false; c.p.down_iq4_nl = v; break;
+            case 'g': if (v < 0) return false; c.p.gu_rows_per_block = v; break;
+            case 'h': if (v < 0) return false; c.p.down_rows_per_block = v; break;
+            case 'm': if (v <= 0) return false; c.p.min_blocks = v; break;
+            default: return false;
+        }
         i = j;
     }
-    if (f.size() > 4) return false;
-    if (f.size() > 0) c.r = f[0];
-    if (f.size() > 1) c.rb = f[1];
-    if (f.size() > 2) c.drb = f[2];
-    if (f.size() > 3) c.minblk = f[3];
-    return c.r == 1 || c.r == 2 || c.r == 4;
+    return true;
 }
 
 void apply_choice(const Choice& c) {
     K::native_expert_set_expdec(c.dec ? 1 : 0);
-    K::native_expert_set_expdec_params(c.r, c.rb, c.drb, c.minblk);
+    K::native_expert_set_expdec_params(c.p);
 }
 
 bool g_cuda_error = false;
@@ -323,7 +323,9 @@ bool run_device(int dev, int reps, int groups_req, const std::vector<uint8_t>& p
             }
         }
     }
-    apply_choice(Choice{});
+    Choice off;
+    off.p = g_engine_params;
+    apply_choice(off);
     K::native_expert_set_mode(-1, 0);
     return ok;
 }
@@ -376,11 +378,12 @@ int main(int argc, char** argv) {
     } else {
         pairs.assign(std::begin(kModelPairs), std::end(kModelPairs));
     }
+    g_engine_params = K::native_expert_expdec_params();
     std::vector<Choice> choices;
-    for (const std::string& s : split_commas(argc > 5 ? argv[5] : "def,dec:1,dec:2,dec:4")) {
+    for (const std::string& s : split_commas(argc > 5 ? argv[5] : "def,dec,dec:r2,dec:b4,dec:r2:b4")) {
         Choice c;
         if (!parse_choice(s, c)) {
-            std::printf("expdec_bench: choice '%s' is not def or dec[:R[:RB[:DRB[:MB]]]] with R in 1, 2, 4\n", s.c_str());
+            std::printf("expdec_bench: choice '%s' is not def or dec[:r<1|2>][:d<1|2|4>][:b<2|4>][:x<0|1>][:g<n>][:h<n>][:m<n>]\n", s.c_str());
             return 1;
         }
         choices.push_back(c);
@@ -424,7 +427,9 @@ int main(int argc, char** argv) {
     K::iq_set_old_kernels(false);
     std::printf("# n_embd %d, n_ff %d, %d pair(s), choices:", kEmbd, kFf, (int) pairs.size());
     for (const Choice& c : choices) {
-        if (c.dec) std::printf(" %s(R %d, RB %d, DRB %d, MB %d)", c.name.c_str(), c.r, c.rb, c.drb, c.minblk);
+        if (c.dec) std::printf(" %s(gu R %d minb %d, down R %d iq4_nl %d, rb %d drb %d, min blocks %d)", c.name.c_str(),
+                               c.p.gu_rows_per_lane, c.p.gu_min_blocks_per_sm, c.p.down_rows_per_lane, c.p.down_iq4_nl,
+                               c.p.gu_rows_per_block, c.p.down_rows_per_block, c.p.min_blocks);
         else std::printf(" %s", c.name.c_str());
     }
     std::printf("\n# dev T shape gu/d choice all_us gu_us down_us GB/s pct identical|DIFFERENT\n");

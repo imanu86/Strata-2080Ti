@@ -86,10 +86,17 @@ void native_expert_set_mode(int mode, int phase);
 /// keep the default kernels.  Set before graph capture; captured graphs keep the kernels they captured.
 void native_expert_set_expdec(int on);
 int native_expert_expdec();
-/// Its knobs (the environment's STRATA_EXPDEC_R / _RB / _DRB / _MINBLK at startup): rows per lane (1, 2, 4; <= 0
-/// keeps), gate/up and down rows per block (0 = auto from the launch's groups, < 0 keeps), the auto rule's minimum
-/// blocks (<= 0 keeps).
-void native_expert_set_expdec_params(int rows_per_lane, int gu_rows_per_block, int down_rows_per_block, int min_blocks);
+/// Its knobs, read from the environment at startup (STRATA_EXPDEC_R 1 | 2, _DR 1 | 2 | 4, _MINB 2 | 4, _D20 0 | 1,
+/// _RB, _DRB, _MINBLK): gate/up and down rows per lane, the gate/up kernel's __launch_bounds__ minimum blocks per SM
+/// (2 = up to 128 registers, 4 = up to 64), EXPDEC for the IQ4_NL down too, gate/up and down rows per block (0 = auto
+/// from the launch's groups), the auto rule's minimum blocks.  In the setter a field <= 0 (< 0 for the two rows per
+/// block and down_iq4_nl) keeps the current value.
+struct NativeExpertExpdecParams {
+    int gu_rows_per_lane = 0, down_rows_per_lane = 0, gu_min_blocks_per_sm = 0, down_iq4_nl = -1;
+    int gu_rows_per_block = -1, down_rows_per_block = -1, min_blocks = 0;
+};
+void native_expert_set_expdec_params(const NativeExpertExpdecParams& p);
+NativeExpertExpdecParams native_expert_expdec_params();
 /// Whether EXPDEC has kernels for this layout's gate/up and down (the bench's check).
 bool native_expert_expdec_takes(const NativeExpertLayout& L, bool& gu, bool& down);
 /// `iq_mmvq` and `native_expert_grouped` decode each weight part once and apply it to every column / entry;
