@@ -96,6 +96,10 @@ int native_expert_expdec();
 struct NativeExpertExpdecParams {
     int gu_rows_per_lane = 0, down_rows_per_lane = 0, gu_min_blocks_per_sm = 0, down_iq4_nl = -1, down = -1;
     int gu_rows_per_block = -1, down_rows_per_block = -1, min_blocks = 0;
+    // lab/speed3 (docs/SPEED3.md): gu_weight_tile = 1 decodes the gate/up weights from a 16-row tile in shared memory
+    // (STRATA_EXPDEC_WT, R = 1); i2f_magic = 1 converts the IQ dots' integer sums with the magic constant instead of I2F
+    // (STRATA_EXPDEC_MAGIC).  -1 = leave the engine's value.  Both bitwise the EXPDEC kernels'.
+    int gu_weight_tile = -1, i2f_magic = -1;
 };
 void native_expert_set_expdec_params(const NativeExpertExpdecParams& p);
 NativeExpertExpdecParams native_expert_expdec_params();

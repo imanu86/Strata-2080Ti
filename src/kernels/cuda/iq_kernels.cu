@@ -37,6 +37,11 @@ __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
     return x32;
 }
 __device__ __forceinline__ int get_int_b4(const void* x, const int& i32) { return ((const int*) x)[i32]; }
+// lab/speed3 (STRATA_EXPDEC_MAGIC): int -> float without I2F (16 lanes/clk per SM on Turing): the integer added to the
+// bit pattern of 1.5 x 2^23 lands in the mantissa, so the float is exactly 12582912 + v and the subtraction gives exactly
+// (float) v for |v| < 2^22 - the integer sums of the IQ dots are far below that (|dp4a of 8 words| <= 32 x 127 x 7, times
+// a scale <= 31).  The same float as (float) v, so the product and the sum that follow are bitwise the same.
+__device__ __forceinline__ float i2f_magic(int v) { return __int_as_float(v + 0x4B400000) - 12582912.0f; }
 __device__ __forceinline__ uint32_t unpack_ksigns(const uint8_t v) {
     const uint32_t p = __popc(v) & 1;
     const uint32_t s = v ^ p << 7;
@@ -707,6 +712,14 @@ template<> struct Split<16> {   // IQ2_XXS
         const float d = r.dw * d8;
         return d * sumi;
     }
+    __device__ static float apply_um(const W& r, const int (&u)[8], float d8) {   // lab/speed3: apply_u, I2F by the magic constant
+        int sumi = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(r.g[j], u[j], sumi);
+        sumi = sumi * r.ls / 8;
+        const float d = r.dw * d8;
+        return d * i2f_magic(sumi);
+    }
 };
 // IQ2_XS and IQ2_S share the apply: two half sums, two 4-bit scales
 struct SplitLs2 {
@@ -730,6 +743,16 @@ struct SplitLs2 {
         const int sumi = (sumi0 * r.ls0 + sumi1 * r.ls1 + (sumi0 + sumi1) / 2) / 4;
         const float d = r.dw * d8;
         return d * sumi;
+    }
+    __device__ static float apply_um(const W& r, const int (&u)[8], float d8) {   // lab/speed3: apply_u, I2F by the magic constant
+        int sumi0 = 0, sumi1 = 0;
+#pragma unroll
+        for (int j = 0; j < 4; ++j) sumi0 = ggml_cuda_dp4a(r.g[j], u[j], sumi0);
+#pragma unroll
+        for (int j = 4; j < 8; ++j) sumi1 = ggml_cuda_dp4a(r.g[j], u[j], sumi1);
+        const int sumi = (sumi0 * r.ls0 + sumi1 * r.ls1 + (sumi0 + sumi1) / 2) / 4;
+        const float d = r.dw * d8;
+        return d * i2f_magic(sumi);
     }
 };
 template<> inline constexpr bool kSplit<17> = true;
@@ -828,6 +851,14 @@ template<> struct Split<18> {   // IQ3_XXS
         const float d = r.dw * d8;
         return d * sumi;
     }
+    __device__ static float apply_um(const W& r, const int (&u)[8], float d8) {   // lab/speed3: apply_u, I2F by the magic constant
+        int sumi = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(r.g[j], u[j], sumi);
+        sumi = (r.ls * sumi + sumi / 2) / 2;
+        const float d = r.dw * d8;
+        return d * i2f_magic(sumi);
+    }
 };
 template<> inline constexpr bool kSplit<21> = true;
 template<> struct Split<21> {   // IQ3_S
@@ -872,6 +903,14 @@ template<> struct Split<21> {   // IQ3_S
         sumi *= r.ls;
         const float d = r.dw * d8;
         return d * sumi;
+    }
+    __device__ static float apply_um(const W& r, const int (&u)[8], float d8) {   // lab/speed3: apply_u, I2F by the magic constant
+        int sumi = 0;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) sumi = ggml_cuda_dp4a(r.g[j], u[j], sumi);
+        sumi *= r.ls;
+        const float d = r.dw * d8;
+        return d * i2f_magic(sumi);
     }
 };
 template<> inline constexpr bool kSplit<29> = true;
@@ -1644,7 +1683,7 @@ __device__ __forceinline__ void ed_load_u(const int4* __restrict__ s_u, int c, i
 // R gate/up rows against the NC staged entries, lane t of a 16-lane sub-warp: row_dot_80_sub16's tree (calls t,
 // t+32, t+64 into s; t+16, t+48 into s16; s = __fadd_rn(s, s16); xor 8-4-2-1), every call's weight part decoded once
 // per row and the entry's block loaded once per NC x R products.
-template<int TG, int R, int NC>
+template<int TG, int R, int NC, bool MAGIC = false>
 __device__ __forceinline__ void ed_gu_rows(const uint8_t* const* wr, const int4* __restrict__ s_u,
                                            const float* __restrict__ s_ds, const uint32_t* __restrict__ s_grid, int t,
                                            float (&s)[R][NC]) {
@@ -1668,7 +1707,10 @@ __device__ __forceinline__ void ed_gu_rows(const uint8_t* const* wr, const int4*
             ed_load_u<ED_XB>(s_u, c, k, u);
             const float d8 = s_ds[c * ED_XB + k];
 #pragma unroll
-            for (int r = 0; r < R; ++r) s[r][c] += S::apply_u(w[r], u, d8);
+            for (int r = 0; r < R; ++r) {
+                if constexpr (MAGIC) s[r][c] += S::apply_um(w[r], u, d8);
+                else s[r][c] += S::apply_u(w[r], u, d8);
+            }
         }
     }
 #pragma unroll
@@ -1684,7 +1726,10 @@ __device__ __forceinline__ void ed_gu_rows(const uint8_t* const* wr, const int4*
             ed_load_u<ED_XB>(s_u, c, k, u);
             const float d8 = s_ds[c * ED_XB + k];
 #pragma unroll
-            for (int r = 0; r < R; ++r) s16[r][c] += S::apply_u(w[r], u, d8);
+            for (int r = 0; r < R; ++r) {
+                if constexpr (MAGIC) s16[r][c] += S::apply_um(w[r], u, d8);
+                else s16[r][c] += S::apply_u(w[r], u, d8);
+            }
         }
     }
 #pragma unroll
@@ -1699,7 +1744,7 @@ __device__ __forceinline__ void ed_gu_rows(const uint8_t* const* wr, const int4*
 
 // gate/up: 16 sub-warps of 16 lanes, R rows each = 16 R rows per pass, `rb` rows per block (a multiple of 16 R; 2 n_ff
 // is one too, so a pass is whole or absent for the entire block).  Group stride as native_gu_multi_kernel.
-template<int TG, int R, int MINB>
+template<int TG, int R, int MINB, bool MAGIC = false>
 __global__ void __launch_bounds__(256, MINB) expdec_gu_kernel(const unsigned long long* __restrict__ grp_ptr,
                                                                             const int32_t* __restrict__ grp_start,
                                                                             const int32_t* __restrict__ n_groups,
@@ -1736,12 +1781,78 @@ __global__ void __launch_bounds__(256, MINB) expdec_gu_kernel(const unsigned lon
                 auto run = [&](auto nc) {
                     constexpr int NC = decltype(nc)::value;
                     float s[R][NC];
-                    ed_gu_rows<TG, R, NC>(wr, s_u, s_ds, s_grid_buf, t, s);
+                    ed_gu_rows<TG, R, NC, MAGIC>(wr, s_u, s_ds, s_grid_buf, t, s);
 #pragma unroll
                     for (int c = 0; c < NC; ++c)
                         if (t == c)
 #pragma unroll
                             for (int r = 0; r < R; ++r) dst[(size_t) (e + c) * n_ff + r0 + r] = s[r][c];
+                };
+                switch (n) {
+                    case 1: run(std::integral_constant<int, 1>{}); break;
+                    case 2: run(std::integral_constant<int, 2>{}); break;
+                    case 3: run(std::integral_constant<int, 3>{}); break;
+                    default: run(std::integral_constant<int, 4>{}); break;
+                }
+            }
+        }
+    }
+}
+
+// lab/speed3 (STRATA_EXPDEC_WT=1, docs/SPEED3.md): expdec_gu_kernel with the pass's 16 rows of weights (16 x gu_row
+// bytes, contiguous in the blob: rows r0..r0+15 of the gate, or of the up) copied into shared memory first by the whole
+// block with 16-byte loads, then decoded from there.  The default and EXPDEC gate/up kernels decode straight from
+// global memory with 2-byte loads (get_int_b2: LD.U16, 7 a call, each a partial sector), so they are bound by load
+// instructions at ~34% of the bandwidth (ROOFLINE 2026-10-12 §1c).  Here the DRAM stream is gu_row LDG.128 per pass
+// (~4 a thread, all in flight together) and the decode reads shared memory.  The bytes, the lane -> call mapping and
+// ed_gu_rows's sum tree are the EXPDEC kernel's: bitwise.  R = 1 (the gate/up's measured choice); dynamic shared memory
+// = 16 x gu_row bytes (IQ3_S 17.6 KB) next to the 11.5 KB of staged entries and the codebook.
+template<int TG, int MINB, bool MAGIC>
+__global__ void __launch_bounds__(256, MINB) expdec_gu_wt_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                                 const int32_t* __restrict__ grp_start,
+                                                                 const int32_t* __restrict__ n_groups,
+                                                                 const int32_t* __restrict__ ent_tok,
+                                                                 const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                                 float* __restrict__ gate, float* __restrict__ up, int rb) {
+    const int ng = *n_groups;
+    if (blockIdx.y >= ng) return;
+    __shared__ alignas(16) int4 s_u[ED_NC * 2 * ED_XB];
+    __shared__ float s_ds[ED_NC * ED_XB];
+    STRATA_SHARED_ALIGN16_U32(s_grid_buf, EdGrid<TG>::words);
+    extern __shared__ __align__(16) int4 ed_sw4[];   // the pass's 16 rows of weights, 16 x gu_row bytes
+    const int tid = threadIdx.x;
+    EdGrid<TG>::copy(s_grid_buf, tid);   // visible after the staging's __syncthreads
+    const int sw = tid >> 4, t = tid & 15;
+    const int nrow = 2 * (int) L.n_ff, n_ff = (int) L.n_ff;
+    const int row_base = blockIdx.x * rb;
+    const int tile4 = (int) L.gu_row;    // 16 rows x gu_row bytes / 16 bytes an int4
+    const uint8_t* const s_w = reinterpret_cast<const uint8_t*>(ed_sw4);
+    for (int g = blockIdx.y; g < ng; g += gridDim.y) {
+        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += ED_NC) {
+            const int n = min(ED_NC, e1 - e);
+            __syncthreads();
+            for (int c = 0; c < n; ++c) ed_stage_entry<ED_XB, true>(s_u, s_ds, c, xq + (size_t) ent_tok[e + c] * ED_XB, tid);
+            __syncthreads();
+            for (int p = 0; p * 16 < rb; ++p) {
+                const int row0 = row_base + p * 16;   // the block's first row of the pass (uniform; n_ff is a multiple of 16)
+                if (row0 >= nrow) break;
+                const bool is_up = row0 >= n_ff;
+                const int r0 = is_up ? row0 - n_ff : row0;
+                const int4* src = reinterpret_cast<const int4*>(blob + (is_up ? L.up_off : 0) + (size_t) r0 * L.gu_row);
+                if (p > 0) __syncthreads();            // every sub-warp is done with the previous tile
+                for (int i = tid; i < tile4; i += 256) ed_sw4[i] = src[i];
+                __syncthreads();
+                const uint8_t* wr[1] = { s_w + (size_t) sw * L.gu_row };
+                float* dst = is_up ? up : gate;
+                auto run = [&](auto nc) {
+                    constexpr int NC = decltype(nc)::value;
+                    float s[1][NC];
+                    ed_gu_rows<TG, 1, NC, MAGIC>(wr, s_u, s_ds, s_grid_buf, t, s);
+#pragma unroll
+                    for (int c = 0; c < NC; ++c)
+                        if (t == c) dst[(size_t) (e + c) * n_ff + r0 + sw] = s[0][c];
                 };
                 switch (n) {
                     case 1: run(std::integral_constant<int, 1>{}); break;
@@ -3105,6 +3216,10 @@ int g_expdec_down = env_int_or("STRATA_EXPDEC_DOWN", 0);
 int g_expdec_rb = env_int_or("STRATA_EXPDEC_RB", 0);        // gate/up rows per block (0 = auto)
 int g_expdec_drb = env_int_or("STRATA_EXPDEC_DRB", 0);      // down rows per block (0 = auto)
 int g_expdec_minblk = env_int_or("STRATA_EXPDEC_MINBLK", 800);   // auto: the most rows per block that keep this many blocks
+// lab/speed3: 1 = the gate/up with the pass's weights tiled in shared memory (expdec_gu_wt_kernel, R = 1); 1 = the int ->
+// float of the IQ dots by the magic constant instead of I2F (both bitwise by construction; the bench decides)
+int g_expdec_wt = env_int_or("STRATA_EXPDEC_WT", 0);
+int g_expdec_magic = env_int_or("STRATA_EXPDEC_MAGIC", 0);
 int expdec_r() { return g_expdec_r == 2 ? 2 : 1; }
 int expdec_dr() { return g_expdec_dr == 1 || g_expdec_dr == 2 ? g_expdec_dr : 4; }
 
@@ -3129,23 +3244,52 @@ int expdec_rows_per_block(int nrow, int rpp, int64_t cap_groups, int knob) {
     return rb;
 }
 
-template<int TG, int R, int MINB>
+template<int TG, int R, int MINB, bool MAGIC = false>
 void expdec_gu_r(int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                  const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
                  float* gate, float* up) {
     const int nrow = 2 * (int) L.n_ff;
     const int rb = expdec_rows_per_block(nrow, 16 * R, cap_groups, g_expdec_rb);
     const dim3 grid((unsigned) ((nrow + rb - 1) / rb), (unsigned) gy);
-    expdec_gu_kernel<TG, R, MINB><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, rb);
+    expdec_gu_kernel<TG, R, MINB, MAGIC><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, rb);
+}
+// lab/speed3: the weights-tiled gate/up (R = 1), dynamic shared memory 16 x gu_row bytes
+template<int TG, int MINB, bool MAGIC>
+void expdec_gu_wt_r(int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
+                    const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
+                    float* gate, float* up) {
+    const int nrow = 2 * (int) L.n_ff;
+    const int rb = expdec_rows_per_block(nrow, 16, cap_groups, g_expdec_rb);
+    const dim3 grid((unsigned) ((nrow + rb - 1) / rb), (unsigned) gy);
+    expdec_gu_wt_kernel<TG, MINB, MAGIC><<<grid, 256, 16 * L.gu_row, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up, rb);
+}
+// the weights-tiled kernel takes the layout when its tile fits the 48 KB of shared memory next to the staged entries
+bool expdec_wt_ok(const NativeExpertLayout& L) {
+    // 16 rows x gu_row of dynamic shared memory next to ~11.5 KB of staged entries and up to 8 KB of codebook (the tile's
+    // 16-byte alignment holds: blobs, up_off = n_ff x gu_row and r0 x gu_row with r0 a multiple of 16 are all multiples of 16)
+    return g_expdec_wt != 0 && 16 * L.gu_row + 20 * 1024 <= 48 * 1024;
 }
 template<int TG>
 void expdec_gu_t(int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr, const int32_t* grp_start,
                  const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, const NativeExpertLayout& L,
                  float* gate, float* up) {
-    const bool b4 = g_expdec_minb >= 4;
-    if (expdec_r() == 2) {
+    const bool b4 = g_expdec_minb >= 4, magic = g_expdec_magic != 0;
+    if (expdec_wt_ok(L)) {   // lab/speed3: weights tiled in shared memory (R = 1)
+        if (b4) {
+            if (magic) expdec_gu_wt_r<TG, 4, true>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            else expdec_gu_wt_r<TG, 4, false>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+        } else {
+            if (magic) expdec_gu_wt_r<TG, 2, true>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+            else expdec_gu_wt_r<TG, 2, false>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+        }
+        return;
+    }
+    if (expdec_r() == 2) {   // (the magic I2F is built for R = 1 only)
         if (b4) expdec_gu_r<TG, 2, 4>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
         else expdec_gu_r<TG, 2, 2>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+    } else if (magic) {
+        if (b4) expdec_gu_r<TG, 1, 4, true>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
+        else expdec_gu_r<TG, 1, 2, true>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     } else {
         if (b4) expdec_gu_r<TG, 1, 4>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
         else expdec_gu_r<TG, 1, 2>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
@@ -3169,9 +3313,11 @@ void expdec_note(const NativeExpertLayout& L, bool gu, bool taken, cudaStream_t 
         return;
     }
     if (gu) {
-        const int R = expdec_r(), rb = expdec_rows_per_block(2 * (int) L.n_ff, 16 * R, cap_groups, g_expdec_rb);
-        std::fprintf(stderr, "strata expdec: CUDA%d gate/up type %d: expdec_gu_kernel R %d MINB %d, %d rows per block, grid %d x %lld "
-                             "(cap %lld groups)%s\n", dev, ty, R, g_expdec_minb >= 4 ? 4 : 2, rb, (2 * (int) L.n_ff + rb - 1) / rb,
+        const bool wt = expdec_wt_ok(L);
+        const int R = wt ? 1 : expdec_r(), rb = expdec_rows_per_block(2 * (int) L.n_ff, 16 * R, cap_groups, g_expdec_rb);
+        std::fprintf(stderr, "strata expdec: CUDA%d gate/up type %d: %s R %d MINB %d%s, %d rows per block, grid %d x %lld "
+                             "(cap %lld groups)%s\n", dev, ty, wt ? "expdec_gu_wt_kernel (weights tiled in shared)" : "expdec_gu_kernel", R,
+                     g_expdec_minb >= 4 ? 4 : 2, g_expdec_magic ? " I2F-magic" : "", rb, (2 * (int) L.n_ff + rb - 1) / rb,
                      (long long) gy, (long long) cap_groups, cs != cudaStreamCaptureStatusNone ? ", captured into a graph" : "");
     } else {
         const int R = expdec_dr(), lanes = ty == 20 ? 8 : 16;
@@ -4022,6 +4168,8 @@ void native_expert_set_expdec_params(const NativeExpertExpdecParams& p) {
     if (p.gu_rows_per_block >= 0) g_expdec_rb = p.gu_rows_per_block;
     if (p.down_rows_per_block >= 0) g_expdec_drb = p.down_rows_per_block;
     if (p.min_blocks > 0) g_expdec_minblk = p.min_blocks;
+    if (p.gu_weight_tile >= 0) g_expdec_wt = p.gu_weight_tile;
+    if (p.i2f_magic >= 0) g_expdec_magic = p.i2f_magic;
 }
 NativeExpertExpdecParams native_expert_expdec_params() {
     NativeExpertExpdecParams p;
@@ -4033,6 +4181,8 @@ NativeExpertExpdecParams native_expert_expdec_params() {
     p.gu_rows_per_block = g_expdec_rb;
     p.down_rows_per_block = g_expdec_drb;
     p.min_blocks = g_expdec_minblk;
+    p.gu_weight_tile = g_expdec_wt ? 1 : 0;
+    p.i2f_magic = g_expdec_magic ? 1 : 0;
     return p;
 }
 bool native_expert_expdec_takes(const NativeExpertLayout& L, bool& gu, bool& down) {

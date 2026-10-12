@@ -1,13 +1,14 @@
 // src/kernels/expdec_bench.cpp - the VRAM experts of a decode verify window: the default grouped kernels against
 // EXPDEC (STRATA_EXPDEC=1, docs/EXPERTDEC.md), bit for bit and in microseconds, per card, per T, per format pair.
 //
-//     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec,dec:r2,dec:b4,dec:r2:b4] [shape = real]
+//     build/expdec_bench [reps = 300] [device = -1 (all)] [groups = 20] [pairs = all] [choices = def,dec,dec:t1,dec:i1,dec:t1:i1,dec:t1:b2] [shape = real]
+//   (lab/speed3, docs/SPEED3.md: t = 1 the gate/up weights tiled in shared memory, i = 1 the I2F by the magic constant)
 //
 // The model's routed expert formats at its geometry (n_embd 2560, n_ff 640): gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS
 // (18), IQ3_S (21), IQ2_S (22); down IQ4_NL (20), Q2_0 (42).  `pairs` is a comma list of gu/down type ids ("21/20,16/42")
 // or "all" (the 10 pairs).  `choices` is a comma list of kernel choices:
 //   def                     the default kernels (STRATA_EXPDEC off); the reference for the bitwise check
-//   dec[:r<n>][:d<n>][:b<n>][:w<n>][:x<n>][:g<n>][:h<n>][:m<n>]
+//   dec[:r<n>][:d<n>][:b<n>][:w<n>][:x<n>][:g<n>][:h<n>][:m<n>][:t<0|1>][:i<0|1>]
 //                           EXPDEC with r = gate/up rows per lane (1, 2), d = down rows per lane (1, 2, 4), b = the
 //                           gate/up kernel's min blocks per SM (2 | 4), w = 1 EXPDEC for the down too (the engine's
 //                           default is the gate/up only), x = 1 also for the IQ4_NL down, g / h = gate/up / down rows
@@ -94,6 +95,8 @@ bool parse_choice(const std::string& s, Choice& c) {
             case 'g': if (v < 0) return false; c.p.gu_rows_per_block = v; break;
             case 'h': if (v < 0) return false; c.p.down_rows_per_block = v; break;
             case 'm': if (v <= 0) return false; c.p.min_blocks = v; break;
+            case 't': if (v != 0 && v != 1) return false; c.p.gu_weight_tile = v; break;   // lab/speed3: weights tiled in shared
+            case 'i': if (v != 0 && v != 1) return false; c.p.i2f_magic = v; break;        // lab/speed3: I2F by the magic constant
             default: return false;
         }
         i = j;
@@ -382,7 +385,7 @@ int main(int argc, char** argv) {
     }
     g_engine_params = K::native_expert_expdec_params();
     std::vector<Choice> choices;
-    for (const std::string& s : split_commas(argc > 5 ? argv[5] : "def,dec,dec:r2,dec:b4,dec:r2:b4")) {
+    for (const std::string& s : split_commas(argc > 5 ? argv[5] : "def,dec,dec:t1,dec:i1,dec:t1:i1,dec:t1:b2")) {
         Choice c;
         if (!parse_choice(s, c)) {
             std::printf("expdec_bench: choice '%s' is not def or dec[:r<1|2>][:d<1|2|4>][:b<2|4>][:x<0|1>][:g<n>][:h<n>][:m<n>]\n", s.c_str());
