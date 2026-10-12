@@ -909,7 +909,7 @@ private:
 // Phase 3's cache fills and the CPU/PCIe miss split - but registration is best-effort and reported, not assumed.
 class ArenaExpertSource : public ExpertSource {
 public:
-    ArenaExpertSource() = default;
+    ArenaExpertSource();   // out of line: the STRATA_RAM_CORE state (rc_) is complete only in expert_source.cpp
     ~ArenaExpertSource() override;
     ArenaExpertSource(const ArenaExpertSource&) = delete;
     ArenaExpertSource& operator=(const ArenaExpertSource&) = delete;
@@ -945,7 +945,38 @@ public:
     double load_read_seconds() const { return load_read_s_; }
     double load_copy_seconds() const { return load_copy_s_; }
 
+    // ---- STRATA_RAM_CORE=1 (docs/RAM_CORE.md): the RAM copy of the experts of the caches' FIXED CORE goes away.
+    // The driver picks, per cache, a core of slots that never changes hands (no adaptive swap, no loan to the prompt
+    // path, no elastic shrink, no K/V growth), and hands each of their experts to `ram_core_drop` once: the whole
+    // pages inside its blob are decommitted (VirtualUnlock + VirtualFree MEM_DECOMMIT; munlock + MADV_DONTNEED).  The
+    // address range stays reserved, so `blob` is still base + offset.  Nothing copies those bytes back: a core expert
+    // never leaves VRAM.  If a path asks for one anyway, `blob` reads it again from the model file first and counts
+    // it (`ram_core_reread`, which must stay 0).  Never inside the CUDA-registered prefix (decommitting registered
+    // pages is not allowed: those experts keep their copy and are counted apart).
+    /// STRATA_RAM_CORE=1 asked for (off by default).
+    static bool ram_core_requested();
+    /// Arms the bookkeeping.  False with `err` when the arena cannot do it (not loaded, mapped read-only, large
+    /// pages, a shared file).
+    bool ram_core_arm(std::string& err);
+    bool ram_core_armed() const { return rc_ != nullptr; }
+    /// Gives back the RAM of (layer, expert).  Returns the bytes decommitted; 0 when kept (inside the registered
+    /// prefix: *registered set; already dropped; refused by the OS).
+    uint64_t ram_core_drop(int64_t layer, int64_t expert, bool* registered = nullptr);
+    /// After the drops: lowers the working-set minimum the arena lock raised by what was given back (best effort).
+    void ram_core_settle();
+    bool ram_core_dropped(int64_t layer, int64_t expert) const;
+    uint64_t ram_core_bytes() const;     ///< bytes decommitted now
+    int64_t ram_core_experts() const;    ///< experts without a RAM copy now
+    int64_t ram_core_reread() const;     ///< experts read again from the model file (must stay 0)
+    uint64_t arena_capacity() const { return arena_capacity_; }
+    uint64_t registered_bytes() const { return pinned_bytes_; }
+
 private:
+    struct RamCore;
+    std::unique_ptr<RamCore> rc_;
+    bool rc_recover(int64_t layer, int64_t expert);   ///< `blob` of a dropped expert: the model file -> the arena
+    uint64_t arena_capacity_ = 0;
+    std::string experts_bin_;        ///< the pack's experts.bin when the arena was loaded from it (else empty: the GGUF)
     void* arena_ = nullptr;          ///< the PinnedArena, owned
     void* map_ = nullptr;            ///< STRATA_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
     uint64_t map_bytes_ = 0;
