@@ -125,6 +125,31 @@ catena vale ~2,4 ms a finestra in tutto, e la parte che la 3060 può fare al suo
   buttate, passi di catena risparmiati).
 - Traccia della pipeline: eventi nuovi `SH` (testa lanciata, x0 = T), `ST` (coda lanciata), `SX` (testa buttata).
 
+## 5. Cosa ha detto la prima misura: la 3060 dopo il verdetto non è ferma
+
+Build `build-structa-7c1a7aca` (scommesse da T=1), L02 256 token a cache fissa, una corsa per braccio, PC carico
+(prefill 78-436 s: i tempi assoluti valgono poco, le differenze dentro la stessa classe sì). Script `structa_undo.py`
+(scratchpad): finestre fresche divise per «il verdetto prima ha fatto l'undo di una B sbagliata» (evento `U`).
+
+| finestre fresche T=1, `V`→fine stadio 0 (M, mediane) | `off` | `STRATA_SA_BET=1` (coda confermata) |
+|---|---|---|
+| senza undo (~10% delle fresche) | 12,16 ms (n 6) | **10,24 ms (n 5)** |
+| con undo (~90%) | 10,76 ms (n 33) | 11,02 ms (n 39) |
+
+- **Dove la 3060 è davvero ferma, la testa rende** (−1,9 ms, campione piccolo).
+- **Dopo un rollback non lo è.** L'undo della B sbagliata (ripristino dello snapshot GDN da 39 MB + commit di A
+  rigiocato, `U` a V+0,45) occupa lo stadio 0 fino a ~V+1,2 (dedotto: coda lanciata a V+1,17, fine stadio 0 a V+11,0 =
+  uno stadio 0 intero dopo ~V+1,2). È proprio quando la catena decide T=1: la testa T=1 non ha spazio.
+- **La testa T=1 persa costa**: occupa lo stadio 0 quando servirebbe la testa T=2 e ritarda le finestre T=2 (`V`→`L0`
+  2,70 contro 2,17 ms, mediane), e su 12 scommesse T=2 solo 3 sono partite in tempo.
+
+Correzione (`build-structa-<sha>` successiva): **niente scommesse T=1 di default** (`STRATA_SA_BET_MINT=2`; `=1` le
+riaccende). La scommessa T=2 (`[x, d1]`) parte alla prima uscita della catena con `d1` ≥ `spec-min-p` (~V+1,2, quando
+l'undo ha finito) e guadagna fino alla decisione di T=2 (~V+2,15): ~0,9 ms sulle fresche T=2 (S); persa (T ≥ 3) finisce
+prima della decisione di T ≥ 3 (~V+3,1) e non ritarda nulla. Stima rivista: ~−0,27 ms per finestra fresca, **~−0,2 ms a
+finestra (~0,8%)**, sotto la risoluzione del B-A-B (±2%).
+
 ## Stato
 
-Disegno e stima: questa pagina. Implementazione: in corso.
+Disegno e stima: §1-4. Prima misura e correzione: §5. Codice: `3e309ed7` (leve), `7c1a7aca` (servizio della testa sul suo
+evento: senza, «layer 1 never rang» se l'host passava prima che la testa suonasse; niente secondo snapshot GDN).

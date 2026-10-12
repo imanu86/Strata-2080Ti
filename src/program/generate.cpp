@@ -12306,6 +12306,13 @@ int main(int argc, char** argv) {
                     const char* v = std::getenv("STRATA_SA_BET_MAXT");
                     return v != nullptr ? std::max(1, std::min(3, std::atoi(v))) : 2;
                 }();
+                // STRATA_SA_BET_MINT (2): the smallest bet.  After a rollback (most fresh windows) stage 0 replays the
+                // commit until about when the chain decides T = 1, so a T = 1 head gains nothing there and, lost, holds
+                // stage 0 when the T = 2 bet should start (docs/STRUCT_A.md, 5)
+                static const int sa_bet_mint = [] {
+                    const char* v = std::getenv("STRATA_SA_BET_MINT");
+                    return v != nullptr ? std::max(1, std::min(3, std::atoi(v))) : 2;
+                }();
                 static const bool sa_chain = [] { const char* v = std::getenv("STRATA_SA_CHAIN"); return v != nullptr && std::atoi(v) != 0; }();
                 static const int sa_chain_ahead = [] {
                     const char* v = std::getenv("STRATA_SA_CHAIN_AHEAD");
@@ -12324,8 +12331,8 @@ int main(int argc, char** argv) {
                             sa_bet_failed = true;
                             sa_bet_on = false;
                         } else if (par == 1)
-                            std::fprintf(stderr, "strata struct-a: STRATA_SA_BET: heads of %d layers on CUDA%d, bets up to T=%d\n",
-                                         v.sa_layers(), v.device(), std::min(sa_bet_maxt, S_mtp - 1));
+                            std::fprintf(stderr, "strata struct-a: STRATA_SA_BET: heads of %d layers on CUDA%d, bets T=%d..%d\n",
+                                         v.sa_layers(), v.device(), sa_bet_mint, std::min(sa_bet_maxt, S_mtp - 1));
                     }
                 struct SaBet {
                     bool live = false, dead = false;   // dead: known lost, served on empty plans until its head is done
@@ -12921,12 +12928,16 @@ int main(int argc, char** argv) {
                         A.fr == 0 && !doomed && !VF(0, A).in_flight()) {
                         const int k = mtp.chain_outputs_ready(err);
                         if (k < 0) return die(err);
-                        int T = sa_last_T + 1;   // the smallest size A can still have
+                        int T = std::max(sa_last_T + 1, sa_bet_mint);   // the smallest size A can still have and is bet on
                         while (k >= T && mtp.chain_prob()[T - 1] >= (float) req_spec_min_p) ++T;
-                        bool ok = T <= std::min(sa_bet_maxt, S_mtp - 1) && k >= T - 1 && A.p + T <= o.max_context;
-                        for (int j = 0; ok && j < T - 1; ++j) ok = mtp.chain_prob()[j] >= (float) req_spec_min_p;
-                        if (ok && !sa_place(T)) return die(err);
-                        if (!ok) sa_want = -1;   // no bet left for this window
+                        if (T > std::min(sa_bet_maxt, S_mtp - 1) || A.p + T > o.max_context) {
+                            sa_want = -1;   // no bet left for this window
+                        } else if (k >= T - 1) {   // its rows are out (else: wait for them)
+                            bool ok = true;
+                            for (int j = 0; ok && j < T - 1; ++j) ok = mtp.chain_prob()[j] >= (float) req_spec_min_p;
+                            if (!ok) sa_want = -1;   // A is smaller (and decided by now)
+                            else if (!sa_place(T)) return die(err);
+                        }
                     }
                     // ---- the front stages: A on its next one (never while a wrong window still holds a front stage's
                     // state)
