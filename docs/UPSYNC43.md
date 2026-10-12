@@ -279,3 +279,12 @@ invece di rileggerlo (~42 s per 40K); il tempo di ripresa lo misura il secondo a
 Corpi delle PR (inglese, stile #2058/#2059, con le misure e senza percorsi locali) pronti nello scratchpad della sessione;
 si incollano dopo la verifica. Il commento a @Niko1221 va solo sulla prima (ple-direct) e rimanda a `stack/` del fork.
 
+## 14. PR aperte
+
+| PR | Branch | Aperta | Verifica |
+|---|---|---|---|
+| [#2073](https://github.com/Niko1221/Strata/pull/2073) PLE direct + diagnostica | `pr/ple-direct` 779c858a | 12/10 10:23, con il commento a @Niko1221 che annuncia la serie e rimanda a `stack/` | build 0.1.43 rc 0 (sha `bdd0054d…`), smoke: pronto in 70 s, sonda 43 290 rows/s, risposta corretta |
+
+Le altre si aprono una per una appena passano lo smoke (coda `coda_pr_u43.sh`): prefix-disk, attn-daily (parità verde),
+simt-default, dequant-sm75; hc16 sospesa; ram-core no.
+
