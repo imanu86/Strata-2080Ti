@@ -23,6 +23,9 @@ Base: `lab/speed4` (v0.1.43 + pila del fork + leve speed, tutte opt-in). Obietti
   qualunque sia T: T=1 costa ~26,6 ms per **un** token, e da T=1 a T=2 si spendono solo ~1,3 ms (M, traccia).
   `STRATA_SB_FRESH=<tmax>` fa prendere alla finestra fresca anche la prima bozza scartata dalla regola, quando restano
   ≤ tmax righe e la bozza ha probabilità ≥ `STRATA_SB_FLOOR` (0,10). Stima: −0,5/−0,75 ms a finestra su L02 (S, §4).
+  Corse brevi (M, §5, singole e non B-A-B): −2,0% ms/token in elastica e −3,5% in fissa.
+  - Il testo di `STRATA_SB_FRESH=2` è deterministico e coincide con off entro l'orizzonte del rumore di corsa.
+  - tmax 3 e theta 0 cambiano invece un quasi-pareggio al token 37, come fa già il solo gate theta.
   `STRATA_SB_THETA` apre il gate di B senza `STRATA_PIPELINE_DEBUG`; `STRATA_SB_B` estende anche B (default spento).
 
 ## 1. Come la pipeline decide B oggi (`src/program/generate.cpp`, ciclo `--pipeline-windows 2`)
@@ -140,6 +143,58 @@ Riga di log `strata struct-b:` per richiesta, con `STRATA_DECODE_TIMING`.
 greedy è lo stesso, a meno di quasi-pareggi numerici: gli esperti CPU usano un kernel diverso a T=1, e con
 `STRATA_IQ_MT_MIN=1` le righe sono bit per bit indipendenti da T (nota in `native_expert.cpp`). Le verifiche sono nel §5.
 
-## 5. Verifiche e misure
+## 5. Verifiche e misure (12/10 sera)
 
-(in corso)
+Build `build-structb-08165b90` (sha256 `02cbb701…`), in `corse_2080ti\20261004_routed_keep`.
+- Corse brevi non forzate: L02, 256 token, greedy, `sb_check.py` nella scratchpad della sessione.
+- Ambiente: braccio B di speed4 (`STRATA_NODECUT=1 STRATA_QFUSE_HC=0 STRATA_TOPK_GRID=1 STRATA_B6_HEAD_MINB=6`) più
+  `STRATA_PIPELINE_DEBUG=1` per la traccia, che non cambia i default.
+- Il PC era usato da altri due agenti: i ms valgono come indicazione, il verdetto spetta al B-A-B.
+
+### 5a. Testo (cache fissa `--expert-cache 1500`, senza `--elastic`)
+
+Per ogni coppia di bracci, il primo token in cui il testo diverge (M; «=» vuol dire identici su 256):
+
+| | base* | off | off2 | t0 | f2 | f2r | f3 | f2t0 |
+|---|---|---|---|---|---|---|---|---|
+| base* (binario speed4, off) | = | 100 | 100 | 37 | 119 | 119 | 37 | 37 |
+| off | 100 | = | 251 | 37 | 100 | 100 | 37 | 37 |
+| f2 = `STRATA_SB_FRESH=2` | 119 | 100 | 100 | 37 | = | **=** | 37 | 37 |
+| t0 = solo `STRATA_SB_THETA=0` | 37 | 37 | 37 | = | 37 | 37 | 73 | 122 |
+
+- **f2 è deterministico** (f2 = f2r su 256 token) e coincide con off fino al token 99. Al token 100 divergono anche
+  base e off, cioè lo stesso codice spento in due corse: è rumore di corsa e non dipende dalla leva. Il tier
+  adattivo sposta esperti anche a cache fissa, e un esperto calcolato su CPU invece che su GPU cambia i bit.
+- **f3, f2+theta 0 e theta 0 da solo** scelgono un token diverso al 37 (quasi-pareggio «Indicate workload» contro
+  «Indicate a workload»). Lo fa anche il solo gate, che è una manopola già esistente: con `--pipeline-windows` il
+  testo dipende dalla composizione delle finestre nei quasi-pareggi. Non è un difetto della leva.
+- `STRATA_IQ_MT_MIN=1` non sposta nulla: offmt = off su 256 token, f2mt e f3mt cadono nello stesso gruppo di f2 e f3.
+  La dipendenza da T sta quindi lato GPU, non nel kernel CPU degli esperti.
+
+### 5b. Misure per finestra (M, `strata decode timing` / `pipeline classes`, corse singole)
+
+| braccio | finestre | T | token/finestra | ms/finestra | **ms/token** | fresche ms · token | speculative ms · token | B sul percorso / gate |
+|---|---|---|---|---|---|---|---|---|
+| **elastica** off2 | 155 | 2,02 | 1,65 | 25,41 | **15,40** | 27,56 · 1,70 | 19,95 · 1,52 | 44 / 18 |
+| **elastica** f2 | 135 | 2,54 | 1,90 | 28,67 | **15,09** (−2,0%) | 30,94 · 1,94 | 19,90 · 1,75 | 28 / 31 |
+| fissa off / off2 / offmt | 149-150 | 2,08 | 1,71-1,72 | 30,8-32,0 | 18,59 / 18,02 / 18,28 | 34,4-36,1 · 1,8 | 20,6-20,8 · 1,5 | 39-40 / 14-15 |
+| fissa f2 / f2r / f2mt | 132-136 | 2,44 | 1,88-1,94 | 33,4-34,5 | 17,24 / 17,40 / 18,33** | 36,3-37,6 · 1,97 | 22,1-22,8 · 1,6-1,8 | 28 / 26-33 |
+| fissa f3 | 121 | 2,90 | 2,12 | 36,37 | 17,16 | 39,88 · 2,17 | 24,63 · 1,93 | 28 / 34 |
+| fissa t0 | 137 | 2,32 | 1,87 | 34,57 | 18,49 | 37,89 · 1,90 | 23,14 · 1,81 | 31 / 0 |
+
+\* `build-speed4-311b6fda`. ** f2mt con il prefill a 253 s (PC carico).
+
+Lettura:
+- Con la leva le fresche portano ~0,2-0,25 token in più a parità di costo quasi pieno (elastica: T=2 fresca 27,7 ms
+  contro T=1 25,5).
+- Le speculative calano dal 28% al 21% delle finestre, come previsto dal §4.
+- Il saldo per token è −2% in elastica e −3,5% in fissa (medie 17,66 contro 18,30): sotto la stima di −0,5/−0,75 ms a
+  finestra.
+- Il gate scarta più B (18 → 31) perché `p_on` ora vale q·r. Con theta 0 le B tornano tutte in volo, ma t0 da solo
+  è più lento (18,49) e ci sono troppo poche finestre per dirlo: va nel B-A-B.
+
+**Bracci per il B-A-B del coordinatore** (elastica, Daily):
+- A = braccio B di speed4;
+- B = A + `STRATA_SB_FRESH=2`;
+- facoltativi: `STRATA_SB_FRESH=3` e `STRATA_SB_FRESH=2 STRATA_SB_THETA=0`.
+`STRATA_SB_FLOOR` resta al default 0,10.
