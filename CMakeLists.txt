@@ -892,6 +892,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_executable(b6_mmvq_bench src/kernels/b6_mmvq_bench.cpp)
     target_include_directories(b6_mmvq_bench PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(b6_mmvq_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    # lab/speed2 (docs/SPEED2.md): the dense projections at the model's shapes, the default kernels against
+    # STRATA_DENSE_WR at T = 1..4, bit for bit and in microseconds, weights read cold from DRAM
+    add_executable(dense_bench EXCLUDE_FROM_ALL src/kernels/dense_bench.cpp)
+    target_include_directories(dense_bench PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(dense_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   endif()
   add_executable(gr_parity src/kernels/gr_parity.cpp)
   target_include_directories(gr_parity PRIVATE ${_strata_gpu_include_directories})

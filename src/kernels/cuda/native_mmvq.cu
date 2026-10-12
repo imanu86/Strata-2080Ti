@@ -1281,6 +1281,18 @@ template<> struct B6X<Q6KTraits> {
         }
         return r;
     }
+    // lab/speed2 (dense_wr_kernel): the same fragment from the block's SoA image in shared memory (8 ints of qs per
+    // Q8_1 block in `qs`, its low scale in `d`; `kby` = the weight block's first Q8_1 block): the same ints and floats
+    __device__ static X xload_s(const int* qs, const float* d, int kby, int iqs) {
+        X r;
+        const int off = kby + 4 * (iqs / 16) + (iqs % 16) / 8;
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            r.u[i] = qs[(off + 2 * i) * 8 + iqs % 8];
+            r.d8[i] = d[off + 2 * i];
+        }
+        return r;
+    }
     __device__ static W wload(const Q6KBlock* __restrict__ w, int iqs) {
         const Q6KTraits::W t = Q6KTraits::load(w, iqs);
         W r;
@@ -1320,6 +1332,18 @@ template<typename T, int KIND> struct B6XK {   // Q4_K (KIND 4) and Q5_K (KIND 5
         }
         return r;
     }
+    __device__ static X xload_s(const int* qs, const float* d, int kby, int iqs) {   // lab/speed2, as xload from shared
+        X r;
+        const int off = kby + 2 * ((iqs / 2) / 4);
+#pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            r.d8[i] = d[off + i];
+            const int* q8 = qs + (off + i) * 8 + ((iqs / 2) % 4);
+            r.u[2 * i] = q8[0];
+            r.u[2 * i + 1] = q8[4];
+        }
+        return r;
+    }
     __device__ static W wload(const typename T::Block* __restrict__ w, int iqs) { return T::load(w, iqs); }
     __device__ static float dot(const W& w, const X& x) {
         const uint8_t* sc = reinterpret_cast<const uint8_t*>(w.aux);
@@ -1341,6 +1365,15 @@ template<> struct B6X<IQ4XSTraits> {
             r.u1[j] = reinterpret_cast<const int*>(x[iqs / 4].qs)[j + 4];
         }
         r.dx = __low2float(x[iqs / 4].ds);
+        return r;
+    }
+    __device__ static X xload_s(const int* qs, const float* d, int kby, int iqs) {   // lab/speed2, as xload from shared
+        X r;
+        const int4* q = reinterpret_cast<const int4*>(qs + (kby + iqs / 4) * 8);   // the block's 8 ints: two LDS.128
+        const int4 a = q[0], b = q[1];
+        r.u0[0] = a.x; r.u0[1] = a.y; r.u0[2] = a.z; r.u0[3] = a.w;
+        r.u1[0] = b.x; r.u1[1] = b.y; r.u1[2] = b.z; r.u1[3] = b.w;
+        r.dx = d[kby + iqs / 4];
         return r;
     }
     __device__ static W wload(const IQ4XSBlock* __restrict__ w, int iqs) { return IQ4XSTraits::load(w, iqs); }
@@ -1422,6 +1455,176 @@ bool b6_launch(const typename F::Block* w, const Q81Block* x, float* y, int n_in
         return true;
     }
 }
+
+// ---- lab/speed2 STRATA_DENSE_WR (CUDA, opt-in; docs/SPEED2.md): the exact layout's sums, one warp per R rows.
+// The default exact kernels (single-column and B6) split a row's blocks over the block's 4 warps (thread tid = 32 y + x
+// takes blocks tid / T, + BPI, ...), park warps 1-3's partials in shared memory and let warp 0 add them in warp order
+// before the butterfly.  Here lane x of a warp runs those four chains itself (vy = 0..3: the blocks of tid = 32 vy + x,
+// in the same order) in four accumulators, adds them in the same order and does the same butterfly: the same floats
+// in the same order as the default, so bitwise the default exact layout's output (hence a single-column call's).
+// What changes: no shared partials and no __syncthreads per block; a warp owns R whole rows (their R weight loads per
+// block position are independent, so they are in flight together); and the activations' q8_1 blocks of every column
+// are staged once per block in shared memory as SoA (8 ints of qs per block, then the low scales), read with LDS
+// instead of per-thread L1 loads (STAGE = false reads them from global exactly as the B6 kernel).  Formats with a
+// B6X; kqs(32 vy + lane) == kqs(lane) for all of them (32 % T == 0), so a lane's kqs is the same for its four chains.
+#if !defined(__HIPCC__)
+NativeDenseWrParams g_dense_wr = [] {
+    NativeDenseWrParams p;
+    auto env = [](const char* n, int d) { const char* v = std::getenv(n); return v != nullptr && v[0] != '\0' ? std::atoi(v) : d; };
+    p.on = env("STRATA_DENSE_WR", 0);
+    p.rows = env("STRATA_DENSE_WR_R", 2);
+    p.stage = env("STRATA_DENSE_WR_STAGE", 1);
+    p.min_blocks_per_sm = env("STRATA_DENSE_WR_MINB", 0);
+    p.min_launch_blocks = env("STRATA_DENSE_WR_MINBLK", 256);
+    p.t1 = env("STRATA_DENSE_WR_T1", 1);
+    return p;
+}();
+
+template<typename F, int NCOLS, int R, bool STAGE, int MINB>
+__launch_bounds__(WARPS * WARP, MINB)
+__global__ void dense_wr_kernel(const typename F::Block* __restrict__ w, const Q81Block* __restrict__ x,
+                                float* __restrict__ y, int n_in, int n_out) {
+    using XB = B6X<F>;
+    extern __shared__ __align__(16) int s_wr[];
+    const int lane = int(threadIdx.x), warp = int(threadIdx.y);
+    const int nb = n_in / Q8K;                          // q8_1 blocks per column (= the column stride)
+    const int blocks_per_row = n_in / F::DIV;
+    const int* s_qs = s_wr;
+    const float* s_d = reinterpret_cast<const float*>(s_wr + NCOLS * nb * 8);
+    if constexpr (STAGE) {
+        int* qs_w = s_wr;
+        float* d_w = reinterpret_cast<float*>(s_wr + NCOLS * nb * 8);
+        const int tid = WARP * warp + lane;
+        for (int i = tid; i < NCOLS * nb * 8; i += WARPS * WARP) {
+            const int c = i / (nb * 8), rem = i - c * nb * 8;
+            qs_w[i] = reinterpret_cast<const int*>(x[std::size_t(c) * nb + (rem >> 3)].qs)[rem & 7];
+        }
+        for (int i = tid; i < NCOLS * nb; i += WARPS * WARP) {
+            const int c = i / nb, b = i - c * nb;
+            d_w[i] = __low2float(x[std::size_t(c) * nb + b].ds);
+        }
+        __syncthreads();
+    }
+    const int row0 = (int(blockIdx.x) * WARPS + warp) * R;
+    if (row0 >= n_out) return;                          // a whole warp, after the staging barrier
+    float acc[NCOLS][R][WARPS];
+#pragma unroll
+    for (int c = 0; c < NCOLS; ++c)
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int vy = 0; vy < WARPS; ++vy) acc[c][r][vy] = 0.0f;
+    const int kqs = F::kqs(lane);
+    for (int kb0 = 0; kb0 < blocks_per_row; kb0 += F::BPI) {   // the default kernel's iterations, in order
+#pragma unroll
+        for (int vy = 0; vy < WARPS; ++vy) {                // the chain of thread 32 vy + lane
+            const int kbx = kb0 + vy * (WARP / F::T) + lane / F::T;
+            if (kbx < blocks_per_row) {
+                const int kby = kbx * F::KBY;
+                typename XB::X xv[NCOLS];
+#pragma unroll
+                for (int c = 0; c < NCOLS; ++c) {
+                    if constexpr (STAGE) xv[c] = XB::xload_s(s_qs + std::size_t(c) * nb * 8, s_d + std::size_t(c) * nb, kby, kqs);
+                    else xv[c] = XB::xload(x + std::size_t(c) * nb + kby, kqs);
+                }
+#pragma unroll
+                for (int r = 0; r < R; ++r) {
+                    if (row0 + r < n_out) {
+                        const typename XB::W wv = XB::wload(w + std::size_t(row0 + r) * blocks_per_row + kbx, kqs);
+#pragma unroll
+                        for (int c = 0; c < NCOLS; ++c) acc[c][r][vy] += XB::dot(wv, xv[c]);
+                    }
+                }
+            }
+        }
+    }
+    // the default's reduction: warp 0's sum, + warp 1's, + warp 2's, + warp 3's partial of the same lane, then the butterfly
+#pragma unroll
+    for (int c = 0; c < NCOLS; ++c) {
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            float s = acc[c][r][0];
+#pragma unroll
+            for (int vy = 1; vy < WARPS; ++vy) s += acc[c][r][vy];
+            s = warp_sum(s);
+            if (lane == r && row0 + r < n_out) y[std::size_t(c) * n_out + row0 + r] = s;
+        }
+    }
+}
+
+// the plan of a dense_wr launch: false = the default kernels run
+bool dense_wr_plan(bool fmt_ok, int n_in, int n_out, int ncols, int* rows, bool* stage, int* minb, int* blocks, std::size_t* smem) {
+    const NativeDenseWrParams& p = g_dense_wr;
+    if (!fmt_ok || !p.on || !g_multi_exact || s26_tsum_on() || ncols < 1 || ncols > 4) return false;
+    if (ncols == 1 && !p.t1) return false;
+    if (n_in % 256 != 0) return false;   // the four formats' block: 256 elements
+    *rows = p.rows == 1 || p.rows == 4 ? p.rows : 2;
+    *blocks = (n_out + WARPS * *rows - 1) / (WARPS * *rows);
+    if (*blocks < p.min_launch_blocks) return false;
+    *smem = std::size_t(ncols) * std::size_t(n_in / Q8K) * 36;
+    *stage = p.stage != 0 && *smem <= std::size_t(48) * 1024;
+    if (!*stage) *smem = 0;
+    // 4 blocks per SM (<= 128 registers) while the accumulators stay small (ncols x rows x 4), else 2
+    *minb = p.min_blocks_per_sm == 2 || p.min_blocks_per_sm == 4 ? p.min_blocks_per_sm : (ncols * *rows <= 8 ? 4 : 2);
+    return true;
+}
+void dense_wr_note(int rows, bool stage, int minb) {
+    static bool noted = false;
+    if (noted) return;
+    noted = true;
+    int dev = 0;
+    cudaGetDevice(&dev);
+    std::fprintf(stderr, "strata dense_wr: CUDA%d one warp per %d rows, activations %s, min %d blocks/SM, launches under %d blocks "
+                         "keep the default kernels, ncols 1 %s (STRATA_DENSE_WR=1; bitwise the default exact layout)\n",
+                 dev, rows, stage ? "staged in shared memory" : "from global", minb, g_dense_wr.min_launch_blocks,
+                 g_dense_wr.t1 ? "included" : "excluded");
+}
+
+template<typename F, int NCOLS, int R, bool STAGE>
+void dense_wr_run(int minb, int blocks, std::size_t smem, const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
+    const dim3 threads(WARP, WARPS);
+    if (minb == 2) dense_wr_kernel<F, NCOLS, R, STAGE, 2><<<unsigned(blocks), threads, smem, s>>>(w, x, y, n_in, n_out);
+    else dense_wr_kernel<F, NCOLS, R, STAGE, 4><<<unsigned(blocks), threads, smem, s>>>(w, x, y, n_in, n_out);
+}
+template<typename F, int NCOLS, int R>
+void dense_wr_run(bool stage, int minb, int blocks, std::size_t smem, const typename F::Block* w, const Q81Block* x, float* y, int n_in, int n_out, cudaStream_t s) {
+    if (stage) dense_wr_run<F, NCOLS, R, true>(minb, blocks, smem, w, x, y, n_in, n_out, s);
+    else dense_wr_run<F, NCOLS, R, false>(minb, blocks, smem, w, x, y, n_in, n_out, s);
+}
+template<typename F, int NCOLS>
+bool dense_wr_launch(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
+    if constexpr (!B6X<F>::ok) {
+        return false;
+    } else {
+        int rows = 0, minb = 0, blocks = 0;
+        bool stage = false;
+        std::size_t smem = 0;
+        if (!dense_wr_plan(true, n_in, n_out, NCOLS, &rows, &stage, &minb, &blocks, &smem)) return false;
+        dense_wr_note(rows, stage, minb);
+        const auto* w = static_cast<const typename F::Block*>(weights);
+        const auto* x = static_cast<const Q81Block*>(x_q8_1);
+        if (rows == 1) dense_wr_run<F, NCOLS, 1>(stage, minb, blocks, smem, w, x, y, n_in, n_out, s);
+        else if (rows == 4) dense_wr_run<F, NCOLS, 4>(stage, minb, blocks, smem, w, x, y, n_in, n_out, s);
+        else dense_wr_run<F, NCOLS, 2>(stage, minb, blocks, smem, w, x, y, n_in, n_out, s);
+        return true;
+    }
+}
+template<typename F>
+bool dense_wr_try(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, int ncols, void* stream) {
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        case 1: return dense_wr_launch<F, 1>(weights, x_q8_1, y, n_in, n_out, s);
+        case 2: return dense_wr_launch<F, 2>(weights, x_q8_1, y, n_in, n_out, s);
+        case 3: return dense_wr_launch<F, 3>(weights, x_q8_1, y, n_in, n_out, s);
+        case 4: return dense_wr_launch<F, 4>(weights, x_q8_1, y, n_in, n_out, s);
+        default: return false;
+    }
+}
+#define STRATA_DENSE_WR_TRY(...) \
+    if (dense_wr_try<__VA_ARGS__>(weights, x_q8_1, y, n_in, n_out, ncols, stream)) { launch_check(); return; }
+#else
+#define STRATA_DENSE_WR_TRY(...)
+#endif
 
 template<typename F, int NCOLS>
 void launch_multi_n(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, cudaStream_t s) {
@@ -2273,6 +2476,21 @@ void native_q6_k_unpack(const void* weights) {
 void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }
 bool native_mmvq_multi_exact() { return g_multi_exact; }
 void native_mmvq_set_b6_rows(int mode) { g_b6_rows = mode; }
+#if !defined(__HIPCC__)
+void native_mmvq_set_dense_wr(const NativeDenseWrParams& p) { g_dense_wr = p; }
+NativeDenseWrParams native_mmvq_dense_wr() { return g_dense_wr; }
+bool native_mmvq_dense_wr_takes(int ggml_type, int n_in, int n_out, int ncols) {
+    const bool fmt_ok = ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 23;
+    int rows = 0, minb = 0, blocks = 0;
+    bool stage = false;
+    std::size_t smem = 0;
+    return dense_wr_plan(fmt_ok, n_in, n_out, ncols, &rows, &stage, &minb, &blocks, &smem);
+}
+#else
+void native_mmvq_set_dense_wr(const NativeDenseWrParams&) {}
+NativeDenseWrParams native_mmvq_dense_wr() { return NativeDenseWrParams{}; }
+bool native_mmvq_dense_wr_takes(int, int, int, int) { return false; }
+#endif
 int native_mmvq_b6_rows() { return g_b6_rows; }
 
 std::size_t native_q8_1_bytes(int n_in, int ncols) {
@@ -2318,6 +2536,7 @@ void native_q5_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(y);
     validate_stream(stream);
     STRATA_WAVE_MMVQ(Q5KTraits)
+    STRATA_DENSE_WR_TRY(Q5KTraits)
     if (ncols > 1) {
         launch_multi<Q5KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
         launch_check();
@@ -2439,6 +2658,7 @@ void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(y);
     validate_stream(stream);
     STRATA_WAVE_MMVQ(IQ4XSTraits)
+    STRATA_DENSE_WR_TRY(IQ4XSTraits)
     if (ncols > 1) {
         launch_multi<IQ4XSTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
         launch_check();
@@ -2479,6 +2699,7 @@ void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(y);
     validate_stream(stream);
     STRATA_WAVE_MMVQ(Q4KTraits)
+    STRATA_DENSE_WR_TRY(Q4KTraits)
     if (ncols > 1) {
         launch_multi<Q4KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
         launch_check();
@@ -2520,6 +2741,7 @@ void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(y);
     validate_stream(stream);
     STRATA_WAVE_MMVQ(Q6KTraits)
+    STRATA_DENSE_WR_TRY(Q6KTraits)
     if (ncols > 1) {
         launch_multi<Q6KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);
         launch_check();

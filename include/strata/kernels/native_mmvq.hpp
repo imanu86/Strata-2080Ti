@@ -37,6 +37,25 @@ bool native_mmvq_multi_exact();
 // Set before graph capture.
 void native_mmvq_set_b6_rows(int mode);
 int native_mmvq_b6_rows();
+// lab/speed2 (CUDA, opt-in STRATA_DENSE_WR=1, docs/SPEED2.md): the exact layout's sums computed by one warp per R
+// rows - a lane runs the four warps' chains of the default kernel (tid = 32 vy + lane) in its own registers and adds
+// them in the default's order, so every output is bitwise the default exact layout's (and a single-column call's).
+// No cross-warp partials or __syncthreads per block; the activations' q8_1 blocks staged once per block in shared
+// memory as SoA (stage = 1) or read from global as the B6 kernel does (stage = 0).  Q4_K, Q5_K, Q6_K and IQ4_XS,
+// 1 <= ncols <= 4; t1 = 0 keeps the single-column kernels at ncols = 1.  min_blocks_per_sm 0 = 4 up to 4 columns, 2
+// above; a launch under `min_launch_blocks` blocks keeps the default kernel.  Set before graph capture.
+struct NativeDenseWrParams {
+    int on = 0;
+    int rows = 2;               // rows per warp: 1, 2 or 4 (STRATA_DENSE_WR_R)
+    int stage = 1;              // STRATA_DENSE_WR_STAGE
+    int min_blocks_per_sm = 0;  // STRATA_DENSE_WR_MINB
+    int min_launch_blocks = 256;// STRATA_DENSE_WR_MINBLK
+    int t1 = 1;                 // STRATA_DENSE_WR_T1
+};
+void native_mmvq_set_dense_wr(const NativeDenseWrParams& p);
+NativeDenseWrParams native_mmvq_dense_wr();
+// true when dense_wr would run this call (the bench reads it)
+bool native_mmvq_dense_wr_takes(int ggml_type, int n_in, int n_out, int ncols);
 
 // One quantization may serve multiple weight matrices sharing the same input.
 // Q8_1 stores FP16 scale and FP16 warp sum of the ORIGINAL float inputs; it does
