@@ -3525,7 +3525,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
             const double now = now_ms();
             if (now - fl_flush_ms_ > 2.0) {   // flush WDDM and notice a dead graph, as run() does
                 fl_flush_ms_ = now;
-                const cudaError_t q = cudaEventQuery(ev_done_);
+                const cudaError_t q = cudaEventQuery(sa_head_ ? ev_head_ : ev_done_);   // STRUCT-A: a head bet has no done event yet
                 if (q != cudaErrorNotReady && *(volatile uint32_t*) h_seq_ < want) {
                     trace_ev("NEVER-RANG", fl_k_, l, (int64_t) q);
                     err = "verify: layer " + std::to_string(l) + " never rang (" +

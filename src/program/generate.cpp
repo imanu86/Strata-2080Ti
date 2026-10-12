@@ -12337,6 +12337,7 @@ int main(int argc, char** argv) {
                 SaBetPool sa_pool;
                 sa_pool.n_expert = g.n_expert;
                 int64_t sa_want = -1, sa_forced = -1;   // the fresh window a bet is for; A's forced rows read (once per A)
+                int64_t sa_snapped = -1;                // the window whose GDN snapshot a bet took
                 int sa_last_T = 0;                      // the last bet's size for sa_want
                 int64_t sa_placed[4] = {}, sa_tails[4] = {}, sa_drops[4] = {}, sa_chains = 0, sa_cut = 0;
                 int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
@@ -12717,7 +12718,8 @@ int main(int argc, char** argv) {
                     for (int i = 1; i < T; ++i) bet.tok[i] = mtp.chain_tok()[i - 1];
                     if (ajob) a_gap(0);
                     if (!el_gap()) return false;
-                    if (!snap_take(0, A.seq)) { err = "the GDN snapshot failed"; return false; }
+                    if (sa_snapped != A.seq && !snap_take(0, A.seq)) { err = "the GDN snapshot failed"; return false; }
+                    sa_snapped = A.seq;
                     if (!VF(0, A).pl_launch_head(T, bet.tok, bet.p, err)) return false;
                     bet.live = true;
                     sa_pool.routes.clear();
@@ -12957,7 +12959,8 @@ int main(int argc, char** argv) {
                         if (st == 0 && A.p + A.T > o.max_context) { ending = true; continue; }
                         if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
                         if (st == 0 && !el_gap()) return die(err);   // fork: the elastic tail
-                        if (!snap_take(st, A.seq)) return die("the GDN snapshot failed");
+                        // STRUCT-A: a thrown-away bet took this snapshot already (a head leaves the GDN state alone)
+                        if (!(st == 0 && sa_snapped == A.seq) && !snap_take(st, A.seq)) return die("the GDN snapshot failed");
                         if (!VF(st, A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.fl = true;
                         if (st == 0) A.launched = true;
