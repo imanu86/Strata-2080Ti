@@ -1,5 +1,6 @@
 #include "strata/core/prefix_cache_file.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <chrono>
 #include <climits>
@@ -10,6 +11,7 @@
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -595,5 +597,94 @@ bool prefix_cache_read(const std::filesystem::path &path,
     error = e.what();
     return false;
   }
+}
+
+std::filesystem::path prefix_cache_keyed_path(
+    const std::filesystem::path &base, const std::vector<int32_t> &prefix,
+    int32_t next_token) {
+  uint64_t h = 1469598103934665603ull;   // FNV-1a 64
+  auto mix = [&h](const void *data, size_t n) {
+    const auto *p = static_cast<const uint8_t *>(data);
+    for (size_t i = 0; i < n; ++i) {
+      h ^= p[i];
+      h *= 1099511628211ull;
+    }
+  };
+  const uint64_t count = prefix.size();
+  mix(&count, sizeof(count));
+  if (!prefix.empty())
+    mix(prefix.data(), prefix.size() * sizeof(int32_t));
+  mix(&next_token, sizeof(next_token));
+  char suffix[18];
+  std::snprintf(suffix, sizeof(suffix), ".%016llx", (unsigned long long)h);
+  auto path = base;
+  path += suffix;
+  return path;
+}
+
+std::vector<PrefixCacheEntry>
+prefix_cache_keyed_files(const std::filesystem::path &base) {
+  std::vector<PrefixCacheEntry> out;
+  std::error_code ec;
+  const auto dir = base.parent_path().empty() ? std::filesystem::path(".")
+                                              : base.parent_path();
+  const std::string stem = base.filename().string() + ".";
+  for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
+       it.increment(ec)) {
+    const std::string name = it->path().filename().string();
+    if (name.size() != stem.size() + 16 || name.compare(0, stem.size(), stem))
+      continue;
+    bool hex = true;
+    for (size_t i = stem.size(); i < name.size() && hex; ++i)
+      hex = (name[i] >= '0' && name[i] <= '9') ||
+            (name[i] >= 'a' && name[i] <= 'f');
+    std::error_code fe;
+    if (!hex || !it->is_regular_file(fe) || fe)
+      continue;
+    PrefixCacheEntry e;
+    e.path = it->path();
+    e.bytes = it->file_size(fe);
+    if (fe)
+      continue;
+    e.written = std::filesystem::last_write_time(e.path, fe);
+    if (fe)
+      continue;
+    out.push_back(std::move(e));
+  }
+  return out;
+}
+
+size_t prefix_cache_evict(const std::filesystem::path &base,
+                          uint64_t cap_bytes,
+                          const std::filesystem::path &keep) {
+  auto files = prefix_cache_keyed_files(base);
+  std::sort(files.begin(), files.end(),
+            [](const PrefixCacheEntry &a, const PrefixCacheEntry &b) {
+              return a.written < b.written;
+            });
+  uint64_t total = 0;
+  for (const auto &f : files)
+    total += f.bytes;
+  size_t removed = 0;
+  std::error_code ec;
+  for (const auto &f : files) {
+    if (total <= cap_bytes)
+      break;
+    if (std::filesystem::equivalent(f.path, keep, ec))
+      continue;
+    ec.clear();
+    if (std::filesystem::remove(f.path, ec) && !ec) {
+      total -= f.bytes;
+      ++removed;
+    }
+    ec.clear();
+  }
+  return removed;
+}
+
+void prefix_cache_touch(const std::filesystem::path &path) {
+  std::error_code ec;
+  std::filesystem::last_write_time(
+      path, std::filesystem::file_time_type::clock::now(), ec);
 }
 } // namespace strata::core
