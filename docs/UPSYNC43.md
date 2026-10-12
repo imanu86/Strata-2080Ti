@@ -287,6 +287,8 @@ si incollano dopo la verifica. Il commento a @Niko1221 va solo sulla prima (ple-
 
 | [#2075](https://github.com/Niko1221/Strata/pull/2075) attenzione QSA del Daily (`STRATA_ATTN_DAILY=1`) | `pr/attn-daily` 901de010 | 12/10 10:40 | build 0.1.43 con test (sha `6c311860…`); `qsa_merge_daily_parity` sulla 2080 Ti **1168 casi, 0 differenze** (default e `=1`); `--bench`: chunk 0,57-0,63×, merge v2 0,24-0,51× dell'upstream; smoke con `STRATA_ATTN_DAILY=1` ok |
 
+| [#2077](https://github.com/Niko1221/Strata/pull/2077) prefisso su disco (`--prompt-cache-file`) | `pr/prefix-disk` 25e12d73 | 12/10 10:50 | build 0.1.43 rc 0 (sha `855b6c09…`); due avvii con l'opzione (identità 17-23 ms), risposte uguali; il salvataggio/ripresa vero non si esercita con un prompt di 70 token: dichiarato nel corpo (gira nel Daily dal 0.1.40) |
+
 Le altre si aprono una per una appena passano lo smoke (coda `coda_pr_u43.sh`): prefix-disk, attn-daily (parità verde),
 simt-default, dequant-sm75; hc16 sospesa; ram-core no.
 
