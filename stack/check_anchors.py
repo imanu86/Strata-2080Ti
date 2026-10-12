@@ -264,6 +264,8 @@ def build(repo, rng):
                 shutil.rmtree(tmp, ignore_errors=True)
                 subprocess.run(['git', 'worktree', 'prune'], cwd=str(repo), capture_output=True)
         text = git(['format-patch', '-1', '--stdout', '--no-stat', '--no-signature', '--zero-commit', patch_sha], repo).stdout
+        # a public registry: no personal address in the header (authorship stays in the fork's history)
+        text = re.sub(r'^From: .*$', 'From: Strata-2080Ti stack <stack@noreply.github.com>', text, count=1, flags=re.M)
         # the first line "From 000... Mon Sep 17 00:00:00 2001" is deterministic with --zero-commit
         (HERE / fname).write_text(text, encoding='utf-8', newline='\n')
         files, _ = parse_patch(text)
