@@ -288,7 +288,7 @@ B-A-B, `wait_flag` 2-7 ms contro 1,5-2,6 di `DET-qsarows-nsys2`; valgono i confr
    32. **Verificato con `-nsysB2`** (`STRATA_EXPDEC_RB=32 STRATA_EXPDEC_DRB=64`): gate/up 1,35 / 2,10 / 2,75 / 3,20 e
    down Q2_0 0,42 / 0,61 / 0,82 / 1,04, identici a B: la geometria non c'entra. Il down Q2_0 nel motore resta ~10%
    peggio (probabile la convivenza con la catena del drafter sulla stessa scheda e i 106 registri contro 61: 2 blocchi
-   per SM invece di 4; non misurato oltre). Da `e4885f1d`+1 il down è dietro `STRATA_EXPDEC_DOWN=1` e **di default
+   per SM invece di 4; non misurato oltre). Da `52a74f6a` il down è dietro `STRATA_EXPDEC_DOWN=1` e **di default
    EXPDEC prende il solo gate/up**.
 2. Il risparmio di kernel per finestra a T medio ≈ 2 è ~0,4-0,5 ms sullo stadio 1 (gate/up −0,5, down +0,1) e ~0,4 sullo
    stadio 0: sul banco pulito è il **2% di 26 ms**, sotto la forbice del B-A-B (±2%). Sotto nsys il muro dello stadio 1
@@ -319,4 +319,10 @@ micro-bench sì (`expdec_bench`, 2 iterazioni, bitwise), installato no, provato 
 
 Build di `e4885f1d` (= `ff8614a6` + la riga di log `strata expdec:`): `strata.exe` sha256
 `affd6c1ec680ab8336e0929aa80254266eda179db9974fa45bc9a38346100a0c`, in `build-expertdec-e4885f1d\` con `build.json`;
-provata nel motore solo nelle catture nsys `DET-x2-expdec-nsys{A,B,B2}` (§7). Il B-A-B lo lancia l'owner.
+provata nel motore solo nelle catture nsys `DET-x2-expdec-nsys{A,B,B2}` (§7).
+
+Build di `52a74f6a` (= `e4885f1d` + `STRATA_EXPDEC_DOWN`, default solo gate/up): `strata.exe` sha256
+`4996974af721a337d7147d8a18f92b6fd872f5f1d894949dd08792a53f64993a`, in `build-expertdec-52a74f6a\` con `build.json`.
+**È il build per il B-A-B** (lo lancia l'owner): braccio B con `STRATA_EXPDEC=1`, A senza, stesso exe; nel log di B
+devono comparire le righe `strata expdec: CUDAn gate/up type ...: expdec_gu_kernel R 1 MINB 4 ... captured into a
+graph` e `down type 42 ... not covered`. Compilato sì, provato nel motore con questo default no.
