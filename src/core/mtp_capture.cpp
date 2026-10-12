@@ -208,11 +208,14 @@ MtpCapture* MtpCapture::instance() {
     return cap;
 }
 
+namespace { int64_t g_request = -1; }
+
+int64_t MtpCapture::request_index() { return g_request; }
+
 void MtpCapture::begin_request(int64_t n_prompt) {
-    static int64_t req = 0;
     auto j = std::make_unique<Job>();
     j->kind = Job::Open;
-    j->k = req++;
+    j->k = ++g_request;
     j->n_prompt = n_prompt;
     impl_->push(std::move(j));
 }

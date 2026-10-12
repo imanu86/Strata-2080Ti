@@ -1,5 +1,6 @@
 // src/core/mtp.cpp - see include/strata/core/mtp.hpp.
 #include "strata/core/mtp.hpp"
+#include "strata/core/mtp_capture.hpp"
 #include "strata/core/coupled_draft.hpp"
 #include "strata/core/spec_prob.hpp"
 #include "strata/core/on_device.hpp"
@@ -529,8 +530,9 @@ namespace {
 // inputs of the chain (the cell p + a, its residual row and the window's tokens) and, per step it ran, the pick, its
 // probability and the draft head's whole logits row (the draft vocabulary's order).  A stream sync per step: slow,
 // diagnostic only.  Record (little endian):
-//   int32 magic 0x4d545044, int32 n_vocab_d, int32 hcn, int32 T, int64 p, int32 a, int32 n_steps, int32 tokens[T],
-//   f32 R[hcn], then per step: int32 draft, f32 prob, f32 logits[n_vocab_d]
+//   int32 magic 0x4d545045, int32 n_vocab_d, int32 hcn, int32 T, int64 p, int32 a, int32 n_steps, int32 request
+//   (MtpCapture::request_index(): the capture's seq_<k>, -1 without a capture), int32 tokens[T], f32 R[hcn], then per
+//   step: int32 draft, f32 prob, f32 logits[n_vocab_d]
 std::FILE* mtp_dump_file() {
     static std::FILE* f = [] () -> std::FILE* {
         const char* p = std::getenv("STRATA_MTP_DUMP");
@@ -1531,11 +1533,12 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
             return false;
         }
         if (dump != nullptr) {
-            const int32_t magic = 0x4d545044, nvd32 = (int32_t) nvd, hcn32 = (int32_t) HCN, T32 = T, a32 = a, n32 = n;
+            const int32_t magic = 0x4d545045, nvd32 = (int32_t) nvd, hcn32 = (int32_t) HCN, T32 = T, a32 = a, n32 = n;
+            const int32_t req32 = (int32_t) MtpCapture::request_index();
             const int64_t p64 = p;
             std::fwrite(&magic, 4, 1, dump); std::fwrite(&nvd32, 4, 1, dump); std::fwrite(&hcn32, 4, 1, dump);
             std::fwrite(&T32, 4, 1, dump); std::fwrite(&p64, 8, 1, dump); std::fwrite(&a32, 4, 1, dump);
-            std::fwrite(&n32, 4, 1, dump);
+            std::fwrite(&n32, 4, 1, dump); std::fwrite(&req32, 4, 1, dump);
             std::fwrite(tokens, 4, (size_t) T, dump);
             std::fwrite(dump_R.data(), 4, dump_R.size(), dump);
             for (int j = 0; j < n; ++j) {

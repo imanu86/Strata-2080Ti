@@ -44,6 +44,8 @@ public:
     static MtpCapture* instance();
     /// A request starts: its files are `<dir>/seq_<k>.*` (k counts the requests that reached here, from 0).
     void begin_request(int64_t n_prompt);
+    /// The k of the last request that began (-1 before the first): the drafter's dump (STRATA_MTP_DUMP) tags its records.
+    static int64_t request_index();
     /// After a prompt window's Verifier::run (rows t = 0..T-1 at positions pos0 + t): `tokens[t]` is the token at
     /// pos0 + t, `next[t]` the prompt's token at pos0 + t + 1 (or -1).  Reads the final residuals and the head logits.
     bool window(const Verifier& ver, const int32_t* tokens, const int32_t* next, int T, int64_t pos0, std::string& err);
