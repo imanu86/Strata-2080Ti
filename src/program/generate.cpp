@@ -10924,7 +10924,14 @@ int main(int argc, char** argv) {
                         std::error_code kec;
                         auto keyed = strata::core::prefix_cache_keyed_path(o.prompt_cache_file, prefix,
                                                                            int32_t(ids[size_t(disk_root)]));
-                        if (std::filesystem::is_regular_file(keyed, kec) && !kec) disk_path = std::move(keyed);
+                        if (std::filesystem::is_regular_file(keyed, kec) && !kec) {
+                            disk_path = std::move(keyed);
+                            // fork (TTFT): this prefix's own file (a hit unless the engine's identity changed): the
+                            // PLE rows of the part read after it are read beside the restore (~0.7 s of file read)
+                            if (o.batch <= 0 && disk_root >= 2 && last_turn - disk_root > o.short_read)
+                                sp.ple_warm_now(ids.data() + disk_root, last_turn - disk_root,
+                                                (int32_t) ids[size_t(disk_root - 2)], (int32_t) ids[size_t(disk_root - 1)]);
+                        }
                     }
                     std::error_code ec;
                     const auto bytes = std::filesystem::file_size(disk_path, ec);
@@ -11735,6 +11742,19 @@ int main(int argc, char** argv) {
                 if (!win && !lend(to - at, err)) {
                     std::printf("ERR lending the prompt path its slots failed: %s\n", err.c_str());
                     return 1;
+                }
+                // fork (TTFT): a batched part followed by another batched part (Claude Code's system turn, then its
+                // first message): the next part's first PLE rows are read once this part has its last chunk's rows,
+                // so the next run's first chunk does not wait for the SSD (Prefill::set_ple_lookahead)
+                if (!win && o.batch <= 0) {
+                    int64_t next_to = INT64_MAX;
+                    for (const int64_t c : cuts)
+                        if (c > to) next_to = std::min(next_to, c);
+                    if (next_to != INT64_MAX && to >= 2 && !windows_ok(to, next_to))
+                        sp.set_ple_lookahead(ids.data() + to, next_to - to, (int32_t) ids[(size_t) (to - 2)],
+                                             (int32_t) ids[(size_t) (to - 1)]);
+                    else
+                        sp.set_ple_lookahead(nullptr, 0, -1, -1);
                 }
                 const auto tsp = Clock::now();
                 pp_exact = false;   // a batched or pipelined part is in flight: a cancel may leave the state past pp_reached
