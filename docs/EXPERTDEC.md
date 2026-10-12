@@ -236,3 +236,12 @@ desktop compreso). Nel motore il 42% delle finestre è a T = 1.
 
 Pronto per il B-A-B end-to-end (lo lancia l'owner): stesso exe, braccio B con `STRATA_EXPDEC=1`, braccio A senza; testo
 identico atteso (bitwise), da guardare `strata decode timing` per T e il profilo `VRAM hits`.
+
+## Stato
+
+Build di `ff8614a6` (codice; i commit successivi toccano solo questa pagina): compilata con `build_lock.py` (Release,
+CUDA 75;86, test spenti), rc 0. `strata.exe` sha256
+`4efc9f7422645b7b8b33f11c08fc3677c257956f27c2fd4a7ebf28d75dd81f16`, copiata con `build.json` in
+`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\build-expertdec-ff8614a6\`; accanto
+`source\serve` e `source\tools` del worktree e `strata-vision.exe` di `build-candidate-5dea5258`. **Compilato sì,
+micro-bench sì (`expdec_bench`, 2 iterazioni, bitwise), installato no, provato nel motore no.**
