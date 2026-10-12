@@ -265,6 +265,12 @@ public:
     /// window in between (the pipelined decode serves a speculative window one layer at a time; architectds 6175807a).
     int service(PoolMultiFn pool, void* user, std::string& err, int max_layers = 0);
     bool in_flight() const { return fl_active_; }
+    /// lab/struct-c (STRATA_SC_SERVE): on the thread that serves this window only - the layers served so far, and
+    /// whether the GPU rang a layer not served yet (the ring service() would serve now)
+    int64_t sc_layers_served() const { return fl_k_; }
+    bool sc_rang() const {
+        return fl_active_ && fl_k_ < fl_total_ && *(volatile const uint32_t*) h_seq_ >= (uint32_t) (fl_k_ + 1);
+    }
     /// The window's graph (and its profile copy) completed; false while it runs.  An error sets `err`.
     bool done(std::string& err);
     /// After `done`: the profile, the last stage's host sampling and picks (`out` may be null on an earlier stage).

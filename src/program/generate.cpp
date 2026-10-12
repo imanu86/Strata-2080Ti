@@ -12317,7 +12317,7 @@ int main(int argc, char** argv) {
                 std::atomic<bool> sc_stop{false};
                 std::string sc_err;
                 std::thread sc_thr;
-                std::atomic<int64_t> sc_served{0}, sc_calls{0}, sc_wait_lock{0};
+                std::atomic<int64_t> sc_served{0}, sc_calls{0}, sc_wait_lock{0}, sc_bheld{0}, sc_bforced{0};
 #if defined(_WIN32)
                 DWORD_PTR sc_loop_old = 0;
 #endif
@@ -12345,8 +12345,10 @@ int main(int argc, char** argv) {
                     if (sc_loop_old != 0) SetThreadAffinityMask(GetCurrentThread(), sc_loop_old);
 #endif
                     std::fprintf(stderr, "strata struct-c serve: %lld windows served on the server thread, %lld service "
-                                         "calls, %lld passes held for the loop\n", (long long) sc_served.load(),
-                                 (long long) sc_calls.load(), (long long) sc_wait_lock.load());
+                                         "calls, %lld passes held for the loop; BGAP: %lld passes held B, %lld B layers "
+                                         "past STRATA_SC_BMAX_US\n", (long long) sc_served.load(),
+                                 (long long) sc_calls.load(), (long long) sc_wait_lock.load(), (long long) sc_bheld.load(),
+                                 (long long) sc_bforced.load());
                 };
                 auto sc_start = [&]() {
                     if (!sc_on) return;
@@ -12381,6 +12383,15 @@ int main(int argc, char** argv) {
                         if (srv_cpu >= 0) SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR) 1 << srv_cpu);
 #endif
                         std::string e;
+                        // STRATA_SC_BGAP_US=g (0 = off): while stage 1 of the verified window runs, B's rung layer waits
+                        // for a gap of stage 1 - no stage-1 ring pending and a stage-1 layer served less than g us ago
+                        // (the GPU is then busy with its own layer for a while) - or until it has waited
+                        // STRATA_SC_BMAX_US (1000).  The pool is one: a B layer taken just before stage 1 rings makes
+                        // stage 1 wait for all of it.  Only when B's layers are served moves.
+                        static const double bgap_us = [] { const char* v = std::getenv("STRATA_SC_BGAP_US"); return v ? std::atof(v) : 0.0; }();
+                        static const double bmax_us = [] { const char* v = std::getenv("STRATA_SC_BMAX_US"); return v ? std::atof(v) : 1000.0; }();
+                        auto us_now = [] { return std::chrono::duration<double, std::micro>(Clock::now().time_since_epoch()).count(); };
+                        double s1_last = 0.0, b_since[2][2] = {{0, 0}, {0, 0}};
                         while (!sc_stop.load(std::memory_order_relaxed)) {
                             bool any = false;
                             for (int pr = 0; pr < 2; ++pr)        // the verified path first, then B a layer per pass
@@ -12392,12 +12403,32 @@ int main(int argc, char** argv) {
                                             continue;
                                         any = true;
                                         if (sc_wants.load(std::memory_order_relaxed) != 0) { sc_wait_lock.fetch_add(1); continue; }
+                                        strata::core::Verifier& sv = *PV[st][par];
+                                        if (pr == 1 && bgap_us > 0.0 && sv.sc_rang()) {   // STRATA_SC_BGAP_US
+                                            int s1 = -1;
+                                            for (int q = 0; q < 2; ++q)
+                                                if (sc_slot[1][q].state.load(std::memory_order_acquire) == 1 &&
+                                                    sc_slot[1][q].prio.load(std::memory_order_relaxed) == 0)
+                                                    s1 = q;
+                                            if (s1 >= 0) {
+                                                const double now = us_now();
+                                                if (b_since[st][par] == 0.0) b_since[st][par] = now;
+                                                const bool gap = !PV[1][s1]->sc_rang() && now - s1_last < bgap_us;
+                                                if (!gap && now - b_since[st][par] < bmax_us) { sc_bheld.fetch_add(1, std::memory_order_relaxed); continue; }
+                                                if (!gap) sc_bforced.fetch_add(1, std::memory_order_relaxed);
+                                            }
+                                        }
                                         std::unique_lock<std::mutex> l(sc_mu, std::try_to_lock);
                                         if (!l.owns_lock()) continue;
                                         sc_calls.fetch_add(1, std::memory_order_relaxed);
-                                        const int r = PV[st][par]->service(sl.skip.load(std::memory_order_relaxed)
-                                                                               ? nullptr : &drive_pool_split,
-                                                                           PSD[par], e, pr == 1 ? 1 : 0);
+                                        const int64_t k0 = sv.sc_layers_served();
+                                        const int r = sv.service(sl.skip.load(std::memory_order_relaxed)
+                                                                     ? nullptr : &drive_pool_split,
+                                                                 PSD[par], e, pr == 1 ? 1 : 0);
+                                        if (sv.sc_layers_served() != k0) {
+                                            if (st == 1) s1_last = us_now();
+                                            else b_since[st][par] = 0.0;
+                                        }
                                         if (r < 0) {
                                             sc_err = e;
                                             sl.state.store(-1, std::memory_order_release);
