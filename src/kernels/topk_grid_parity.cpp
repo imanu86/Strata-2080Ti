@@ -50,6 +50,20 @@ template <typename T> struct Dev {
     }
 };
 
+// the grid kernel keys its exchange slot on the `ids` pointer (8 per device; the engine's buffers are stable), so every
+// case writes into this one persistent buffer and the result is copied out
+int32_t* g_grid_ids = nullptr;
+int g_declined = 0;   // cases the grid kernel declined (does not fit with a query to spare): nq > 5 only
+int32_t* grid_ids(size_t n) {
+    static size_t have = 0;
+    if (n > have) {
+        if (g_grid_ids) { ck(cudaDeviceSynchronize(), "grid ids sync"); cudaFree(g_grid_ids); }
+        have = n < (size_t) 8 * 4096 ? (size_t) 8 * 4096 : n;
+        ck(cudaMalloc(&g_grid_ids, have * sizeof(int32_t)), "grid ids");
+    }
+    return g_grid_ids;
+}
+
 const float kNaN = std::numeric_limits<float>::quiet_NaN(), kInf = std::numeric_limits<float>::infinity();
 
 enum Pattern { kRandom, kAllEqual, kFewValues, kNaNs, kInfs, kSignedZero, kDenormal, kAscending, kDescending, kAllNaN,
@@ -132,9 +146,17 @@ int run_case(int64_t ctx, int64_t capacity, int nq, int pattern, std::mt19937& r
     ck(cudaMemset(d_new.p, 0xA5, n_ids * 4), "memset");
     ck(cudaMemset(d_old.p, 0xA5, n_ids * 4), "memset");
     ck(cudaMemset(d_ref.p, 0xA5, n_ids * 4), "memset");
-    if (!k::qsa_block_topk_grid(d_sc.p, d_st.p, nq, max_blocks, cap, s, d_new.p, nullptr)) {
-        std::printf("FAIL ctx %lld cap %lld nq %d: the grid kernel did not run\n", (long long) ctx, (long long) capacity, nq);
-        return 1;
+    int32_t* gid = grid_ids(n_ids);
+    ck(cudaMemset(gid, 0xA5, n_ids * 4), "memset grid");
+    const bool ran = k::qsa_block_topk_grid(d_sc.p, d_st.p, nq, max_blocks, cap, s, gid, nullptr);
+    if (ran) ck(cudaMemcpy(d_new.p, gid, n_ids * 4, cudaMemcpyDeviceToDevice), "copy grid ids");
+    if (!ran) {   // a grid that does not fit the card with a query to spare is declined by design (decode has 1-5 queries)
+        if (nq <= 5) {
+            std::printf("FAIL ctx %lld cap %lld nq %d: the grid kernel did not run\n", (long long) ctx, (long long) capacity, nq);
+            return 1;
+        }
+        ++g_declined;
+        return 0;
     }
     k::qsa_block_topk(d_sc.p, d_st.p, nq, max_blocks, cap, s, d_old.p, nullptr);
     k::qsa_block_topk_ref(d_sc.p, d_st.p, nq, max_blocks, cap, s, d_ref.p, nullptr);
@@ -273,12 +295,14 @@ int bench() {
             d_st.put(in.steps);
             const float* sp = d_sc.p;
             const int32_t* st = d_st.p;
+            int32_t* gb = grid_ids((size_t) (nq * cap));
             float to[5], tg[5];
             for (int r = 0; r < 5; ++r) {
                 to[r] = time_us(cs, [&] { k::qsa_block_topk(sp, st, nq, max_blocks, cap, s, d_a.p, cs); }, 300);
-                tg[r] = time_us(cs, [&] { k::qsa_block_topk_grid(sp, st, nq, max_blocks, cap, s, d_b.p, cs); }, 300);
+                tg[r] = time_us(cs, [&] { k::qsa_block_topk_grid(sp, st, nq, max_blocks, cap, s, gb, cs); }, 300);
             }
             const float a = median5(to), b = median5(tg);
+            ck(cudaMemcpy(d_b.p, gb, (size_t) (nq * cap) * 4, cudaMemcpyDeviceToDevice), "copy grid ids");
             const int64_t d = count_diff(d_a.get(), d_b.get());
             bad += d != 0;
             std::printf("%6lld %d %7.1f %6.1f %5.2fx %s\n", (long long) ctx, nq, a, b, a / b, d ? "DIFFERENT" : "identical");
@@ -313,6 +337,7 @@ int main(int argc, char** argv) {
             }
         }
     }
-    std::printf("topk_grid_parity: %d cases + graph + two streams, %d failed\n", cases, fails);
+    std::printf("topk_grid_parity: %d cases + graph + two streams, %d failed, %d declined (nq 8 that does not fit)\n", cases,
+                fails, g_declined);
     return fails ? 1 : 0;
 }

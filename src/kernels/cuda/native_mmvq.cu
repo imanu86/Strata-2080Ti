@@ -1414,10 +1414,11 @@ bool b6_launch(const typename F::Block* w, const Q81Block* x, float* y, int n_in
         if (g_b6_rows <= 0 || !g_multi_exact || s26_tsum_on() || n_in / F::DIV < 1) return false;
         const int rows = g_b6_rows == 1 ? 2 : g_b6_rows;
         const dim3 threads(WARP, WARPS);
-        if constexpr (std::is_same_v<F, Q5KTraits> && NCOLS >= 3) {
-            // SPEED4 STRATA_B6_HEAD_MINB=6|8 (opt-in): the head (n_out >= 65536) at 3-8 columns with __launch_bounds__
+        if constexpr (std::is_same_v<F, Q5KTraits> && NCOLS >= 4 && NCOLS <= 5) {
+            // SPEED4 STRATA_B6_HEAD_MINB=6|8 (opt-in): the head (n_out >= 65536) at 4-5 columns with __launch_bounds__
             // asking for that many blocks per SM - fewer registers (89 at T=4 on sm_75), more warps in flight; the same
-            // arithmetic in the same order, so the same bits
+            // arithmetic in the same order, so the same bits. b6_mmvq_bench on the 2080 Ti, MINB 6: T=4 1.356 -> 1.232
+            // ms, T=5 1.614 -> 1.458; T=3 even and T=8 spills (6.2 ms), so only 4-5 columns
             static const int head_minb = [] { const char* v = std::getenv("STRATA_B6_HEAD_MINB"); return v ? std::atoi(v) : 0; }();
             if (rows == 2 && n_out >= 65536 && (head_minb == 6 || head_minb == 8)) {
                 if (head_minb == 6)
