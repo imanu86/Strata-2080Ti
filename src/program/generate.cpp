@@ -12245,7 +12245,10 @@ int main(int argc, char** argv) {
                 auto VF = [&](int st, const PW& w) -> strata::core::Verifier& { return stage_ver_p(st, w.seq & 1); };
                 auto V1 = [&](const PW& w) -> strata::core::Verifier& { return *PV[1][w.seq & 1]; };
                 auto SDf = [&](const PW& w) { return (void*) PSD[w.seq & 1]; };
-                const float theta = pl_theta;
+                // lab/struct-b: STRATA_SB_THETA=<f> sets the gate without STRATA_PIPELINE_DEBUG (a wrong B costs ~nothing:
+                // it ends on stage 0 before the verdict, docs/STRUCT_B.md)
+                static const float sb_theta = [] { const char* v = std::getenv("STRATA_SB_THETA"); return v ? (float) std::atof(v) : -1.0f; }();
+                const float theta = sb_theta >= 0.0f ? sb_theta : pl_theta;
                 const int force_miss = pl_force_miss;
                 static const bool pl_log = pipe_dbg_env("STRATA_PIPELINE_LOG") != nullptr;
                 // the snapshot of the GDN state window `seq` reads on front stage `st` (overlapped: before its launch
@@ -12350,6 +12353,27 @@ int main(int argc, char** argv) {
                     }
                     return std::max(1, std::min(T, 1 + avail - from));
                 };
+                // ---- lab/struct-b (opt-in, docs/STRUCT_B.md): the pipeline's own window size.  The serial rule ends a
+                // window at the first draft below spec_min_p; in the pipeline a FRESH window pays both stages in series
+                // whatever its size (a T=1 fresh window costs ~26 ms for one token), so one more row there is cheap.
+                // STRATA_SB_FRESH=<tmax>: a fresh window also takes the first draft the rule left out, when the window
+                // stays within tmax rows and that draft's probability is at least STRATA_SB_FLOOR (default 0.10).
+                // STRATA_SB_B=<tmax>: the same for the speculative window B (its row costs stage 1 ~3 ms when on the
+                // path).  Unset or 0: off, the serial rule.  Only the window's composition changes: every row is
+                // verified as before (greedy text the same; bit for bit with STRATA_IQ_MT_MIN=1, see the rows' note).
+                static const int sb_fresh_tmax = [] { const char* v = std::getenv("STRATA_SB_FRESH"); return v ? std::max(0, std::atoi(v)) : 0; }();
+                static const int sb_b_tmax = [] { const char* v = std::getenv("STRATA_SB_B"); return v ? std::max(0, std::atoi(v)) : 0; }();
+                static const float sb_floor = [] { const char* v = std::getenv("STRATA_SB_FLOOR"); return v ? (float) std::atof(v) : 0.10f; }();
+                int64_t sb_ext_fresh = 0, sb_ext_b = 0, sb_fresh_n = 0;
+                // T from t_rule over the same outputs: one row more when the rule stopped at a low draft that is computed
+                auto sb_extend = [&](const float* pr, int from, int avail, int T, int tmax, int64_t& count) {
+                    if (tmax <= 0 || req_spec_min_p <= 0.0 || T >= S_mtp || T >= tmax) return T;
+                    const int j = from + T - 1;   // the first draft the rule left out
+                    if (j >= avail || pr[j] < sb_floor) return T;
+                    ++count;
+                    return T + 1;
+                };
+                // ---- end lab/struct-b
                 // B from the chain's outputs: its row 0 is the guess at index `base`, its drafts follow
                 auto make_b = [&](const int32_t* oc, const float* op, int base, int avail, float pa) {
                     B = PW{};
@@ -12358,6 +12382,7 @@ int main(int argc, char** argv) {
                     B.p = A.p + A.T;
                     B.tok[0] = oc[base];
                     B.T = t_rule(op, base + 1, avail);
+                    B.T = sb_extend(op, base + 1, avail, B.T, sb_b_tmax, sb_ext_b);   // lab/struct-b
                     for (int i = 1; i < B.T; ++i) {
                         B.tok[i] = oc[base + i];
                         B.prob[i - 1] = op[base + i];
@@ -12717,6 +12742,8 @@ int main(int argc, char** argv) {
                                     if (mtp.chain_prob()[j] < (float) req_spec_min_p) { decided = true; break; }
                             if (decided) {
                                 A.T = t_rule(mtp.chain_prob(), 0, std::min(k, S_mtp - 1));
+                                A.T = sb_extend(mtp.chain_prob(), 0, std::min(k, S_mtp - 1), A.T, sb_fresh_tmax, sb_ext_fresh);   // lab/struct-b
+                                ++sb_fresh_n;
                                 for (int i = 1; i < A.T; ++i) {
                                     A.tok[i] = mtp.chain_tok()[i - 1];
                                     A.prob[i - 1] = mtp.chain_prob()[i - 1];
@@ -12734,6 +12761,8 @@ int main(int argc, char** argv) {
                         const float* op = mtp.chain_prob();
                         if (r == 1 && chain_kind == 2 && !early_used) {
                             A.T = t_rule(op, 0, std::min(chain_n, S_mtp - 1));
+                            A.T = sb_extend(op, 0, std::min(chain_n, S_mtp - 1), A.T, sb_fresh_tmax, sb_ext_fresh);   // lab/struct-b
+                            ++sb_fresh_n;
                             for (int i = 1; i < A.T; ++i) {
                                 A.tok[i] = oc[i - 1];
                                 A.prob[i - 1] = op[i - 1];
@@ -13047,6 +13076,10 @@ int main(int argc, char** argv) {
                                  cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
                                  avg(cls_ms[1], cls_n[1]), avg(cls_tok[1], cls_n[1]), (long long) pl_disagree,
                                  (long long) pl_late);
+                    if (sb_fresh_tmax > 0 || sb_b_tmax > 0)   // lab/struct-b
+                        std::fprintf(stderr, "strata struct-b: one low draft more in %lld of %lld fresh windows (STRATA_SB_FRESH "
+                                             "%d) and in %lld B (STRATA_SB_B %d), floor %.2f\n", (long long) sb_ext_fresh,
+                                     (long long) sb_fresh_n, sb_fresh_tmax, (long long) sb_ext_b, sb_b_tmax, sb_floor);
                     std::string cal;
                     char b[48];
                     for (int i = 0; i < 10; ++i)
