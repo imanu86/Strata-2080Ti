@@ -79,7 +79,41 @@ colonna singola; mediana di 5 giri di `reps` chiamate; GB/s e % del picco della 
    (`gr_up_fast_kernel`: le 8 righe del warp caricate prima dei dot, bitwise) e va misurato con `fused_gr_bench`;
    poi la stessa cura al `gr_down_staged` (41 blocchi soli: prefetch dei pesi più profondo, meno righe per blocco).
 
+## 5. Risultati
+
+### Passata 1 (commit 0107c261, build `build-speed2-0107c261`, 12/10 10:20)
+
+`dense_bench 300` su entrambe le schede: **384 celle per scheda, tutte `identical 1col=ok`** (def, b6, wr, wr:r1,
+wr:r4, wr:s0 × 16 forme × T=1..4). Run engine breve (`DET-x7-speed2-wr`, L02 64 token, `STRATA_NODECUT=1
+STRATA_DENSE_WR=1`): `L02.txt` identico a off; la riga `strata dense_wr:` c'è.
+
+Tempi sulla 2080 Ti (µs per chiamata, def → miglior wr):
+
+| forma | T=1 | T=2 | T=3 | T=4 |
+|---|---|---|---|---|
+| qkv IQ4_XS | 31,5 → 30,9 (+2%) | 35,2 → 32,9 (+7%) | 44,3 → 37,7 (+15%) | 53,0 → 46,2 (+13%) |
+| qkv Q4_K | 37,7 → 32,2 (+15%) | 38,4 → 34,7 (+10%) | 44,6 → 38,8 (+13%) | 53,3 → 47,7 (+11%) |
+| qkv Q5_K | 39,7 → 37,4 (+6%) | 42,7 → 39,9 (+7%) | 48,5 → 43,6 (+10%) | 60,4 → 53,4 (+12%) |
+| qkv Q6_K | 56,7 → 47,3 (+17%) | 51,1 → 52,1 (−2%) | 56,1 → 57,9 (−3%) | 61,4 → 62,6 (−2%) |
+| q IQ4_XS / Q4_K | +4% / +16% | +8% / +10% | +14% / +11% | +13% / +11% |
+| gate Q4_K / Q5_K | +12% / +5% | +7% / +5% | +8% / +8% | +10% / +12% |
+| out Q4_K / Q6_K (6144 ingressi) | −8% / −12% | +1% / 0% | −8% / −8% | −25% / −8% |
+
+- Il vincitore è quasi sempre **`wr:s0`**: le attivazioni in shared (SoA) **perdono** su Turing e su Ampere (la copia e la
+  barriera costano più delle LDG che vanno in L1). Default cambiato: `STRATA_DENSE_WR_STAGE=0`.
+- Q6_K (T=32: ogni blocco su tutto il warp) e le righe da 6144 ingressi peggiorano: esclusi dai default
+  (`STRATA_DENSE_WR_TYPES=12,13,23`, `STRATA_DENSE_WR_MAXIN=2560`; il bench li misura con `a1:k0`).
+- Peso sulla finestra: con i formati e le forme che guadagnano (qkv/gate/q in IQ4_XS, Q4_K, Q5_K: ~45% dei byte densi)
+  il risparmio è **~50-60 µs a T=2, ~100-150 µs a T=3-4**, cioè 0,3-0,8% della finestra: molto meno dei −0,7/−1,0 ms
+  stimati. I kernel di default stavano già al 60-74% del picco e il WR li porta al 65-78%: il vincolo bitwise fissa la
+  mappa lane → elementi, quindi i byte in volo per warp restano R × 2,7 KB.
+
+### Passata 2 (questo commit)
+
+Caricamenti dei pesi delle 4 catene × R righe **tutti prima** dell'applicazione (indirizzi clampati all'ultimo blocco /
+ultima riga, applicati solo dove il default li applica): 4R frammenti in volo per lane invece di uno per catena.
+Scelte del bench: `def,wr,wr:r1,wr:r4,wr:b2,wr:s1,wr:a1:k0,wr:a1:k0:r4,wr:a1:k0:b2`. Esito: da misurare.
+
 ## Stato
 
-- 12/10 10:00: kernel, ganci, knob, bench e doc scritti; **compilato no / provato no** (build in coda dietro
-  `bench.lock`, poi `dense_bench` sotto lo stesso lock).
+- 12/10 10:45: passata 1 compilata e misurata (sopra); passata 2 scritta, **compilato no / provato no**.

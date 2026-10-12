@@ -1473,12 +1473,32 @@ NativeDenseWrParams g_dense_wr = [] {
     auto env = [](const char* n, int d) { const char* v = std::getenv(n); return v != nullptr && v[0] != '\0' ? std::atoi(v) : d; };
     p.on = env("STRATA_DENSE_WR", 0);
     p.rows = env("STRATA_DENSE_WR_R", 2);
-    p.stage = env("STRATA_DENSE_WR_STAGE", 1);
+    p.stage = env("STRATA_DENSE_WR_STAGE", 0);
     p.min_blocks_per_sm = env("STRATA_DENSE_WR_MINB", 0);
     p.min_launch_blocks = env("STRATA_DENSE_WR_MINBLK", 256);
     p.t1 = env("STRATA_DENSE_WR_T1", 1);
+    p.max_n_in = env("STRATA_DENSE_WR_MAXIN", 2560);
+    if (const char* v = std::getenv("STRATA_DENSE_WR_TYPES"); v != nullptr && v[0] != '\0') {   // "12,13,23"; "all"
+        if (std::string(v) == "all") p.types_mask = ~0u;
+        else {
+            p.types_mask = 0;
+            for (const char* s = v; *s != '\0';) {
+                char* end = nullptr;
+                const long t = std::strtol(s, &end, 10);
+                if (end == s) break;
+                if (t >= 0 && t < 32) p.types_mask |= 1u << t;
+                s = *end == ',' ? end + 1 : end;
+            }
+        }
+    }
     return p;
 }();
+
+template<typename F> struct DenseWrType { static constexpr int value = 0; };   // the GGML type id of a traits
+template<> struct DenseWrType<Q4KTraits> { static constexpr int value = 12; };
+template<> struct DenseWrType<Q5KTraits> { static constexpr int value = 13; };
+template<> struct DenseWrType<Q6KTraits> { static constexpr int value = 14; };
+template<> struct DenseWrType<IQ4XSTraits> { static constexpr int value = 23; };
 
 template<typename F, int NCOLS, int R, bool STAGE, int MINB>
 __launch_bounds__(WARPS * WARP, MINB)
@@ -1516,11 +1536,26 @@ __global__ void dense_wr_kernel(const typename F::Block* __restrict__ w, const Q
             for (int vy = 0; vy < WARPS; ++vy) acc[c][r][vy] = 0.0f;
     const int kqs = F::kqs(lane);
     for (int kb0 = 0; kb0 < blocks_per_row; kb0 += F::BPI) {   // the default kernel's iterations, in order
+        // the weight fragments of the four chains x R rows are loaded first, unconditionally (a chain with no block in
+        // this iteration, or a row past n_out, reads the row's last block / the last row: valid memory, never applied),
+        // so they are in flight together; then each is applied exactly where the default kernel applies it
+        typename XB::W wv[WARPS][R];
+        bool ok[WARPS];
 #pragma unroll
         for (int vy = 0; vy < WARPS; ++vy) {                // the chain of thread 32 vy + lane
             const int kbx = kb0 + vy * (WARP / F::T) + lane / F::T;
-            if (kbx < blocks_per_row) {
-                const int kby = kbx * F::KBY;
+            ok[vy] = kbx < blocks_per_row;
+            const int kc = ok[vy] ? kbx : blocks_per_row - 1;
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                const int rr = row0 + r < n_out ? row0 + r : n_out - 1;
+                wv[vy][r] = XB::wload(w + std::size_t(rr) * blocks_per_row + kc, kqs);
+            }
+        }
+#pragma unroll
+        for (int vy = 0; vy < WARPS; ++vy) {
+            if (ok[vy]) {
+                const int kby = (kb0 + vy * (WARP / F::T) + lane / F::T) * F::KBY;
                 typename XB::X xv[NCOLS];
 #pragma unroll
                 for (int c = 0; c < NCOLS; ++c) {
@@ -1530,9 +1565,8 @@ __global__ void dense_wr_kernel(const typename F::Block* __restrict__ w, const Q
 #pragma unroll
                 for (int r = 0; r < R; ++r) {
                     if (row0 + r < n_out) {
-                        const typename XB::W wv = XB::wload(w + std::size_t(row0 + r) * blocks_per_row + kbx, kqs);
 #pragma unroll
-                        for (int c = 0; c < NCOLS; ++c) acc[c][r][vy] += XB::dot(wv, xv[c]);
+                        for (int c = 0; c < NCOLS; ++c) acc[c][r][vy] += XB::dot(wv[vy][r], xv[c]);
                     }
                 }
             }
@@ -1553,11 +1587,12 @@ __global__ void dense_wr_kernel(const typename F::Block* __restrict__ w, const Q
 }
 
 // the plan of a dense_wr launch: false = the default kernels run
-bool dense_wr_plan(bool fmt_ok, int n_in, int n_out, int ncols, int* rows, bool* stage, int* minb, int* blocks, std::size_t* smem) {
+bool dense_wr_plan(int ggml_type, int n_in, int n_out, int ncols, int* rows, bool* stage, int* minb, int* blocks, std::size_t* smem) {
     const NativeDenseWrParams& p = g_dense_wr;
+    const bool fmt_ok = (ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 23) && ((p.types_mask >> ggml_type) & 1u);
     if (!fmt_ok || !p.on || !g_multi_exact || s26_tsum_on() || ncols < 1 || ncols > 4) return false;
     if (ncols == 1 && !p.t1) return false;
-    if (n_in % 256 != 0) return false;   // the four formats' block: 256 elements
+    if (n_in % 256 != 0 || (p.max_n_in > 0 && n_in > p.max_n_in)) return false;   // the four formats' block: 256 elements
     *rows = p.rows == 1 || p.rows == 4 ? p.rows : 2;
     *blocks = (n_out + WARPS * *rows - 1) / (WARPS * *rows);
     if (*blocks < p.min_launch_blocks) return false;
@@ -1575,8 +1610,10 @@ void dense_wr_note(int rows, bool stage, int minb) {
     int dev = 0;
     cudaGetDevice(&dev);
     std::fprintf(stderr, "strata dense_wr: CUDA%d one warp per %d rows, activations %s, min %d blocks/SM, launches under %d blocks "
-                         "keep the default kernels, ncols 1 %s (STRATA_DENSE_WR=1; bitwise the default exact layout)\n",
-                 dev, rows, stage ? "staged in shared memory" : "from global", minb, g_dense_wr.min_launch_blocks,
+                         "or over %d inputs keep the default kernels, types%s%s%s%s, ncols 1 %s (STRATA_DENSE_WR=1; bitwise the default exact layout)\n",
+                 dev, rows, stage ? "staged in shared memory" : "from global", minb, g_dense_wr.min_launch_blocks, g_dense_wr.max_n_in,
+                 (g_dense_wr.types_mask >> 12) & 1u ? " Q4_K" : "", (g_dense_wr.types_mask >> 13) & 1u ? " Q5_K" : "",
+                 (g_dense_wr.types_mask >> 14) & 1u ? " Q6_K" : "", (g_dense_wr.types_mask >> 23) & 1u ? " IQ4_XS" : "",
                  g_dense_wr.t1 ? "included" : "excluded");
 }
 
@@ -1599,7 +1636,7 @@ bool dense_wr_launch(const void* weights, const void* x_q8_1, float* y, int n_in
         int rows = 0, minb = 0, blocks = 0;
         bool stage = false;
         std::size_t smem = 0;
-        if (!dense_wr_plan(true, n_in, n_out, NCOLS, &rows, &stage, &minb, &blocks, &smem)) return false;
+        if (!dense_wr_plan(DenseWrType<F>::value, n_in, n_out, NCOLS, &rows, &stage, &minb, &blocks, &smem)) return false;
         dense_wr_note(rows, stage, minb);
         const auto* w = static_cast<const typename F::Block*>(weights);
         const auto* x = static_cast<const Q81Block*>(x_q8_1);
@@ -2480,11 +2517,10 @@ void native_mmvq_set_b6_rows(int mode) { g_b6_rows = mode; }
 void native_mmvq_set_dense_wr(const NativeDenseWrParams& p) { g_dense_wr = p; }
 NativeDenseWrParams native_mmvq_dense_wr() { return g_dense_wr; }
 bool native_mmvq_dense_wr_takes(int ggml_type, int n_in, int n_out, int ncols) {
-    const bool fmt_ok = ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 23;
     int rows = 0, minb = 0, blocks = 0;
     bool stage = false;
     std::size_t smem = 0;
-    return dense_wr_plan(fmt_ok, n_in, n_out, ncols, &rows, &stage, &minb, &blocks, &smem);
+    return dense_wr_plan(ggml_type, n_in, n_out, ncols, &rows, &stage, &minb, &blocks, &smem);
 }
 #else
 void native_mmvq_set_dense_wr(const NativeDenseWrParams&) {}

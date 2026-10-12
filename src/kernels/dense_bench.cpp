@@ -2,7 +2,7 @@
 // the default kernels against STRATA_DENSE_WR (lab/speed2, docs/SPEED2.md), bit for bit and in microseconds, per
 // card, per T.
 //
-//     build/dense_bench [reps = 300] [device = -1 (all)] [shapes = model] [choices = def,b6,wr,wr:r1,wr:r4,wr:s0] [T = 1,2,3,4]
+//     build/dense_bench [reps = 300] [device = -1 (all)] [shapes = model] [choices = def,wr,wr:r1,wr:r4,wr:b2,wr:s1,wr:a1:k0,...] [T = 1,2,3,4]
 //
 // `shapes`: "model" = the stage-1 layers' dense matrices of Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS (qkv 2560 -> 10240 in
 // Q6_K / IQ4_XS / Q4_K / Q5_K, gate 2560 -> 6144 in IQ4_XS / Q4_K / Q6_K / Q5_K, out 6144 -> 2560 in Q6_K / Q4_K,
@@ -11,11 +11,12 @@
 //   def                 the engine's default path: the single-column kernels at T = 1, STRATA_B6_MMVQ_ROWS=1 (two rows
 //                       a block) above; the reference for the bitwise check
 //   b6[:<mode>]         STRATA_B6_MMVQ_ROWS at that mode (1 = 2 rows, 2 / 4 / 8)
-//   wr[:r<n>][:s<0|1>][:b<n>][:m<n>][:t<0|1>]
+//   wr[:r<n>][:s<0|1>][:b<n>][:m<n>][:t<0|1>][:a<0|1>][:k<n>]
 //                       STRATA_DENSE_WR with r = rows per warp (1, 2, 4), s = activations staged in shared memory,
 //                       b = min blocks per SM (2 | 4; 0 = auto), m = the smallest launch (blocks) it takes, t = 1 also at
-//                       T = 1; a missing field takes the engine's value (the environment's STRATA_DENSE_WR_* or its
-//                       default).  A choice that would not take a call (native_mmvq_dense_wr_takes) is reported as
+//                       T = 1, a = 1 every format (the default mask leaves Q6_K out), k = the longest row it takes (0 =
+//                       any; the default 2560 leaves the 6144-input output projections out); a missing field takes the
+//                       engine's value (the environment's STRATA_DENSE_WR_* or its default).  A choice that would not take a call (native_mmvq_dense_wr_takes) is reported as
 //                       "default" for that cell: the time is the default kernel's.
 // Per (device, shape, T, choice): the output against `def`'s, bit for bit (memcmp), and against T single-column calls;
 // the median of 5 rounds of `reps` back-to-back native_mmvq calls between two CUDA events.  The weights rotate over
@@ -105,6 +106,8 @@ bool parse_choice(const std::string& s, Choice& c) {
             case 'b': c.p.min_blocks_per_sm = (int) v; break;
             case 'm': c.p.min_launch_blocks = (int) v; break;
             case 't': c.p.t1 = (int) v; break;
+            case 'a': c.p.types_mask = v ? ~0u : K::NativeDenseWrParams{}.types_mask; break;   // a1 = every format (Q6_K too)
+            case 'k': c.p.max_n_in = (int) v; break;                                          // k0 = any row length
             default: return false;
         }
         i = (size_t) (end - s.c_str());
@@ -147,7 +150,7 @@ int main(int argc, char** argv) {
     const int reps = argc > 1 ? std::max(20, std::atoi(argv[1])) : 300;
     const int only = argc > 2 ? std::atoi(argv[2]) : -1;
     const std::string shapes_arg = argc > 3 ? argv[3] : "model";
-    const std::string choices_arg = argc > 4 ? argv[4] : "def,b6,wr,wr:r1,wr:r4,wr:s0";
+    const std::string choices_arg = argc > 4 ? argv[4] : "def,wr,wr:r1,wr:r4,wr:b2,wr:s1,wr:a1:k0,wr:a1:k0:r4,wr:a1:k0:b2";
     const std::string t_arg = argc > 5 ? argv[5] : "1,2,3,4";
     g_engine_wr = K::native_mmvq_dense_wr();
     std::vector<Choice> choices;

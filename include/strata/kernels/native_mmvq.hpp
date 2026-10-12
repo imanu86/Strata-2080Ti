@@ -51,6 +51,8 @@ struct NativeDenseWrParams {
     int min_blocks_per_sm = 0;  // STRATA_DENSE_WR_MINB
     int min_launch_blocks = 256;// STRATA_DENSE_WR_MINBLK
     int t1 = 1;                 // STRATA_DENSE_WR_T1
+    int max_n_in = 2560;        // STRATA_DENSE_WR_MAXIN: longer rows (the 6144-input output projections) keep the default; 0 = any
+    unsigned types_mask = (1u << 12) | (1u << 13) | (1u << 23);   // STRATA_DENSE_WR_TYPES ("12,13,23" | "all"): Q4_K, Q5_K, IQ4_XS; Q6_K measured slower
 };
 void native_mmvq_set_dense_wr(const NativeDenseWrParams& p);
 NativeDenseWrParams native_mmvq_dense_wr();
