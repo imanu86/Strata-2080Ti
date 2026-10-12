@@ -29,12 +29,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#define STRATA_EC_NVML_FREE 1
 #endif
 
 namespace strata::core {
 
-#if defined(STRATA_EC_NVML_FREE)
 namespace {
 
 // STRATA_VRAM_FREE=device (opt-in, Windows + NVIDIA).  Under WDDM cudaMemGetInfo answers for THIS process: memory
@@ -77,7 +75,6 @@ bool nvml_device_free(size_t& out) {
 }
 
 }  // namespace
-#endif
 
 // See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
 // not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
@@ -123,7 +120,6 @@ size_t device_free_bytes() {
         }
     }
 #endif
-#if defined(STRATA_EC_NVML_FREE)
     static const bool device_wide = [] {
         const char* v = std::getenv("STRATA_VRAM_FREE");
         return v != nullptr && std::strcmp(v, "device") == 0;
@@ -143,7 +139,6 @@ size_t device_free_bytes() {
         }
         if (got) free_b = std::min(free_b, nvml_b);
     }
-#endif
     return free_b;
 }
 
