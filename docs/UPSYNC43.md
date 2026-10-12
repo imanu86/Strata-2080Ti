@@ -246,3 +246,34 @@ le due leve tolte erano opt-in e spente nella config.
 Niente da chiudere: le cinque superate erano già chiuse, le quattro aperte sono tutte nella pila. Le PR nuove
 (qsa-rows, expdec, …, §7) si aprono solo ora che la 0.1.43 è al livello del Daily r2, nell'ordine di §7, su ok dell'owner.
 
+## 13. Seguito del 12/10: follow-up nel registro, PR in preparazione
+
+- **Follow-up delle leve.** Niente riscrittura della cronologia pubblicata: una correzione a una leva è un commit a
+  parte, elencato in `manifest.json` (`follow_up_subjects`), e `check_anchors.py --build` lo fonde nella patch della leva
+  (cherry-pick sul commit della leva in un worktree temporaneo, `reset --soft` sul padre, `format-patch`). Primo caso:
+  `STRATA_EC_NVML_FREE` (macro sempre definita intorno al codice NVML di #1911) tolto con `22ce9d88`, patch 07 rigenerata
+  senza; nessun cambio di comportamento.
+- **Env morte nella config del banco** (`strata-2080ti-sota.json`, la base di `run_long.py`): `STRATA_PARALLEL_INTERMEDIATE_QUANT`,
+  `STRATA_PREFILL_EXACT_SMALL`, `STRATA_QSA_PREFILL_MULTI` (e `STRATA_IQ_MT_MIN` se presente) si tolgono **dopo**
+  `DET-x10-u43p-b`, con backup `.bak-20261012-envmorte.json` accanto (script in coda). Nessun bat del Desktop usa quel file.
+- **PR autorizzate dall'owner** (ordine: ple-direct, ram-core, prefix-disk, attn-daily dopo la parità, prefill-sm75 in tre
+  pezzi). Branch puliti su `upstream/main`, un commit ciascuno, messaggi in inglese, pushati sul fork (**PR non ancora
+  aperte**: prima build e verifica sotto lock, in coda dietro `DET-x10`):
+
+| Branch | Sta da solo su 0.1.43? | Novità rispetto alle PR aperte | Stato |
+|---|---|---|---|
+| `pr/ple-direct` | sì (pulita) | nessuna PR tocca la sonda PLE (#2031 e #1800 sono dequant/sostituzione tabella) | build+smoke in coda |
+| `pr/attn-daily` | sì (pulita) | #1888 (KarlGrier) è lo split su int8 mma sm_80+, non bit per bit: non si sovrappone | build con test, `qsa_merge_daily_parity` e smoke in coda; **si apre solo con la parità verde** |
+| `pr/prefix-disk` | sì (solo l'adiacenza CMake col link dell'elastica, risolta) | #1937 (xrip) e #1810 (CC-David-CC) persistono le *conversazioni* parcheggiate; #1489 chiuso non merged. Il nostro persiste la *radice del prefisso* con la radice MTP: scopo diverso, da dichiarare nel corpo | build+smoke (due avvii: scrittura e ripresa) in coda |
+| `pr/prefill-simt-default` | sì | cambio di default di #1091 (merged opt-in); #1981 (TITAN RTX) lo usa già come opt-in | build+smoke in coda |
+| `pr/prefill-dequant-sm75` | sì | #1720 (merged) ha fatto lo stesso per Q8_0; questo copre le proiezioni BF16 su sm_75 | build+smoke in coda |
+| `pr/prefill-hc16-sm75` | sì | **si sovrappone** a `STRATA_BF16_TC=1` di upstream (opt-in su 7.x, #655: +15-18% prompt su 2080 Ti Q2_0), che converte *tutte* le proiezioni; hc16 solo HC+ssm e tiene il draft BF16. Consiglio: **non aprirla** finché non c'è un A/B hc16 contro `BF16_TC=1` sulla 2080 Ti | build+smoke in coda, apertura sospesa |
+| ram-core | **no**: da sola fallisce in `generate.cpp` (conflitti anche dopo 01+05); dipende dall'elastica (#1117: nucleo fisso, prestiti, shrink) | #1533 (gfifgfifofich, draft: niente copia RAM degli esperti in VRAM) e #1838 (`STRATA_RAM_ADAPT`) hanno lo stesso scopo con meccanismi diversi | **non si apre** (regola dell'owner); si ripropone quando #1117 entra o come riscrittura senza elastica |
+
+Correzione al registro: il valore «TTFT 42 → 16-20 s» che avevo attribuito a `--prompt-cache-file` è della variante a più
+file di `lab/ttft` (`STRATA_PREFIX_DISK_MULTI`, non nella pila); per 06 resta: il prefisso 40-130K si ripristina dal file
+invece di rileggerlo (~42 s per 40K); il tempo di ripresa lo misura il secondo avvio dello smoke test.
+
+Corpi delle PR (inglese, stile #2058/#2059, con le misure e senza percorsi locali) pronti nello scratchpad della sessione;
+si incollano dopo la verifica. Il commento a @Niko1221 va solo sulla prima (ple-direct) e rimanda a `stack/` del fork.
+
