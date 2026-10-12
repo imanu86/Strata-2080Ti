@@ -194,6 +194,8 @@ const bool g_coherent = env_on("STRATA_VERIFY_COHERENT");
 const bool g_doorbell_store = env_on("STRATA_DOORBELL_STORE");
 #endif
 const bool g_trace = env_on("STRATA_VERIFY_TRACE");
+// lab/struct-c (docs/STRUCT_C.md): the #649 breadcrumbs without the host event ring, summed per window (sc_wait_note)
+const bool g_sc_waitstat = env_on("STRATA_SC_WAITSTAT");
 const bool g_no_multi_gr = env_on("STRATA_NO_MULTI_GR");   // #783 PR-g: per-token GR reads/writes and generic-T kernels again
 const bool g_no_batch_kv = env_on("STRATA_NO_BATCH_KV_STEP");   // #783 PR-d: per-token K/V and indexer appends again
 
@@ -729,7 +731,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         return false;
     }
     cudaMemset(arena_, 0, count.used);
-    if (g_trace && trace_h_ == nullptr) {   // #649: the breadcrumbs, mapped so they read while the GPU hangs
+    if ((g_trace || g_sc_waitstat) && trace_h_ == nullptr) {   // #649: the breadcrumbs, mapped so they read while the GPU hangs
         trace_n_ = (size_t) (g.n_layers + 1) * kProfPer * 2;
         if (!mapped(trace_n_ * 8, (void**) &trace_h_, (void**) &trace_m_)) {
             (void) cudaGetLastError();
@@ -3453,7 +3455,9 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
     std::atomic_thread_fence(std::memory_order_seq_cst);
     trace_ev("WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
     ms_host += ms_since(t0);
+    const Clock::time_point sc_l0 = Clock::now();
     const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
+    if (g_sc_waitstat) { sc_wait.launch_ms += ms_since(sc_l0); ++sc_wait.launches; }   // lab/struct-c
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
@@ -3588,6 +3592,7 @@ bool Verifier::pl_finish(int32_t* out, std::string& err) {
     fl_active_ = false;
     if (fl_prof_) accumulate_profile(prof_pin_);
     ++windows;
+    if (g_sc_waitstat) sc_wait_note();   // lab/struct-c
     trace_ev("DONE (pipelined)", -1, -1, (int64_t) (now_ms() - fl_launch_ms_));
     if (le_ < g.n_layers) return true;   // an earlier stage: the hand-off is written
     const int T = fl_T_;
@@ -3645,6 +3650,60 @@ void Verifier::absorb_stats(Verifier& o) {
         for (int i = 0; i < kProfPer; ++i) { prof_sum_[k][i] += o.prof_sum_[k][i]; o.prof_sum_[k][i] = 0; }
     prof_windows_ += o.prof_windows_;
     o.prof_windows_ = 0;
+    // lab/struct-c
+    ScWait& a = sc_wait;
+    const ScWait& b = o.sc_wait;
+    a.win += b.win; a.wa += b.wa; a.vram += b.vram; a.wb += b.wb; a.wc += b.wc; a.longa_ms += b.longa_ms;
+    a.longc_ms += b.longc_ms; a.launch_ms += b.launch_ms;
+    a.n += b.n; a.layers += b.layers; a.longa += b.longa; a.longc += b.longc; a.launches += b.launches;
+    o.sc_wait = ScWait{};
+}
+
+// lab/struct-c (docs/STRUCT_C.md), STRATA_SC_WAITSTAT=1: where the GPU waited for the host in the window that just
+// finished, read from the #649 breadcrumbs (globaltimer stamps written to mapped memory; this window's only: pl_launch
+// zeroes them).  Per layer and token group: waitA = stamp 18 -> 19 (plan flag + its copy), VRAM = 19 -> 20, waitB =
+// 20 -> 21, CPU rows = 23 -> 24 (the CPU's rows: the wait for the served flag, their copy and the combine).  The
+// window's wall is its first stamp to its last.  Measurement only: the stamps are extra graph nodes.
+void Verifier::sc_wait_note() {
+    if (trace_h_ == nullptr || g_ == nullptr) return;
+    auto at = [&](int64_t l, int i, int grp) {
+        return *(const volatile unsigned long long*) (trace_h_ + (size_t) ((l * kProfPer + i) * 2 + grp));
+    };
+    auto d = [](unsigned long long a, unsigned long long b) { return a != 0 && b >= a ? (double) (b - a) * 1e-6 : 0.0; };
+    unsigned long long w0 = ~0ull, w1 = 0;
+    for (int64_t l = lb_; l < le_; ++l)
+        for (int grp = 0; grp < 2; ++grp) {
+            const unsigned long long t0 = at(l, 0, grp), t24 = at(l, 24, grp);
+            if (t0 == 0 || t24 == 0) continue;
+            w0 = std::min(w0, t0);
+            w1 = std::max(w1, t24);
+            const double a = d(at(l, 18, grp), at(l, 19, grp)), c = d(at(l, 23, grp), t24);
+            sc_wait.wa += a;
+            sc_wait.vram += d(at(l, 19, grp), at(l, 20, grp));
+            sc_wait.wb += d(at(l, 20, grp), at(l, 21, grp));
+            sc_wait.wc += c;
+            if (a > 0.1) { ++sc_wait.longa; sc_wait.longa_ms += a; }
+            if (c > 0.1) { ++sc_wait.longc; sc_wait.longc_ms += c; }
+            ++sc_wait.layers;
+        }
+    if (w1 > w0) {
+        sc_wait.win += (double) (w1 - w0) * 1e-6;
+        ++sc_wait.n;
+    }
+}
+
+std::string Verifier::sc_wait_report() {
+    const ScWait& s = sc_wait;
+    if (s.n == 0) return {};
+    const double w = (double) s.n;
+    char b[512];
+    std::snprintf(b, sizeof b, "%lld windows, GPU wall %.2f ms/window; per window: waitA %.3f (%.2f > 0.1 ms: %.3f ms), "
+                               "VRAM experts %.3f, waitB %.3f, CPU rows+combine %.3f (%.2f > 0.1 ms: %.3f ms); %.1f "
+                               "layer-groups/window; graph launch on the host %.3f ms x %.2f",
+                  (long long) s.n, s.win / w, s.wa / w, s.longa / w, s.longa_ms / w, s.vram / w, s.wb / w, s.wc / w,
+                  s.longc / w, s.longc_ms / w, s.layers / w, s.launches ? s.launch_ms / s.launches : 0.0, s.launches / w);
+    sc_wait = ScWait{};
+    return b;
 }
 
 }  // namespace strata::core

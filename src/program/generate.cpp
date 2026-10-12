@@ -13326,6 +13326,10 @@ int main(int argc, char** argv) {
                     if (st == 0) std::fprintf(stderr, "strata decode GPU stages (ms/window):%s\n", pr.c_str());   // text as before
                     else std::fprintf(stderr, "strata decode GPU stages, stage %d (ms/window):%s\n", st, pr.c_str());
                 }
+                for (int st = 0; st < n_stages; ++st) {   // lab/struct-c, STRATA_SC_WAITSTAT=1 (docs/STRUCT_C.md)
+                    const std::string sw = stage_ver(st).sc_wait_report();
+                    if (!sw.empty()) std::fprintf(stderr, "strata struct-c waits, stage %d: %s\n", st, sw.c_str());
+                }
                 // fork (Daily 93af2041): the primary verifier's PLE gather (a subset of its host staging; with
                 // --pipeline-windows the second verifier's gathers are not in it)
                 const double ple_ms = d1.ple - ds0.ple;

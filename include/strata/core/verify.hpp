@@ -310,8 +310,16 @@ public:
     /// STRATA_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
     /// window), as one line; empty when off.
     std::string profile_report();
+    // ---- lab/struct-c (docs/STRUCT_C.md), STRATA_SC_WAITSTAT=1: the GPU's waits on the host's flags per pipelined
+    // window, from the #649 breadcrumbs (mapped stamps, no profiler).  Sums in ms over the windows since the last report.
+    struct ScWait {
+        double win = 0, wa = 0, vram = 0, wb = 0, wc = 0, longa_ms = 0, longc_ms = 0, launch_ms = 0;
+        int64_t n = 0, layers = 0, longa = 0, longc = 0, launches = 0;
+    } sc_wait;
+    std::string sc_wait_report();
 
 private:
+    void sc_wait_note();   // lab/struct-c: one finished window's breadcrumbs into sc_wait
     RemoteExpertOpt* remote_opt_ = nullptr;
     bool capture(int T, std::string& err);
     // batch windows (see init_slots)
