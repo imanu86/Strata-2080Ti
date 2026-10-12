@@ -144,6 +144,39 @@ lancio è ~1-1,2 ms e il polling di F0 ~0,3-1, quindi l'attesa è **−0,5/−1 
 sulle finestre fresche. Il modo 1 non va usato (sposta il costo sullo stadio 0). `target picks replaced` 3 / 5 / 4:
 varia fra corse identiche (quali esperti finiscono sulla CPU), non è la leva; i draft accettati sono gli stessi.
 
+### 5b. B-A-B dell'owner (`DET-x5-hostgap-{a,b1,b2}`, build `72fc813a`, EXPDEC acceso ovunque, B = `STRATA_HG_PRELAUNCH=2`): **neutro**
+
+| braccio | L01 t/s | L02 t/s | L02 ms/finestra | fresh (n, ms) | speculative (n, ms) | per-layer host | stage | PLE gather + staging ms/finestra |
+|---|---|---|---|---|---|---|---|---|
+| A | 72,0 | 66,4 | 25,71 | 429 · 28,39 | 171 · 18,98 | 1,15 | 0,09 | 0,01 + 0,07 |
+| B1 | 65,8 | 64,1 | 26,64 | 435 · 29,33 | 165 · 19,57 | **2,12** | **1,03** | **0,48 + 0,55** (L01: 1,33 + 1,24) |
+| B2 | 71,9 | 66,5 | 25,66 | 432 · 28,25 | 168 · 18,98 | 1,19 | 0,08 | 0,01 + 0,07 |
+
+Guadagno di B su A −6,4% / +0,1%, media −3,1%; 521/600 finestre identiche. Lettura:
+
+1. **B1 è un outlier dell'host, non della leva**: nel suo log `strata decode PLE primary: gather 691 ms (1,327 ms/
+   finestra), other staging 1,242 ms/finestra` in L01 e 0,478 / 0,550 in L02, contro 0,008-0,014 / 0,07-0,08 in A e B2;
+   di qui `stage 1,03` e `per-layer host 2,12`. Sono le righe PLE lette dall'SSD / row cache a ogni finestra
+   (`pl_stage` → `prefetch_rows`, `gather_batch`): I/O lento in quella corsa (anche L01 −8,6%, dove il prelancio è
+   identico a B2). CPU di altri processi e disco (`ambiente.json`) uguali fra B1 e B2.
+2. **B2 ≡ A**: fresh −0,14 ms (−0,5%), speculative identiche, L02 +0,1%. Il prelancio funziona (432/432 rilasci) ma
+   sul banco pulito il tratto che toglie — polling di F0 + `cudaGraphLaunch` dei 1397 nodi — vale ~0,3-0,5 ms per
+   finestra fresca, non i 4,9 ms visti sotto nsys: il profiler gonfia di 2-3 volte il costo host del lancio (2,8 ms
+   contro ~1) e i buchi fra i nodi (è lui la «bolla» da 3,5 ms). Il −3,2% di `-nsysB2` era in gran parte un artefatto
+   della misura.
+3. **Lo spin di un blocco sulla 2080 Ti durante lo stadio 0 non costa nulla di misurabile**: con la leva accesa (B2)
+   speculative, hand-off e `GPU-reach wait` (14,64 contro 15,10) sono pari o migliori di A; gli esperti su CPU
+   (`CPU experts 0,52 per layer-finestra`, `CPU 2,00 ms`) identici.
+
+**Chiusura: `STRATA_HG_PRELAUNCH` resta opt-in, default spento, e si chiude come neutro.** Nessuna correzione credibile:
+il costo che la leva toglie è già sotto la risoluzione del B-A-B (±2%); per vederlo servirebbe un banco con lo stadio 1
+spesso in attesa dell'host, che oggi non c'è. I tempi morti veri della finestra restano quelli strutturali del §1d
+(lo stadio 0 seriale nelle finestre fresche: 67% delle finestre, ~10 ms di 2080 Ti ferma) e i buchi fra i nodi (§2).
+
+**Lezione di metodo.** I buchi e le latenze host letti da una traccia nsys vanno divisi per 2-3 prima di stimare il
+guadagno sul banco pulito: il profiler aggiunge ~1-2 µs a nodo di grafo e allunga le API di lancio; il `decode timing`
+del motore (`GPU-reach wait`, `per-layer host`, `stage`, `PLE gather`) è la misura buona per il lato host.
+
 **Per il B-A-B** (lo lancia l'owner): `build-hostgap-72fc813a\strata.exe`, config del candidato + `STRATA_EXPDEC=1` in
 entrambi i bracci, B con `STRATA_HG_PRELAUNCH=2`; nel log di B `strata hostgap: STRATA_HG_PRELAUNCH: N stage-1 windows
 prelaunched at their stage-0 launch, N released at stage 0's end`; da leggere `strata pipeline classes: fresh … ms`.
@@ -159,5 +192,13 @@ i 0,2 ms prima del sampler restano per le fusioni (§2).
 Build di `72fc813a` (codice; questa pagina è stata aggiornata dopo): compilata con `build_lock.py` (Release, CUDA
 75;86, test spenti), rc 0. `strata.exe` sha256 `61aca041fa290eea04b5f8a31ca08870e65952de0e82b80f4b8f1dbf7bbf04c6`,
 copiata con `build.json` in `moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\
-build-hostgap-72fc813a\` (accanto `build-hostgap-f1e6c639`, il modo 1 solo). **Compilato sì, nsys nel motore sì,
-installato no, B-A-B no.**
+build-hostgap-72fc813a\` (accanto `build-hostgap-f1e6c639`, il modo 1 solo), più `strata.pdb` dello stesso build per
+leggere i dump dei crash d'avvio. **Compilato sì, nsys nel motore sì, B-A-B sì (`DET-x5-hostgap`, §5b: neutro),
+installato no.** Nessuna nuova build.
+
+Crash d'avvio del banco (indagine 12/10, sola lettura): ~1 avvio su 8 muore dopo `CUDA1 prompt path borrows …` dentro
+l'init del prompt path, su ogni build dal 6/10 (Daily compreso); WER: `nvcuda64.dll` 32.0.15.9621, offset `0x46c025`,
+`0xC0000409` dati 2 (stack cookie del driver), quattro volte dal 7/10, dump in `%LOCALAPPDATA%\CrashDumps`. Non è
+EXPDEC né hostgap (nessuno dei due è ancora stato toccato a quel punto). L'harness (`run_long.py`, `run_nsys.py`,
+commit `9707e10` in moe-aggressive-commit) ora registra l'exit code (`start_failures` nel result.json) e riprova
+l'avvio una volta sullo stesso braccio («retry avvio»).
