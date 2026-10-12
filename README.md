@@ -204,7 +204,7 @@ The longer explanation: [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Every part
 This fork (`imanu86/Strata-2080Ti`) carries a stack of patches on top of upstream Strata, one lever each, for a
 two-card Windows box (RTX 2080 Ti + RTX 3060, `--layer-split`). The registry is [`stack/`](stack/INDEX.md): what each
 patch does, its switch, where it comes from, what it measured, and for every insertion point an anchor of 2-3 unpatched
-lines. The patches apply to upstream v0.1.43 (branch `lab/upsync43`). To re-base the stack on a new upstream, read
+lines. The patches apply to upstream v0.1.43 (branch `lab/upsync43-pulito`). To re-base the stack on a new upstream, read
 `stack/INDEX.md`, then run `python stack/check_anchors.py --check <upstream checkout> --rev <new tag>`: it says which
 anchors moved and which patches apply clean, need a 3-way merge or a rewrite.
 

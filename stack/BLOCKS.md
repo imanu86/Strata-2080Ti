@@ -3104,7 +3104,7 @@ Anchor:
 #include <utility>
 #include <cstring>
 ```
-Block (hunk 1 of `src/core/expert_cache.cpp` in the patch, 64 lines):
+Block (hunk 1 of `src/core/expert_cache.cpp` in the patch, 61 lines):
 ```diff
  #include <utility>
  #include <cstring>
@@ -3117,12 +3117,10 @@ Block (hunk 1 of `src/core/expert_cache.cpp` in the patch, 64 lines):
 +#define NOMINMAX
 +#endif
 +#include <windows.h>
-+#define STRATA_EC_NVML_FREE 1
 +#endif
 +
  namespace strata::core {
 
-+#if defined(STRATA_EC_NVML_FREE)
 +namespace {
 +
 +// STRATA_VRAM_FREE=device (opt-in, Windows + NVIDIA).  Under WDDM cudaMemGetInfo answers for THIS process: memory
@@ -3165,7 +3163,6 @@ Block (hunk 1 of `src/core/expert_cache.cpp` in the patch, 64 lines):
 +}
 +
 +}  // namespace
-+#endif
 +
  // See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
  // not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
@@ -3178,17 +3175,15 @@ Block (hunk 1 of `src/core/expert_cache.cpp` in the patch, 64 lines):
 
 Anchor:
 ```
-            if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);
         }
     }
+#endif
 ```
-Block (hunk 2 of `src/core/expert_cache.cpp` in the patch, 27 lines):
+Block (hunk 2 of `src/core/expert_cache.cpp` in the patch, 25 lines):
 ```diff
-             if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);
          }
      }
-+#endif
-+#if defined(STRATA_EC_NVML_FREE)
+ #endif
 +    static const bool device_wide = [] {
 +        const char* v = std::getenv("STRATA_VRAM_FREE");
 +        return v != nullptr && std::strcmp(v, "device") == 0;
@@ -3208,9 +3203,9 @@ Block (hunk 2 of `src/core/expert_cache.cpp` in the patch, 27 lines):
 +        }
 +        if (got) free_b = std::min(free_b, nvml_b);
 +    }
- #endif
      return free_b;
  }
+
 ```
 
 ### 07-5
