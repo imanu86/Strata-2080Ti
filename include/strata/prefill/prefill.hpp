@@ -21,6 +21,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace strata::core { class PeerExperts; }
 namespace strata::kernels::cpu { class ExpertPool; }
@@ -132,6 +133,17 @@ public:
 
     const PrefillStats& stats() const { return stats_; }
 
+    /// Fork (TTFT): the PLE rows of the NEXT run's first tokens (`tokens`, `n` of them, `prev0`/`prev1` the two before
+    /// them, oldest first).  The first chunk of every run waits for its whole chunk's rows (the read-ahead only covers
+    /// the chunks after it): 5.7 s of SSD reads for the part after the system turn of Claude Code's first request.
+    /// Set before a run, they are read into the PLE row cache on a thread once this run has its last chunk's rows (the
+    /// SSD is idle then), and the next run's first gather finds them there: the same bytes, earlier.  A run waits for
+    /// a warm still in flight before its first gather.  No-op on a stage without the PLE, in mmap mode, without the
+    /// reader's I/O thread or a row cache that can hold them.  STRATA_PLE_LOOKAHEAD=0 turns both calls off.
+    void set_ple_lookahead(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1);
+    /// The same read, started now (e.g. beside a prefix restore, before the run that needs them).
+    void ple_warm_now(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1);
+
     /// multi-GPU: the experts the peer GPU holds are computed THERE for every prompt chunk (up to `cap_rows` routed
     /// rows per layer; the rest of the peer's experts are read by this GPU over P2P).  Allocates the peer's buffers for
     /// chunks of up to init's `chunk` tokens.  Needs P2P between the two cards.
@@ -208,6 +220,13 @@ private:
     std::string next_err_;
     std::future<bool> next_run_;
     int hand_buf_ = 0;
+
+    // fork (TTFT): set_ple_lookahead / ple_warm_now
+    std::vector<int64_t> ple_ahead_;
+    int32_t ple_ahead_prev_[2] = {-1, -1};
+    std::future<bool> ple_warm_;
+    void ple_warm_launch(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1);
+    void ple_warm_wait();
 
     bool carve(std::size_t T, void* alloc);   // the device buffers of a chunk (prefill.cpp's Alloc)
     void release();                          // the destructor's cleanup (also `reset`'s)
