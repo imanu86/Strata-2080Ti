@@ -3146,11 +3146,44 @@ void expdec_gu_t(int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigned 
         else expdec_gu_r<TG, 1, 2>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up);
     }
 }
+// One line on stderr per (role, format, taken or not), the first time STRATA_EXPDEC=1 meets it: the proof in the
+// engine's log that the EXPDEC kernels are the ones launched (or captured into the window's graph), with the
+// choices in force.
+void expdec_note(const NativeExpertLayout& L, bool gu, bool taken, cudaStream_t s, int64_t gy, int64_t cap_groups) {
+    static bool seen[2][64][2] = {};
+    const int ty = gu ? L.gu_type : L.d_type;
+    if (ty < 0 || ty >= 64 || seen[gu ? 0 : 1][ty][taken ? 1 : 0]) return;
+    seen[gu ? 0 : 1][ty][taken ? 1 : 0] = true;
+    cudaStreamCaptureStatus cs = cudaStreamCaptureStatusNone;
+    cudaStreamIsCapturing(s, &cs);
+    int dev = -1;
+    cudaGetDevice(&dev);
+    if (!taken) {
+        std::fprintf(stderr, "strata expdec: CUDA%d %s type %d (n_embd %lld, n_ff %lld) not covered: the default kernel runs\n", dev,
+                     gu ? "gate/up" : "down", ty, (long long) L.n_embd, (long long) L.n_ff);
+        return;
+    }
+    if (gu) {
+        const int R = expdec_r(), rb = expdec_rows_per_block(2 * (int) L.n_ff, 16 * R, cap_groups, g_expdec_rb);
+        std::fprintf(stderr, "strata expdec: CUDA%d gate/up type %d: expdec_gu_kernel R %d MINB %d, %d rows per block, grid %d x %lld "
+                             "(cap %lld groups)%s\n", dev, ty, R, g_expdec_minb >= 4 ? 4 : 2, rb, (2 * (int) L.n_ff + rb - 1) / rb,
+                     (long long) gy, (long long) cap_groups, cs != cudaStreamCaptureStatusNone ? ", captured into a graph" : "");
+    } else {
+        const int R = expdec_dr(), lanes = ty == 20 ? 8 : 16;
+        const int rb = expdec_rows_per_block((int) L.n_embd, (256 / lanes) * R, cap_groups, g_expdec_drb);
+        std::fprintf(stderr, "strata expdec: CUDA%d down type %d: expdec_down_kernel R %d, %d rows per block, grid %d x %lld "
+                             "(cap %lld groups)%s\n", dev, ty, R, rb, ((int) L.n_embd + rb - 1) / rb, (long long) gy,
+                     (long long) cap_groups, cs != cudaStreamCaptureStatusNone ? ", captured into a graph" : "");
+    }
+}
+
 // false: EXPDEC is off or does not take this layout (the caller launches the default kernels)
 bool expdec_gu(const NativeExpertLayout& L, int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr,
                const int32_t* grp_start, const int32_t* n_groups, const int32_t* ent_tok, const block_q8_1* X, float* gate,
                float* up) {
-    if (!g_expdec || g_old_kernels || !expdec_gu_ok(L)) return false;
+    if (!g_expdec || g_old_kernels) return false;
+    if (!expdec_gu_ok(L)) { expdec_note(L, true, false, s, gy, cap_groups); return false; }
+    expdec_note(L, true, true, s, gy, cap_groups);
     switch (L.gu_type) {
         case 16: expdec_gu_t<16>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
         case 17: expdec_gu_t<17>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
@@ -3180,7 +3213,9 @@ void expdec_down_t(int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigne
 }
 bool expdec_down(const NativeExpertLayout& L, int64_t gy, int64_t cap_groups, cudaStream_t s, const unsigned long long* grp_ptr,
                  const int32_t* grp_start, const int32_t* n_groups, const int32_t* ent_dst, const block_q8_1* hq, float* out) {
-    if (!g_expdec || g_old_kernels || !expdec_down_ok(L)) return false;
+    if (!g_expdec || g_old_kernels) return false;
+    if (!expdec_down_ok(L)) { expdec_note(L, false, false, s, gy, cap_groups); return false; }
+    expdec_note(L, false, true, s, gy, cap_groups);
     if (L.d_type == 20) expdec_down_t<20>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
     else expdec_down_t<42>(gy, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
     return true;
