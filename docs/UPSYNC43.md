@@ -1,6 +1,6 @@
 # UPSYNC43: la pila del Daily su upstream 0.1.43
 
-Branch `lab/upsync43` del fork `imanu86/Strata-2080Ti`, worktree `Strata-wt\upsync43`. Base `upstream/main` =
+Branch **`lab/upsync43-pulito`** del fork `imanu86/Strata-2080Ti`, worktree `Strata-wt\upsync43` (il branch `lab/upsync43` pushato il 12/10 con 19 leve è **superato**: resta com'è perché l'owner non riscrive la cronologia pubblicata; il nome nuovo nasce dalla pulizia di §10). Base `upstream/main` =
 `7695859a` = tag **v0.1.43** (11/10/2026). Sopra, leva per leva, la pila di `lab/candidate2` `ac6065dc` («Strata 0.1.42
 Daily r2»: upstream v0.1.42 `61b3fb5d` + 70 commit). Diario di lavoro in italiano; il **registro della pila** leggibile
 anche da altri utenti del motore è `stack/` (inglese): `INDEX.md`, `BLOCKS.md`, una `.patch` per leva, `manifest.json`,
@@ -75,7 +75,7 @@ Non erano in `lab/candidate2` e restano sui loro branch: `lab/hostgap` (`STRATA_
 | 17 | `src/program/generate.cpp` | riordino degli scambi di `STRATA_ADAPT_OVERLAP` e `rc_swaps.fetch_add` adiacenti | tenuti entrambi, nell'ordine upstream → nostro |
 
 Le altre 14 leve si sono applicate pulite (`git cherry-pick -X patience`). Ogni leva è un commit:
-`git log upstream/main..lab/upsync43`. Il codice è stato controllato uguale prima e dopo l'autosquash che ha tolto i
+`git log upstream/main..lab/upsync43-pulito`. Il codice è stato controllato uguale prima e dopo l'autosquash che ha tolto i
 percorsi del lab dai doc (`git diff 4bc562e7 HEAD -- . ':!docs'` vuoto).
 
 ## 4. Il registro `stack/`
@@ -193,7 +193,7 @@ finestra contro 0,01-0,02 negli altri bracci), primo braccio dopo il pilota MTP 
 **Regola del banco** (owner): quando il braccio precedente era un altro lavoro (pilota MTP, build, altra coda), prima di
 `b1` si fa **una corsa di riscaldamento che non si misura**; `bab_verdict.py` legge solo i bracci nominati.
 
-**Pulizia** (decisione dell'owner: via le leve senza guadagno misurato): tolte da `lab/upsync43` con un rebase che scarta
+**Pulizia** (decisione dell'owner: via le leve senza guadagno misurato): tolte dal branch con un rebase (da qui il nome `lab/upsync43-pulito`) che scarta
 i due commit (backup locale `backup/upsync43-pre-pulizia`), 19 file, −2 532 righe, un solo conflitto (CMake, il blocco
 `chain_step_bench` accanto a `qsa_rows_bench`):
 
