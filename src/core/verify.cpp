@@ -196,6 +196,13 @@ const bool g_doorbell_store = env_on("STRATA_DOORBELL_STORE");
 const bool g_trace = env_on("STRATA_VERIFY_TRACE");
 // lab/struct-c (docs/STRUCT_C.md): the #649 breadcrumbs without the host event ring, summed per window (sc_wait_note)
 const bool g_sc_waitstat = env_on("STRATA_SC_WAITSTAT");
+// lab/struct-c STRATA_SC_SERVE=1 (sc_ple_lock): the PLE table's staging and gather from two threads
+std::atomic<bool> g_sc_ple_on{false};
+std::mutex g_sc_ple_mu;
+std::unique_lock<std::mutex> sc_ple_hold() {
+    return g_sc_ple_on.load(std::memory_order_acquire) ? std::unique_lock<std::mutex>(g_sc_ple_mu)
+                                                       : std::unique_lock<std::mutex>();
+}
 const bool g_no_multi_gr = env_on("STRATA_NO_MULTI_GR");   // #783 PR-g: per-token GR reads/writes and generic-T kernels again
 const bool g_no_batch_kv = env_on("STRATA_NO_BATCH_KV_STEP");   // #783 PR-d: per-token K/V and indexer appends again
 
@@ -926,7 +933,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     const bool sidem = side_mixer && !batch_rec_;
     auto stamp = [&](int64_t l, int i, int grp) {
         if (prof_on_ && grp == 0) gpu_stamp(prof_, (int) (l * kProfPer + i), cs);
-        if (trace_m_ != nullptr) gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);   // #649
+        // #649; lab/struct-c STRATA_SC_WAITSTAT alone: only the stamps sc_wait_note reads (6 nodes a layer, not ~25)
+        if (trace_m_ != nullptr && (g_trace || i == 0 || i == 18 || i == 19 || i == 20 || i == 23 || i == 24))
+            gpu_stamp(trace_m_, (int) ((l * kProfPer + i) * 2 + grp), cs);
     };
     const int tb_[2] = {0, (T + 1) / 2}, te_[2] = {G == 2 ? (T + 1) / 2 : T, T};
     // S26 STRATA_LFUSE=1: where the shared expert's gate / scale fusions apply (the paths they replace are the ones taken)
@@ -3404,6 +3413,7 @@ void Verifier::pl_stage(int T, const int32_t* tokens, int64_t pos0, const int32_
     SessionState& ss = *ss_;
     fl_ple_ = ss.ple.ready() && ple_stage();
     if (fl_ple_) {
+        const std::unique_lock<std::mutex> sc_ple = sc_ple_hold();   // lab/struct-c
         int32_t prev[2] = {ple_prev[0], ple_prev[1]};
         for (int t = 0; t < T; ++t) {
             ngram_rows(&tokens[t], prev, 1, ss.ple.consts, pl_ple_rows_.data() + t * PLE_N_HEADS);
@@ -3488,6 +3498,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
     auto gather_ple = [&]() -> bool {
         if (!fl_ple_) return true;
         const Clock::time_point tp = Clock::now();
+        const std::unique_lock<std::mutex> sc_ple = sc_ple_hold();   // lab/struct-c
         if (!ss.ple.table->gather_batch(pl_ple_rows_.data(), (size_t) T, h_ple_, err)) return false;
         std::atomic_thread_fence(std::memory_order_seq_cst);
         _mm_sfence();
@@ -3641,6 +3652,8 @@ bool Verifier::pl_commit_async(int n_keep, std::string& err) {
     return true;
 }
 
+void sc_ple_lock(bool on) { g_sc_ple_on.store(on, std::memory_order_release); }
+
 void Verifier::absorb_stats(Verifier& o) {
     ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
     windows += o.windows;
@@ -3662,8 +3675,9 @@ void Verifier::absorb_stats(Verifier& o) {
 // lab/struct-c (docs/STRUCT_C.md), STRATA_SC_WAITSTAT=1: where the GPU waited for the host in the window that just
 // finished, read from the #649 breadcrumbs (globaltimer stamps written to mapped memory; this window's only: pl_launch
 // zeroes them).  Per layer and token group: waitA = stamp 18 -> 19 (plan flag + its copy), VRAM = 19 -> 20, waitB =
-// 20 -> 21, CPU rows = 23 -> 24 (the CPU's rows: the wait for the served flag, their copy and the combine).  The
-// window's wall is its first stamp to its last.  Measurement only: the stamps are extra graph nodes.
+// 20 -> 21 (stamped with STRATA_VERIFY_TRACE only: flag B rises with flag A when nothing goes over PCIe), CPU rows =
+// 23 -> 24 (the CPU's rows: the wait for the served flag, their copy and the combine).  The window's wall is its first
+// stamp to its last.  Measurement only: the stamps are extra graph nodes (6 a layer).
 void Verifier::sc_wait_note() {
     if (trace_h_ == nullptr || g_ == nullptr) return;
     auto at = [&](int64_t l, int i, int grp) {

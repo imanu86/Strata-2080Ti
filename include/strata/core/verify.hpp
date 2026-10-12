@@ -538,4 +538,9 @@ private:
     int64_t cap_ = 0, max_blocks_ = 0, attn_scratch_floats_ = 0;
 };
 
+/// lab/struct-c (docs/STRUCT_C.md), STRATA_SC_SERVE=1: the pipelined windows' doorbells are served on a thread of their
+/// own while the decode loop stages and launches the next ones.  The PLE table (its prefetch slots) is then reached from
+/// both threads: on = its staging (pl_stage) and its gather (service) take one mutex.  Off (the default): no lock.
+void sc_ple_lock(bool on);
+
 }  // namespace strata::core

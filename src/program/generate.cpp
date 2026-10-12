@@ -12295,10 +12295,138 @@ int main(int argc, char** argv) {
                 std::thread pl_adapt_thr;
                 std::atomic<bool> pl_adapt_done{true};
                 bool pl_adapt_ok = true;
+                // ---- lab/struct-c (docs/STRUCT_C.md), STRATA_SC_SERVE=1: every window's doorbells served on a thread
+                // of its own (the CPU experts, the plans, the flags), so a layer that rings while this loop is inside a
+                // graph launch, a commit, the chain or the verdict is served at once.  The loop launches, finishes and
+                // decides as before; a window is handed to the server when it is launched (sc_arm) and handed back
+                // once every layer is served (state 2: the loop's done/pl_finish).  The pool, its plan and the Drive stay
+                // on one thread (the server); what the loop changes that the pool reads (the residency table, the
+                // expert source, the tiers' gaps) it changes under sc_mu (sc_hold), and the PLE table takes its own
+                // lock (sc_ple_lock).  Same plans, same CPU and GPU work per layer: only when a layer is served moves.
+                // Two stages only.  STRATA_SC_SERVE_CPU / STRATA_SC_LOOP_CPU: the logical processors of the server and
+                // of this loop (default: the server on the host core, the loop on its sibling; -1 = unpinned).
+                static const bool sc_env = [] { const char* v = std::getenv("STRATA_SC_SERVE"); return v != nullptr && std::atoi(v) != 0; }();
+                const bool sc_on = sc_env && n_stages == 2;
+                struct ScSlot {   // [stage][parity]: 0 idle, 1 handed to the server, 2 every layer served, -1 failed
+                    std::atomic<int> state{0}, prio{0};
+                    std::atomic<bool> skip{false};
+                };
+                ScSlot sc_slot[2][2];
+                std::mutex sc_mu;
+                std::atomic<int> sc_wants{0};
+                std::atomic<bool> sc_stop{false};
+                std::string sc_err;
+                std::thread sc_thr;
+                std::atomic<int64_t> sc_served{0}, sc_calls{0}, sc_wait_lock{0};
+#if defined(_WIN32)
+                DWORD_PTR sc_loop_old = 0;
+#endif
+                auto sc_hold = [&]() {   // the loop's critical sections against the server's
+                    std::unique_lock<std::mutex> l;
+                    if (!sc_on) return l;
+                    sc_wants.fetch_add(1);
+                    l = std::unique_lock<std::mutex>(sc_mu);
+                    sc_wants.fetch_sub(1);
+                    return l;
+                };
+                auto sc_arm = [&](int st, int par, int prio) {
+                    if (!sc_on) return;
+                    ScSlot& s = sc_slot[st][par];
+                    s.skip.store(false, std::memory_order_relaxed);
+                    s.prio.store(prio, std::memory_order_relaxed);
+                    s.state.store(1, std::memory_order_release);
+                };
+                auto sc_halt = [&]() {   // the server stops; what it held in flight the loop serves again (pl_drain)
+                    if (!sc_thr.joinable()) return;
+                    sc_stop.store(true);
+                    sc_thr.join();
+                    strata::core::sc_ple_lock(false);
+#if defined(_WIN32)
+                    if (sc_loop_old != 0) SetThreadAffinityMask(GetCurrentThread(), sc_loop_old);
+#endif
+                    std::fprintf(stderr, "strata struct-c serve: %lld windows served on the server thread, %lld service "
+                                         "calls, %lld passes held for the loop\n", (long long) sc_served.load(),
+                                 (long long) sc_calls.load(), (long long) sc_wait_lock.load());
+                };
+                auto sc_start = [&]() {
+                    if (!sc_on) return;
+                    strata::core::sc_ple_lock(true);
+                    int srv_cpu = -1;
+#if defined(_WIN32)
+                    {   // the loop's processor today (pinned by --host-core): the server takes it, the loop its sibling
+                        auto env_cpu = [](const char* n, int def) { const char* v = std::getenv(n); return v ? std::atoi(v) : def; };
+                        DWORD_PTR proc = 0, sys = 0;
+                        GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys);
+                        const DWORD_PTR old = SetThreadAffinityMask(GetCurrentThread(), proc);
+                        int host = -1;
+                        if (old != 0 && (old & (old - 1)) == 0)
+                            for (int i = 0; i < (int) (8 * sizeof(DWORD_PTR)); ++i)
+                                if (old == ((DWORD_PTR) 1 << i)) host = i;
+                        srv_cpu = env_cpu("STRATA_SC_SERVE_CPU", host);
+                        const int loop_cpu = env_cpu("STRATA_SC_LOOP_CPU", host >= 0 ? (host ^ 1) : -1);
+                        const DWORD_PTR lm = loop_cpu >= 0 ? ((DWORD_PTR) 1 << loop_cpu) & proc : 0;
+                        SetThreadAffinityMask(GetCurrentThread(), lm != 0 ? lm : (old != 0 ? old : proc));
+                        sc_loop_old = old;
+                        static bool said = false;
+                        if (!said) {
+                            said = true;
+                            std::fprintf(stderr, "strata struct-c serve: on (STRATA_SC_SERVE=1): the doorbells on a thread of "
+                                                 "their own, on processor %d; the decode loop on %d\n", srv_cpu,
+                                         lm != 0 ? loop_cpu : -1);
+                        }
+                    }
+#endif
+                    sc_thr = std::thread([&, srv_cpu] {
+#if defined(_WIN32)
+                        if (srv_cpu >= 0) SetThreadAffinityMask(GetCurrentThread(), (DWORD_PTR) 1 << srv_cpu);
+#endif
+                        std::string e;
+                        while (!sc_stop.load(std::memory_order_relaxed)) {
+                            bool any = false;
+                            for (int pr = 0; pr < 2; ++pr)        // the verified path first, then B a layer per pass
+                                for (int st = 0; st < 2; ++st)
+                                    for (int par = 0; par < 2; ++par) {
+                                        ScSlot& sl = sc_slot[st][par];
+                                        if (sl.state.load(std::memory_order_acquire) != 1 ||
+                                            sl.prio.load(std::memory_order_relaxed) != pr)
+                                            continue;
+                                        any = true;
+                                        if (sc_wants.load(std::memory_order_relaxed) != 0) { sc_wait_lock.fetch_add(1); continue; }
+                                        std::unique_lock<std::mutex> l(sc_mu, std::try_to_lock);
+                                        if (!l.owns_lock()) continue;
+                                        sc_calls.fetch_add(1, std::memory_order_relaxed);
+                                        const int r = PV[st][par]->service(sl.skip.load(std::memory_order_relaxed)
+                                                                               ? nullptr : &drive_pool_split,
+                                                                           PSD[par], e, pr == 1 ? 1 : 0);
+                                        if (r < 0) {
+                                            sc_err = e;
+                                            sl.state.store(-1, std::memory_order_release);
+                                        } else if (r == 1) {
+                                            sc_served.fetch_add(1, std::memory_order_relaxed);
+                                            sl.state.store(2, std::memory_order_release);
+                                        }
+                                    }
+                            if (!any) {
+#if defined(_WIN32)
+                                YieldProcessor();
+#else
+                                std::this_thread::yield();
+#endif
+                            }
+                        }
+                    });
+                };
+                // the window's state on the server (sc_on): -1 failed (err set), 0 still served, 1 every layer served
+                auto sc_ready = [&](int st, int par) -> int {
+                    const int x = sc_slot[st][par].state.load(std::memory_order_acquire);
+                    if (x < 0) { err = sc_err.empty() ? std::string("struct-c: the server failed") : sc_err; return -1; }
+                    return x == 2 ? 1 : 0;
+                };
                 // an error ends the engine, as the serial loop's do: every GPU wait is released first (#267), so no
                 // window in flight keeps spinning on a flag nobody raises, and the tier's thread can finish (the
                 // asynchronous tier's job does host work alone: it ends)
                 auto die = [&](const std::string& m) -> int {
+                    sc_halt();   // lab/struct-c: no layer is served past this point
                     std::fprintf(stderr, "strata serve: pipelined decode: %s\n", m.c_str());
                     strata::core::diag_pipeline_fn().store(nullptr);
                     strata::core::release_gpu_waits(stderr);
@@ -12332,8 +12460,14 @@ int main(int argc, char** argv) {
                     // undo restores everything it wrote).  STRATA_PIPELINE_DOOM_SKIP=0: served in full.
                     static const bool doom_skip = [] { const char* e = pipe_dbg_env("STRATA_PIPELINE_DOOM_SKIP"); return e == nullptr || std::atoi(e) != 0; }();
                     const bool skip = doom_skip && doomed && &w == &D;
-                    if (v.service(skip ? nullptr : &drive_pool_split, SDf(w), err, max_layers) < 0) return false;
+                    if (sc_on) {   // lab/struct-c: the server serves it; the loop finishes it
+                        if (skip) sc_slot[w.fr][w.seq & 1].skip.store(true, std::memory_order_relaxed);
+                        const int r = sc_ready(w.fr, w.seq & 1);
+                        if (r < 0) return false;
+                        if (r == 0) return true;
+                    } else if (v.service(skip ? nullptr : &drive_pool_split, SDf(w), err, max_layers) < 0) return false;
                     if (v.done(err)) {
+                        if (sc_on) sc_slot[w.fr][w.seq & 1].state.store(0, std::memory_order_relaxed);
                         if (!v.pl_finish(nullptr, err)) return false;
                         w.fl = false;
                         if (++w.fr == pl_nf) w.finished = true;
@@ -12446,6 +12580,7 @@ int main(int argc, char** argv) {
                         const cudaError_t q = cudaEventQuery(el_fill_ev);
                         if (q == cudaErrorNotReady) return true;
                         if (q != cudaSuccess) { err = "elastic cache: a fill copy failed"; return false; }
+                        const auto sc_h = sc_hold();   // lab/struct-c: host_res, the expert source
                         for (const auto& [i, slot] : el_fill) {
                             host_res[(size_t) i] = slot;
                             srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
@@ -12463,6 +12598,7 @@ int main(int argc, char** argv) {
                     ElPlan plan;
                     if (!elastic_step(false, err, &plan)) return false;
                     if (plan.kind == 0) return true;
+                    const auto sc_h = sc_hold();   // lab/struct-c: host_res, the expert source
                     const Clock::time_point t0 = Clock::now();
                     const strata::core::OnDevice on(0);   // the elastic cache's card (CUDA0)
                     if (plan.kind == 1) {
@@ -12501,6 +12637,7 @@ int main(int argc, char** argv) {
                 };
                 double a_poll_ms = 0.0;
                 auto pl_adapt = [&]() -> bool {   // the blocking tier (--adapt-async 0)
+                    const auto sc_h = sc_hold();   // lab/struct-c: host_res, the expert source
                     if (pl_adapt_thr.joinable() && pl_adapt_done.load()) {
                         pl_adapt_thr.join();
                         if (!pl_adapt_ok) return false;
@@ -12637,6 +12774,7 @@ int main(int argc, char** argv) {
                     return v == nullptr || std::atoi(v) != 0;
                 }();
                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
+                sc_start();   // lab/struct-c
                 while (true) {
                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
                     g_pl_diag.a_seq.store(A.seq, std::memory_order_relaxed);
@@ -12652,7 +12790,12 @@ int main(int argc, char** argv) {
                         const double t = ms_now();
                         if (t - a_poll_ms >= 0.5) {
                             a_poll_ms = t;
-                            if (!adapt_tick(false, false)) return die("an adaptive refill failed");
+                            bool ok;
+                            {
+                                const auto sc_h = sc_hold();   // lab/struct-c
+                                ok = adapt_tick(false, false);
+                            }
+                            if (!ok) return die("an adaptive refill failed");
                         }
                     }
                     // ---- every window in flight served.  Every stage's CPU experts run from this one loop, a layer at a
@@ -12664,8 +12807,12 @@ int main(int argc, char** argv) {
                     if (pl_yield && !pump0(A)) return die(err);
                     if (A.s1 && !A.s1_done) {
                         strata::core::Verifier& v = V1(A);
-                        if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);
-                        if (v.done(err)) {
+                        int sc_r = 1;   // lab/struct-c: served on the server thread
+                        if (sc_on) sc_r = sc_ready(1, A.seq & 1);
+                        else if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);
+                        if (sc_r < 0) return die(err);
+                        if (sc_r == 1 && v.done(err)) {
+                            if (sc_on) sc_slot[1][A.seq & 1].state.store(0, std::memory_order_relaxed);
                             if (!v.pl_finish(outp.data(), err)) return die(err);
                             force_rows_out(outp.data(), A.T, produced_n);   // lab bench: STRATA_FORCE_IDS
                             A.s1_done = true;
@@ -12792,10 +12939,11 @@ int main(int argc, char** argv) {
                         const int st = A.fr;
                         if (st == 0 && force_win != nullptr) force_window(A.p, A.tok[0], A.T, A.tok, S);   // lab bench replay
                         if (st == 0 && A.p + A.T > o.max_context) { ending = true; continue; }
-                        if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
+                        if (ajob && st == 0) { const auto sc_h = sc_hold(); a_gap(0); }   // --adapt-async: stage 0 is idle until this launch
                         if (st == 0 && !el_gap()) return die(err);   // fork: the elastic tail
                         if (!snap_take(st, A.seq)) return die("the GDN snapshot failed");
                         if (!VF(st, A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
+                        sc_arm(st, A.seq & 1, 0);   // lab/struct-c
                         A.fl = true;
                         if (st == 0) A.launched = true;
                         tre("L0", A.seq, A.T, st);
@@ -12811,7 +12959,7 @@ int main(int argc, char** argv) {
                         const int st = B.fr;
                         if (st == 0 && force_win != nullptr) force_window(B.p, B.tok[0], B.T, B.tok, S);   // lab bench replay
                         if (st > 0 || (B.p_on >= theta && B.p + B.T <= o.max_context)) {
-                            if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
+                            if (ajob && st == 0) { const auto sc_h = sc_hold(); a_gap(0); }   // --adapt-async: stage 0 is idle until this launch
                             if (st == 0 && !el_gap()) return die(err);   // fork: the elastic tail
                             PlSnap& sn = pl_snaps[(size_t) st];
                             cudaStream_t cs = pl_stream[(size_t) st];
@@ -12829,6 +12977,7 @@ int main(int argc, char** argv) {
                             if (!VF(st, A).pl_commit_async(A.T, err) || !snap_take(st, B.seq) ||
                                 !VF(st, B).pl_launch(B.T, B.tok, B.p, err))
                                 return die(err.empty() ? std::string("the GDN snapshot failed") : err);
+                            sc_arm(st, B.seq & 1, 1);   // lab/struct-c
                             A.com |= 1u << st;
                             B.fl = true;
                             if (st == 0) {
@@ -12845,8 +12994,9 @@ int main(int argc, char** argv) {
                     // ---- the last stage: A, once every front stage is done
                     if (A.finished && !A.s1) {
                         if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
-                        if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
+                        if (ajob) { const auto sc_h = sc_hold(); a_gap(1); }   // --adapt-async: stage 1 is idle until this launch
                         if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
+                        sc_arm(1, A.seq & 1, 0);   // lab/struct-c
                         A.s1 = true;
                         tre("L1", A.seq, A.T);
                     }
@@ -12934,6 +13084,7 @@ int main(int argc, char** argv) {
                             if ((A.com & (1u << st)) == 0 && !VF(st, A).pl_commit_async(A.T, err)) return die(err);
                         A = B;
                         B = PW{};
+                        if (sc_on && A.fl) sc_slot[A.fr][A.seq & 1].prio.store(0, std::memory_order_relaxed);   // lab/struct-c
                         lookup_next();   // fork: a copy goes on - the next B from the lookup (else the chain makes it)
                     } else {
                         // the front stages B never ran on take A's real commit now; those it did run on are undone
@@ -12968,9 +13119,17 @@ int main(int argc, char** argv) {
                         }
                     }
                     // --adapt-async: the verdict's tick, once the drafter's chain is launched (off its critical path)
-                    if (!last && ajob && !adapt_tick(false)) return die("an adaptive refill failed");
+                    if (!last && ajob) {
+                        bool ok;
+                        {
+                            const auto sc_h = sc_hold();   // lab/struct-c
+                            ok = adapt_tick(false);
+                        }
+                        if (!ok) return die("an adaptive refill failed");
+                    }
                     if (last) ending = true;
                 }
+                sc_halt();    // lab/struct-c: the drain serves what is left on this thread
                 pl_drain();   // nothing in flight: both stages' commits and the drafter have landed
                 strata::core::diag_pipeline_fn().store(nullptr);
                 if (pl_adapt_thr.joinable()) pl_adapt_thr.join();   // its copies waited only for finished work
