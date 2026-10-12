@@ -226,9 +226,11 @@ Build del worktree ripulito (`60d1130d`, codice = `aa617085`): `build_lock.py`, 
 Compilato sì, installato no.
 
 Controllo del testo: `DET-x10-u43p-b` (`det_force.sh`, argomenti di `coda_cand2.sh`, braccio B) contro `DET-x7-cand2-b1`
-(Daily r2): **in coda dietro il pilota MTP** (`bench.lock` preso alle 08:28 per 200 min). Script pronto:
-`20261006_due_schede\coda_u43p.sh` (stampa UGUALE/DIVERSO per L01/L02). Finché non gira: provato no. Atteso identico:
-le due leve tolte erano opt-in e spente nella config.
+(Daily r2), corsa alle 09:19-09:29 appena il pilota MTP ha lasciato il lock (il primo tentativo era scaduto nel `timeout
+3000` di `det_force.sh` aspettando il lock): **L01.txt e L02.txt identici byte per byte** (`fd37c80c…` / `45d230d2…`),
+stesse 521/600 finestre, stessi 503/690 e 426/614 draft accettati. **Provato sì.** Velocità non indicativa (69,3/64,8 t/s;
+prefill 355 s con la cache del disco svuotata dal pilota e una build di un altro agente in corso sotto `build.lock`):
+il B-A-B vale quello di §10. Lezione per `det_force.sh`: il `timeout 3000` conta anche l'attesa del lock.
 
 ## 12. Le nostre PR su upstream (autore imanu86, controllate il 12/10 con `gh`, sola lettura)
 
