@@ -3394,19 +3394,21 @@ bool Verifier::pl_prelaunch(int T, const int32_t* tokens, int64_t pos0, std::str
 }
 
 void Verifier::pl_release() {
-    if (!hg_win_ || h_hg_ == nullptr) return;
+    if (h_hg_ == nullptr || !(hg_win_ || hg_armed_)) return;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     _mm_sfence();
-    *(volatile uint32_t*) h_hg_ = 1;   // the spin before the hand-off copies returns; the window runs from here
-    _mm_sfence();
+    *(volatile uint32_t*) h_hg_ = 1;   // the spin before the hand-off copies returns; the window runs from here (an
+    _mm_sfence();                      // armed graph not launched yet runs straight through: the hand-off is written)
+    const bool launched = hg_win_;
     hg_win_ = false;
-    fl_since_ms_ = fl_launch_ms_ = now_ms();   // the GPU-reach wait counts from the release, as from a plain launch
+    hg_released_ms_ = now_ms();   // the GPU-reach wait counts from the release (pl_fire may still be running)
+    if (launched) fl_since_ms_ = fl_launch_ms_ = hg_released_ms_;
     trace_ev("RELEASED (prelaunched)", -1, -1, 0);
 }
 
-bool Verifier::pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool pre, std::string& err) {
+bool Verifier::pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool pre, std::string& err, bool arm_only) {
     const OnDevice on_device(device_);
-    if (fl_active_) { err = "verify: a window is already in flight on this verifier"; return false; }
+    if (fl_active_ || hg_armed_) { err = "verify: a window is already in flight on this verifier"; return false; }
     if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
     if (T < 1 || T > max_t_) { err = "verify: window size out of range"; return false; }
     SessionState& ss = *ss_;
@@ -3436,9 +3438,34 @@ bool Verifier::pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool p
         *(volatile uint32_t*) h_hg_ = 0;
         _mm_sfence();
     }
+    if (arm_only) {   // STRATA_HG_PRELAUNCH=2: pl_prelaunch_fire launches from another thread
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        trace_ev("WINDOW (armed)", -1, -1, pos0 * 16 + T);
+        ms_host += ms_since(t0);
+        hg_armed_ = true;
+        return true;
+    }
     std::atomic_thread_fence(std::memory_order_seq_cst);
     trace_ev(pre ? "WINDOW (prelaunched)" : "WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
     ms_host += ms_since(t0);
+    hg_armed_ = pre;
+    return pl_fire(pre, err);
+}
+
+// hostgap STRATA_HG_PRELAUNCH=2: the arming (staging, the hand-off word down) on the loop's thread, the launch itself
+// (cudaGraphLaunch of the 1397 nodes, ~1 ms of host) on another thread, so the loop keeps serving stage 0's doorbells
+bool Verifier::pl_prelaunch_arm(int T, const int32_t* tokens, int64_t pos0, std::string& err) {
+    if (!hg_ready()) { err = "verify: prelaunch without the STRATA_HG_PRELAUNCH graphs"; return false; }
+    return pl_launch_impl(T, tokens, pos0, true, err, true);
+}
+bool Verifier::pl_prelaunch_fire(std::string& err) {
+    const OnDevice on_device(device_);
+    if (!hg_armed_) { err = "verify: prelaunch fire without arm"; return false; }
+    return pl_fire(true, err);
+}
+
+bool Verifier::pl_fire(bool pre, std::string& err) {
+    const int T = fl_T_;
     const cudaError_t le = cudaGraphLaunch(pre ? exec_hg_[T] : cp_win_ ? exec_cp_[T] : exec_[T], cs_);
     hg_win_ = pre;
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
@@ -3446,8 +3473,9 @@ bool Verifier::pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool p
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
     if (cudaEventRecord(ev_done_, cs_) != cudaSuccess) { err = "verify: event record failed"; return false; }
     (void) cudaStreamQuery(cs_);   // WDDM: submit now
-    fl_active_ = true;
     fl_since_ms_ = fl_flush_ms_ = fl_launch_ms_ = now_ms();
+    hg_armed_ = false;
+    fl_active_ = true;   // last: the loop's thread reads it (in_flight) once the firing thread is done
     return true;
 }
 

@@ -225,6 +225,11 @@ public:
     /// graph runs up to its hand-off copies and spins there until `pl_release` (the host, once the stage before is
     /// done).  Only when `hg_ready()`; the window then counts as in flight (service, done, pl_finish as always).
     bool pl_prelaunch(int T, const int32_t* tokens, int64_t pos0, std::string& err);
+    /// STRATA_HG_PRELAUNCH=2: `pl_prelaunch` in two halves - `arm` on the loop's thread (staging, the hand-off word
+    /// down), `fire` (the cudaGraphLaunch, ~1 ms) on another thread; nothing else may touch the verifier between them
+    /// except `pl_release`, and `in_flight()` is true only once `fire` returned.
+    bool pl_prelaunch_arm(int T, const int32_t* tokens, int64_t pos0, std::string& err);
+    bool pl_prelaunch_fire(std::string& err);
     void pl_release();
     bool hg_ready() const { return exec_hg_[1] != nullptr; }
     bool pl_prelaunched() const { return hg_win_; }
@@ -382,8 +387,11 @@ private:
     bool hg_win_ = false;                 ///< the window in flight was prelaunched and not released yet
     cudaGraphExec_t exec_hg_[9] = {};
     uint32_t* h_hg_ = nullptr; uint32_t* m_hg_ = nullptr;   ///< the hand-off word: 0 at launch, 1 at release
+    bool hg_armed_ = false;               ///< STRATA_HG_PRELAUNCH=2: staged and the word down, the launch on another thread pending
+    double hg_released_ms_ = 0;
     bool hg_prepare(std::string& err);    ///< capture_all: the prelaunch graphs (once; off on failure)
-    bool pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool pre, std::string& err);
+    bool pl_launch_impl(int T, const int32_t* tokens, int64_t pos0, bool pre, std::string& err, bool arm_only = false);
+    bool pl_fire(bool pre, std::string& err);   ///< the cudaGraphLaunch and what follows it
     uint32_t* h_cpmap_ = nullptr; uint32_t* m_cpmap_ = nullptr;   ///< per ring: 1 device-planned, 2 served by the host
     int32_t* h_cpids_ = nullptr; int32_t* m_cpids_ = nullptr;     ///< per ring: the planned group's routed ids
     static constexpr int kCpRings = 2 * 64 + 2;

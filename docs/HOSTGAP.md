@@ -76,7 +76,7 @@ dalla CPU alla GPU **non è bit per bit** (la GPU arrotonda diversamente: il mot
 non si tocca qui. `STRATA_CP_RESPLAN` (piano sul device per i layer tutti residenti) e `S1FIRST` erano neutri sul
 banco (handoff 11/10).
 
-## 4. Leva implementata: `STRATA_HG_PRELAUNCH=1`
+## 4. Leva implementata: `STRATA_HG_PRELAUNCH=1` (lancio sul thread del ciclo) / `=2` (su un thread a parte, §4b)
 
 **Cosa fa.** Alla partenza dello stadio 0 di A (`L0`) il ciclo lancia subito anche il grafo dello stadio 1 di A
 (`Verifier::pl_prelaunch`), nella variante `exec_hg_[T]` catturata in `capture_all` (`hg_prepare`) con un
@@ -109,6 +109,22 @@ stadio 0 finito → primo kernel utile dello stadio 1 (dopo lo spin), la bolla a
 `decode timing`; poi il B-A-B dell'owner col banco forzato (`strata pipeline classes: fresh … ms` è la riga che deve
 scendere).
 
+### 4b. `STRATA_HG_PRELAUNCH=2`: il lancio su un altro thread
+
+Prima misura del modo 1 (`DET-x3-hostgap-nsys{A,B}`, build `f1e6c639`, 96 finestre di L02 sotto nsys; A =
+`STRATA_EXPDEC=1`, B = + `=1`): il meccanismo funziona (72 prelanci / 72 rilasci; da fine stadio 0 al primo kernel
+utile dello stadio 1 **4,93 → 0,01 ms**; la bolla al nodo 8 sparita: idle dentro il grafo prima di `gr_up_multi`
+2,15 → 0,10 ms per finestra) ma la finestra **non scende** (L02 36,37 → 36,82 ms/finestra, fresh 40,47 → 40,15,
+speculative 26,84 → 26,76): il muro dello stadio 0 della stessa finestra sale **13,15 → 14,93 ms** e la durata utile
+dello stadio 1 18,55 → 19,69. Causa: il `cudaGraphLaunch` dei 1397 nodi (2,8 ms sotto nsys, ~1,2 pulito) ora occupa
+il thread del ciclo **subito dopo il lancio dello stadio 0**, proprio quando la 3060 suona i doorbell dei primi layer:
+lo stadio 0 aspetta il piano dell'host per tutta la durata del lancio. Il tempo si sposta, non sparisce. Quindi il
+modo 2: `pl_prelaunch_arm` sul thread del ciclo (staging, parola a 0), `pl_prelaunch_fire` (il `cudaGraphLaunch` e
+l'evento) su un thread a parte (`std::async`); il ciclo marca lo stadio 1 in volo quando il future è pronto, e il
+rilascio può precedere il lancio (il grafo trova la parola già a 1 e corre). `target picks replaced` varia già fra
+corse identiche (3/3/4/3/5; 39/36 nel B-A-B di EXPDEC: dipende da quali esperti finiscono sulla CPU), non è un segno
+della leva.
+
 ## 5. Esito
 
-In corso.
+In corso (modo 2).

@@ -12377,8 +12377,12 @@ int main(int argc, char** argv) {
                 int64_t pl_disagree = 0, pl_late = 0;
                 // hostgap STRATA_HG_PRELAUNCH=1 (docs/HOSTGAP.md): A's last-stage graph launched at A's stage-0 launch,
                 // spinning on the hand-off word until stage 0 is done (Verifier::pl_prelaunch / pl_release)
-                static const bool hg_pre = cp_env_int("STRATA_HG_PRELAUNCH", 0) != 0;
+                static const int hg_mode = cp_env_int("STRATA_HG_PRELAUNCH", 0);   // 1: launch on this thread; 2: on another
+                static const bool hg_pre = hg_mode != 0;
                 int64_t hg_pre_n = 0, hg_rel_n = 0;
+                std::future<bool> hg_fut;           // mode 2: the stage-1 launch in flight on its thread
+                auto hg_err = std::make_shared<std::string>();
+                bool hg_pending = false;
                 static const bool pl_prestage = [] {   // STRATA_PIPELINE_PRESTAGE=0: B staged at its launch
                     const char* v = pipe_dbg_env("STRATA_PIPELINE_PRESTAGE");
                     return v == nullptr || std::atoi(v) != 0;
@@ -12444,9 +12448,14 @@ int main(int argc, char** argv) {
                     // verdict), and while A's last stage runs, B one layer per pass
                     if (!pl_yield && ((doomed && !pump0(D)) || !pump0(A) || !pump0(B))) return die(err);
                     if (pl_yield && !pump0(A)) return die(err);
+                    if (hg_pending && hg_fut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {   // hostgap mode 2
+                        hg_pending = false;
+                        if (!hg_fut.get()) return die(*hg_err);
+                        A.s1 = true;   // in flight from here (service, done, pl_finish as always)
+                    }
                     if (A.s1_pre && A.finished) {   // hostgap: stage 0 is done, the prelaunched stage-1 graph may read the hand-off
                         if (ajob) a_gap(1);   // --adapt-async: stage 1 was idle (spinning) until now
-                        V1(A).pl_release();
+                        V1(A).pl_release();   // safe before the launch too: the graph then runs straight through
                         A.s1_pre = false;
                         ++hg_rel_n;
                         tre("L1", A.seq, A.T);
@@ -12648,9 +12657,17 @@ int main(int argc, char** argv) {
                         // hostgap STRATA_HG_PRELAUNCH: A's last stage launched now, behind its hand-off word (released at
                         // F0 below): the 1397-node launch and the polling of stage 0 overlap stage 0.  Only with one front
                         // stage and the last stage's verifier free (the window before it is done: its verdict made A)
-                        if (hg_pre && st == 0 && pl_nf == 1 && !A.s1 && V1(A).hg_ready() && !V1(A).in_flight()) {
-                            if (!V1(A).pl_prelaunch(A.T, A.tok, A.p, err)) return die(err);
-                            A.s1 = true;
+                        if (hg_pre && st == 0 && pl_nf == 1 && !A.s1 && !hg_pending && V1(A).hg_ready() && !V1(A).in_flight()) {
+                            if (hg_mode == 2) {   // the launch on its own thread: this one keeps serving stage 0
+                                if (!V1(A).pl_prelaunch_arm(A.T, A.tok, A.p, err)) return die(err);
+                                strata::core::Verifier* v1 = &V1(A);
+                                hg_err->clear();
+                                hg_fut = std::async(std::launch::async, [v1, hg_err] { return v1->pl_prelaunch_fire(*hg_err); });
+                                hg_pending = true;
+                            } else {
+                                if (!V1(A).pl_prelaunch(A.T, A.tok, A.p, err)) return die(err);
+                                A.s1 = true;
+                            }
                             A.s1_pre = true;
                             ++hg_pre_n;
                             tre("P1", A.seq, A.T);
