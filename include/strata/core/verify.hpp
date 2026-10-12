@@ -85,6 +85,8 @@ public:
     /// Diagnostics: row `t` of the last window's head logits (n_vocab floats) to the host. Valid after run().
     bool copy_logits(int t, float* host) const;
     int64_t vocab() const { return next_ ? next_->vocab() : n_vocab_; }
+    /// The width of one final residual row (hc * n_embd): what final_R_all() holds per window row (mtp_capture.hpp).
+    int64_t hc_n_embd() const { return g_ != nullptr ? g_->hc * g_->n_embd : 0; }
     /// The sampling the verify window's head applies (temperature / top_p / top_k / seed).  Set per
     /// request; greedy by default.  The sampling itself runs OUTSIDE the captured graph - its
     /// parameters would otherwise be baked forever - so this can change between requests freely.

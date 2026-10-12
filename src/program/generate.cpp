@@ -27,6 +27,7 @@
 #include "strata/core/prefix_cache_file.hpp"
 #include "strata/core/conversation_memory.hpp"
 #include "strata/core/coupled_draft.hpp"
+#include "strata/core/mtp_capture.hpp"   // lab: STRATA_MTP_CAPTURE (the MTP distillation capture, opt-in)
 #include "strata/core/expert_source.hpp"
 #include "strata/core/foresight_swap.hpp"
 #include "strata/core/pinned.hpp"
@@ -10674,6 +10675,9 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
+            // lab: STRATA_MTP_CAPTURE - this request is the next captured sequence (seq_<k>.*); the prompt read's
+            // windows below write its rows
+            if (strata::core::MtpCapture* cap = strata::core::MtpCapture::instance()) cap->begin_request(n);
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {
@@ -11325,6 +11329,9 @@ int main(int argc, char** argv) {
                     }();
                     if (logpos != nullptr && !ver.window_logprobs(nxt.data(), T, q, logpos_extra, logpos, e))
                         return false;
+                    // lab: STRATA_MTP_CAPTURE - this window's final residuals and head top-k (teacher-forced rows)
+                    if (strata::core::MtpCapture* cap = strata::core::MtpCapture::instance())
+                        if (!cap->window(ver, win.data(), nxt.data(), T, q, e)) return false;
                     if (!ver.commit(T, e) || (use_mtp && !mtp.prefill(ver.final_R_all(), nxt.data(), T, q, e))) return false;
                     q += T;
                     pp_reached = q;   // #471
@@ -13336,6 +13343,8 @@ int main(int argc, char** argv) {
             if (o.lookup_chain > 0)
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
+            // lab: STRATA_MTP_CAPTURE - every queued row of this request is on disk before DONE (the driver checks sizes)
+            if (strata::core::MtpCapture* cap = strata::core::MtpCapture::instance()) cap->flush();
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s\n",
                         (long long) produced_n,
