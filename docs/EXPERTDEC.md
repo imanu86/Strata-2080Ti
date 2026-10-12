@@ -54,8 +54,9 @@ remoto. Le conclusioni sopra vengono dal modello, dal SASS e dalla scomposizione
   righe, T = 2 (cap 20) → 32, T = 4 (cap 40) → 64.
 - **Codebook in shared** anche per IQ3_XXS (1 KB) e IQ3_S (2 KB): `Split<18>::load<true>` / `Split<21>::load<true>`
   leggono la stessa tabella dalla shared (IQ2_XXS/XS/S la mettevano già in shared i kernel di default).
-- **Registri**: `__launch_bounds__(256, MINB)` del gate/up con MINB a runtime (`STRATA_EXPDEC_MINB`): 2 = fino a 128
-  registri (2 blocchi per SM), 4 = fino a 64 (4 blocchi per SM, come il default, a rischio spill); il down resta a 2.
+- **Registri**: `__launch_bounds__(256, MINB)` del gate/up con MINB a runtime (`STRATA_EXPDEC_MINB`, default 4 dal
+  bench 2): 4 = fino a 64 registri (4 blocchi per SM come il default, 8 B di stack), 2 = fino a 128 (2 blocchi per SM);
+  il down resta a 2 (Q2_0 R 4: 106 registri).
 - Formati: gate/up IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21), IQ2_S (22) a n_embd 2560 (`n_ff` multiplo di
   64); down Q2_0 (42) a n_ff 640, e IQ4_NL (20) solo con `STRATA_EXPDEC_D20=1` (dal bench non guadagna: il kernel di
   default ha già l'hq in shared). Ogni ruolo decide da sé; un formato fuori lista tiene il kernel di default.
@@ -185,6 +186,53 @@ contigui) copiati in shared con `LDG.32`/`LDG.128` coalescati e decodificati da 
 int→float con la costante magica (`__int_as_float(sumi + 0x4B400000) - 12582912.0f`, esatta per |sumi| < 2^22, qui
 sempre) al posto di `I2F` (16 lane/clk per SM su Turing). Entrambi bitwise per costruzione, da verificare col bench.
 
-## 6. Esito del bench, iterazione 2
+## 6. Esito del bench, iterazione 2 (build `1a41387e`, 12/10) e scelta finale
 
-In corso.
+`expdec_bench 300 -1 20 all def,dec,dec:r2,dec:b4,dec:r2:b4,dec:d1:x1,dec:d2:x1,dec:d4:x1 both`: **bitwise
+`identical` su tutte le 1280 celle**. `dec` = gate/up R 1 MINB 2, down Q2_0 R 4, IQ4_NL default; `dec:b4` = MINB 4 (64
+registri, 4 blocchi per SM); `dec:r2` = gate/up R 2; `dec:d<n>:x1` = EXPDEC anche sul down IQ4_NL con R n. Rapporti su
+`def` (µs della fase, forma `real`):
+
+**2080 Ti, gate/up** (def in µs a T 1/2/3/4, poi `dec` e `dec:b4`)
+
+| formato | def T1-4 | dec | dec:b4 |
+|---|---|---|---|
+| IQ2_XXS | 42 / 74 / 86 / 97 | 1.00 / 0.93 / 0.86 / 0.84 | 0.98 / 0.92 / 0.86 / 0.84 |
+| IQ2_XS | 60 / 80 / 92 / 104 | 0.74 / 0.91 / 0.87 / 0.83 | 0.75 / 0.92 / 0.87 / 0.84 |
+| IQ3_XXS | 61 / 95 / 107 / 119 | 0.77 / 0.86 / 0.79 / 0.79 | 0.79 / 0.84 / 0.79 / 0.77 |
+| IQ3_S | 72 / 112 / 124 / 138 | 0.71 / 0.79 / 0.74 / 0.75 | 0.73 / 0.79 / 0.75 / 0.74 |
+| IQ2_S | 62 / 83 / 96 / 109 | 0.78 / 0.92 / 0.87 / 0.85 | 0.75 / 0.92 / 0.86 / 0.84 |
+
+`dec:r2` è pari o peggio tranne IQ2_XXS/IQ2_S (0,79-0,83 a T = 4). **2080 Ti, down**: Q2_0 `dec` 0.69 / 0.85 / 0.77 /
+0.79 (R = 4; R 1-2 via `x1` 0,86-1,02); IQ4_NL `dec` = 1,00 (default), con `x1` 0,95-1,04: resta il default.
+
+**3060, gate/up**: `dec:b4` 0.87-0.95 a T ≥ 2 su tutti i formati (IQ3_S 0.99 / 0.89 / 0.87, IQ3_XXS 0.92 / 0.90 /
+0.82), `dec` (MINB 2) 0,91-1,11: sulla 3060 i 4 blocchi per SM contano. **3060, down**: Q2_0 `dec` 0.76 / 0.73 /
+0.71 / 0.65; IQ4_NL 0,97-1,07 (default).
+
+Scomposizione (µs per layer, a = per esperto, b = per entrata) con la scelta finale `dec:b4`:
+
+| scheda | coppia | ruolo | a def → dec:b4 | b def → dec:b4 |
+|---|---|---|---|---|
+| 2080 Ti | 21/20 | gate/up IQ3_S | 5.20 → 3.73 | 1.26 → 0.64 |
+| 2080 Ti | 18/20 | gate/up IQ3_XXS | 4.39 → 3.27 | 1.22 → 0.62 |
+| 2080 Ti | 16/20 | gate/up IQ2_XXS | 3.42 → 2.65 | 1.18 → 0.67 |
+| 2080 Ti | 16/42 | down Q2_0 | 1.45 → 1.02 | 0.59 → 0.39 |
+| 2080 Ti | 16/20 | down IQ4_NL | 1.81 → 1.80 | 0.58 → 0.59 |
+| 3060 | 21/20 | gate/up IQ3_S | 6.25 → 5.35 | 1.52 → 0.49 |
+| 3060 | 16/42 | down Q2_0 | 3.77 → 1.84 | 1.15 → 0.54 |
+
+**Scelta finale** (default di `STRATA_EXPDEC=1` da questo HEAD): gate/up R 1 con MINB 4 (`STRATA_EXPDEC_MINB=4`),
+down Q2_0 R 4, down IQ4_NL col kernel di default. Stima sul motore (2080 Ti, 32 layer, ~11,7 entrate e ~3,4 esperti
+distinti in più per riga): gate/up IQ3_S 11,7 × 1,26 + 3,4 × 5,2 = 32 µs/layer → 11,7 × 0,64 + 3,4 × 3,73 = 20 µs
+(**−38%**, la pendenza +0,88 ms per riga → ~0,55); down Q2_0 11,9 → 7,9 µs/layer (−34%), IQ4_NL ±0 → la pendenza down
++0,36 → ~0,28; router +0,08 invariato. **Pendenza esperti attesa: +1,31 → ~0,9 ms per riga sulla 2080 Ti (−30%),
++1,04 → ~0,9 sulla 3060 (−10/−15%)**. Non è il dimezzamento chiesto: la parte che resta è il costo per esperto del
+gate/up (3,7 µs contro 2,3 di DRAM), cioè il lato pesi (§5), più ~1 ms piatto a T = 1 che EXPDEC già toglie in parte
+(IQ3_S a T = 1: 0,71-0,73).
+
+Costo di T = 1: nessuna perdita sulla 2080 Ti (0,71-1,00); sulla 3060 `dec:b4` a T = 1 è 0,89-1,09 (rumore del
+desktop compreso). Nel motore il 42% delle finestre è a T = 1.
+
+Pronto per il B-A-B end-to-end (lo lancia l'owner): stesso exe, braccio B con `STRATA_EXPDEC=1`, braccio A senza; testo
+identico atteso (bitwise), da guardare `strata decode timing` per T e il profilo `VRAM hits`.

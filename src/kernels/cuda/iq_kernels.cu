@@ -1592,7 +1592,8 @@ __global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l
 // same lane does the same calls in the same order with the same operations, `apply_u` = `apply` on the block's
 // words), so the output is bitwise the same (expdec_bench checks it; docs/EXPERTDEC.md).
 #ifndef STRATA_EXPDEC_MINB
-#define STRATA_EXPDEC_MINB 2   // __launch_bounds__ min blocks per SM: 2 = up to 128 registers
+#define STRATA_EXPDEC_MINB 4   // gate/up __launch_bounds__ min blocks per SM by default (STRATA_EXPDEC_MINB at runtime): 4 = up to 64
+                               // registers, as the default kernels (bench: equal on the 2080 Ti, 0.87-0.95 on the 3060); 2 = up to 128
 #endif
 constexpr int ED_NC = GRP_NC;   // entries staged at once
 constexpr int ED_XB = 80;       // q8_1 blocks of a gate/up row (n_embd 2560)
