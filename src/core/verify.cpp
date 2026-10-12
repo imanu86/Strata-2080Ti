@@ -3152,6 +3152,50 @@ bool Verifier::copy_logits(int t, float* host) const {
                       cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
+// lab (mtp_capture): run()'s head on rows the batched prompt path produced (Prefill::on_chunk's R rows), the
+// "final mixer in one read, no pending write" form, then the same quantize + mmvq.  The window's own graph is not
+// touched: this launches on the stream directly, between windows.
+bool Verifier::head_rows(const float* R_dev, int T, std::string& err) {
+    if (next_ != nullptr) return next_->head_rows(R_dev, T, err);   // a layer split: the head is on the last stage
+    using namespace strata::kernels;
+    const OnDevice on_device(device_);
+    if (R_dev == nullptr || T < 1 || T > max_t_ || T > kFusedGrMaxT) { err = "verify head_rows: rows out of range"; return false; }
+    if (head_ == nullptr || !head_->loaded() || head_logits_ == nullptr || head_mixed_ == nullptr) {
+        err = "verify head_rows: needs the native head (--native) and an initialized verifier";
+        return false;
+    }
+    if (wt_ == nullptr || g_ == nullptr) { err = "verify head_rows: not initialized"; return false; }
+    const ModelGeometry& g = *g_;
+    const WeightTable& wt = *wt_;
+    const int64_t N = g.n_embd, HC = g.hc;
+    const WeightRef *hn = wt.find("output_hc_norm.weight"), *hd = wt.find("output_hc_down.weight"),
+                    *hu = wt.find("output_hc_up.weight");
+    if (!hn || !hd || !hu) { err = "verify head_rows: an output_hc_* weight is missing"; return false; }
+    if (hn->kind != WeightKind::F32 || hd->kind != WeightKind::Bf16InF32 || hu->kind != WeightKind::Bf16InF32) {
+        err = "verify head_rows: the output_hc_* weights have the wrong engine forms";
+        return false;
+    }
+    FusedGrArgs fa[kFusedGrMaxT];
+    for (int t = 0; t < T; ++t) {
+        float* R = const_cast<float*>(R_dev + (size_t) t * (size_t) (HC * N));   // apply = false: read only
+        fa[t].R = R; fa[t].R_out = R; fa[t].apply = false;
+        fa[t].w_norm = (const float*) hn->data; fa[t].w_down = (const uint16_t*) hd->data;
+        fa[t].w_up = (const uint16_t*) hu->data; fa[t].eps = EPS;
+        fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC; fa[t].mixed = head_mixed_ + t * N;
+    }
+    try {
+        fused_gr_read_multi(fa, T, xn_, cs_);
+        native_quantize_q8_1(head_mixed_, xq_, (int) N, T, cs_);
+        native_mmvq(head_->type(), head_->weights(), xq_, head_logits_, (int) N, (int) n_vocab_, T, cs_);
+    } catch (const std::exception& e) {
+        err = std::string("verify head_rows: ") + e.what();
+        return false;
+    }
+    const cudaError_t ce = cudaGetLastError();
+    if (ce != cudaSuccess) { err = std::string("verify head_rows: ") + cudaGetErrorString(ce); return false; }
+    return true;
+}
+
 
 // ================================ PIPELINED WINDOWS (see verify.hpp) ================================
 //

@@ -524,6 +524,25 @@ bool MtpDrafter::top2_env() {
     return on;
 }
 
+namespace {
+// lab (STRATA_MTP_DUMP=<file>, mtp_distill's parity test): the serial decode's draft() appends, per draft call, the
+// inputs of the chain (the cell p + a, its residual row and the window's tokens) and, per step it ran, the pick, its
+// probability and the draft head's whole logits row (the draft vocabulary's order).  A stream sync per step: slow,
+// diagnostic only.  Record (little endian):
+//   int32 magic 0x4d545044, int32 n_vocab_d, int32 hcn, int32 T, int64 p, int32 a, int32 n_steps, int32 tokens[T],
+//   f32 R[hcn], then per step: int32 draft, f32 prob, f32 logits[n_vocab_d]
+std::FILE* mtp_dump_file() {
+    static std::FILE* f = [] () -> std::FILE* {
+        const char* p = std::getenv("STRATA_MTP_DUMP");
+        if (p == nullptr || p[0] == '\0') return nullptr;
+        std::FILE* h = std::fopen(p, "ab");
+        if (h) std::fprintf(stderr, "strata mtp dump: on, %s (the serial decode's drafts, their inputs and head logits)\n", p);
+        return h;
+    }();
+    return f;
+}
+}  // namespace
+
 // STRATA_MTP_TOP2=1 (a diagnostic for tree drafts): draft j's runner-up under the draft layer, from the head logits
 // the step just wrote (row 0), on the host.  Slow; only for measuring what a second branch would have caught.
 void MtpDrafter::record_top2(int j) {
@@ -1468,11 +1487,30 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
                 if ((++spins & 1023u) == 0 && cudaStreamQuery(cs_) != cudaErrorNotReady) break;
             }
         };
+        // lab: STRATA_MTP_DUMP - after each step the head logits row the step wrote (mtp_dump_file above)
+        std::FILE* const dump = mtp_dump_file();
+        const int64_t nvd = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
+        const int64_t HCN = g_->hc * g_->n_embd;
+        std::vector<float> dump_logits, dump_R;
+        auto dump_step = [&](int j) -> bool {
+            if (dump == nullptr) return true;
+            if (cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp dump: the stream failed"; return false; }
+            dump_logits.resize((size_t) (j + 1) * (size_t) nvd);
+            if (cudaMemcpy(dump_logits.data() + (size_t) j * (size_t) nvd, head_logits_, (size_t) nvd * sizeof(float),
+                           cudaMemcpyDeviceToHost) != cudaSuccess) { err = "mtp dump: the logits copy failed"; return false; }
+            if (j == 0) {
+                dump_R.resize((size_t) HCN);
+                if (cudaMemcpy(dump_R.data(), window_R_ + (size_t) a * (size_t) HCN, (size_t) HCN * sizeof(float),
+                               cudaMemcpyDefault) != cudaSuccess) { err = "mtp dump: the residual copy failed"; return false; }
+            }
+            return true;
+        };
         wait_step(0);
         drafts[0] = ((volatile int32_t*) h_out_)[0];
         float pj = ((volatile float*) h_prob_)[0];
         if (probs) probs[0] = pj;
         n = 1;
+        if (!dump_step(0)) return false;
         for (int j = 1; j < max_steps && pj >= min_p; ++j) {
             if (cudaGraphLaunch(cp ? step_exec_c_[j] : step_exec_[j], cs_) != cudaSuccess) {
                 err = std::string("mtp draft step: ") + cudaGetErrorString(cudaGetLastError());
@@ -1485,11 +1523,28 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
             pj = ((volatile float*) h_prob_)[j];
             if (probs) probs[j] = pj;
             ++n;
+            if (!dump_step(j)) return false;
         }
         prefetch_ple(drafts[n - 1]);
         if (cudaStreamSynchronize(cs_) != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
             return false;
+        }
+        if (dump != nullptr) {
+            const int32_t magic = 0x4d545044, nvd32 = (int32_t) nvd, hcn32 = (int32_t) HCN, T32 = T, a32 = a, n32 = n;
+            const int64_t p64 = p;
+            std::fwrite(&magic, 4, 1, dump); std::fwrite(&nvd32, 4, 1, dump); std::fwrite(&hcn32, 4, 1, dump);
+            std::fwrite(&T32, 4, 1, dump); std::fwrite(&p64, 8, 1, dump); std::fwrite(&a32, 4, 1, dump);
+            std::fwrite(&n32, 4, 1, dump);
+            std::fwrite(tokens, 4, (size_t) T, dump);
+            std::fwrite(dump_R.data(), 4, dump_R.size(), dump);
+            for (int j = 0; j < n; ++j) {
+                const float pr = probs ? probs[j] : ((volatile float*) h_prob_)[j];
+                std::fwrite(&drafts[j], 4, 1, dump);
+                std::fwrite(&pr, 4, 1, dump);
+                std::fwrite(dump_logits.data() + (size_t) j * (size_t) nvd, 4, (size_t) nvd, dump);
+            }
+            std::fflush(dump);
         }
     }
     for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }

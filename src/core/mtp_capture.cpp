@@ -1,6 +1,8 @@
 // src/core/mtp_capture.cpp - see include/strata/core/mtp_capture.hpp.
 #include "strata/core/mtp_capture.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/core/verify.hpp"
+#include "strata/kernels/topk_lse.hpp"
 
 #include <cuda_runtime.h>
 
@@ -11,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -33,9 +36,46 @@ struct Job {
     int64_t n_prompt = 0;     // Open
     int64_t pos0 = 0;         // Rows
     int T = 0;                // Rows
-    std::vector<int32_t> tok, nxt;
-    std::vector<float> R;       // T * hcn
-    std::vector<float> logits;  // T * n_vocab
+    std::vector<int32_t> tok;
+    std::vector<float> R;         // T * hcn (f32, converted by the worker)
+    std::vector<int32_t> top_ids; // T * K
+    std::vector<float> top_lp;    // T * K
+    std::vector<float> nll;       // T
+};
+
+/// Device scratch for the top-k of up to `rows` rows (on the head stage's device).
+struct DevScratch {
+    int device = -1;
+    int rows = 0, K = 0;
+    int32_t* next = nullptr;
+    int32_t* ids = nullptr;
+    float* lps = nullptr;
+    float* nll = nullptr;
+    bool ensure(int dev, int n_rows, int topk, std::string& err) {
+        if (device == dev && n_rows <= rows && K == topk) return true;
+        release();
+        const OnDevice on(dev);
+        device = dev; rows = std::max(n_rows, 8); K = topk;
+        if (cudaMalloc((void**) &next, (size_t) rows * sizeof(int32_t)) != cudaSuccess ||
+            cudaMalloc((void**) &ids, (size_t) rows * K * sizeof(int32_t)) != cudaSuccess ||
+            cudaMalloc((void**) &lps, (size_t) rows * K * sizeof(float)) != cudaSuccess ||
+            cudaMalloc((void**) &nll, (size_t) rows * sizeof(float)) != cudaSuccess) {
+            err = "mtp capture: the device scratch could not be allocated";
+            release();
+            return false;
+        }
+        return true;
+    }
+    void release() {
+        if (device < 0) return;
+        const OnDevice on(device);
+        if (next) cudaFree(next);
+        if (ids) cudaFree(ids);
+        if (lps) cudaFree(lps);
+        if (nll) cudaFree(nll);
+        next = nullptr; ids = nullptr; lps = nullptr; nll = nullptr;
+        device = -1; rows = 0;
+    }
 };
 
 }  // namespace
@@ -44,11 +84,12 @@ struct MtpCapture::Impl {
     std::string dir;
     int topk = 20;
     int64_t hcn = 0, n_vocab = 0;
+    DevScratch scratch;
     // the queue
     std::mutex mu;
     std::condition_variable cv_push, cv_pop;
     std::deque<std::unique_ptr<Job>> q;
-    size_t max_queue = 3;
+    size_t max_queue = 4;
     bool stop = false;
     int64_t queued = 0, done = 0;
     std::thread worker;
@@ -57,8 +98,6 @@ struct MtpCapture::Impl {
     std::FILE *f_tok = nullptr, *f_r = nullptr, *f_top = nullptr, *f_nll = nullptr;
     int64_t cur_k = -1, cur_n = 0, cur_first = -1;
     std::vector<uint16_t> bf;
-    std::vector<int32_t> ids;
-    std::vector<float> lps;
 
     void close_files() {
         if (f_tok) { std::fclose(f_tok); f_tok = nullptr; }
@@ -91,48 +130,16 @@ struct MtpCapture::Impl {
         if (!f_tok || !worker_err.empty()) return;
         if (cur_first < 0) cur_first = j.pos0;
         const int K = topk;
-        ids.resize((size_t) K);
-        lps.resize((size_t) K);
-        bf.resize((size_t) hcn);
+        bf.resize((size_t) j.T * (size_t) hcn);
+        for (size_t i = 0; i < bf.size(); ++i) bf[i] = f32_to_bf16_rne(j.R[i]);
+        std::fwrite(j.tok.data(), sizeof(int32_t), (size_t) j.T, f_tok);
+        std::fwrite(bf.data(), sizeof(uint16_t), bf.size(), f_r);
         for (int t = 0; t < j.T; ++t) {
-            const float* row = j.logits.data() + (size_t) t * (size_t) n_vocab;
-            // the K largest: a min-heap of K (ids, value) pairs; ties keep the lower id first (stable enough for a trainer)
-            struct E { float v; int32_t i; };
-            std::vector<E> heap;
-            heap.reserve((size_t) K);
-            auto cmp = [](const E& a, const E& b) { return a.v > b.v || (a.v == b.v && a.i < b.i); };   // min at front
-            for (int64_t v = 0; v < n_vocab; ++v) {
-                const float x = row[v];
-                if ((int) heap.size() < K) {
-                    heap.push_back({x, (int32_t) v});
-                    std::push_heap(heap.begin(), heap.end(), cmp);
-                } else if (x > heap.front().v) {
-                    std::pop_heap(heap.begin(), heap.end(), cmp);
-                    heap.back() = {x, (int32_t) v};
-                    std::push_heap(heap.begin(), heap.end(), cmp);
-                }
-            }
-            std::sort_heap(heap.begin(), heap.end(), cmp);   // ascending by cmp = descending by value
-            std::reverse(heap.begin(), heap.end());
-            const double maxv = heap.empty() ? 0.0 : (double) heap.front().v;
-            double sum = 0.0;
-            for (int64_t v = 0; v < n_vocab; ++v) sum += std::exp((double) row[v] - maxv);
-            const double lse = maxv + std::log(sum);
-            for (int i = 0; i < K; ++i) {
-                ids[(size_t) i] = i < (int) heap.size() ? heap[(size_t) i].i : -1;
-                lps[(size_t) i] = i < (int) heap.size() ? (float) ((double) heap[(size_t) i].v - lse) : -INFINITY;
-            }
-            const int32_t nx = j.nxt[(size_t) t];
-            const float nll = nx >= 0 && nx < n_vocab ? (float) ((double) row[nx] - lse) : NAN;
-            const float* R = j.R.data() + (size_t) t * (size_t) hcn;
-            for (int64_t i = 0; i < hcn; ++i) bf[(size_t) i] = f32_to_bf16_rne(R[i]);
-            std::fwrite(&j.tok[(size_t) t], sizeof(int32_t), 1, f_tok);
-            std::fwrite(bf.data(), sizeof(uint16_t), (size_t) hcn, f_r);
-            std::fwrite(ids.data(), sizeof(int32_t), (size_t) K, f_top);
-            std::fwrite(lps.data(), sizeof(float), (size_t) K, f_top);
-            std::fwrite(&nll, sizeof(float), 1, f_nll);
-            ++cur_n;
+            std::fwrite(j.top_ids.data() + (size_t) t * K, sizeof(int32_t), (size_t) K, f_top);
+            std::fwrite(j.top_lp.data() + (size_t) t * K, sizeof(float), (size_t) K, f_top);
         }
+        std::fwrite(j.nll.data(), sizeof(float), (size_t) j.T, f_nll);
+        cur_n += j.T;
         std::fflush(f_tok); std::fflush(f_r); std::fflush(f_top); std::fflush(f_nll);
         write_meta();
     }
@@ -183,6 +190,7 @@ MtpCapture::~MtpCapture() {
     if (impl_->worker.joinable()) impl_->worker.join();
     impl_->close_files();
     impl_->write_meta();
+    impl_->scratch.release();
     delete impl_;
 }
 
@@ -191,10 +199,10 @@ MtpCapture* MtpCapture::instance() {
         const char* d = std::getenv("STRATA_MTP_CAPTURE");
         if (d == nullptr || d[0] == '\0') return nullptr;
         const char* k = std::getenv("STRATA_MTP_CAPTURE_TOPK");
-        const int topk = k != nullptr ? std::max(1, std::min(256, std::atoi(k))) : 20;
+        const int topk = k != nullptr ? std::max(1, std::min(32, std::atoi(k))) : 20;
         static MtpCapture holder(d, topk);   // destroyed at exit: the worker is joined and the files closed
-        std::fprintf(stderr, "strata mtp capture: on, %s, top-%d (the prompt read's windows write the final residuals "
-                             "and the head's top-k; opt-in lab hook)\n", d, topk);
+        std::fprintf(stderr, "strata mtp capture: on, %s, top-%d (the prompt read's chunks and windows write the final "
+                             "residuals and the head's top-k; opt-in lab hook)\n", d, topk);
         return &holder;
     }();
     return cap;
@@ -209,36 +217,71 @@ void MtpCapture::begin_request(int64_t n_prompt) {
     impl_->push(std::move(j));
 }
 
-bool MtpCapture::window(const Verifier& ver, const int32_t* tokens, const int32_t* next, int T, int64_t pos0,
-                        std::string& err) {
+// T rows whose final residuals are at R_dev and whose head logits are at logits_dev (both on the head stage's
+// device, complete on head_stream()): the top-k on the device, then one job for the worker.
+bool MtpCapture::rows(const Verifier& ver, const float* R_dev, const float* logits_dev, const int32_t* tokens,
+                      const int32_t* next, int T, int64_t pos0, std::string& err) {
     if (T <= 0) return true;
     if (impl_->n_vocab == 0) impl_->n_vocab = ver.vocab();
     if (impl_->hcn == 0) impl_->hcn = ver.hc_n_embd();
     const int64_t nv = impl_->n_vocab, hcn = impl_->hcn;
+    const int K = impl_->topk;
     if (nv <= 0 || hcn <= 0) { err = "mtp capture: the verifier has no head or no residual rows"; return false; }
+    const int dev = ver.head_device();
+    const OnDevice on(dev);
+    DevScratch& s = impl_->scratch;
+    if (!s.ensure(dev, T, K, err)) return false;
+    cudaStream_t cs = ver.head_stream();
     auto j = std::make_unique<Job>();
     j->pos0 = pos0;
     j->T = T;
     j->tok.assign(tokens, tokens + T);
-    j->nxt.assign(next, next + T);
     j->R.resize((size_t) T * (size_t) hcn);
-    j->logits.resize((size_t) T * (size_t) nv);
-    // run() synchronized the verifier's stream: the final residuals and the head logits of this window are complete
-    if (cudaMemcpy(j->R.data(), ver.final_R_all(), j->R.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
-        err = "mtp capture: the final residual copy failed";
+    j->top_ids.resize((size_t) T * K);
+    j->top_lp.resize((size_t) T * K);
+    j->nll.resize((size_t) T);
+    try {
+        if (cudaMemcpyAsync(s.next, next, (size_t) T * sizeof(int32_t), cudaMemcpyHostToDevice, cs) != cudaSuccess)
+            throw std::runtime_error("the next-token copy failed");
+        strata::kernels::row_topk_lse(logits_dev, T, (int) nv, K, s.next, s.ids, s.lps, s.nll, cs);
+        if (cudaMemcpyAsync(j->top_ids.data(), s.ids, j->top_ids.size() * sizeof(int32_t), cudaMemcpyDeviceToHost, cs) != cudaSuccess ||
+            cudaMemcpyAsync(j->top_lp.data(), s.lps, j->top_lp.size() * sizeof(float), cudaMemcpyDeviceToHost, cs) != cudaSuccess ||
+            cudaMemcpyAsync(j->nll.data(), s.nll, j->nll.size() * sizeof(float), cudaMemcpyDeviceToHost, cs) != cudaSuccess ||
+            cudaMemcpyAsync(j->R.data(), R_dev, j->R.size() * sizeof(float), cudaMemcpyDeviceToHost, cs) != cudaSuccess)
+            throw std::runtime_error("a copy to the host failed");
+        if (cudaStreamSynchronize(cs) != cudaSuccess)
+            throw std::runtime_error(std::string("the stream failed: ") + cudaGetErrorString(cudaGetLastError()));
+    } catch (const std::exception& e) {
+        err = std::string("mtp capture: ") + e.what();
         return false;
     }
-    for (int t = 0; t < T; ++t)
-        if (!ver.copy_logits(t, j->logits.data() + (size_t) t * (size_t) nv)) {
-            err = "mtp capture: the head logits copy failed";
-            return false;
-        }
     {
         std::lock_guard<std::mutex> lk(impl_->mu);
         if (!impl_->worker_err.empty()) { err = impl_->worker_err; return false; }
     }
     written_ += T;
     impl_->push(std::move(j));
+    return true;
+}
+
+bool MtpCapture::window(const Verifier& ver, const int32_t* tokens, const int32_t* next, int T, int64_t pos0,
+                        std::string& err) {
+    // run() synchronized the verifier's stream: the final residuals and the head logits of this window are complete
+    return rows(ver, ver.final_R_all(), ver.head_logits(), tokens, next, T, pos0, err);
+}
+
+bool MtpCapture::chunk(Verifier& ver, const float* R_rows, const int32_t* tokens, const int32_t* next, int T,
+                       int64_t pos0, std::string& err) {
+    if (T <= 0) return true;
+    const int64_t hcn = ver.hc_n_embd();
+    const int step = std::min(ver.max_t(), 8);
+    if (step < 1 || hcn <= 0) { err = "mtp capture: the verifier is not initialized"; return false; }
+    for (int done = 0; done < T; done += step) {
+        const int n = std::min(step, T - done);
+        const float* R = R_rows + (size_t) done * (size_t) hcn;
+        if (!ver.head_rows(R, n, err)) return false;
+        if (!rows(ver, R, ver.head_logits(), tokens + done, next + done, n, pos0 + done, err)) return false;
+    }
     return true;
 }
 

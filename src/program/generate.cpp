@@ -8453,6 +8453,13 @@ int main(int argc, char** argv) {
                 }
             }
             if (!e.empty() || (use_mtp && !batched && !mtp.prefill(R_rows, nxt.data(), T, p0, e))) return false;
+            // lab: STRATA_MTP_CAPTURE - this chunk's final residuals and head top-k (the batched prompt path; the
+            // drafter has consumed the rows above, the chunk's stream is synchronized)
+            if (strata::core::MtpCapture* cap = strata::core::MtpCapture::instance()) {
+                std::vector<int32_t> toks((size_t) T);
+                for (int64_t t = 0; t < T; ++t) toks[(size_t) t] = (int32_t) cur[(size_t) (p0 + t)];
+                if (!cap->chunk(ver, R_rows, toks.data(), nxt.data(), (int) T, p0, e)) return false;
+            }
             if (use_mtp && std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr)
                 std::fprintf(stderr, "strata serve: DRAFT_PREFILL path=%s mode=%d cells=%lld\n",
                              batched ? "batched" : "token", mtp.kv_state().kv_mode, (long long) T);

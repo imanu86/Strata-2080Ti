@@ -87,6 +87,16 @@ public:
     int64_t vocab() const { return next_ ? next_->vocab() : n_vocab_; }
     /// The width of one final residual row (hc * n_embd): what final_R_all() holds per window row (mtp_capture.hpp).
     int64_t hc_n_embd() const { return g_ != nullptr ? g_->hc * g_->n_embd : 0; }
+    /// lab (mtp_capture.hpp): the head on `T` final residual rows that are NOT this verifier's (hc * n_embd floats
+    /// each, on the head stage's device; T <= max_t()): the final mixer and the output projection, the same kernels
+    /// as a window's, into head_logits() rows 0..T-1 on head_stream().  Nothing is synchronized here.  Needs the
+    /// native head.  A layer split forwards to the stage that holds the head.
+    bool head_rows(const float* R_dev, int T, std::string& err);
+    /// The last window's (or head_rows') head logits on the device, max_t() rows of vocab() floats.
+    const float* head_logits() const { return next_ ? next_->head_logits() : head_logits_; }
+    int head_device() const { return next_ ? next_->head_device() : device_; }
+    cudaStream_t head_stream() const { return next_ ? next_->head_stream() : cs_; }
+    int max_t() const { return max_t_; }
     /// The sampling the verify window's head applies (temperature / top_p / top_k / seed).  Set per
     /// request; greedy by default.  The sampling itself runs OUTSIDE the captured graph - its
     /// parameters would otherwise be baked forever - so this can change between requests freely.
