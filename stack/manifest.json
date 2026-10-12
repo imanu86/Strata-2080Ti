@@ -1,0 +1,4493 @@
+{
+  "title": "Strata-2080Ti patch stack",
+  "intro": "The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata, one lever each, in the order they apply. Written for a two-card Windows box (RTX 2080 Ti 22 GB as stage 1, RTX 3060 12 GB as stage 0, `--layer-split 16 --trim-stage-weights --pipeline-windows 2`), but every lever is a plain switch and most are bitwise with the default path. The registry exists so that the next upstream version can be checked and re-based mechanically: run `check_anchors.py --check` on the new tag, read what moved, re-apply.",
+  "forced_defaults": "Upstream defaults that this stack or its reference configuration changes, so that a run on the stack behaves like the fork's Daily:\n\n| default in upstream 0.1.43 | here | by |\n|---|---|---|\n| `STRATA_SELECT_SIMT` opt-in (QSA block scores below sm_80 on the warp kernel) | **on** below sm_80, `=0` turns it off | patch 16 |\n| `STRATA_DF_BRANCH`, `STRATA_DF_PLE` opt-in (PR #904's graph branches / PLE post-ops) | **on** with CUDA (BRANCH: on Windows), `=0` turns them off; BRANCH yields to `STRATA_SIDE_MIXER` | patch 11, 14 |\n| `--ple-io` auto: the start-up probe switches to mmap under 15 000 rows/s | **direct** stays; `STRATA_PLE_AUTO_MMAP=1` restores the switch | patch 15 |\n| `STRATA_ROUTE_TAIL_SKIP=7` (off from 90% cached experts, #1884) | unchanged in code; the reference config sets `=0` (-1.6% with it at 96-98% hit) | config |\n| `STRATA_MMVQ_IL` on (interleaved dense GEMV where the card's table has a cell) | unchanged in code; the reference config sets `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1` (IL -3.0% / sm_75 table 0.0% against B6 on the 2080 Ti) | config, patch 04 |\n| `STRATA_NAN_GUARD` on (#1892, new in 0.1.43) | unchanged (cost < 0.2%, bitwise otherwise); `=0` turns it off | - |\n| `STRATA_ADAPT_OVERLAP`, `STRATA_PCIE_AUTO_CANON` opt-in on Windows (0.1.43) | unchanged | - |\n| `STRATA_PIPELINE_ELASTIC` (not in upstream) | **on** with two cards and `--pipeline-windows`: theta 0.10, verified window served first; `=0` gives upstream's theta 0.20 and D-A-B order | patch 09 |\n\nReference configuration environment (the fork's \"0.1.42 Daily r2\"): `STRATA_VRAM_FREE=device STRATA_ROUTE_TAIL_SKIP=0 STRATA_ATTN_DAILY=1 STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1 STRATA_MTP_SHARED_BRANCH=0 STRATA_SIDE_MIXER=2 STRATA_RAM_CORE=1 STRATA_RAM_CORE_SLOTS_DEV1=5500 STRATA_EXPDEC=1 STRATA_QSA_ROWS=1`, options `--elastic --prompt-cache-tail --prompt-cache-every 16384 --prompt-cache-file <file> --layer-split 16 --trim-stage-weights --pipeline-windows 2 --vram-reserve-later-mib 384 --host-core last`.",
+  "base": {
+    "repo": "Niko1221/Strata",
+    "tag": "v0.1.43",
+    "commit": "7695859aa13afb248bdb4d36f9b2e95707db079d"
+  },
+  "stack_head": "9676fdda71e5a2eccac899649a3e9bb8c03abae8",
+  "skip_subjects": [
+    "FABLE-STRATA-Riporta docs/UPSYNC.md"
+  ],
+  "patches": [
+    {
+      "id": "01",
+      "name": "elastic-cache",
+      "summary": "`--elastic`: the expert cache grows and shrinks at runtime around a fixed core, sized on the card's free VRAM.",
+      "switch": "`--elastic` (off)",
+      "origin": "fork (PR #1117, ours)",
+      "upstream_status": "PR open since 0.1.40; not in 0.1.43",
+      "measured": "Daily default since 3 Oct; with the two-card split see patch 05. Resubmitted PR: opt-in, exact.",
+      "notes": "Conflict on 0.1.43: the pinned token upload of #1712 (`tok_up`) is sized on `cap_T` (largest chunk) like the host buffer.",
+      "docs": "docs/ELASTIC_CACHE.md",
+      "patch": "01-elastic-cache.patch",
+      "commit": "0704e03ae83cd1c495cae194590a362d94e79d4c",
+      "title": "FABLE-STRATA-Porta su 0.1.43 la cache elastica con nucleo fisso (--elastic, PR #1117)",
+      "anchors": [
+        {
+          "block": "01-1",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)",
+          "anchor": [
+            "    src/core/arch_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)",
+            "  target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)",
+            "  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "01-2",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)",
+          "anchor": [
+            "    target_link_libraries(expert_cache_per_layer_test PRIVATE strata_engine)",
+            "    add_test(NAME expert_cache_per_layer_test COMMAND expert_cache_per_layer_test)",
+            "    set_tests_properties(expert_cache_per_layer_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "01-3",
+          "file": "docs/ELASTIC_CACHE.md",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "01-4",
+          "file": "include/strata/core/expert_cache.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    const uint64_t* slot_offsets() const { return off_.empty() ? nullptr : off_.data(); }",
+            "    void close();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "01-5",
+          "file": "include/strata/core/expert_cache.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "    std::vector<int32_t> layer_next_;   ///< [n_layers] -> that layer's next free slot",
+            "    std::vector<uint64_t> off_;         ///< plan v0.3 P6: slot offsets (slots + 1 entries) when sized",
+            "    int64_t admitted_ = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "01-6",
+          "file": "include/strata/prefill/prefill.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    /// `host_res`: the static residency table (n_layers x n_expert, slot or -1) or null; `cache` its slots.",
+            "    /// `borrow`/`borrow_bytes`: device memory to carve every buffer from (the top slots of the expert cache,",
+            "    /// lent for the prompt and refilled after it); null = allocate normally."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "01-7",
+          "file": "src/core/expert_cache.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include <cstdio>",
+            "#include <filesystem>",
+            "#include <cstdlib>"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "01-8",
+          "file": "src/core/expert_cache.cpp",
+          "symbol": "bool ExpertCache::open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_l",
+          "anchor": [
+            "void ExpertCache::close() {",
+            "#if defined(STRATA_USE_HIP)",
+            "    if (blocking_staging_) (void) cudaFreeHost(blocking_staging_);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "01-9",
+          "file": "src/core/expert_cache.cpp",
+          "symbol": "void ExpertCache::close() {",
+          "anchor": [
+            "    blocking_staging_bytes_ = 0;",
+            "#endif",
+            "    off_.clear();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "01-10",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused) {",
+          "anchor": [
+            "",
+            "bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, core::SessionState& ss,",
+            "                   core::ExpertSource* src, const core::ExpertCache* cache, const int32_t* host_res, int64_t chunk,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "01-11",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co",
+          "anchor": [
+            "    // the CPU share's staged-chunk limit, before the ring is sized below (a caller that sizes loans first armed it)",
+            "    arm_cpu_share(cpu_pool_ != nullptr);",
+            "    for (int b = 0; next_ != nullptr && b < 2; ++b)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "01-12",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co",
+          "anchor": [
+            "        m.gemm.set_f16_io(m.f16_io);",
+            "        set_act_f16(m.f16_io);",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "01-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "struct Options {",
+          "anchor": [
+            "    /// Plan v0.3 P4: `--expert-cache auto` sizes the VRAM tier from what is free after the weights, the session",
+            "    /// and the KV state, minus this reserve for the graphs, the hit scratch and the head.",
+            "    int vram_reserve_mib = 700;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "01-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "void usage() {",
+          "anchor": [
+            "                 \"  --cvec-dir per-layer|single:L  each layer's own direction (default) or layer L's everywhere (project)\\n\"",
+            "                 \"  --no-token-graph     A/B: two graphs per layer (the host launches each) instead of one per token\\n\"",
+            "                 \"  --no-fused-gr        A/B: the six-kernel hyper-connection read and a separate write (native)\\n\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "01-15",
+          "file": "src/program/generate.cpp",
+          "symbol": "void usage() {",
+          "anchor": [
+            "                 \"                       GPU via `moe_hit_grouped_s2`.  DEFAULT 0.  Measured at 4096 slots\\n\"",
+            "                 \"                       with --expert-cache-per-layer: 54.4%% hits, CPU pool drain 19.1 -> 10.3\\n\"",
+            "                 \"                       ms/token, -2.7 ms/token end to end.\\n\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "01-16",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        else if (a == \"--vram-reserve-mib\") { o.vram_reserve_mib = std::atoi(next(\"--vram-reserve-mib\")); o.vram_reserve_given = true; }",
+            "        else if (a == \"--vram-reserve-later-mib\")",
+            "            o.vram_reserve_later_mib = std::atoi(next(\"--vram-reserve-later-mib\"));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "01-17",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    strata::core::set_peer_portable(o.peer_device >= 1);   // multi-GPU: the Portable flag on mapped host buffers only with a peer device (before any allocation)",
+            "    {   // the RAM guard (parking, session save/restore): --memory-limit-mib, else STRATA_MEMORY_LIMIT_MIB, else none",
+            "        int64_t mib = o.memory_limit_mib;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "01-18",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                            !o.expert_profile.empty() && !o.resident_cpu_experts && o.expert_cache != 0 && !remote &&",
+            "                            strata::core::vmm_available() &&",
+            "                            // the batch slots carve their own K/V and --vram-elastic's cache is not one VMM range"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "01-19",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        : multi_gpu ? \"a layer split has a cache per GPU\"",
+            "                        : std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(),",
+            "                                      [](int n) { return n > 0; }) ? \"the helper caches on other GPUs\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "01-20",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // page back while the verify graph spun on a host flag never finished.  So the slots are zeroed and the",
+            "        // free figure read again; while it is short of the reserve the cache is reopened smaller.",
+            "        // STRATA_TEST_CACHE_FAIL=N: the first N opens fail as an out-of-commit cudaMalloc does (tests the retry)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "01-21",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        const int64_t rounded = per > std::numeric_limits<int64_t>::max() - 255 ? per : ((per + 255) / 256) * 256;",
+            "        return std::min(max_chunk, rounded);",
+            "    };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "01-22",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    };",
+            "    auto plan_lend = [&](int64_t& chunk) -> int64_t {",
+            "        auto slots_for = lend_slots;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "01-23",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                if (c > 8192 && (c > o.prefill_auto_max || c > o.max_context)) continue;",
+            "                if (o.prefill_auto_cap > 0 && c > o.prefill_auto_cap) continue;   // #1630",
+            "                const int64_t k = slots_for(c);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "01-24",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            constexpr int64_t kRingMin = 16;",
+            "            const int64_t small = old_rule();   // 0.1.39's chunk (and its ring for the prompts that fit it)",
+            "            const int64_t ring_max = strata::prefill::Prefill::ring_cap_for(small);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "01-25",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    // ring_slots() now returns `room` - unless STRATA_PREFILL_RING overrides it, in which case the",
+            "                    // chunk has to fit THAT ring, which is the pre-fix rule and the A/B arm",
+            "                    const int64_t k = slots_for(t);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        },
+        {
+          "block": "01-26",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        }",
+            "        for (int64_t c = chunk; c >= 256; c /= 2) {",
+            "            const int64_t k = slots_for(c);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 14
+        },
+        {
+          "block": "01-27",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            // (no split) this reduces to plan_lend exactly, so the single-GPU loan is unchanged from main.",
+            "            auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {",
+            "                const int64_t k = part_slots(p, c);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 15
+        },
+        {
+          "block": "01-28",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    // clamped at 0: a cache under 128 slots has a negative lend budget, and `slots - budget` is",
+            "                    // then `slots`, which is off_[slots] - the end of the prefix sum, so that cache lends 0 bytes",
+            "                    // rather than reading one entry past its offsets"
+          ],
+          "status_in_base": "unique",
+          "hunk": 16
+        },
+        {
+          "block": "01-29",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // the prompt path's own buffers (no loan) are not priced into them: with the whole arena pinned (#253) a",
+            "        // `--prefill auto` split could stop at start with \"device buffers for a chunk of 2048 tokens do not fit\".  A",
+            "        // chunk that does not fit is tried again one size smaller, down to 512 tokens (a smaller chunk only reads slower)."
+          ],
+          "status_in_base": "unique",
+          "hunk": 17
+        },
+        {
+          "block": "01-30",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            }",
+            "            if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);",
+            "            if (share_pool) sp.set_cpu_pool(&pool);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 18
+        },
+        {
+          "block": "01-31",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                const int32_t* r = host_res.data() + l * g.n_expert;",
+            "                for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {",
+            "                    if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 19
+        },
+        {
+          "block": "01-32",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            for (float& v : drive.d.usage) v *= o.adapt_decay;",
+            "            return true;",
+            "        };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 20
+        },
+        {
+          "block": "01-33",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            if (batch_on() || (piped && pipe_inflight())) {",
+            "                if (!try_next_line(line)) {",
+            "                    if (!(piped ? pump(true) : batch_step())) return 1;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 21
+        },
+        {
+          "block": "01-34",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            // participant's own cache, and marking only that participant's own layers",
+            "            auto lend = [&](int64_t tokens, std::string& e) -> bool {",
+            "                if (pf_parts.empty()) return true;                     // its own buffers: nothing to lend"
+          ],
+          "status_in_base": "unique",
+          "hunk": 22
+        },
+        {
+          "block": "01-35",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                return true;",
+            "            };",
+            "            apply_pending(true);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 23
+        },
+        {
+          "block": "01-36",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                         std::chrono::duration<double, std::milli>(Clock::now() - round0).count());",
+            "                if (eos) { finish = \"stop\"; break; }",
+            "                if (stop_req.load()) { finish = \"cancel\"; break; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 24
+        },
+        {
+          "block": "01-37",
+          "file": "tests/core/expert_cache_elastic_test.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        }
+      ],
+      "files": [
+        "CMakeLists.txt",
+        "docs/ELASTIC_CACHE.md",
+        "include/strata/core/expert_cache.hpp",
+        "include/strata/prefill/prefill.hpp",
+        "src/core/expert_cache.cpp",
+        "src/prefill/prefill.cpp",
+        "src/program/generate.cpp",
+        "tests/core/expert_cache_elastic_test.cpp"
+      ]
+    },
+    {
+      "id": "02",
+      "name": "split-prompt-borrow",
+      "summary": "With `--layer-split`, each stage's prompt loan is estimated on its own device, not on CUDA0's.",
+      "switch": "always on with `--layer-split` (correctness)",
+      "origin": "fork (PR #1417, ours)",
+      "upstream_status": "PR open; not in 0.1.43",
+      "measured": "Correctness: the stage-1 card no longer refuses a loan that fits. No speed claim.",
+      "docs": "docs/UPSYNC.md",
+      "patch": "02-split-prompt-borrow.patch",
+      "commit": "5a4012bd65e221e0eb0245ffc79785d1c90a0a67",
+      "title": "FABLE-STRATA-Porta su 0.1.43 la stima del prestito del prompt sul device del proprio blocco (PR #1417)",
+      "anchors": [
+        {
+          "block": "02-1",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co",
+          "anchor": [
+            "        err = \"prefill: device buffers for a chunk of \" + std::to_string(chunk) + \" tokens do not fit (\" +",
+            "              std::to_string(fb >> 20) + \" of \" + std::to_string(tb >> 20) + \" MiB free at the failure; \" +",
+            "              std::to_string(o.used >> 20) + \" MiB taken, the failing buffer wanted \" +"
+          ],
+          "status_in_base": "ambiguous",
+          "hunk": 1
+        },
+        {
+          "block": "02-2",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                                     (uint64_t) strata::kernels::cpu::expert_layout().max_blob, need);",
+            "        };",
+            "        auto part_slots = [&](const PfPart& p, int64_t c) -> int64_t {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        }
+      ],
+      "files": [
+        "src/prefill/prefill.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "03",
+      "name": "forced-bench",
+      "summary": "Deterministic bench: replay token ids and verified windows (`STRATA_FORCE_IDS`, `STRATA_FORCE_WINDOWS`, trace with `STRATA_FORCE_TRACE`), adapted to the multi-stage pipeline.",
+      "switch": "`STRATA_FORCE_IDS=<file>[;<file>]`, `STRATA_FORCE_WINDOWS=<trace>`, `STRATA_FORCE_TRACE=<out>` (off)",
+      "origin": "fork (PR #1419, ours)",
+      "upstream_status": "PR open; not in 0.1.43",
+      "measured": "Tooling: every B-A-B number in this registry is read on this bench (131k context, L01 full prefill + L02 cached prefix, 1024 tokens, same text in every arm).",
+      "docs": "docs/UPSYNC.md",
+      "patch": "03-forced-bench.patch",
+      "commit": "bd887068fa4575eb6ef96e7524e96d690a968bce",
+      "title": "FABLE-STRATA-Porta su 0.1.43 il banco forzato STRATA_FORCE_IDS/STRATA_FORCE_WINDOWS/STRATA_FORCE_TRACE (PR #1419)",
+      "anchors": [
+        {
+          "block": "03-1",
+          "file": "src/program/generate.cpp",
+          "symbol": "static const char* pipe_dbg_env(const char* name) {",
+          "anchor": [
+            "    return on ? std::getenv(name) : nullptr;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "03-2",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                continue;",
+            "            }",
+            "            char* endp = nullptr;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "03-3",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();",
+            "            std::printf(\"REUSED %lld\\n\", (long long) resume);   // the prompt is read; the first window comes next",
+            "            std::fflush(stdout);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "03-4",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);",
+            "                        if (v.done(err)) {",
+            "                            if (!v.pl_finish(outp.data(), err)) return die(err);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "03-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                // stage B now (its PLE rows from the tokens before it as they will be once A is",
+            "                                // committed whole), so its launch behind A is only the graph launch (never while a",
+            "                                // rollback is pending: B's verifier is the one the undo commit reads)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "03-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    // state)",
+            "                    if (A.ready && !A.fl && A.fr < pl_nf && !doomed) {",
+            "                        const int st = A.fr;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "03-7",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    }();",
+            "                    if (B.ready && !B.fl && B.fr < pl_nf && B.fr < pl_spec_depth && A.fr > B.fr && !doomed) {",
+            "                        const int st = B.fr;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "03-8",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    chain_kind = 0;",
+            "                    int a = 0;",
+            "                    while (a < A.T - 1 && A.tok[a + 1] == outp[(size_t) a]) ++a;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "03-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                window[0] = x;",
+            "                for (int i = 1; i < T_mtp; ++i) window[(size_t) i] = from_sfx ? sbuf[(size_t) i - 1] : drafts[(size_t) i - 1];",
+            "                for (int i = 0; i < chain_n; ++i) window[(size_t) (T_mtp + i)] = cbuf[(size_t) i];"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "03-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    }",
+            "                }",
+            "                int a = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "03-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                p += a + 1;",
+            "            }",
+            "            const double decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - d0).count();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        }
+      ],
+      "files": [
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "04",
+      "name": "b6-mmvq-rows",
+      "summary": "Dense GEMV (MMVQ) that reuses the quantized activations across 2-4 output rows (Q4_K, Q5_K, Q6_K, IQ4_XS), bitwise.",
+      "switch": "`STRATA_B6_MMVQ_ROWS=1` (off)",
+      "origin": "fork (PR #1418, ours)",
+      "upstream_status": "PR open; validated independently on a 2080 Ti/Windows (bitwise, kernels -17/-33%); upstream went its own way with the MMVQ_IL tables (0.1.42: sm_80+, 0.1.43: sm_86 and one column, Q3_K)",
+      "measured": "Reference config uses it with `STRATA_MMVQ_IL=0`: against it, upstream's IL path -3.0% and the sm_75 shape table of PR #1437 0.0% on the 2080 Ti (11-12 Oct).",
+      "notes": "Adjacency conflict in CMakeLists.txt with 0.1.43's router_chain_bench: both kept. Also adds `b6_mmvq_bench`.",
+      "docs": "docs/UPSYNC.md",
+      "patch": "04-b6-mmvq-rows.patch",
+      "commit": "b1ece8dc6af2c0e290887f2941795f17cc0bfb95",
+      "title": "FABLE-STRATA-Porta su 0.1.43 l'MMVQ multi-colonna di B6 opt-in (STRATA_B6_MMVQ_ROWS=1, PR #1418)",
+      "anchors": [
+        {
+          "block": "04-1",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)",
+          "anchor": [
+            "  add_executable(router_chain_bench src/kernels/router_chain_bench.cpp)",
+            "  target_include_directories(router_chain_bench PRIVATE ${_strata_gpu_include_directories})",
+            "  target_link_libraries(router_chain_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "04-2",
+          "file": "include/strata/kernels/native_mmvq.hpp",
+          "symbol": "std::size_t native_q8_1_bytes(int n_in, int ncols = 1);",
+          "anchor": [
+            "// graph capture; captured graphs keep the kernels they captured.",
+            "void native_mmvq_set_multi_exact(bool exact);",
+            "bool native_mmvq_multi_exact();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "04-3",
+          "file": "src/kernels/b6_mmvq_bench.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "04-4",
+          "file": "src/kernels/cuda/native_mmvq.cu",
+          "symbol": "struct SmallTraits<IQ4NLBlock, 4> {",
+          "anchor": [
+            "// llama.cpp's generic multi-column table (ncols 2-4: 4 warps; 5-8: 2 warps; always 2 rows per block): faster,",
+            "// equal to ncols = 1 only to float rounding (the cross-warp reduction groups partial sums differently).",
+            "bool g_multi_exact = true;   // until the upstream layout is timed on an idle GPU (plan rule: default only what is measured)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "04-5",
+          "file": "src/kernels/cuda/native_mmvq.cu",
+          "symbol": "__global__ void native_mmvq_multi_kernel(const typename F::Block* __restrict__ w",
+          "anchor": [
+            "    if (!g_multi_exact) {",
+            "        constexpr int NW = NCOLS <= 4 ? 4 : 2;",
+            "        const unsigned blocks = unsigned((std::size_t(n_out) + 1) / 2);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "04-6",
+          "file": "src/kernels/cuda/native_mmvq.cu",
+          "symbol": "void native_q6_k_unpack(const void* weights) {",
+          "anchor": [
+            "",
+            "void native_mmvq_set_multi_exact(bool exact) { g_multi_exact = exact; }",
+            "bool native_mmvq_multi_exact() { return g_multi_exact; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        }
+      ],
+      "files": [
+        "CMakeLists.txt",
+        "include/strata/kernels/native_mmvq.hpp",
+        "src/kernels/b6_mmvq_bench.cpp",
+        "src/kernels/cuda/native_mmvq.cu"
+      ]
+    },
+    {
+      "id": "05",
+      "name": "elastic-split-pipeline",
+      "summary": "The elastic cache with `--layer-split` (CUDA0's block only) and beside `--pipeline-windows`: the queue moves only in stage-0 gaps, growth published when the fills landed, 1.5 GiB queue, 128 MiB step, the prompt borrows the core too; on by default with two cards.",
+      "switch": "`STRATA_PIPELINE_ELASTIC` (on with two cards and `--pipeline-windows`; `=0` off)",
+      "origin": "fork",
+      "upstream_status": "never proposed (depends on 01)",
+      "measured": "Part of the Daily's two-card configuration (83.7 t/s at 40-71k on a real SWE case, 7 Oct). The 0.1.42 port with the whole stack measured +0.7% against the Daily (131k forced bench).",
+      "depends_on": "01",
+      "docs": "docs/UPSYNC.md",
+      "patch": "05-elastic-split-pipeline.patch",
+      "commit": "a47d30acb46062e3583f7395a1796e965952ce5c",
+      "title": "FABLE-STRATA-Porta su 0.1.43 la cache elastica di CUDA0 con --layer-split e accanto a --pipeline-windows (di default con due schede)",
+      "anchors": [
+        {
+          "block": "05-1",
+          "file": "src/program/generate.cpp",
+          "symbol": "static const char* pipe_dbg_env(const char* name) {",
+          "anchor": [
+            "    return on ? std::getenv(name) : nullptr;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "05-2",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // page back while the verify graph spun on a host flag never finished.  So the slots are zeroed and the",
+            "        // free figure read again; while it is short of the reserve the cache is reopened smaller.",
+            "        // STRATA_TEST_CACHE_FAIL=N: the first N opens fail as an out-of-commit cudaMalloc does (tests the retry)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "05-3",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                --fake_fails;",
+            "                err = \"ExpertCache: cudaMalloc failed: out of memory (STRATA_TEST_CACHE_FAIL)\";",
+            "            } else {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "05-4",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    // --elastic: the TWO-ZONE cache.  Slots [0, el_core) are the core - filled from the profile at startup, never",
+            "    // picked by the adaptive swaps to leave, never shrunk, never lent; the tail after it is the elastic zone.",
+            "    int64_t el_core = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "05-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    };",
+            "    auto plan_lend = [&](int64_t& chunk) -> int64_t {",
+            "        auto slots_for = lend_slots;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "05-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            // (no split) this reduces to plan_lend exactly, so the single-GPU loan is unchanged from main.",
+            "            auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {",
+            "                const int64_t k = part_slots(p, c);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "05-7",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    int64_t budget = std::max<int64_t>(0, std::min(p.cache->slots() - 128,",
+            "                                                                  kAutoLendPct * p.cache->slots() / 100));",
+            "                    // --elastic: the two-zone cache lends only its tail (fits_one refuses the core as well)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "05-8",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // the prompt path's own buffers (no loan) are not priced into them: with the whole arena pinned (#253) a",
+            "        // `--prefill auto` split could stop at start with \"device buffers for a chunk of 2048 tokens do not fit\".  A",
+            "        // chunk that does not fit is tried again one size smaller, down to 512 tokens (a smaller chunk only reads slower)."
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "05-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // --pipeline-windows: set while the tier adapts beside windows in flight (see its use in adapt)",
+            "        std::function<void()> adapt_fence;",
+            "        // the VRAM tier follows the conversation (the same rule as the speculative loop below)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "05-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                const int32_t* r = host_res.data() + l * g.n_expert;",
+            "                for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {",
+            "                    if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "05-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // that shrank too far lends a smaller chunk, the same rule as plan_lend).  Run only where nothing is in",
+            "        // flight: a request's start (nothing lent yet) and the decode's safe point (window, commit, draft and the",
+            "        // adaptive swaps all finished)."
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "05-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        Clock::time_point el_last_grow{}, el_last_shrink{};",
+            "        int el_backoff = 1;",
+            "        auto el_free = []() -> int64_t {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "05-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            const bool have_usage = !drive.d.usage.empty();",
+            "            std::vector<std::vector<std::pair<float, int32_t>>> keep((size_t) g.n_layers), tail((size_t) g.n_layers);",
+            "            for (int64_t l = 0; l < g.n_layers; ++l)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        },
+        {
+          "block": "05-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // GROW by at most `room` bytes: the missing experts the conversation routes most (usage >= 2, as the adaptive",
+            "        // tier's candidates), then the profile's order for what it has not asked for yet; filled on the refill",
+            "        // stream and published like the adaptive swaps (apply_pending), so the windows never wait for them"
+          ],
+          "status_in_base": "unique",
+          "hunk": 14
+        },
+        {
+          "block": "05-15",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            for (const auto& pr : profile) {",
+            "                if (used + (int64_t) lay.max_blob > room) break;",
+            "                const int32_t i = (int32_t) (pr.first * g.n_expert + pr.second);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 15
+        },
+        {
+          "block": "05-16",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            // under WDDM the free figure is only trustworthy once the pages are written: `grow` zeroed them",
+            "            cudaDeviceSynchronize();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 16
+        },
+        {
+          "block": "05-17",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    e = \"elastic cache: a fill copy failed\";",
+            "                    return false;",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 17
+        },
+        {
+          "block": "05-18",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // one step of the policy: shrink at once below the reserve; grow once the room has stayed for stable_ms.  At a",
+            "        // request's start it only shrinks: a growth's fills land asynchronously in the tail, and the prompt is about",
+            "        // to borrow the tail - the decode's safe point grows, and apply_pending publishes the fills before any lend"
+          ],
+          "status_in_base": "unique",
+          "hunk": 18
+        },
+        {
+          "block": "05-19",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    el_backoff = std::min(el_backoff * 2, 8);   // a shrink right after a growth: it grew too far",
+            "                el_last_shrink = t;",
+            "                el_seen.clear();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 19
+        },
+        {
+          "block": "05-20",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            el_stable_since = t;",
+            "            el_last_grow = t;",
+            "            el_seen.clear();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 20
+        },
+        {
+          "block": "05-21",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                switch (astate) {",
+            "                case AState::Idle:",
+            "                    if (drain || a_win - a_last < (int64_t) o.adapt_every) return true;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 21
+        },
+        {
+          "block": "05-22",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // --pipeline-windows 2: the loop has drained (nothing in flight on either card): what waits for a gap goes now,",
+            "        // and the round in flight goes on unfenced (a_pl_idle unset) from the next tick, the next request's drain.  The",
+            "        // job's work is the host's alone, so the wait for it ends."
+          ],
+          "status_in_base": "unique",
+          "hunk": 22
+        },
+        {
+          "block": "05-23",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                bool b_done = false;     // B has been made from the chain in flight",
+            "                int chain_n = 0;",
+            "                int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 23
+        },
+        {
+          "block": "05-24",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                // --adapt-async: the asynchronous tier beside the windows (see adapt_tick).  A stage is idle when neither",
+            "                // of its verifiers has a window in flight (a commit or a snapshot copy waits on nothing of the host's)",
+            "                if (ajob) a_pl_idle = [&](int st) { return !PV[st][0]->in_flight() && !PV[st][1]->in_flight(); };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 24
+        },
+        {
+          "block": "05-25",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    if (pl_adapt_thr.joinable()) return true;   // still adapting",
+            "                    pl_apply();",
+            "                    if (!drive.d.usage.empty() && o.adapt_every > 0 && (rounds % o.adapt_every) == 0 && pending.empty() &&"
+          ],
+          "status_in_base": "unique",
+          "hunk": 25
+        },
+        {
+          "block": "05-26",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        } else if (!err.empty()) return die(err);",
+            "                    }",
+            "                    if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : \"the expert pool failed\");"
+          ],
+          "status_in_base": "unique",
+          "hunk": 26
+        },
+        {
+          "block": "05-27",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        if (st == 0 && force_win != nullptr) force_window(A.p, A.tok[0], A.T, A.tok, S);   // lab bench replay",
+            "                        if (st == 0 && A.p + A.T > o.max_context) { ending = true; continue; }",
+            "                        if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch"
+          ],
+          "status_in_base": "unique",
+          "hunk": 27
+        },
+        {
+          "block": "05-28",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        if (st == 0 && force_win != nullptr) force_window(B.p, B.tok[0], B.T, B.tok, S);   // lab bench replay",
+            "                        if (st > 0 || (B.p_on >= theta && B.p + B.T <= o.max_context)) {",
+            "                            if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch"
+          ],
+          "status_in_base": "unique",
+          "hunk": 28
+        },
+        {
+          "block": "05-29",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                // unfenced (the INVARIANT at pl_drain: a checkpoint, a park, the serial loop and the next request find",
+            "                // nothing pipelined in flight) at the next tick, the next request's drain",
+            "                a_pl_settle();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 29
+        },
+        {
+          "block": "05-30",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                         \"the path, %lld rolled back, %lld below the gate (theta %.2f)\\n\",",
+            "                                 (long long) dec_windows, pl_ms, avg(pl_ms, (double) dec_windows), (long long) pl_spec,",
+            "                                 (long long) pl_on, (long long) pl_undo, (long long) pl_gate, theta);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 30
+        }
+      ],
+      "files": [
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "06",
+      "name": "prefix-disk",
+      "summary": "`--prompt-cache-file`: the long prompt prefix saved to disk and restored across restarts, format v2 with one image per split block; the MTP drafter computes every cell of the saved root.",
+      "switch": "`--prompt-cache-file <path>` (off)",
+      "origin": "fork",
+      "upstream_status": "never proposed (upstream has `--prompt-cache-tail/-every` in RAM only)",
+      "measured": "TTFT of a Claude Code session: ~42 s to 16-20 s on the first 40k prompt after a restart (docs/TTFT.md on the lab branch). The file identity covers exe, args and STRATA_*/CUDA_* variables.",
+      "notes": "Uses upstream's `available_host_bytes()` (0.1.42 removed `conversation_available_memory`).",
+      "docs": "docs/UPSYNC.md",
+      "patch": "06-prefix-disk.patch",
+      "commit": "310d0b184f5b5cb04be8ff858704493926c5f4b1",
+      "title": "FABLE-STRATA-Porta su 0.1.43 il prefisso su disco con due schede (--prompt-cache-file, formato v2)",
+      "anchors": [
+        {
+          "block": "06-1",
+          "file": "CMakeLists.txt",
+          "symbol": "option(STRATA_BUILD_TESTS \"Build the test suite\" ${_strata_tests_default})",
+          "anchor": [
+            "option(STRATA_BUILD_CONVERSATION_TESTS \"Build standalone conversation cache tests\" OFF)",
+            "option(STRATA_WERROR \"Treat compiler warnings as errors\" OFF)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "06-2",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)",
+          "anchor": [
+            "    src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp",
+            "    src/core/arch_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)",
+            "  target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "06-3",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    const uint16_t* tensor_bf16(const char* name) const { return bf16(name); }",
+            "    const void* tensor_q8(const char* name) const { return q8(name); }",
+            "    QsaState& kv_state_rw() { return st_; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "06-4",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "    std::string rt_dir_;",
+            "    int64_t window_ = 0;        // attention over the last window_ cells (0 = every cell)",
+            "    int64_t prompt_len_ = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "06-5",
+          "file": "include/strata/core/prefix_cache_file.hpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "06-6",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_",
+          "anchor": [
+            "    const OnDevice on_device(device_);",
+            "    const Clock::time_point t0 = Clock::now();",
+            "    const int64_t HCN = g_->hc * g_->n_embd;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "06-7",
+          "file": "src/core/prefix_cache_file.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "06-8",
+          "file": "src/core/prefix_cache_file_test.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "06-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include \"strata/core/conversation_snapshot.hpp\"",
+            "#include \"strata/core/conversation_file.hpp\"",
+            "#include \"strata/core/session_save_reclaim.hpp\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "06-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include <cstdio>",
+            "#include <cstdlib>",
+            "#include <cstring>"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "06-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "struct Options {",
+          "anchor": [
+            "    /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and",
+            "    /// the PLE history (~118 MB of host RAM); the KV cache itself is positional and stays where it is.",
+            "    int prompt_cache = 6;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "06-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "void usage() {",
+          "anchor": [
+            "                 \"  --vision             --serve takes images too (GENI requests; embeddings from strata-vision)\\n\"",
+            "                 \"  --prompt-cache N     --serve: keep N conversation checkpoints between requests (default 6, ~118 MB\\n\"",
+            "                 \"                       of RAM each; 0 = read every prompt from the start)\\n\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "06-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        else if (a == \"--vision\") o.vision = true;",
+            "        else if (a == \"--session-save-reclaim\") o.session_save_reclaim = true;",
+            "        else if (a == \"--prompt-cache\") o.prompt_cache = std::max(0, std::atoi(next(\"--prompt-cache\")));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "06-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        std::fprintf(stderr, \"strata serve: warning: conversation caching is disabled by %s\\n\",",
+            "                     o.prompt_cache == 0 ? \"--prompt-cache 0\" : \"--conversation-cache-slots 0\");",
+            "    // parking with --layer-split saves every stage (SavedConversation::stage_images)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "06-15",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        bool cvec_cached = true;   // the control vector's state the live session and the checkpoints were read with",
+            "        // without --mtp the conversation cache stays on: a parked image carries the draft layer's K/V only when there is one",
+            "        // (the snapshots accept a null draft)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "06-16",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                incoming.reset();",
+            "                err.clear();",
+            "            }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "06-17",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                 mtp.kv_state().kv_mode, \"ram\",",
+            "                                 (long long) (mtp.kv_state().n_slots * strata::kernels::qsa_real_shapes().page_size));",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "06-18",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        if (i >= o.prompt_cache_root) root_at = i;",
+            "                        break;",
+            "                    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "06-19",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                if (trace && to == message_at)",
+            "                    std::fprintf(stderr, \"strata serve: message boundary checkpoint: %lld tokens, %lld tail\\n\",",
+            "                                 (long long) message_at, (long long) (turn_at - message_at));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        }
+      ],
+      "files": [
+        "CMakeLists.txt",
+        "include/strata/core/mtp.hpp",
+        "include/strata/core/prefix_cache_file.hpp",
+        "src/core/mtp.cpp",
+        "src/core/prefix_cache_file.cpp",
+        "src/core/prefix_cache_file_test.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "07",
+      "name": "vram-free-nvml",
+      "summary": "`STRATA_VRAM_FREE=device`: free VRAM of the whole card through NVML (matched by PCI bus id, so `CUDA_VISIBLE_DEVICES` order does not matter); the elastic cache reads it too.",
+      "switch": "`STRATA_VRAM_FREE=device` (off: CUDA's per-process view)",
+      "origin": "upstream PR #1911 (Xiaomi2008) + fork glue for the elastic cache",
+      "upstream_status": "PR open; not in 0.1.43",
+      "measured": "Fixes the 7-36 t/s collapses under WDDM paging on the 3060 (CUDA saw 9.7 GB free, NVML 8.1): with it the stage holds 77 t/s. Daily default since 11 Oct.",
+      "depends_on": "01",
+      "docs": "docs/UPSYNC.md",
+      "patch": "07-vram-free-nvml.patch",
+      "commit": "dcc8987bc7a46291575083c2b0f5212f5c03a2d3",
+      "title": "FABLE-STRATA-Porta su 0.1.43 la PR upstream #1911: VRAM libera della scheda intera via NVML (STRATA_VRAM_FREE=device), letta anche dalla cache elastica",
+      "anchors": [
+        {
+          "block": "07-1",
+          "file": "docs/DETAILS.md",
+          "symbol": "GPU nor the RAM budget holds (only pages - the experts computed are the same; `S",
+          "anchor": [
+            "is what runs [Unsloth's UD-Q4_K_XL](UNSLOTH_Q4.md) (72 GiB of experts) on a 64 GB PC: 7-8.5 tokens/s at N = 40 on an",
+            "RTX 5070, against ~3 tokens/s before these changes."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "07-2",
+          "file": "include/strata/core/expert_cache.hpp",
+          "symbol": "bool write_expert_profile(const std::string& path, int64_t n_layers, int64_t n_e",
+          "anchor": [
+            "/// Free device memory for the expert cache.  On a unified memory system - one memory for the CPU and the GPU, such as",
+            "/// the DGX Spark (GB10); CUDA reports it as cudaDevAttrIntegrated - cudaMemGetInfo counts only MemFree, not the page cache - which, with the experts read from the GGUF in place, is mostly those",
+            "/// files' clean pages and gives way to a device allocation.  There the figure is MemAvailable less 6 GiB for the OS"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "07-3",
+          "file": "src/core/expert_cache.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include <utility>",
+            "#include <cstring>"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "07-4",
+          "file": "src/core/expert_cache.cpp",
+          "symbol": "size_t device_free_bytes() {",
+          "anchor": [
+            "            if (avail > head && avail - head > free_b) free_b = (size_t) (avail - head);",
+            "        }",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "07-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        std::deque<std::pair<Clock::time_point, int64_t>> el_seen;",
+            "        Clock::time_point el_last_grow{}, el_last_shrink{};",
+            "        int el_backoff = 1;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "07-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            // and a page-in while the verify graph spins on a host flag stalls the request for good",
+            "            size_t free_b = 0, total_b = 0;",
+            "            cudaMemGetInfo(&free_b, &total_b);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        }
+      ],
+      "files": [
+        "docs/DETAILS.md",
+        "include/strata/core/expert_cache.hpp",
+        "src/core/expert_cache.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "08",
+      "name": "park-no-foreign-kv",
+      "summary": "The conversation cache never parks one conversation with another's retained K/V.",
+      "switch": "always on (correctness)",
+      "origin": "upstream PR #1503 (sanastasiou)",
+      "upstream_status": "PR open; not in 0.1.43",
+      "measured": "Correctness only.",
+      "docs": "docs/UPSYNC.md",
+      "patch": "08-park-no-foreign-kv.patch",
+      "commit": "ef49ebcccf0f5de5dbdb0ec9b465e38aa92ec99f",
+      "title": "FABLE-STRATA-Porta su 0.1.43 la PR upstream #1503: mai parcheggiare una conversazione col K/V di un'altra",
+      "anchors": [
+        {
+          "block": "08-1",
+          "file": "include/strata/core/conversation_cache.hpp",
+          "symbol": "struct ConversationKvReuse {",
+          "anchor": [
+            "    std::vector<ConversationKv> kv;",
+            "    // Original image extent for validation, and the earliest subsequent rewrite.",
+            "    int64_t captured_tokens = 0, unchanged_tokens = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "08-2",
+          "file": "include/strata/core/conversation_cache.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    // Retain only the restored K/V buffers, not duplicate running checkpoints.",
+            "    // This optimization never evicts a parked conversation to make itself fit.",
+            "    // `stage_kv`: with a layer split, the later stages' restored K/V (one per stage), retained with the first's."
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "08-3",
+          "file": "include/strata/core/conversation_cache.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "        if (reuse_.unchanged_tokens <= 0) reuse_ = {};",
+            "    }",
+            "    ConversationKvReuse take_reuse() { return std::exchange(reuse_, {}); }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "08-4",
+          "file": "src/core/conversation_cache_test.cpp",
+          "symbol": "int main() {",
+          "anchor": [
+            "        auto none = conversation_checkpoints_split({}, 3);",
+            "        check(conversation_checkpoints_merge(std::move(none), back) && back.empty(), \"no checkpoints: nothing to do\");",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "08-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                ~MergeBack() { if (on && !strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear(); }",
+            "            } merge_back{cs, checks, n_st > 0};",
+            "            const strata::core::ConversationView view{live, live_imgs, n_st > 0 ? cs.stage0 : checks, cvec_cached};"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "08-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // conversation an idle slot holds reads on from there.  Every stage, the same calls.",
+            "        // `at`: one of the slot's checkpoints - only the K/V up to it is copied and its state restored instead",
+            "        auto copy_from_slot = [&](int b, const ConvCheckpoint* at, std::string& e) -> bool {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "08-7",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                if (std::getenv(\"STRATA_SNAPSHOT_FULL_CAPTURE\") == nullptr) {",
+            "                    std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park",
+            "                    for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "08-8",
+          "file": "sycl/src/program/generate.cpp",
+          "symbol": "int main(int argc, char **argv) try {",
+          "anchor": [
+            "                ~MergeBack() { if (on && !strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear(); }",
+            "            } merge_back{cs, checks, n_st > 0};",
+            "            const strata::core::ConversationView view{live, live_imgs, n_st > 0 ? cs.stage0 : checks, cvec_cached};"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "08-9",
+          "file": "sycl/src/program/generate.cpp",
+          "symbol": "int main(int argc, char **argv) try {",
+          "anchor": [
+            "        // `at`: one of the slot's checkpoints - only the K/V up to it is copied and its state restored instead",
+            "        auto copy_from_slot = [&](int b, const ConvCheckpoint *at,",
+            "                                  std::string &e) -> bool {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "08-10",
+          "file": "sycl/src/program/generate.cpp",
+          "symbol": "int main(int argc, char **argv) try {",
+          "anchor": [
+            "                if (std::getenv(\"STRATA_SNAPSHOT_FULL_CAPTURE\") == nullptr) {",
+            "                    std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park",
+            "                    for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        }
+      ],
+      "files": [
+        "include/strata/core/conversation_cache.hpp",
+        "src/core/conversation_cache_test.cpp",
+        "src/program/generate.cpp",
+        "sycl/src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "09",
+      "name": "pipeline-architectds",
+      "summary": "The two-window pipeline's profile from the Daily: the verified window is served first (front stage of A, last stage of A, then D and B one layer per pass), lookup beyond one window, theta 0.10; plus two log lines (rollback cost per window class, chain latency).",
+      "switch": "`STRATA_PIPELINE_ELASTIC` (on with two cards and `--pipeline-windows`; `=0`: upstream's theta 0.20 and D-A-B order)",
+      "origin": "fork (from the architectds lab branch)",
+      "upstream_status": "never proposed",
+      "measured": "0.1.42 without it: -4.6/-7.3/-7.8% against the Daily (speculative windows 133/600 instead of 164/600, stage host 0.50 -> 1.69 ms). With it and patch 11: +0.7% (parity).",
+      "depends_on": "05",
+      "docs": "docs/UPSYNC.md",
+      "patch": "09-pipeline-architectds.patch",
+      "commit": "d171acb2e0248c0fdf7d47fa95870074eed9d301",
+      "title": "FABLE-STRATA-Porta su 0.1.43 il profilo architectds della pipeline (STRATA_PIPELINE_ELASTIC: verificata servita per prima, lookup oltre una finestra, theta 0,10) e i log di rollback e latenza della catena",
+      "anchors": [
+        {
+          "block": "09-1",
+          "file": "include/strata/core/verify.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    /// window as they WILL be, their pages prefetched).  A later `pl_launch` of the same window (T, pos0, tokens, and",
+            "    /// `ss.ple_prev` equal to `ple_prev` by then) skips the staging; anything else stages again.",
+            "    bool prestage(int T, const int32_t* tokens, int64_t pos0, const int32_t ple_prev[2], std::string& err);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "09-2",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string",
+          "anchor": [
+            "int Verifier::service(PoolMultiFn pool, void* user, std::string& err) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "09-3",
+          "file": "src/core/verify.cpp",
+          "symbol": "int Verifier::service(PoolMultiFn pool, void* user, std::string& err) {",
+          "anchor": [
+            "    }",
+            "    const int G = groups_[T] > 0 ? groups_[T] : 1;",
+            "    const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "09-4",
+          "file": "src/core/verify.cpp",
+          "symbol": "int Verifier::service(PoolMultiFn pool, void* user, std::string& err) {",
+          "anchor": [
+            "        if (fl_k_ == 0 && !gather_ple()) return -1;",
+            "        *(volatile uint32_t*) h_flag_ = want;",
+            "        ++fl_k_;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "09-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            int pl_pw = pipe ? o.pipeline_windows : 0;",
+            "            float pl_theta = [] {   // a speculative window is launched only when its estimated chance is at least this",
+            "                const char* v = pipe_dbg_env(\"STRATA_PIPELINE_THETA\");"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "09-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    bool spec = false;     // launched speculatively (behind the window before, ahead of its verdict)",
+            "                    bool made = false;     // made from a chain (its outcome can be scored even when the gate held it)",
+            "                    bool sfx = false;      // a lookup window (the suffix drafter's drafts)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "09-7",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                bool b_done = false;     // B has been made from the chain in flight",
+            "                int chain_n = 0;",
+            "                int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "09-8",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                  std::chrono::duration<double, std::milli>(Clock::now() - pl_tr0).count(), ev, seq, x0, x1);",
+            "                    pl_trace += b;",
+            "                };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "09-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    // undo restores everything it wrote).  STRATA_PIPELINE_DOOM_SKIP=0: served in full.",
+            "                    static const bool doom_skip = [] { const char* e = pipe_dbg_env(\"STRATA_PIPELINE_DOOM_SKIP\"); return e == nullptr || std::atoi(e) != 0; }();",
+            "                    const bool skip = doom_skip && doomed && &w == &D;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "09-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        B.p_on = pl_lookup_pon;",
+            "                        B.ready = true;",
+            "                        B.made = true;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "09-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                // per window class (0: fresh, 1: run speculatively ahead of its predecessor's verdict): the time from",
+            "                // the previous verdict, the tokens it emitted, how many",
+            "                double cls_ms[2] = {0, 0}, cls_tok[2] = {0, 0}, cls_n[2] = {0, 0};"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "09-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                            if (!adapt_tick(false, false)) return die(\"an adaptive refill failed\");",
+            "                        }",
+            "                    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "09-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                            tre(\"F1\", A.seq, A.T);",
+            "                        } else if (!err.empty()) return die(err);",
+            "                    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "09-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                    if (!VF(0, B).prestage(B.T, B.tok, B.p, prev, err)) return die(err);",
+            "                                }",
+            "                                b_done = true;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "09-15",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        if (A.sfx) { ++sfx_windows; sfx_drafts += A.T - 1; sfx_ok += a; }",
+            "                        if (A.seq > 0 && !last) policy.observe(A.sfx, A.T, a, A.sfx_match, now - last_verdict);",
+            "                        cls_ms[c] += now - last_verdict;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "09-16",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    if (!last && !ajob && !pl_adapt()) return die(\"an adaptive refill failed\");",
+            "                    if (on && !last) {",
+            "                        ++pl_on;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "09-17",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                            return die(err);",
+            "                        chain_kind = 1;",
+            "                        tre(\"CL\", A.seq, 1);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        },
+        {
+          "block": "09-18",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                            if ((A.com & (1u << st)) == 0 && !VF(st, A).pl_commit_async(A.T, err)) return die(err);",
+            "                        A = B;",
+            "                        B = PW{};"
+          ],
+          "status_in_base": "unique",
+          "hunk": 14
+        },
+        {
+          "block": "09-19",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                return die(err);",
+            "                            chain_kind = 2;",
+            "                            tre(\"CL\", A.seq, 2);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 15
+        },
+        {
+          "block": "09-20",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                         \"the path, %lld rolled back, %lld below the gate (theta %.2f)\\n\",",
+            "                                 (long long) dec_windows, pl_ms, avg(pl_ms, (double) dec_windows), (long long) pl_spec,",
+            "                                 (long long) pl_on, (long long) pl_undo, (long long) pl_gate, theta);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 16
+        }
+      ],
+      "files": [
+        "include/strata/core/verify.hpp",
+        "src/core/verify.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "10",
+      "name": "attn-daily",
+      "summary": "The Daily's QSA decode attention on every CUDA card: the two-cells-per-step chunk kernel (upstream keeps it below sm_75 only) and the `attn_merge_v2` merge; bitwise with the default; parity harness `qsa_merge_daily_parity`.",
+      "switch": "`STRATA_ATTN_DAILY=1` (off); `STRATA_ATTN_MERGE_V2`, `STRATA_ATTN_PRE75=0` for the two halves",
+      "origin": "fork (kernel body from PR #540 sskver and the merge from Hardin22, both carried in the old Daily)",
+      "upstream_status": "upstream has the chunk kernel as `attn_chunk_kernel_pre75` (sm_60 builds only); the merge v2 is not upstream",
+      "measured": "nsys on the 3060: `attn_chunk_kernel` 99.8 -> 46.4 us a call. In the engine the attention is ~8% of the per-row cost (docs/QSAROWS.md): part of the +0.7% parity, not separable.",
+      "docs": "docs/UPSYNC.md",
+      "patch": "10-attn-daily.patch",
+      "commit": "dae4dc49b4749c24fa61eafab95a9b47ea777744",
+      "title": "FABLE-STRATA-Porta su 0.1.43 l'attenzione QSA del decode del Daily (STRATA_ATTN_DAILY=1: chunk pre75 su ogni scheda e merge v2) col test di parita",
+      "anchors": [
+        {
+          "block": "10-1",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)",
+          "anchor": [
+            "    target_link_libraries(qsa_topk_active_parity PRIVATE strata_kernels CUDA::cudart)",
+            "    add_test(NAME qsa_topk_active_parity COMMAND qsa_topk_active_parity)",
+            "    set_tests_properties(qsa_topk_active_parity PROPERTIES SKIP_RETURN_CODE 77)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "10-2",
+          "file": "include/strata/kernels/qsa_decode_attn.hpp",
+          "symbol": "void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32",
+          "anchor": [
+            "void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,",
+            "                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "10-3",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "__global__ void __launch_bounds__(THREADS) attn_chunk_kernel(const float* __rest",
+          "anchor": [
+            "// run on gfx103x (RDNA2), with 8 cells per step and the butterfly's lane exchanges in registers (DPP / permlanex16)",
+            "// instead of ds_bpermute: there the score loop is bound by the LDS pipe (the q reads and ds_bpermute share it), not by",
+            "// occupancy - 8 cells per step at 7 waves/SIMD beat 1 cell at 9.  Every other card keeps exactly the kernel above."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "10-4",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "__global__ void __launch_bounds__(HD) attn_merge_kernel(const float* __restrict_",
+          "anchor": [
+            "    attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "10-5",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "bool query_swizzle_gfx906_device() {",
+          "anchor": [
+            "}",
+            "#endif"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "10-6",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "bool pre75_attn() {",
+          "anchor": [
+            "    }",
+            "    return cc[dev] < 75;",
+            "#endif"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "10-7",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3",
+          "anchor": [
+            "    float* part_l = part_m + (size_t) n_chunks * s.n_head;",
+            "    const float scale = 1.0f / sqrtf((float) HD);",
+            "    const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "10-8",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3",
+          "anchor": [
+            "    } else",
+            "#endif",
+            "    if (kv_mode == 3)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "10-9",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32",
+          "anchor": [
+            "    else",
+            "        STRATA_ATTN_CHUNK(0)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,",
+            "                                                        scale, part_acc, part_m, part_l, n_chunks, 0, 0);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "10-10",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32",
+          "anchor": [
+            "}  // namespace strata::kernels"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "10-11",
+          "file": "src/kernels/qsa_merge_daily_parity.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        }
+      ],
+      "files": [
+        "CMakeLists.txt",
+        "include/strata/kernels/qsa_decode_attn.hpp",
+        "src/kernels/cuda/qsa_decode_attn.cu",
+        "src/kernels/qsa_merge_daily_parity.cpp"
+      ]
+    },
+    {
+      "id": "11",
+      "name": "df-defaults",
+      "summary": "`STRATA_DF_BRANCH` (mixer side branches in the window graph; CUDA on Windows) and `STRATA_DF_PLE` (PLE post-projections in one pass; CUDA) on by default, as in the Daily.",
+      "switch": "`STRATA_DF_BRANCH=0`, `STRATA_DF_PLE=0` turn them off (upstream: opt-in `=1`)",
+      "origin": "fork (defaults of PR #904's switches)",
+      "upstream_status": "upstream merged #904 opt-in and keeps BRANCH off after a Linux stall (#905, never seen on Windows)",
+      "measured": "Daily measurements: BRANCH +2.4% at 131k, PLE +3.3% (bitwise). On 0.1.42 their absence was the main part of ~1.1 ms of GPU per window.",
+      "forces": "DF_BRANCH, DF_PLE default on (see the table above)",
+      "docs": "docs/UPSYNC.md",
+      "patch": "11-df-defaults.patch",
+      "commit": "3f3e175f699788ef952b9c89a87af7e3fc4ef328",
+      "title": "FABLE-STRATA-Rimetti STRATA_DF_BRANCH (CUDA su Windows) e STRATA_DF_PLE (CUDA) accesi di default come nel Daily",
+      "anchors": [
+        {
+          "block": "11-1",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&",
+          "anchor": [
+            "    {   // STRATA_DF_BRANCH=1 (opt-in): the mixer's side branches.  Off by default: on Linux (open modules, GSP) a",
+            "        // stage's window with the branches stopped inside its graph when an NVML query (nvidia-smi) came between",
+            "        // requests (2x RTX 3090 and 2x RTX 2080 Ti, #905); never seen on Windows.  0 / unset: one stream, as before"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "11-2",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "            // below (the norms divide at run time as its norms do; the history advances token by token), which also",
+            "            // writes the commit's history snapshots.  Scratch: layer 0's expert rows, combined by now, and the",
+            "            // hyper-connection read's `lo_`, which the read below rewrites."
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        }
+      ],
+      "files": [
+        "src/core/verify.cpp"
+      ]
+    },
+    {
+      "id": "12",
+      "name": "critpath-levers",
+      "summary": "Critical-path levers for the two-stage pipeline: stage-1 layers first (`L1FIRST`, `S1FIRST`), the MTP chain queued behind stage 1 and two launches fewer per step (`CHAIN_PRE`, `CHAIN_FUSE`), resident groups planned on the device (`RESPLAN`).",
+      "switch": "`STRATA_CP_L1FIRST`, `STRATA_CP_S1FIRST`, `STRATA_CP_CHAIN_PRE`, `STRATA_CP_CHAIN_FUSE`, `STRATA_CP_RESPLAN` (all off)",
+      "origin": "fork",
+      "upstream_status": "never proposed",
+      "measured": "All within noise on the 131k forced bench (-0.4 / -2.5 / +0.1 / -0.1%). Kept opt-in; candidate for retirement.",
+      "notes": "Conflict on 0.1.43 in verify.cpp: `hits_in_combine` (STRATA_FUSE_HITS, gfx12) is declared before the RESPLAN branch, which calls `moe_hit_add` itself.",
+      "docs": "docs/CRITPATH.md",
+      "patch": "12-critpath-levers.patch",
+      "commit": "dd118e31b151f839c08182633ac31e926c7b77fd",
+      "title": "FABLE-STRATA-Porta su 0.1.43 le leve CRITPATH del percorso critico (STRATA_CP_L1FIRST/S1FIRST/CHAIN_PRE/CHAIN_FUSE/RESPLAN, tutte opt-in)",
+      "anchors": [
+        {
+          "block": "12-1",
+          "file": "docs/CRITPATH.md",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "12-2",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include \"strata/core/layer.hpp\"",
+            "#include \"strata/core/session.hpp\"",
+            "#include \"strata/kernels/sampler.hpp\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-3",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    /// chain_tok()/chain_prob(); -1: an error.  A window's size is often decided by its first outputs (a draft below",
+            "    /// spec_min_p ends it), so the next launch need not wait for all of them.",
+            "    int chain_outputs_ready(std::string& err);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "12-4",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "    cudaEvent_t ev_chain_ = nullptr;",
+            "    cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs",
+            "    int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "12-5",
+          "file": "include/strata/core/verify.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.",
+            "    void diag_pipelined(std::FILE* f, const char* name) const;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-6",
+          "file": "include/strata/core/verify.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "    double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;",
+            "    int32_t pl_prev_[2] = {-1, -1};",
+            "    std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "12-7",
+          "file": "include/strata/kernels/elementwise.hpp",
+          "symbol": "void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei",
+          "anchor": [
+            "                            void* stream);",
+            "void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,",
+            "                          float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-8",
+          "file": "include/strata/kernels/verify_kernels.hpp",
+          "symbol": "void add_streams_broadcast(const float* h, const float* e, float* R, int64_t n_e",
+          "anchor": [
+            "void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream);",
+            "/// The draft chain's next input: R_dst[:] = R_src[row], tok_dst[0] = ids[row], out[j] = ids[row], with",
+            "/// row = *row_dev (device memory).  `out` may be mapped host memory."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-9",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool mtp_catchup_all() {",
+          "anchor": [
+            "    }();",
+            "    return on;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-10",
+          "file": "src/core/mtp.cpp",
+          "symbol": "MtpDrafter::~MtpDrafter() {",
+          "anchor": [
+            "    if (owns_draft_head_ && dhead_) { strata::kernels::native_q6_k_unpack(dhead_); cudaFree(dhead_); }",
+            "    if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);",
+            "    if (ev_chain_) cudaEventDestroy(ev_chain_);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "12-11",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {",
+          "anchor": [
+            "    copy_i32_from_mapped(step_ + ra * 4, m_step_ + ra * 4, 4, cs_);",
+            "    copy_i32_from_mapped(pos_ + ra * NH, m_pos_ + ra * NH, NH, cs_);",
+            "#else   // the draft round's seven inputs in one launch"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "12-12",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {",
+          "anchor": [
+            "        ok = record_rest(ra, cs_, err);",
+            "        coupled_rec_ = false;",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "12-13",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {",
+          "anchor": [
+            "    copy_i32_from_mapped(step_ + row * 4, m_step_ + row * 4, 4, cs_);",
+            "    copy_i32_from_mapped(pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head, cs_);",
+            "#else"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "12-14",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*",
+          "anchor": [
+            "                       float* probs, float min_p, int* n_drafts) {",
+            "    const OnDevice on_device(device_);",
+            "    if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = \"mtp: draft arguments out of range\"; return false; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "12-15",
+          "file": "src/core/mtp.cpp",
+          "symbol": "int MtpDrafter::chain_outputs_ready(std::string& err) {",
+          "anchor": [
+            "}",
+            "",
+            "int MtpDrafter::chain_poll(std::string& err) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "12-16",
+          "file": "src/core/mtp.cpp",
+          "symbol": "int MtpDrafter::chain_poll(std::string& err) {",
+          "anchor": [
+            "    return 1;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "12-17",
+          "file": "src/core/verify.cpp",
+          "symbol": "Verifier::~Verifier() {",
+          "anchor": [
+            "        if (e) cudaGraphExecDestroy(e);",
+            "    for (auto& e : exec_nr_)",
+            "        if (e) cudaGraphExecDestroy(e);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-18",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "            resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,",
+            "                          hits_.cache_base, slot_off_d_, (long long) hits_.blob,",
+            "                          plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, nullptr, 0, cs, m_plan_err_);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "12-19",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "            }",
+            "        };",
+            "        bool hits_in_combine = false;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "12-20",
+          "file": "src/core/verify.cpp",
+          "symbol": "void Verifier::refresh_ar() {",
+          "anchor": [
+            "}",
+            "",
+            "bool Verifier::capture(int T, std::string& err) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "12-21",
+          "file": "src/core/verify.cpp",
+          "symbol": "void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {",
+          "anchor": [
+            "    std::atomic_thread_fence(std::memory_order_seq_cst);",
+            "    last_t_ = T;",
+            "    last_pos0_ = pos0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "12-22",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::capture_all(std::string& err) {",
+          "anchor": [
+            "        cudaGetLastError();",
+            "    }",
+            "    pl_ple_rows_.assign((size_t) strata::kernels::kVerifyMaxT * strata::kernels::PLE_N_HEADS, 0u);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "12-23",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string",
+          "anchor": [
+            "    fl_total_ = (le_ - lb_) * G;",
+            "    fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;",
+            "    if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);   // #649: this window's breadcrumbs only"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "12-24",
+          "file": "src/core/verify.cpp",
+          "symbol": "int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la",
+          "anchor": [
+            "        const Clock::time_point b = Clock::now();",
+            "        ms_wait += now_ms() - fl_since_ms_;",
+            "        const int grp = (int) (fl_k_ % G);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "12-25",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::pl_commit_async(int n_keep, std::string& err) {",
+          "anchor": [
+            "void Verifier::absorb_stats(Verifier& o) {",
+            "    ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;",
+            "    windows += o.windows;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "12-26",
+          "file": "src/kernels/cuda/elementwise.cu",
+          "symbol": "void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei",
+          "anchor": [
+            "                                                                          ids_out, weights_out, d_seq, value);",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-27",
+          "file": "src/kernels/cuda/verify_kernels.cu",
+          "symbol": "__global__ void row_top_prob_kernel(const float* __restrict__ logits, int n_voca",
+          "anchor": [
+            "",
+            "__global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t stride, const int32_t* __restrict__ ids,",
+            "                                  const int32_t* __restrict__ row_dev, float* __restrict__ R_dst,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-28",
+          "file": "src/kernels/cuda/verify_kernels.cu",
+          "symbol": "__global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {",
+          "anchor": [
+            "    if (f >= 0) *tok = f;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "12-29",
+          "file": "src/kernels/cuda/verify_kernels.cu",
+          "symbol": "void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b,",
+          "anchor": [
+            "}",
+            "",
+            "void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "12-30",
+          "file": "src/program/generate.cpp",
+          "symbol": "void drive_pool_split(void* user, const float* x_f, const int32_t* ids, int64_t",
+          "anchor": [
+            "    d.d.pcie_num = s->pcie_num[st];",
+            "    drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "12-31",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                for (int par = 0; par < 2; ++par) {",
+            "                    stage_ver_p(st, par).set_stream(pl_stream[(size_t) st]);",
+            "                    stage_ver_p(st, par).set_always_publish(true);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "12-32",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                std::thread pl_adapt_thr;",
+            "                std::atomic<bool> pl_adapt_done{true};",
+            "                bool pl_adapt_ok = true;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "12-33",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    std::fprintf(stderr, \"strata serve: pipelined decode: %s\\n\", m.c_str());",
+            "                    strata::core::diag_pipeline_fn().store(nullptr);",
+            "                    strata::core::release_gpu_waits(stderr);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "12-34",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                // adapt()'s fence, on the tier's thread: it waits on the HOST.  A device-side wait (the refill streams",
+            "                // waiting for the stages' events) would queue copies behind windows that need this loop, beside it.",
+            "                adapt_fence = [&]() {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "12-35",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    return v == nullptr || std::atoi(v) != 0;",
+            "                }();",
+            "                auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "12-36",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    // verdict), and while A's last stage runs, B one layer per pass",
+            "                    if (!pl_yield && ((doomed && !pump0(D)) || !pump0(A) || !pump0(B))) return die(err);",
+            "                    if (pl_yield && !pump0(A)) return die(err);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "12-37",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                            tre(\"F1\", A.seq, A.T);",
+            "                        } else if (!err.empty()) return die(err);",
+            "                    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "12-38",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        }",
+            "                    }",
+            "                    // ---- the last stage: A, once every front stage is done"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "12-39",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts",
+            "                        mtp.set_source_R(V1(A).final_R(0));",
+            "                        chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "12-40",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        if (!last) {",
+            "                            mtp.set_source_R(V1(A).final_R(0));",
+            "                            chain_n = strata::kernels::kVerifyMaxT - 1;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "12-41",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    if (!last && ajob && !adapt_tick(false)) return die(\"an adaptive refill failed\");",
+            "                    if (last) ending = true;",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "12-42",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                }",
+            "                // the odd windows' counters and GPU profiles into the verifiers that report them",
+            "                for (int st = 0; st < n_stages; ++st) stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 1));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        }
+      ],
+      "files": [
+        "docs/CRITPATH.md",
+        "include/strata/core/mtp.hpp",
+        "include/strata/core/verify.hpp",
+        "include/strata/kernels/elementwise.hpp",
+        "include/strata/kernels/verify_kernels.hpp",
+        "src/core/mtp.cpp",
+        "src/core/verify.cpp",
+        "src/kernels/cuda/elementwise.cu",
+        "src/kernels/cuda/verify_kernels.cu",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "13",
+      "name": "chain-fuse",
+      "summary": "Fused kernels of the MTP drafter's step (norm+q8_1, gate+q8_1, head tail in one launch, combine+residual, chunked attention), bitwise; micro-bench `chain_step_bench`.",
+      "switch": "`STRATA_CHAIN_FUSE2=1` (off), `STRATA_CHAIN_FUSE2_MASK` per fusion, `STRATA_CHAIN_FUSE2_ATTN`",
+      "origin": "fork",
+      "upstream_status": "never proposed",
+      "measured": "Kernels on the 2080 Ti: head tail 85 -> 12 us, merge 45 -> 33, norm/gate/combine -37/-49%; the fused attention is slower (244 -> 362 us, mask 62 leaves it out). Engine: +0.4% (noise). Kept opt-in; candidate for retirement.",
+      "docs": "docs/CHAINFUSE.md",
+      "patch": "13-chain-fuse.patch",
+      "commit": "8259596b6d1110f3efae5af4a40175bd89d7c9b9",
+      "title": "FABLE-STRATA-Porta su 0.1.43 le fusioni della catena MTP del drafter (STRATA_CHAIN_FUSE2, STRATA_CHAIN_FUSE2_MASK, STRATA_CHAIN_FUSE2_ATTN, opt-in) e chain_step_bench",
+      "anchors": [
+        {
+          "block": "13-1",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)",
+          "anchor": [
+            "    set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT \"STRATA_ATTN_DAILY=1\"",
+            "                         SKIP_RETURN_CODE 77)",
+            "  endif()"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-2",
+          "file": "docs/CHAINFUSE.md",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "13-3",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "    float* probs_ = nullptr;",
+            "    uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' and row_top_prob_split's partials and counters",
+            "    uint8_t* top_scratch_ = nullptr;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-4",
+          "file": "include/strata/kernels/native_gr_postops.hpp",
+          "symbol": "void native_gr_post_multi(const float* residual, const float* block_out, const f",
+          "anchor": [
+            "void native_gr_post_multi(const float* residual, const float* block_out, const float* inject,",
+            "                          float* output, int n_embd, int hc, int n_tok, void* stream);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-5",
+          "file": "include/strata/kernels/native_qsa.hpp",
+          "symbol": "void native_qsa_rms_norm_grouped(const float* input, const float* gamma, float*",
+          "anchor": [
+            "void native_qsa_gate_apply(const float* attn, const float* q_full, float* output,",
+            "                           int n_head, int head_dim, void* stream);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-6",
+          "file": "include/strata/kernels/qsa_decode_attn.hpp",
+          "symbol": "void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32",
+          "anchor": [
+            "void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,",
+            "                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-7",
+          "file": "include/strata/kernels/verify_kernels.hpp",
+          "symbol": "bool multi_block_head_ops();",
+          "anchor": [
+            "/// True where the verify head's and the draft's greedy pick should be argmax_rows: sm_80 to sm_89 (the one-block",
+            "/// kernel is slow there; sm_90+ has sample_tokens' cluster kernel, other cards keep sample_tokens).",
+            "bool argmax_rows_wanted();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-8",
+          "file": "src/core/mtp.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include \"strata/kernels/gr.hpp\"",
+            "#include \"strata/kernels/kv_q4.hpp\"",
+            "#include \"strata/kernels/kv_q8.hpp\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-9",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool cp_chain_fuse() {",
+          "anchor": [
+            "constexpr int GGML_Q8_0 = 8;",
+            "constexpr int GGML_Q4_0 = 2;",
+            "using Clock = std::chrono::steady_clock;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "13-10",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session",
+          "anchor": [
+            "        probs_ = b.take<float>(T + 4);",
+            "        arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));",
+            "        top_scratch_ = b.take<uint8_t>(strata::kernels::row_top_prob_scratch_bytes((int) T));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "13-11",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err",
+          "anchor": [
+            "            embedding_gather_dev(codes, scales, offsets, tok_, T, we->ne0, we->code_bits, we->code_bias, we->group_elems,",
+            "                                 (uint64_t) (we->ne0 / (8 / we->code_bits)), (uint64_t) (we->ne0 / we->group_elems), emb_, cs);",
+            "        }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "13-12",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err",
+          "anchor": [
+            "            native_quantize_q8_1(hn_ + (size_t) c0 * N, xq_, (int) N, nc, cs);",
+            "            native_mmvq(wt_fc_hidden, wp_fc_hidden, xq_, h2_ + (size_t) c0 * N, (int) N, (int) N, nc, cs);",
+            "        }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "13-13",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "        if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);",
+            "        const QsaAttnPools pools = qsa_attn_pools(st_);",
+            "        if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "13-14",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "            const char* v = std::getenv(\"STRATA_NO_MULTI_GR\");",
+            "            return v != nullptr && v[0] != '\\0' && v[0] != '0';",
+            "        }();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "13-15",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "        // its own, so doing them after the loop changes nothing)",
+            "        if (!fuse_head_gr && !no_multi_gr)",
+            "            gr_write_multi(R_, y_, inj2_, gs, R_, T, cs);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "13-16",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                                     cparams_, cring_, kCoupledHistCap, coupled_j_, step, cscratch_, out_ids_, probs_, cs);",
+            "            return true;",
+            "        }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "13-17",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {",
+          "anchor": [
+            "        coupled_rec_ = false;",
+            "    }",
+            "    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "13-18",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {",
+          "anchor": [
+            "    bool ok = record_forward(1, row, cs_, err);",
+            "    coupled_rec_ = false;",
+            "    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "13-19",
+          "file": "src/kernels/chain_step_bench.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "13-20",
+          "file": "src/kernels/cuda/native_gr_postops.cu",
+          "symbol": "void native_gr_post_multi(const float* residual, const float* block_out, const f",
+          "anchor": [
+            "        residual, block_out, inject, output, n_embd, hc, 1.0f / float(hc), r_stride, b_stride, i_stride);",
+            "    check_launch();",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-21",
+          "file": "src/kernels/cuda/native_qsa.cu",
+          "symbol": "(file scope)",
+          "anchor": [
+            "// SOFTWARE.",
+            "",
+            "#include \"strata/kernels/native_qsa.hpp\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-22",
+          "file": "src/kernels/cuda/native_qsa.cu",
+          "symbol": "void native_qsa_gate_apply(const float* attn, const float* q_full, float* output",
+          "anchor": [
+            "    gate<<<unsigned((count + 255) / 256), 256, 0, static_cast<cudaStream_t>(stream)>>>(attn, q_full, output, n_head, head_dim);",
+            "    check_launch();",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "13-23",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "__global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restri",
+          "anchor": [
+            "#if defined(STRATA_HIP_GFX906)",
+            "// The compat backend can target other architectures. Check the calling thread's current device,",
+            "// caching only its last ordinal so a layer split or another thread cannot reuse the wrong answer."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-24",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "int attn_merge_v2() {",
+          "anchor": [
+            "// the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel, 1 attn_merge_v2_kernel (bitwise the same output)",
+            "void launch_merge(int v2, const float* part_acc, const float* part_m, const float* part_l, int n_chunks,",
+            "                  const int32_t* steps, float* attn, long long stride, unsigned n_head, unsigned n_q, cudaStream_t st) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "13-25",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_",
+          "anchor": [
+            "    const float scale = 1.0f / sqrtf((float) HD);",
+            "    const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);",
+            "#if defined(STRATA_ATTN_PRE75_BUILT)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "13-26",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, cons",
+          "anchor": [
+            "                                 int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, int daily_chunk,",
+            "                                 void* stream) {",
+            "    if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "13-27",
+          "file": "src/kernels/cuda/qsa_decode_attn.cu",
+          "symbol": "void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, cons",
+          "anchor": [
+            "        (v2 != 0 && v2 != 1) || !steps || !attn) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "13-28",
+          "file": "src/kernels/cuda/verify_kernels.cu",
+          "symbol": "__global__ void row_top_prob_split_kernel(const float* __restrict__ logits, int",
+          "anchor": [
+            "    rows[row].counter = 0;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "13-29",
+          "file": "src/kernels/cuda/verify_kernels.cu",
+          "symbol": "void argmax_rows(const float*, int, int, void*, int32_t*, void*) {",
+          "anchor": [
+            "    std::fprintf(stderr, \"argmax_rows: not built for this backend\\n\");",
+            "    std::exit(1);",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        }
+      ],
+      "files": [
+        "CMakeLists.txt",
+        "docs/CHAINFUSE.md",
+        "include/strata/core/mtp.hpp",
+        "include/strata/kernels/native_gr_postops.hpp",
+        "include/strata/kernels/native_qsa.hpp",
+        "include/strata/kernels/qsa_decode_attn.hpp",
+        "include/strata/kernels/verify_kernels.hpp",
+        "src/core/mtp.cpp",
+        "src/kernels/chain_step_bench.cpp",
+        "src/kernels/cuda/native_gr_postops.cu",
+        "src/kernels/cuda/native_qsa.cu",
+        "src/kernels/cuda/qsa_decode_attn.cu",
+        "src/kernels/cuda/verify_kernels.cu"
+      ]
+    },
+    {
+      "id": "14",
+      "name": "side-mixer",
+      "summary": "`STRATA_SIDE_MIXER=1/2`: the mixer's work that reads only the layer's input (GDN gates, the QSA indexer chain, with `=2` also z and the q chain) on branches of the window graph; bitwise. Turns `STRATA_DF_BRANCH` off when set.",
+      "switch": "`STRATA_SIDE_MIXER=1|2` (off)",
+      "origin": "upstream PR #1889 (KarlGrier)",
+      "upstream_status": "PR open; not in 0.1.43",
+      "measured": "`=2`: +0.9% against DF_BRANCH on the 131k forced bench (11-12 Oct). Daily default since 12 Oct.",
+      "notes": "Ported without PR #1437's sm_75 table: the branches' MMVQ_IL calls use 0.1.43's signature and interleave only for 2+ columns. 0.1.43's `STRATA_FUSE_CONVAB` (HIP) is forced off when a/b run on a branch.",
+      "docs": "docs/UPSYNC.md",
+      "patch": "14-side-mixer.patch",
+      "commit": "de6dde9984ca05e5b96674221fa5f15e9cda571f",
+      "title": "FABLE-STRATA-Porta su 0.1.43 STRATA_SIDE_MIXER=1/2 (PR #1889): il lavoro del mixer che legge solo l'input su rami del grafo",
+      "anchors": [
+        {
+          "block": "14-1",
+          "file": "include/strata/core/verify.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "    cudaEvent_t df_join_[2] = {};",
+            "    cudaGraphExec_t exec_[9] = {};",
+            "    cudaGraphExec_t exec_nr_[9] = {};   // #871: the doorbell variant of a stage that is all-resident otherwise"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "14-2",
+          "file": "src/core/verify.cpp",
+          "symbol": "inline bool g_qfuse_hc() {",
+          "anchor": [
+            "inline bool g_qfuse() { static const bool on = [] { const char* v = std::getenv(\"STRATA_QFUSE\"); return v != nullptr && std::atoi(v) != 0; }(); return on; }",
+            "#define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, \"verify dbg: \" __VA_ARGS__); std::fflush(stderr); } } while (0)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "14-3",
+          "file": "src/core/verify.cpp",
+          "symbol": "Verifier::~Verifier() {",
+          "anchor": [
+            "    if (cs_ && cs_ != ext_stream_) cudaStreamDestroy(cs_);   // set_stream: the stage's stream, shared, not ours",
+            "    if (sh_cs_) cudaStreamDestroy(sh_cs_);",
+            "    if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "14-4",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&",
+          "anchor": [
+            "#else",
+            "        df_branch_ = v != nullptr && std::atoi(v) != 0;",
+            "#endif"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "14-5",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&",
+          "anchor": [
+            "            all_resident_ = all_ok;",
+            "        }",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "14-6",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "    // Pipelined windows must wait for the host verdict/snapshot fence before mutating state.",
+            "    const bool self_commit = T == 1 && !always_publish_ && !batch_rec_ && !g_qfuse() && one_token_self_commit();   // see Verifier::commit",
+            "    static const bool dec_batch = [] { const char* v = std::getenv(\"STRATA_DEC_BATCH\"); return v == nullptr || std::atoi(v) != 0; }();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "14-7",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "    // makes side i depend on everything captured on `cs` so far, join(i) makes `cs` depend on everything captured on",
+            "    // side i: a branch never races with what came before its fork or after its join.  Not in a split or batch window,",
+            "    // nor under the stage profiler (whose stamps are on `cs`)."
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "14-8",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                float* hb = h_L_ + (size_t) gi * MT * C;",
+            "                float* gate = gate_L_ + (size_t) gi * MT * HV;",
+            "                float* beta = beta_L_ + (size_t) gi * MT * HV;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "14-9",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                    native_mmvq(wg->native_type, wg->native_data, xq_, z_ + (size_t) tb * ZV, (int) N, (int) ZV, n,",
+            "                                df_side_[1]);",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "14-10",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                    join(0);",
+            "                    join(1);",
+            "                } else {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "14-11",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                                              IQ * ID, N, IQ * ID, n, df_side_[1]);",
+            "                    norm_rope_on(qidx_ + tb * IQ * ID, wiqn, (int) (n * IQ), (int) ID, pos_i + tb * IQ, df_side_[1]);",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "14-12",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                    fwht256_inplace_cuda(vcur_ + tb * NKV * HD, (int64_t) n * NKV, cs);",
+            "                }",
+            "                stamp(l, 8, grp);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "14-13",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                        kv_append_step(st.k_pool, st.v_pool, st.page_table, step_t, kcur_ + t * NKV * HD,",
+            "                                       vcur_ + t * NKV * HD, s, cs, &st.host);",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "14-14",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {",
+          "anchor": [
+            "                                              attn_ + t * NH * HD, 1, cs);",
+            "                    }",
+            "                } else {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        }
+      ],
+      "files": [
+        "include/strata/core/verify.hpp",
+        "src/core/verify.cpp"
+      ]
+    },
+    {
+      "id": "15",
+      "name": "ple-direct",
+      "summary": "The PLE table stays in direct I/O even when the start-up probe measures the disk slow (0.1.42+ switches to mmap under 15 000 rows/s); PLE diagnostics for prefill (mean/max/reads over 100 ms, waiting chunks) and decode (`STRATA_DECODE_TIMING`).",
+      "switch": "default direct; `STRATA_PLE_AUTO_MMAP=1` restores upstream's switch to mmap",
+      "origin": "fork",
+      "upstream_status": "never proposed",
+      "measured": "PLE on a cold SATA SSD: 131k prefill 260 s (mmap) -> 75 s (direct), decode +3.9%. The probe read 1 259 rows/s; direct I/O with `--ple-inflight` reads and chunk read-ahead hides it.",
+      "forces": "`--ple-io` auto no longer switches to mmap",
+      "docs": "docs/UPSYNC.md",
+      "patch": "15-ple-direct.patch",
+      "commit": "bca52780555c6ceea09ea31d9285828401e54f0d",
+      "title": "FABLE-STRATA-Porta su 0.1.43 la PLE in lettura diretta anche con la sonda lenta (STRATA_PLE_AUTO_MMAP=1 per il passaggio a mmap) e la diagnostica PLE di prefill e decode",
+      "anchors": [
+        {
+          "block": "15-1",
+          "file": "include/strata/core/verify.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    /// the pool never plans a PCIe share (--pcie-frac 0): the window skips that path.  Before the first run.",
+            "",
+            "    double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "15-2",
+          "file": "include/strata/ngram/ple_reader.hpp",
+          "symbol": "struct ReaderStats {",
+          "anchor": [
+            "    double wait_us = 0;           ///< time `collect` spent blocked",
+            "    double submit_us = 0;         ///< time spent inside the read submission call (non-zero = it blocks)",
+            "    double read_us_sum = 0;       ///< sum of per-read latencies (issue to completion)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "15-3",
+          "file": "src/core/verify.cpp",
+          "symbol": "constexpr float EPS = 1e-6f;",
+          "anchor": [
+            "using Clock = std::chrono::steady_clock;",
+            "double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }",
+            "const bool g_dbg = std::getenv(\"STRATA_VERIFY_DEBUG\") != nullptr;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "15-4",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,",
+          "anchor": [
+            "            _mm_sfence();",
+            "            *flag = 1;",
+            "            ms_host += ms_since(tp);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "15-5",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,",
+          "anchor": [
+            "            std::atomic_thread_fence(std::memory_order_seq_cst);",
+            "            _mm_sfence();",
+            "            ms_host += ms_since(tp);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "15-6",
+          "file": "src/core/verify.cpp",
+          "symbol": "int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la",
+          "anchor": [
+            "        std::atomic_thread_fence(std::memory_order_seq_cst);",
+            "        _mm_sfence();",
+            "        ms_host += ms_since(tp);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "15-7",
+          "file": "src/kernels/ngram.cpp",
+          "symbol": "void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_del",
+          "anchor": [
+            "std::string PleTable::io_report() const {",
+            "    if (impl_->mode != PleIo::Direct || !impl_->reader.is_open()) return {};",
+            "    const strata::ngram::ReaderStats s = impl_->reader.snapshot();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "15-8",
+          "file": "src/kernels/ngram.cpp",
+          "symbol": "std::string PleTable::io_report() const {",
+          "anchor": [
+            "                  (unsigned long long) s.reads, (double) s.bytes / 1e6, s.percentile(0.5), s.percentile(0.99),",
+            "                  s.wait_us / 1000.0, s.submit_us / 1000.0, (unsigned long long) impl_->reader.cache_size(),",
+            "                  (unsigned long long) impl_->reader.cache_capacity());"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "15-9",
+          "file": "src/ngram/ple_reader.cpp",
+          "symbol": "struct PleReader::Impl {",
+          "anchor": [
+            "",
+            "    void record_latency(double us) {",
+            "        stats.read_us_sum += us;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "15-10",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                });",
+            "            }",
+            "            ple_buf ^= 1;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "15-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        }",
+            "        // Recommend, never force: when the default direct reads measure slow, switch to the mapped reads (40-100x",
+            "        // faster on the reporters' drives); an explicit --ple-io direct is kept and only warned about."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "15-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    std::fprintf(stderr, \"strata generate: WARNING: --ple-io direct measures slow here (%.0f rows/s, about %.0f \"",
+            "                                         \"MB/s of random 4 KiB reads): a prompt can spend minutes reading layer 1 and trip the \"",
+            "                                         \"stall watchdog (#1425, #1629). --ple-io mmap was 40-100x faster on such drives; \""
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "15-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            const Clock::time_point d0 = Clock::now();",
+            "            // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)",
+            "            static const bool dec_timing = std::getenv(\"STRATA_DECODE_TIMING\") != nullptr;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "15-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    if (st == 0) std::fprintf(stderr, \"strata decode GPU stages (ms/window):%s\\n\", pr.c_str());   // text as before",
+            "                    else std::fprintf(stderr, \"strata decode GPU stages, stage %d (ms/window):%s\\n\", st, pr.c_str());",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        }
+      ],
+      "files": [
+        "include/strata/core/verify.hpp",
+        "include/strata/ngram/ple_reader.hpp",
+        "src/core/verify.cpp",
+        "src/kernels/ngram.cpp",
+        "src/ngram/ple_reader.cpp",
+        "src/prefill/prefill.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "16",
+      "name": "prefill-sm75",
+      "summary": "The Daily's prefill on Turing: `STRATA_SELECT_SIMT` on by default below sm_80 (FP32 tiled QSA block scores), dequant of the projections with 16-byte stores, and the hyper-connection projections plus ssm_alpha/beta on FP16 tensor cores (`hc16`; weights re-encoded once, activations in FP16: not bitwise with BF16, like the Daily).",
+      "switch": "`STRATA_SELECT_SIMT=0`, `STRATA_TC_SM75=0` turn them off (sm_75 only)",
+      "origin": "fork (SIMT scores from PR #1091 konijiwa110, merged upstream opt-in)",
+      "upstream_status": "SIMT: upstream merged opt-in; 16-byte dequant and hc16: never proposed (upstream's `STRATA_BF16_TC` stays off on sm_75)",
+      "measured": "131k prefill 100 -> 75 s on the 2080 Ti stage (with patch 15: 75.4 s against the Daily's 74.9). In the old Daily hc16 removed 19.5% of the prompt's GPU time (BF16 GEMM in FFMA below sm_80).",
+      "forces": "SELECT_SIMT default on below sm_80",
+      "docs": "docs/UPSYNC.md",
+      "patch": "16-prefill-sm75.patch",
+      "commit": "ffc44f84c3d61b13e9660ab18350058c8909fa63",
+      "title": "FABLE-STRATA-Porta su 0.1.43 il prefill del Daily su sm_75: STRATA_SELECT_SIMT di default sotto sm_80, dequant con store da 16 B e hc16 sui tensor core FP16 (STRATA_TC_SM75=0 li spegne)",
+      "anchors": [
+        {
+          "block": "16-1",
+          "file": "include/strata/core/tc_sm75.hpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "16-2",
+          "file": "include/strata/kernels/qsa_select.hpp",
+          "symbol": "void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx",
+          "anchor": [
+            "/// The same scores on tensor cores (3xTF32, FP32-level accuracy but another summation order: not bitwise; the tail",
+            "/// block n_bid is the warp kernel's arithmetic). For the prompt path; false (nothing launched) on another geometry.",
+            "/// On AMD it is the gfx12 (RDNA4) WMMA kernel (a three-way bf16 split, six products); false on any other AMD target."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-3",
+          "file": "include/strata/prefill/kernels.hpp",
+          "symbol": "namespace strata::prefill {",
+          "anchor": [
+            "// ---- hyper-connection (n_embd 2560, hc 4, hc_lr 320)",
+            "/// xn[t, c*2560 + d] = R[t,c,d] * rsqrt(mean_d R[t,c,:]^2 + eps) * w_norm[c*2560 + d]; also its BF16 image.",
+            "/// `xn16_lo` (null: none) takes bf16(x - xn16): W.xn16 + W.xn16_lo is the product with ~16 mantissa bits of x."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-4",
+          "file": "include/strata/prefill/kernels.hpp",
+          "symbol": "bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const",
+          "anchor": [
+            "              float* mixed, uint16_t* mixed16, uint16_t* mixed_h, int64_t T, void* stream);",
+            "void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,",
+            "                      float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "16-5",
+          "file": "include/strata/prefill/kernels.hpp",
+          "symbol": "void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in",
+          "anchor": [
+            "/// fp32 -> fp16 bits and fp32 -> bf16, n elements (the two activation images of the prompt GEMMs).",
+            "void to_f16(const float* x, uint16_t* y, int64_t n, void* stream);",
+            "void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo = nullptr);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "16-6",
+          "file": "src/kernels/cuda/dequant_bf16.cu",
+          "symbol": "(file scope)",
+          "anchor": [
+            "// Arithmetic transcribed from ggml/src/ggml-quants.c at the pinned llama.cpp (MIT License, Copyright (c) 2023-2026",
+            "// The ggml authors): dequantize_row_q2_0/q4_0/q5_0/q8_0/q3_K/q4_K/q5_K/q6_K/iq4_nl/iq4_xs.",
+            "#include \"strata/kernels/dequant_bf16.hpp\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-7",
+          "file": "src/kernels/cuda/dequant_bf16.cu",
+          "symbol": "__device__ __forceinline__ void group32(const uint8_t* row_blocks, int gi_in_row",
+          "anchor": [
+            "    }",
+            "}"
+          ],
+          "status_in_base": "ambiguous",
+          "hunk": 2
+        },
+        {
+          "block": "16-8",
+          "file": "src/kernels/cuda/dequant_bf16.cu",
+          "symbol": "void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co",
+          "anchor": [
+            "        if (e != cudaSuccess) { std::fprintf(stderr, \"dequant launch: %s\\n\", cudaGetErrorString(e)); std::exit(1); }",
+            "        return;",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "16-9",
+          "file": "src/kernels/cuda/qsa_select.cu",
+          "symbol": "bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_",
+          "anchor": [
+            "            cc_major[dev] = w && (!std::strcmp(w, \"1\") || !std::strcmp(w, \"select\")) ? 7 : strata::cc_major_of(major);",
+            "        }",
+            "        if (cc_major[dev] < 8) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-10",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "unsigned blocks_for(int64_t n, int t = 256) { return (unsigned) ((n + t - 1) / t",
+          "anchor": [
+            "",
+            "// ---------------------------------------------------------------- hyper-connection",
+            "__global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restrict__ w, float eps,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-11",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restr",
+          "anchor": [
+            "        const uint16_t h = act16(v);",
+            "        xn16[row * N + d] = h;",
+            "        if (xn16_lo) xn16_lo[row * N + d] = bf_lo(v, h);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "16-12",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __re",
+          "anchor": [
+            "        const uint16_t h = act16(v);",
+            "        xn16[xo + d] = h;",
+            "        if (xn16_lo) xn16_lo[xo + d] = bf_lo(v, h);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "16-13",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict",
+          "anchor": [
+            "                                                               const float* __restrict__ inj, int64_t inj_ld,",
+            "                                                               const float* __restrict__ w, float eps,",
+            "                                                               float* __restrict__ rs_out, uint16_t* __restrict__ xn16,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "16-14",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict",
+          "anchor": [
+            "        const uint16_t h = act16(x);",
+            "        xn16[xo + d] = h;",
+            "        if (xn16_lo) xn16_lo[xo + d] = bf_lo(x, h);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "16-15",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(",
+          "anchor": [
+            "    float* __restrict__ R, const float* __restrict__ bo, const float* __restrict__ inj, int64_t inj_ld,",
+            "    const float* __restrict__ v_l, const float* __restrict__ s_l, const int* __restrict__ on, int mode,",
+            "    const float* __restrict__ w, float eps, float* __restrict__ rs_out, uint16_t* __restrict__ xn16,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "16-16",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(",
+          "anchor": [
+            "        const uint16_t h = act16(y);",
+            "        xn16[t * ldx + (int64_t) c * N + d] = h;",
+            "        if (xn16_lo) xn16_lo[t * ldx + (int64_t) c * N + d] = bf_lo(y, h);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "16-17",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void gr_silu_kernel(const float* __restrict__ lo, uint16_t* __restric",
+          "anchor": [
+            "    const uint16_t h = act16(v);",
+            "    lo16[i] = h;",
+            "    if (lo16_lo) lo16_lo[i] = bf_lo(v, h);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "16-18",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "__global__ void to_f16_kernel(const float* __restrict__ x, uint16_t* __restrict_",
+          "anchor": [
+            "    for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (int64_t) gridDim.x * blockDim.x)",
+            "        y[i] = hf(x[i]);",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "16-19",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo",
+          "anchor": [
+            "    check(\"to_bf16\");",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "16-20",
+          "file": "src/prefill/kernels.cu",
+          "symbol": "bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const",
+          "anchor": [
+            "#endif",
+            "}",
+            "void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "16-21",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include \"strata/platform/aux_cpus.hpp\"",
+            "",
+            "#include \"strata/core/layout.hpp\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-22",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "inline bool hcd_exact() {",
+          "anchor": [
+            "    return v;",
+            "}",
+            "inline bool hc_pad() { return pf_hcdown() || hcd_exact(); }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "16-23",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "struct Prefill::Impl {",
+          "anchor": [
+            "    float *emb = nullptr, *R = nullptr, *xn = nullptr, *lo = nullptr, *gated = nullptr, *inj = nullptr;",
+            "    float* grs = nullptr;                    // F-1: the hyper-connection read's row scales (T x 4)",
+            "    uint16_t *xn16 = nullptr, *lo16 = nullptr;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "16-24",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::carve(size_t T, void* alloc) {",
+          "anchor": [
+            "    m.xn = gr_unfused() ? o.take<float>(T * D, ok) : nullptr;   // F-1: not needed (gr_mix_r reads R)",
+            "    m.grs = o.take<float>(T * HC, ok);",
+            "    m.xn16 = o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok); m.lo = o.take<float>(T * LR, ok); m.lo16 = o.take<uint16_t>(T * LR, ok);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "16-25",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t",
+          "anchor": [
+            "        proj(hn, hn16, w_fh, h2, nb * g.hc, Nn, Nn, 1);   // every stream through fc_hidden",
+            "        strata::kernels::add_streams_broadcast(h2, e2, Rm, Nn, (int) g.hc, (int) nb, m.cs);",
+            "        // the attention hyper-connection's read (its mixed input only: this pass writes nothing back)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "16-26",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se",
+          "anchor": [
+            "        f(T * N); f(T * D); f(T * D);",
+            "    }",
+            "    o.take<uint16_t>(T * (D + (hc_pad() ? XN_PAD : 0)), ok); f(T * LR); o.take<uint16_t>(T * LR, ok);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "16-27",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y,",
+          "anchor": [
+            "    if (X_lo) gm.bf16(X_lo, (const uint16_t*) w->data, Y, T, w->ne1 > 0 ? w->ne1 : 1, w->ne0, ldy, 1.0f);",
+            "    return true;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "16-28",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                                      *wu = need(v, su.c_str(), err), *wi = need(v, si.c_str(), err);",
+            "                if (!wn || !wd || !wu || !wi) return false;",
+            "                pt.mark(kPfHc, cs);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "16-29",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                    }",
+            "                    hcd = true;",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "16-30",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                                           m.mixed, m.mixed_bf, m.mixed_h, T, m.cs);",
+            "                    }",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "16-31",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                    float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;",
+            "                    if (!native_proj(m.gemm, wqkv, m.mixed_h, m.qkv, T, v.name(\"attn_qkv.weight\"), err)) return false;",
+            "                    if (!native_proj(m.gemm, wg, m.mixed_h, m.z, T, v.name(\"attn_gate.weight\"), err)) return false;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "16-32",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                        // C-1: the grid reaches the batch's last query's n_bid (they rise with the position)",
+            "                        const int64_t active = (int64_t) m.steps_host[(size_t) ((t0 + nb - 1) * strata::kernels::kStepCount +",
+            "                                                                                strata::kernels::kStepNBid)] + 1;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "16-33",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                        gr_norm_rs(Rc, (const float*) wnn->data, EPS, rc, xc, T, m.cs, nullptr, D);",
+            "                        gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,",
+            "                                              strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        },
+        {
+          "block": "16-34",
+          "file": "src/prefill/prefill.cpp",
+          "symbol": "bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri",
+          "anchor": [
+            "                    } else",
+            "                    gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,",
+            "                                          strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs, m.xn16,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 14
+        },
+        {
+          "block": "16-35",
+          "file": "src/program/generate.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include \"strata/core/progress.hpp\"",
+            "#include \"strata/core/device.hpp\"",
+            "#include \"strata/core/emulate.hpp\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-36",
+          "file": "src/program/generate.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include <set>",
+            "#include <vector>"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "16-37",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        const int64_t pf = search && split_own_auto && !place_with_reserve ? 0 : split_pf_mib;",
+            "        const int64_t base_reserve =",
+            "            later && o.vram_reserve_later_mib >= 0 ? o.vram_reserve_later_mib : o.vram_reserve_mib;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "16-38",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        if (stages.empty())",
+            "            for (const auto& d : slot_mtp)",
+            "                mtp_bind += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "16-39",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        size_t free_b = 0, total_b = 0;",
+            "        free_b = strata::core::device_free_bytes(); (void) total_b;",
+            "        const int64_t prefill_mib = owned_prefill_mib();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "16-40",
+          "file": "sycl/src/prefill/kernels.dp.cpp",
+          "symbol": "void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo",
+          "anchor": [
+            "}",
+            "",
+            "void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "16-41",
+          "file": "sycl/src/prefill/kernels.dp.cpp",
+          "symbol": "void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t",
+          "anchor": [
+            "    check(\"gr_norm\");",
+            "}",
+            "void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "16-42",
+          "file": "sycl/src/prefill/kernels.dp.cpp",
+          "symbol": "bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const",
+          "anchor": [
+            "#endif",
+            "}",
+            "void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "16-43",
+          "file": "sycl/src/prefill/kernels.dp.cpp",
+          "symbol": "void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_l",
+          "anchor": [
+            "}",
+            "void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* v_l,",
+            "                           const float* s_l, const int* on, int mode, const float* w_norm_next, float eps, float* rs,"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "16-44",
+          "file": "sycl/src/prefill/kernels.dp.cpp",
+          "symbol": "void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t",
+          "anchor": [
+            "    }",
+            "    check(\"gr_write_cvec_norm_rs\");",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        }
+      ],
+      "files": [
+        "include/strata/core/tc_sm75.hpp",
+        "include/strata/kernels/qsa_select.hpp",
+        "include/strata/prefill/kernels.hpp",
+        "src/kernels/cuda/dequant_bf16.cu",
+        "src/kernels/cuda/qsa_select.cu",
+        "src/prefill/kernels.cu",
+        "src/prefill/prefill.cpp",
+        "src/program/generate.cpp",
+        "sycl/src/prefill/kernels.dp.cpp"
+      ]
+    },
+    {
+      "id": "17",
+      "name": "ram-core",
+      "summary": "A fixed core of expert slots per card, excluded from swaps, loans and shrink, whose RAM copy is given back (the resident arena no longer mirrors experts that never leave VRAM).",
+      "switch": "`STRATA_RAM_CORE=1` (off), `STRATA_RAM_CORE_SLOTS_DEV<n>=<slots>`",
+      "origin": "fork",
+      "upstream_status": "never proposed",
+      "measured": "`STRATA_RAM_CORE_SLOTS_DEV1=5500`: arena 39.97 -> 29.62 GiB (-10.35), working set 48.7 -> 33.6 GB, t/s +0.1%, hit rate unchanged, 0 re-reads from file. Daily default since 12 Oct.",
+      "notes": "Adjacency conflict in generate.cpp with 0.1.43's `STRATA_ADAPT_OVERLAP` ordering of the swaps: both kept.",
+      "docs": "docs/RAM_CORE.md",
+      "patch": "17-ram-core.patch",
+      "commit": "bdb426a7c6647e1579211cf676a9e6eb7140241a",
+      "title": "FABLE-STRATA-Porta su 0.1.43 il nucleo fisso per scheda senza copia RAM (STRATA_RAM_CORE=1, STRATA_RAM_CORE_SLOTS_DEV<n>)",
+      "anchors": [
+        {
+          "block": "17-1",
+          "file": "docs/RAM_CORE.md",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "17-2",
+          "file": "include/strata/core/expert_source.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "// Phase 3's cache fills and the CPU/PCIe miss split - but registration is best-effort and reported, not assumed.",
+            "class ArenaExpertSource : public ExpertSource {",
+            "public:"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "17-3",
+          "file": "include/strata/core/expert_source.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    double load_read_seconds() const { return load_read_s_; }",
+            "    double load_copy_seconds() const { return load_copy_s_; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "17-4",
+          "file": "src/core/expert_source.cpp",
+          "symbol": "LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:",
+          "anchor": [
+            "    return st;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "17-5",
+          "file": "src/core/expert_source.cpp",
+          "symbol": "bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6",
+          "anchor": [
+            "    arena_ = a;",
+            "    base_ = a->data();",
+            "    pinned_bytes_ = a->registered_bytes;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "17-6",
+          "file": "src/core/expert_source.cpp",
+          "symbol": "void ArenaExpertSource::close() {",
+          "anchor": [
+            "    map_ = nullptr;",
+            "    map_bytes_ = 0;",
+            "    inputs_.clear();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "17-7",
+          "file": "src/core/expert_source.cpp",
+          "symbol": "void ArenaExpertSource::close() {",
+          "anchor": [
+            "    base_ = nullptr;",
+            "    blobs_ = 0;",
+            "    n_expert_ = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "17-8",
+          "file": "src/core/expert_source.cpp",
+          "symbol": "const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {",
+          "anchor": [
+            "    const int64_t idx = layer * n_expert_ + expert;",
+            "    if (idx < 0 || idx >= blobs_) return nullptr;",
+            "    ++reads_;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "17-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    // fork (Daily 12a6f553): beside the pipeline the prompt path may borrow the core too - nothing decodes while a prompt",
+            "    // is read, and the lent slots are refilled before the decode as the tail's are (with only the 1.5 GiB tail lent the",
+            "    // 131k prompt read fell from ~85 s to 134 s)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "17-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            int32_t first_now = -1;        // where its buffers are laid out now",
+            "            int64_t lent_chunk = 0;",
+            "            std::vector<std::pair<int32_t, int32_t>> lent;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "17-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // keeps the pinned-share rule.  STRATA_SPLIT_RING=N: N slots on a split; 0: the pinned-share rule.",
+            "        // (decided above, before the lend regions were sized: a no-op here unless the resident RAM mode skipped it)",
+            "        decide_split_ring();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "17-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}});",
+            "            for (auto& st : stages)",
+            "                pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "17-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {",
+            "                const int64_t k = part_slots(p, c);",
+            "                if (p.cache == &xcache && k > xcache.slots() - el_lend_floor) return false;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "17-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                                                  kAutoLendPct * p.cache->slots() / 100));",
+            "                    // --elastic: the two-zone cache lends only its tail (fits_one refuses the core as well)",
+            "                    if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_lend_floor));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "17-15",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last",
+            "        // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for",
+            "        // the widest window; a request without penalties gets a null buffer and takes the byte-for-byte"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "17-16",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }",
+            "                    // --elastic: the core never leaves - unless core_adapt; beside the pipeline el_core counts CUDA0's",
+            "                    // slots and a later stage's layers hold slots of their own cache"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "17-17",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                agate.has.assign((size_t) g.n_layers, 0);",
+            "                for (const Swap& s : swaps) agate.has[(size_t) s.layer] = 1;",
+            "            }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "17-18",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        static const bool el_trace = std::getenv(\"STRATA_ELASTIC_TRACE\") != nullptr;",
+            "        const int64_t el_step_max = 512ll << 20;   // at most this much per growth step (its copies are async)",
+            "        const int64_t el_shrink_step = std::max<int64_t>(64ll << 20, (int64_t) o.elastic_shrink_step_mib << 20);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "17-19",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            int64_t c = el_chunk_max;",
+            "            const int64_t k = plan_lend(c);",
+            "            if (k <= 0 || c > el_chunk_max) return;   // nothing fits (not above el_min_slots): keep the plan"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "17-20",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            for (int64_t l = 0; l < g.n_layers; ++l)",
+            "                for (int32_t ex = 0; ex < (int32_t) g.n_expert && el_layer(l); ++ex) {",
+            "                    const size_t i = (size_t) (l * g.n_expert + ex);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "17-21",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                const int32_t* r = a_res.data() + l * g.n_expert;",
+            "                for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {",
+            "                    if (r[e] < 0) { if (u[e] >= 2.0f && !helper_holds(l, e)) cand.emplace_back(u[e], e); }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        },
+        {
+          "block": "17-22",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            std::fprintf(stderr, \"strata trace: %s %lld %lld\\n\", what, a, b);",
+            "            std::fflush(stderr);",
+            "        };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 14
+        },
+        {
+          "block": "17-23",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            const int64_t want_free = (int64_t) reserve << 20, mapped = xcache.mapped_bytes();",
+            "            const int64_t before = xcache.slots();",
+            "            // what stays at least: the prompt path's smallest loan (256 tokens) and the 128 slots it must leave"
+          ],
+          "status_in_base": "unique",
+          "hunk": 15
+        },
+        {
+          "block": "17-24",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,",
+            "                        (long long) req_offload, chain_txt);",
+            "            std::fflush(stdout);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 16
+        }
+      ],
+      "files": [
+        "docs/RAM_CORE.md",
+        "include/strata/core/expert_source.hpp",
+        "src/core/expert_source.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "18",
+      "name": "qsa-rows",
+      "summary": "QSA decode block scores with the queries in registers and the four heads reduced in six shuffles (T <= 4), bitwise; `qsa_rows_bench` (cost per window row of the QSA decode kernels).",
+      "switch": "`STRATA_QSA_ROWS=1` (off)",
+      "origin": "fork",
+      "upstream_status": "PR branch prepared (`pr/qsa-rows-scores`, one commit on v0.1.43); not yet opened",
+      "measured": "Kernel 101 -> 55 us a call at T=4 on the 2080 Ti; engine B-A-B +3.2 / +0.1% (about +1-1.5%). Daily default since 12 Oct.",
+      "docs": "docs/QSAROWS.md",
+      "patch": "18-qsa-rows.patch",
+      "commit": "390441947ad2972bf2b876023fd1e6095a067e96",
+      "title": "FABLE-STRATA-Porta su 0.1.43 STRATA_QSA_ROWS=1: punteggi dell'indicizzatore QSA con le query in registri e le 4 teste ridotte in 6 shuffle (stessi bit) e qsa_rows_bench",
+      "anchors": [
+        {
+          "block": "18-1",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)",
+          "anchor": [
+            "    target_include_directories(chain_step_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})",
+            "    target_link_libraries(chain_step_bench PRIVATE strata_kernels CUDA::cudart)",
+            "  endif()"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "18-2",
+          "file": "docs/QSAROWS.md",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "18-3",
+          "file": "docs/qsa_rows_bench_2026-10-12.txt",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "18-4",
+          "file": "docs/qsa_rows_bench_rows_2026-10-12.txt",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "18-5",
+          "file": "include/strata/kernels/qsa_select.hpp",
+          "symbol": "void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx",
+          "anchor": [
+            "                      int64_t active_blocks = -1);   ///< perf-review C-1: > 0 launches only this many blocks (the",
+            "                                                     ///< batch's largest n_bid + 1; not for a captured graph)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "18-6",
+          "file": "src/kernels/cuda/qsa_select.cu",
+          "symbol": "__global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(co",
+          "anchor": [
+            "#if !defined(__HIPCC__)",
+            "// ---- the decode top-k on a thread-block cluster (sm_90+; S19).  One CTA per query (block_topk_reg_kernel, or",
+            "// block_topk_kernel above 33,792 blocks: a --max-context over ~135K) makes four radix passes and two scans over up to"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "18-7",
+          "file": "src/kernels/cuda/qsa_select.cu",
+          "symbol": "void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx",
+          "anchor": [
+            "    // a block past a query's n_bid returns at once: the grid need only reach the batch's largest n_bid (C-1)",
+            "    static const bool multi = [] { const char* v = std::getenv(\"STRATA_SCORES_MULTI\"); return v == nullptr || std::atoi(v) != 0; }();",
+            "    if (multi && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "18-8",
+          "file": "src/kernels/cuda/qsa_select.cu",
+          "symbol": "void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx",
+          "anchor": [
+            "    if (e != cudaSuccess) { std::fprintf(stderr, \"qsa_block_scores: %s\\n\", cudaGetErrorString(e)); std::exit(1); }",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "18-9",
+          "file": "src/kernels/qsa_rows_bench.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        }
+      ],
+      "files": [
+        "CMakeLists.txt",
+        "docs/QSAROWS.md",
+        "docs/qsa_rows_bench_2026-10-12.txt",
+        "docs/qsa_rows_bench_rows_2026-10-12.txt",
+        "include/strata/kernels/qsa_select.hpp",
+        "src/kernels/cuda/qsa_select.cu",
+        "src/kernels/qsa_rows_bench.cpp"
+      ]
+    },
+    {
+      "id": "19",
+      "name": "expdec",
+      "summary": "Routed experts' gate/up in the verify window with the group's activations in shared memory and R rows per lane (the down behind `STRATA_EXPDEC_DOWN=1`), bitwise; `expdec_bench`.",
+      "switch": "`STRATA_EXPDEC=1` (off); `STRATA_EXPDEC_DOWN`, `_R`, `_DR`, `_MINB`, `_D20`, `_RB`, `_DRB` knobs",
+      "origin": "fork",
+      "upstream_status": "PR branch prepared (`pr/verify-expdec`, one commit on v0.1.43); not yet opened",
+      "measured": "gate/up kernel -11/-23% at T 1-4 on the 2080 Ti; engine B-A-B +1.1% (B +0.0/+2.1). Daily default since 12 Oct. The Q2_0 down with EXPDEC was ~10% slower in the engine: off by default.",
+      "docs": "docs/EXPERTDEC.md",
+      "patch": "19-expdec.patch",
+      "commit": "74c55d543c74e09b52c59620b237971513c8a5ce",
+      "title": "FABLE-STRATA-Porta su 0.1.43 EXPDEC: attivazioni del gruppo in shared e R righe per lane per gli esperti VRAM (STRATA_EXPDEC=1, down dietro STRATA_EXPDEC_DOWN=1) e expdec_bench",
+      "anchors": [
+        {
+          "block": "19-1",
+          "file": "CMakeLists.txt",
+          "symbol": "if(STRATA_NATIVE_EXPERTS)",
+          "anchor": [
+            "    add_executable(native_expert_bench src/kernels/native_expert_bench.cpp)",
+            "    target_include_directories(native_expert_bench PRIVATE ${_strata_gpu_include_directories})",
+            "    target_link_libraries(native_expert_bench PRIVATE strata_kernels strata_kernels_cpu strata_artifact ${_strata_gpu_runtime_target})"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "19-2",
+          "file": "docs/EXPERTDEC.md",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        },
+        {
+          "block": "19-3",
+          "file": "include/strata/kernels/iq_kernels.hpp",
+          "symbol": "void native_grouped_set_v1(bool v1);",
+          "anchor": [
+            "/// The bench only: the AMD kernel layout (STRATA_EXP_MODE values; -1 = the environment's) and the phase",
+            "/// (0 all, 1 gate/up + SwiGLU + quantize, 2 down).",
+            "void native_expert_set_mode(int mode, int phase);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "19-4",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "template<> struct Split<16> {   // IQ2_XXS",
+          "anchor": [
+            "};",
+            "// IQ2_XS and IQ2_S share the apply: two half sums, two 4-bit scales",
+            "struct SplitLs2 {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "19-5",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "struct SplitLs2 {",
+          "anchor": [
+            "};",
+            "template<> inline constexpr bool kSplit<17> = true;",
+            "template<> struct Split<17> : SplitLs2 {   // IQ2_XS"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "19-6",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "template<> inline constexpr bool kSplit<18> = true;",
+          "anchor": [
+            "template<> struct Split<18> {   // IQ3_XXS",
+            "    struct W { int g[8]; int ls; float dw; };",
+            "    template<bool STAGE_GRID = false>"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "19-7",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "template<> struct Split<18> {   // IQ3_XXS",
+          "anchor": [
+            "        const float d = r.dw * __low2float(bq8_1[iqs / 2].ds);",
+            "        return d * sumi;",
+            "    }"
+          ],
+          "status_in_base": "ambiguous",
+          "hunk": 4
+        },
+        {
+          "block": "19-8",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "template<> struct Split<21> {   // IQ3_S",
+          "anchor": [
+            "};",
+            "template<> inline constexpr bool kSplit<29> = true;",
+            "template<> struct Split<29> {   // IQ1_M"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "19-9",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "template<> struct Split<20> {   // IQ4_NL",
+          "anchor": [
+            "        const float d = r.dw * __low2float(bq8_1->ds);",
+            "        return d * sumi;",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "19-10",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "template<> struct Split<42> {   // Q2_0",
+          "anchor": [
+            "        const float d8 = __low2float(bq8_1_chunk->ds);",
+            "        return r.d2 * d8 * sumi;",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "19-11",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "__global__ void __launch_bounds__(256) native_down_multi_kernel(const unsigned l",
+          "anchor": [
+            "// ---------------------------------------------------------------- q8_1 (quantize.cu)",
+            "// value i of a q8_1 row set (the warp holds block i / 32, lane = i % 32)",
+            "__device__ __forceinline__ void q8_1_store(const float xi, block_q8_1* __restrict__ y, const long long i) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "19-12",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "void s27_launch_ts(bool ts, const NativeExpertLayout& L, int64_t cap_groups, cud",
+          "anchor": [
+            "    else s27_launch<TG, TD, true, 4, 4, false>(L, cap_groups, s, grp_ptr, grp_start, n_groups, ent_dst, ent_tok, X, gate, up, h, hq, out, nh);",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "19-13",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "bool g_grouped_v1 = env_on(\"STRATA_GROUPED_V1\");",
+          "anchor": [
+            "",
+            "void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "19-14",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long",
+          "anchor": [
+            "    } else",
+            "#undef STRATA_GU_AMD",
+            "#endif"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "19-15",
+          "file": "src/kernels/cuda/iq_kernels.cu",
+          "symbol": "void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long",
+          "anchor": [
+            "    } else",
+            "#undef STRATA_D_AMD",
+            "#endif"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "19-16",
+          "file": "src/kernels/expdec_bench.cpp",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        }
+      ],
+      "files": [
+        "CMakeLists.txt",
+        "docs/EXPERTDEC.md",
+        "include/strata/kernels/iq_kernels.hpp",
+        "src/kernels/cuda/iq_kernels.cu",
+        "src/kernels/expdec_bench.cpp"
+      ]
+    }
+  ]
+}

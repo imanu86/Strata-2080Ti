@@ -1,0 +1,812 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: imanu <imanu86@gmail.com>
+Date: Mon, 12 Oct 2026 07:34:35 +0200
+Subject: [PATCH] FABLE-STRATA-Porta su 0.1.43 l'attenzione QSA del decode del
+ Daily (STRATA_ATTN_DAILY=1: chunk pre75 su ogni scheda e merge v2) col test
+ di parita
+
+Da lab/candidate2 5d3b59cb + d0b9121d. Opt-in.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index eeb268b2..00d813b5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -409,6 +409,17 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+     target_link_libraries(qsa_topk_active_parity PRIVATE strata_kernels CUDA::cudart)
+     add_test(NAME qsa_topk_active_parity COMMAND qsa_topk_active_parity)
+     set_tests_properties(qsa_topk_active_parity PROPERTIES SKIP_RETURN_CODE 77)
++    # fork: the Daily's decode attention (STRATA_ATTN_DAILY=1: PR #540's chunk kernel on every card and the bounded
++    # merge) against upstream's kernels, bitwise; the production entries checked with the variable off and on
++    add_executable(qsa_merge_daily_parity src/kernels/qsa_merge_daily_parity.cpp)
++    target_include_directories(qsa_merge_daily_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
++    target_link_libraries(qsa_merge_daily_parity PRIVATE strata_kernels CUDA::cudart)
++    add_test(NAME qsa_merge_daily_parity_default COMMAND qsa_merge_daily_parity)
++    add_test(NAME qsa_merge_daily_parity_daily COMMAND qsa_merge_daily_parity)
++    set_tests_properties(qsa_merge_daily_parity_default PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=0"
++                         SKIP_RETURN_CODE 77)
++    set_tests_properties(qsa_merge_daily_parity_daily PROPERTIES ENVIRONMENT "STRATA_ATTN_DAILY=1"
++                         SKIP_RETURN_CODE 77)
+   endif()
+   # the QSA selection (block scores on the warp kernel and the tensor-core one, top-k): a GPU bench with a
+   # scorer-vs-scorer comparison and an FP64 accuracy gate (synthetic, no model); the ctest runs a 32K context under a
+diff --git a/include/strata/kernels/qsa_decode_attn.hpp b/include/strata/kernels/qsa_decode_attn.hpp
+index 45c0f301..c752b774 100644
+--- a/include/strata/kernels/qsa_decode_attn.hpp
++++ b/include/strata/kernels/qsa_decode_attn.hpp
+@@ -43,4 +43,16 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
+ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+                            int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);
+ 
++/// For src/kernels/qsa_merge_daily_parity.cpp only: qsa_decode_attn_batch's two passes apart, whatever the environment
++/// says.  `chunks_only` runs the chunk pass into `scratch` with `daily_chunk` 0: attn_chunk_kernel (upstream's default),
++/// 1: the Daily's (attn_chunk_kernel_pre75, what STRATA_ATTN_DAILY=1 picks on CUDA).  `merge_only` merges those
++/// partials with `v2` 0: attn_merge_kernel, 1: attn_merge_v2_kernel (STRATA_ATTN_MERGE_V2, on with STRATA_ATTN_DAILY).
++/// Width must not exceed an unaligned cap (the chunk pass keeps its upstream contract); for aligned caps the grid
++/// bounds widths above cap.  One input can go through every pair and the outputs be compared bit for bit.
++void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
++                                 int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, int daily_chunk,
++                                 void* stream);
++void qsa_decode_attn_merge_only(const int32_t* steps, int64_t cap, const QsaShapes& s, const float* scratch,
++                                float* attn, int64_t n_q, int v2, void* stream);
++
+ }  // namespace strata::kernels
+diff --git a/src/kernels/cuda/qsa_decode_attn.cu b/src/kernels/cuda/qsa_decode_attn.cu
+index 624036c6..15d88acc 100644
+--- a/src/kernels/cuda/qsa_decode_attn.cu
++++ b/src/kernels/cuda/qsa_decode_attn.cu
+@@ -286,7 +286,11 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_kernel(const float* __rest
+ // run on gfx103x (RDNA2), with 8 cells per step and the butterfly's lane exchanges in registers (DPP / permlanex16)
+ // instead of ds_bpermute: there the score loop is bound by the LDS pipe (the q reads and ds_bpermute share it), not by
+ // occupancy - 8 cells per step at 7 waves/SIMD beat 1 cell at 9.  Every other card keeps exactly the kernel above.
+-#if defined(STRATA_EXPERIMENTAL_SM60) || (defined(__HIPCC__) && !defined(STRATA_HIP_GFX906))
++// Fork (lab/upsync): built on every CUDA build too, for STRATA_ATTN_DAILY=1 (see daily_attn below).  With NC 2 and
++// no DPP it is the Daily's (be4cf1c) attn_chunk_kernel line for line - the same reduce12 scores, the same cell-major
++// probabilities and the same four-cell value fold - except that `spt` shares `sq`'s storage here (no arithmetic
++// change).  Without the variable nothing selects it on a card at or above sm_75.
++#if defined(STRATA_EXPERIMENTAL_SM60) || !defined(__HIPCC__) || !defined(STRATA_HIP_GFX906)
+ #define STRATA_ATTN_PRE75_BUILT 1
+ #endif
+ #if defined(STRATA_ATTN_PRE75_BUILT)
+@@ -544,6 +548,86 @@ __global__ void __launch_bounds__(HD) attn_merge_kernel(const float* __restrict_
+     attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;
+ }
+ 
++// attn_merge_kernel's arithmetic in the same chunk order, with two changes that leave every output bit as it was
++// (the Daily's 3effa9d5, from Hardin22; qsa_merge_daily_parity compares the two kernels on the same partials, all four
++// KV formats):
++//
++// (1) Bounded by the width.  The chunk kernel writes m = -FLT_MAX, l = 0 for every chunk with c0 >= step[kStepWidth]
++//     (its `n_here <= 0` exit) and the merge skips exactly those, so it can stop at n_act = ceil(width / CHUNK):
++//     fmaxf with -FLT_MAX never changes M, and a skipped chunk never touches L or acc.  The drafter's merge walks its
++//     whole capacity (--mtp-window 32768: 512 chunks) at every context, where a short context fills one or two.
++// (2) Loads batched.  attn_merge_kernel loads part_l / part_acc behind its `m == -FLT_MAX` branch, so the compiler
++//     issues each chunk's l and acc loads inside that chunk's branch: a few dependent L2 round trips per chunk.  Here
++//     the m, l and acc of U chunks are loaded first, guarded only by the chunk index, then consumed in chunk order.
++//     The skip is a select on the loaded m instead of a branch, so the loads cannot move back behind it.  The values
++//     selected are the very fmaf's attn_merge_kernel computes (same operands, same order), and a skipped chunk leaves
++//     L and acc as they were, as its `continue` does.
++constexpr int kMergeU = 16;
++
++template <int U, bool TAIL>
++__device__ __forceinline__ void merge_max_block(const float* __restrict__ pm, int c0, int n_act, float& M) {
++    float mm[U];
++#pragma unroll
++    for (int u = 0; u < U; ++u) mm[u] = (!TAIL || c0 + u < n_act) ? pm[(size_t) (c0 + u) * G] : -FLT_MAX;
++#pragma unroll
++    for (int u = 0; u < U; ++u)
++        if (!TAIL || c0 + u < n_act) M = fmaxf(M, mm[u]);
++}
++
++template <int U, bool TAIL>
++__device__ __forceinline__ void merge_sum_block(const float* __restrict__ pm, const float* __restrict__ pl,
++                                                const float* __restrict__ pa, int c0, int n_act, float M, float& L,
++                                                float& acc) {
++    float mm[U], ll[U], aa[U];
++#pragma unroll
++    for (int u = 0; u < U; ++u) {
++        const bool in = !TAIL || c0 + u < n_act;
++        mm[u] = in ? pm[(size_t) (c0 + u) * G] : -FLT_MAX;
++        ll[u] = in ? pl[(size_t) (c0 + u) * G] : 0.0f;
++        aa[u] = in ? pa[(size_t) (c0 + u) * G * HD] : 0.0f;
++    }
++#pragma unroll
++    for (int u = 0; u < U; ++u) {
++        const float w = __expf(mm[u] - M);
++        const float L_next = fmaf(ll[u], w, L);
++        const float acc_next = fmaf(aa[u], w, acc);
++        const bool live = !(mm[u] == -FLT_MAX);   // attn_merge_kernel: `if (m == -FLT_MAX) continue;`
++        L = live ? L_next : L;
++        acc = live ? acc_next : acc;
++    }
++}
++
++template <int U>
++__global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restrict__ part_acc,
++                                                           const float* __restrict__ part_m,
++                                                           const float* __restrict__ part_l, int n_chunks,
++                                                           const int32_t* __restrict__ steps,
++                                                           float* __restrict__ attn, long long scratch_stride = 0) {
++    part_acc += (size_t) blockIdx.y * (size_t) scratch_stride;
++    part_m += (size_t) blockIdx.y * (size_t) scratch_stride;
++    part_l += (size_t) blockIdx.y * (size_t) scratch_stride;
++    attn += (size_t) blockIdx.y * (size_t) gridDim.x * HD;
++    // the step record the chunk kernel read for this query (attn_chunk_kernel: step + blockIdx.z * kStepCount)
++    const int width = __ldg(steps + (size_t) blockIdx.y * kStepCount + kStepWidth);
++    const int n_act = width > 0 ? min(n_chunks, (width - 1) / CHUNK + 1) : 0;
++    const int h = blockIdx.x;                 // global query head
++    const int kvh = h / G, hl = h % G;
++    const int d = threadIdx.x;
++    // chunk c of this head: part_m / part_l [(kvh * n_chunks + c) * G + hl], part_acc [that * HD + d]
++    const size_t base = (size_t) kvh * (size_t) n_chunks * G + (size_t) hl;
++    const float* pm = part_m + base;
++    const float* pl = part_l + base;
++    const float* pa = part_acc + base * HD + (size_t) d;
++    const int n_full = n_act - n_act % U;
++    float M = -FLT_MAX;
++    for (int c0 = 0; c0 < n_full; c0 += U) merge_max_block<U, false>(pm, c0, n_act, M);
++    if (n_full < n_act) merge_max_block<U, true>(pm, n_full, n_act, M);
++    float L = 0.0f, acc = 0.0f;
++    for (int c0 = 0; c0 < n_full; c0 += U) merge_sum_block<U, false>(pm, pl, pa, c0, n_act, M, L, acc);
++    if (n_full < n_act) merge_sum_block<U, true>(pm, pl, pa, n_full, n_act, M, L, acc);
++    attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;
++}
++
+ #if defined(STRATA_HIP_GFX906)
+ // The compat backend can target other architectures. Check the calling thread's current device,
+ // caching only its last ordinal so a layer split or another thread cannot reuse the wrong answer.
+@@ -572,17 +656,40 @@ bool query_swizzle_gfx906_device() {
+ }
+ #endif
+ 
++// Fork (lab/upsync): STRATA_ATTN_DAILY=1 runs the Daily's (be4cf1c) decode attention on every CUDA card: the chunk
++// pass on PR #540's kernel (attn_chunk_kernel_pre75<M, 2, false>, the Daily's attn_chunk_kernel), bit for bit the
++// default kernel's partials.  CUDA only; unset or anything but "1" keeps upstream 0.1.42's kernels.
++// STRATA_ATTN_PRE75=0 still turns the chunk kernel off (A/B).
++[[maybe_unused]] bool daily_attn() {
++#if defined(__HIPCC__)
++    return false;
++#else
++    static const bool on = [] {
++        const char* v = std::getenv("STRATA_ATTN_DAILY");
++        return v != nullptr && v[0] == '1' && v[1] == '\0';
++    }();
++    return on;
++#endif
++}
++
+ #if defined(STRATA_ATTN_PRE75_BUILT)
+-// CUDA: the current device is below sm_75; HIP: it is gfx103x (per device: a layer split can mix cards).
++// CUDA: the current device is below sm_75 (experimental build) or STRATA_ATTN_DAILY=1 (any card); HIP: it is gfx103x
++// (per device: a layer split can mix cards).
+ // STRATA_ATTN_PRE75=0 turns PR #540's kernel off (A/B); on HIP =1 also runs it on another wave32 card.
+ bool pre75_attn() {
+     static const int env = [] {
+         const char* e = std::getenv("STRATA_ATTN_PRE75");
+         return e == nullptr ? -1 : e[0] == '0' ? 0 : e[0] == '1' ? 1 : -1;
+     }();
++    if (env == 0) return false;
++#if !defined(__HIPCC__) && !defined(STRATA_EXPERIMENTAL_SM60)
++    return daily_attn();   // the ready-made engine: upstream's attn_chunk_kernel unless STRATA_ATTN_DAILY=1
++#else
++#if !defined(__HIPCC__)
++    if (daily_attn()) return true;
++#endif
+     static int cc[64] = {};
+     int dev = 0;
+-    if (env == 0) return false;
+     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+ #if defined(__HIPCC__)
+     if (cc[dev] == 0) {   // 2: gfx103x, 1: another card
+@@ -603,26 +710,47 @@ bool pre75_attn() {
+     }
+     return cc[dev] < 75;
+ #endif
++#endif  // ready-made CUDA engine
+ }
++// `PRE` picks PR #540's kernel; the environment's choice is STRATA_ATTN_CHUNK.
+ #if defined(__HIPCC__)
+-#define STRATA_ATTN_CHUNK(M) (pre75_attn() ? attn_chunk_kernel_pre75<M, 8, true> : attn_chunk_kernel<M>)
++#define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M, 8, true> : attn_chunk_kernel<M>)
+ #else
+-#define STRATA_ATTN_CHUNK(M) (pre75_attn() ? attn_chunk_kernel_pre75<M> : attn_chunk_kernel<M>)
++#define STRATA_ATTN_CHUNK_SEL(M, PRE) ((PRE) ? attn_chunk_kernel_pre75<M> : attn_chunk_kernel<M>)
+ #endif
++#define STRATA_ATTN_CHUNK(M) STRATA_ATTN_CHUNK_SEL(M, pre75_attn())
+ #else
++#define STRATA_ATTN_CHUNK_SEL(M, PRE) attn_chunk_kernel<M>
+ #define STRATA_ATTN_CHUNK(M) attn_chunk_kernel<M>
+ #endif
+ 
+-}  // namespace
++// STRATA_ATTN_MERGE_V2: 1 merges with attn_merge_v2_kernel, 0 with attn_merge_kernel.  Unset it follows
++// STRATA_ATTN_DAILY (the Daily had it on by default on NVIDIA), so upstream's merger stays the default.
++int attn_merge_v2() {
++    static const int on = [] {
++        int r = daily_attn() ? 1 : 0;
++        const char* v = std::getenv("STRATA_ATTN_MERGE_V2");
++        if (v != nullptr && *v != '\0') r = std::atoi(v) != 0 ? 1 : 0;
++        return r;
++    }();
++    return on;
++}
+ 
+-void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+-                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream) {
+-    if (n_q <= 0) return;
+-    if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
+-        !pools.page_table || n_q > 65535) {
+-        std::fprintf(stderr, "qsa_decode_attn_batch: unsupported geometry or missing buffers\n");
+-        std::exit(1);
+-    }
++// the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel, 1 attn_merge_v2_kernel (bitwise the same output)
++void launch_merge(int v2, const float* part_acc, const float* part_m, const float* part_l, int n_chunks,
++                  const int32_t* steps, float* attn, long long stride, unsigned n_head, unsigned n_q, cudaStream_t st) {
++    if (v2)
++        attn_merge_v2_kernel<kMergeU><<<dim3(n_head, n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, steps,
++                                                                         attn, stride);
++    else
++        attn_merge_kernel<<<dim3(n_head, n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, attn, stride);
++}
++
++// qsa_decode_attn_batch's chunk pass: `n_q` queries' partials into `scratch` (one stride each).  `kernel` < 0 is the
++// environment's choice (lane cell, gfx906 swizzle, STRATA_ATTN_DAILY / PR #540); 0 is attn_chunk_kernel and 1 PR #540's
++// kernel where it is built (the parity harness: never the environment).
++void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
++                         int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, cudaStream_t st, int kernel) {
+     const int kv_mode = pools.k_q4 != nullptr ? 2 : (pools.k_q != nullptr && pools.v_q4 != nullptr ? 3
+                         : (pools.k_q != nullptr ? 1 : 0));
+     const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
+@@ -633,14 +761,18 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
+     float* part_l = part_m + (size_t) n_chunks * s.n_head;
+     const float scale = 1.0f / sqrtf((float) HD);
+     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv, (unsigned) n_q);
+-    cudaStream_t st = (cudaStream_t) stream;
++#if defined(STRATA_ATTN_PRE75_BUILT)
++    const bool pre = kernel < 0 ? pre75_attn() : kernel == 1;
++#endif
+     // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
+-    static const bool lane_cell = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
++    static const bool lane_cell_env = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
++    const bool lane_cell = kernel < 0 && lane_cell_env;
+ #if defined(STRATA_HIP_GFX906)
+     static const bool query_swizzle = [] {
+         const char* v = std::getenv("STRATA_GFX906_ATTN_QUERY_SWIZZLE"); return v && v[0] == '1';
+     }();
+-    const bool use_query_swizzle = query_swizzle && !lane_cell && kv_mode == 1 && query_swizzle_gfx906_device();
++    const bool use_query_swizzle = kernel < 0 && query_swizzle && !lane_cell && kv_mode == 1 &&
++                                   query_swizzle_gfx906_device();
+     static const bool query_swizzle_trace = std::getenv("STRATA_GFX906_ATTN_QUERY_SWIZZLE_TRACE") != nullptr;
+     static thread_local bool query_swizzle_said = false;
+     if (query_swizzle_trace && !query_swizzle_said) {
+@@ -688,19 +820,47 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
+     } else
+ #endif
+     if (kv_mode == 3)
+-        STRATA_ATTN_CHUNK(3)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
+-                                                        scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
++        STRATA_ATTN_CHUNK_SEL(3, pre)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv,
++                                                                (int) s.page_size, scale, part_acc, part_m, part_l,
++                                                                n_chunks, (int) cap, stride);
+     else if (kv_mode == 2)
+-        STRATA_ATTN_CHUNK(2)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
+-                                                        scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
++        STRATA_ATTN_CHUNK_SEL(2, pre)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv,
++                                                                (int) s.page_size, scale, part_acc, part_m, part_l,
++                                                                n_chunks, (int) cap, stride);
+     else if (kv_mode == 1)
+-        STRATA_ATTN_CHUNK(1)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
+-                                                        scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
++        STRATA_ATTN_CHUNK_SEL(1, pre)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv,
++                                                                (int) s.page_size, scale, part_acc, part_m, part_l,
++                                                                n_chunks, (int) cap, stride);
+     else
+-        STRATA_ATTN_CHUNK(0)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
+-                                                        scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
+-    attn_merge_kernel<<<dim3((unsigned) s.n_head, (unsigned) n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks,
+-                                                                                  attn, stride);
++        STRATA_ATTN_CHUNK_SEL(0, pre)<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv,
++                                                                (int) s.page_size, scale, part_acc, part_m, part_l,
++                                                                n_chunks, (int) cap, stride);
++}
++
++// qsa_decode_attn_batch's merge pass over the partials launch_chunks_batch wrote; `v2` names the merge kernel
++void launch_merge_batch(const int32_t* steps, int64_t cap, const QsaShapes& s, const float* scratch, float* attn,
++                        int64_t n_q, int v2, cudaStream_t st) {
++    const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
++    const long long stride = (long long) qsa_decode_attn_scratch_floats(cap, s);
++    const float* part_acc = scratch;
++    const float* part_m = scratch + (size_t) n_chunks * s.n_head * HD;
++    const float* part_l = part_m + (size_t) n_chunks * s.n_head;
++    launch_merge(v2, part_acc, part_m, part_l, n_chunks, steps, attn, stride, (unsigned) s.n_head, (unsigned) n_q, st);
++}
++
++}  // namespace
++
++void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
++                           int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream) {
++    if (n_q <= 0) return;
++    if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
++        !pools.page_table || n_q > 65535) {
++        std::fprintf(stderr, "qsa_decode_attn_batch: unsupported geometry or missing buffers\n");
++        std::exit(1);
++    }
++    cudaStream_t st = (cudaStream_t) stream;
++    launch_chunks_batch(q, pools, ids, steps, cap, s, scratch, n_q, st, -1);
++    launch_merge_batch(steps, cap, s, scratch, attn, n_q, attn_merge_v2(), st);
+     const cudaError_t e = cudaGetLastError();
+     if (e != cudaSuccess) {
+         std::fprintf(stderr, "qsa_decode_attn_batch: %s\n", cudaGetErrorString(e));
+@@ -747,7 +907,7 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
+     else
+         STRATA_ATTN_CHUNK(0)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
+                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);
+-    attn_merge_kernel<<<(unsigned) s.n_head, HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, attn);
++    launch_merge(attn_merge_v2(), part_acc, part_m, part_l, n_chunks, step, attn, 0, (unsigned) s.n_head, 1u, st);
+     const cudaError_t e = cudaGetLastError();
+     if (e != cudaSuccess) {
+         std::fprintf(stderr, "qsa_decode_attn: %s\n", cudaGetErrorString(e));
+@@ -755,4 +915,38 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
+     }
+ }
+ 
++// qsa_merge_daily_parity: qsa_decode_attn_batch's two passes apart, the chunk kernel and the merge named by the
++// arguments (never the environment), so the Daily's kernels and upstream's can be run on the same inputs and the
++// outputs compared bit for bit.  The engine never calls these.
++void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
++                                 int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, int daily_chunk,
++                                 void* stream) {
++    if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||
++        !q || !ids || !steps || !pools.page_table || (daily_chunk != 0 && daily_chunk != 1)) {
++        std::fprintf(stderr, "qsa_decode_attn_chunks_only: unsupported geometry or missing buffers\n");
++        std::exit(1);
++    }
++    launch_chunks_batch(q, pools, ids, steps, cap, s, scratch, n_q, (cudaStream_t) stream, daily_chunk);
++    const cudaError_t e = cudaGetLastError();
++    if (e != cudaSuccess) {
++        std::fprintf(stderr, "qsa_decode_attn_chunks_only: %s\n", cudaGetErrorString(e));
++        std::exit(1);
++    }
++}
++
++void qsa_decode_attn_merge_only(const int32_t* steps, int64_t cap, const QsaShapes& s, const float* scratch,
++                                float* attn, int64_t n_q, int v2, void* stream) {
++    if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||
++        (v2 != 0 && v2 != 1) || !steps || !attn) {
++        std::fprintf(stderr, "qsa_decode_attn_merge_only: unsupported geometry or missing buffers\n");
++        std::exit(1);
++    }
++    launch_merge_batch(steps, cap, s, scratch, attn, n_q, v2, (cudaStream_t) stream);
++    const cudaError_t e = cudaGetLastError();
++    if (e != cudaSuccess) {
++        std::fprintf(stderr, "qsa_decode_attn_merge_only: %s\n", cudaGetErrorString(e));
++        std::exit(1);
++    }
++}
++
+ }  // namespace strata::kernels
+diff --git a/src/kernels/qsa_merge_daily_parity.cpp b/src/kernels/qsa_merge_daily_parity.cpp
+new file mode 100644
+index 00000000..be473d57
+--- /dev/null
++++ b/src/kernels/qsa_merge_daily_parity.cpp
+@@ -0,0 +1,418 @@
++// Recovered from the Claude Daily merge parity harness (lab/wip-0809), extended to the Daily's chunk kernel.
++// src/kernels/qsa_merge_daily_parity.cpp - the Daily's decode attention (STRATA_ATTN_DAILY=1: attn_chunk_kernel_pre75
++// and attn_merge_v2_kernel) against upstream's (attn_chunk_kernel, attn_merge_kernel), bitwise (GPU, synthetic, no
++// model).
++//
++// The reference is upstream's pair: one chunk pass with attn_chunk_kernel (qsa_decode_attn_chunks_only, daily_chunk 0)
++// and attn_merge_kernel (qsa_decode_attn_merge_only, v2 0).  Against it, memcmp of: attn_merge_v2_kernel on the same
++// partials; the production entry points (qsa_decode_attn_batch, and _step at n_q 1) as the environment sets them; the
++// Daily's chunk kernel (daily_chunk 1, NaN-filled scratch again) merged by both mergers.  Kernels are chosen by the
++// arguments, never by the environment, except for the production entries.  Covers:
++//   - the four KV formats the chunk kernel reads: fp16, int8, q4_0 (rotated or not, the merge cannot tell), k8v4;
++//   - page tables with unresident (-1) pages: scattered single pages, and one run of 64 pages (256 consecutive cells)
++//     that the window-shaped selections land on, so whole chunks inside the width are masked (m = -FLT_MAX, l = 0,
++//     acc = 0) and some queries are masked entirely (output 0);
++//   - widths {-1, 0, 1, 63, 64, 65, 1023, 1024, 1025, 2051, 4096, 16383, 16385, 32768, INT_MAX} per query (1023-1025 and 16383 /
++//     16385 sit on the v2 merge's 16-chunk block edges), all queries alike and mixed within one batch; a width above
++//     aligned cap (2112/32768) is bounded by the chunk grid; an unaligned cap2051 keeps width<=cap;
++//   - n_q 1..6, caps2051/2112 (main selection and its rounded capacity) and32768 (the drafter's
++//     default --mtp-window);
++//   - selections shaped like the drafter's window (consecutive cells, window_ids), like the indexer's (ascending, with
++//     gaps) and unordered with repeats.
++// The scratch is filled with NaN before every chunk pass, so a merge that read a partial the chunk pass did not write
++// (a chunk past the width, say) would differ from the other one or produce a NaN.  ~260 MB of VRAM.
++//
++//   qsa_merge_daily_parity [--device N]           the sweep; exit 0 when every case is bit-identical (77: no GPU)
++//   qsa_merge_daily_parity [--device N] --bench   plus each merge's time per call at target/drafter caps2051/32768
++#include "strata/kernels/kv_q4.hpp"
++#include "strata/kernels/kv_q8.hpp"
++#include "strata/kernels/qsa.hpp"
++#include "strata/kernels/qsa_decode_attn.hpp"
++
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <limits>
++#include <random>
++#include <vector>
++
++namespace k = strata::kernels;
++
++namespace {
++void ck(cudaError_t e, const char* what) {
++    if (e != cudaSuccess) {
++        std::fprintf(stderr, "qsa_merge_daily_parity: %s: %s\n", what, cudaGetErrorString(e));
++        std::exit(2);
++    }
++}
++template <typename T> T* dalloc(size_t n) {
++    T* p = nullptr;
++    ck(cudaMalloc((void**) &p, n * sizeof(T) + 256), "cudaMalloc");
++    ck(cudaMemset(p, 0, n * sizeof(T) + 256), "cudaMemset");
++    return p;
++}
++template <typename T> T* upload(const std::vector<T>& h) {
++    T* d = dalloc<T>(h.size());
++    ck(cudaMemcpy(d, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice), "upload");
++    return d;
++}
++
++// fp16 bits drawn directly: a random sign, exponent 11..15 (|x| in [2^-4, 2)), a random mantissa; finite by
++// construction. Scales are positive: INT8 [1/64, 1/32) (codes up to 127 give |x| < 4), Q4_0 [1/4, 1/2).
++uint16_t f16_value(uint32_t r) { return (uint16_t) ((r & 0x8000u) | ((11u + (r >> 16) % 5u) << 10) | (r & 0x3FFu)); }
++uint16_t f16_scale_q8(uint32_t r) { return (uint16_t) ((9u << 10) | (r & 0x3FFu)); }
++uint16_t f16_scale_q4(uint32_t r) { return (uint16_t) ((13u << 10) | (r & 0x3FFu)); }
++
++constexpr int kFmtF16 = 0, kFmtInt8 = 1, kFmtQ4 = 2, kFmtK8V4 = 3;
++const char* fmt_name(int f) { return f == kFmtF16 ? "fp16" : f == kFmtInt8 ? "int8" : f == kFmtQ4 ? "q4_0" : "k8v4"; }
++
++struct DevicePools {   // every format's pools over the same physical rows; `view` picks what a KV mode reads
++    uint16_t *k16 = nullptr, *v16 = nullptr, *k8s = nullptr, *v8s = nullptr;
++    int8_t *k8 = nullptr, *v8 = nullptr;
++    uint8_t *k4 = nullptr, *v4 = nullptr;
++    k::QsaAttnPools view(int fmt, const int32_t* table) const {
++        k::QsaAttnPools p;
++        p.page_table = table;
++        if (fmt == kFmtF16) { p.k_pool = k16; p.v_pool = v16; }
++        else if (fmt == kFmtInt8) { p.k_q = k8; p.v_q = v8; p.k_scale = k8s; p.v_scale = v8s; }
++        else if (fmt == kFmtQ4) { p.k_q4 = k4; p.v_q4 = v4; }
++        else { p.k_q = k8; p.k_scale = k8s; p.v_q4 = v4; }   // K8V4: INT8 K, Q4_0 V (qsa_decode_attn.cu kv_mode 3)
++        return p;
++    }
++};
++
++DevicePools make_pools(int64_t rows, int64_t D, std::mt19937& rng) {
++    DevicePools p;
++    {
++        std::vector<uint16_t> h((size_t) (rows * D));
++        for (auto& x : h) x = f16_value(rng());
++        p.k16 = upload(h);
++        for (auto& x : h) x = f16_value(rng());
++        p.v16 = upload(h);
++    }
++    {
++        std::vector<int8_t> c((size_t) (rows * D));
++        for (auto& x : c) x = (int8_t) ((int) (rng() % 255u) - 127);
++        p.k8 = upload(c);
++        for (auto& x : c) x = (int8_t) ((int) (rng() % 255u) - 127);
++        p.v8 = upload(c);
++        std::vector<uint16_t> sc((size_t) (rows * (D / k::KV_Q8_GROUP)));
++        for (auto& x : sc) x = f16_scale_q8(rng());
++        p.k8s = upload(sc);
++        for (auto& x : sc) x = f16_scale_q8(rng());
++        p.v8s = upload(sc);
++    }
++    {
++        const size_t blocks = (size_t) (rows * (D / k::QK4_0));
++        std::vector<uint8_t> b(blocks * sizeof(k::block_q4_0));
++        for (int side = 0; side < 2; ++side) {
++            for (size_t i = 0; i < blocks; ++i) {
++                k::block_q4_0 blk;
++                blk.d = f16_scale_q4(rng());
++                for (auto& q : blk.qs) q = (uint8_t) (rng() & 0xFFu);
++                std::memcpy(b.data() + i * sizeof(k::block_q4_0), &blk, sizeof(blk));
++            }
++            (side == 0 ? p.k4 : p.v4) = upload(b);
++        }
++    }
++    return p;
++}
++
++struct Case {
++    int fmt = 0;
++    int64_t cap = 0;
++    int n_q = 0;
++    std::vector<int32_t> widths;
++};
++
++// the cells this harness can address, and where the 64 unresident pages in a row sit (cells [kHole, kHole + 256))
++constexpr int64_t kCells = 40960;
++constexpr int64_t kHole = 8192;
++
++// query `i`'s `cap` selection ids. Every entry is a valid cell: a width above the cap makes the chunk kernel read
++// all `cap` of them.
++void selection(int32_t* ids, int64_t cap, int width, int shape, std::mt19937& rng) {
++    const int64_t w = std::max<int64_t>(0, std::min<int64_t>(width, cap));
++    if (shape == 0) {   // the drafter's window: consecutive cells (window_ids), often across the unresident run
++        int64_t start;
++        if (rng() % 2 == 0) start = std::max<int64_t>(0, kHole - 64 * (int64_t) (rng() % 8));   // chunk-aligned on it
++        else start = (int64_t) (rng() % (uint32_t) (kCells - std::max<int64_t>(w, 1)));
++        if (start + w > kCells) start = kCells - w;
++        for (int64_t j = 0; j < cap; ++j) ids[j] = (int32_t) ((start + j) % kCells);
++    } else if (shape == 1) {   // the indexer's: ascending with gaps
++        std::vector<int32_t> v((size_t) cap);
++        for (auto& x : v) x = (int32_t) (rng() % (uint32_t) kCells);
++        std::sort(v.begin(), v.begin() + w);
++        std::copy(v.begin(), v.end(), ids);
++    } else {   // unordered, with repeats
++        for (int64_t j = 0; j < cap; ++j) ids[j] = (int32_t) (rng() % (uint32_t) kCells);
++    }
++}
++
++struct Harness {
++    k::QsaShapes s = k::qsa_real_shapes();
++    DevicePools pools;
++    int32_t* table = nullptr;
++    float *q = nullptr, *scratch = nullptr, *attn_old = nullptr, *attn_new = nullptr;
++    int32_t *ids = nullptr, *steps = nullptr;
++    int64_t max_q = 0, max_cap = 0;
++
++    void init(std::mt19937& rng, int64_t max_q_, int64_t max_cap_) {
++        max_q = max_q_;
++        max_cap = max_cap_;
++        const int64_t PS = s.page_size, pages = kCells / PS, H = s.n_head_kv, D = s.head_dim;
++        // logical page -> physical page: a permutation, ~3% scattered unresident pages, and the 64-page hole
++        std::vector<int32_t> tab((size_t) pages);
++        for (int64_t i = 0; i < pages; ++i) tab[(size_t) i] = (int32_t) i;
++        std::shuffle(tab.begin(), tab.end(), rng);
++        for (int64_t i = 0; i < pages; ++i)
++            if (rng() % 32u == 0) tab[(size_t) i] = -1;
++        for (int64_t i = kHole / PS; i < (kHole + 256) / PS; ++i) tab[(size_t) i] = -1;
++        table = upload(tab);
++        pools = make_pools(pages * H * PS, D, rng);
++        q = dalloc<float>((size_t) (max_q * s.n_head * D));
++        ids = dalloc<int32_t>((size_t) (max_q * max_cap));
++        steps = dalloc<int32_t>((size_t) (max_q * k::kStepCount));
++        scratch = dalloc<float>((size_t) (k::qsa_decode_attn_scratch_floats(max_cap, s) * (uint64_t) max_q));
++        attn_old = dalloc<float>((size_t) (max_q * s.n_head * D));
++        attn_new = dalloc<float>((size_t) (max_q * s.n_head * D));
++    }
++
++    ~Harness() {
++        for (void* p : {static_cast<void*>(table), static_cast<void*>(q), static_cast<void*>(ids),
++                       static_cast<void*>(steps), static_cast<void*>(scratch), static_cast<void*>(attn_old),
++                       static_cast<void*>(attn_new), static_cast<void*>(pools.k16), static_cast<void*>(pools.v16),
++                       static_cast<void*>(pools.k8), static_cast<void*>(pools.v8), static_cast<void*>(pools.k8s),
++                       static_cast<void*>(pools.v8s), static_cast<void*>(pools.k4), static_cast<void*>(pools.v4)})
++            if (p) ck(cudaFree(p), "free harness");
++    }
++
++    // uploads the case's queries, selections and widths, and runs ONE chunk pass into NaN-filled scratch
++    void prepare(const Case& c, std::mt19937& rng) {
++        const int64_t D = s.head_dim, NH = s.n_head;
++        std::normal_distribution<float> nd(0.0f, 1.0f);
++        std::vector<float> hq((size_t) (c.n_q * NH * D));
++        for (auto& x : hq) x = nd(rng);
++        ck(cudaMemcpy(q, hq.data(), hq.size() * 4, cudaMemcpyHostToDevice), "q");
++        std::vector<int32_t> hid((size_t) (c.n_q * c.cap));
++        std::vector<int32_t> hst((size_t) (c.n_q * k::kStepCount), 0);
++        for (int i = 0; i < c.n_q; ++i) {
++            selection(hid.data() + (size_t) i * c.cap, c.cap, c.widths[(size_t) i], (int) (rng() % 3u), rng);
++            hst[(size_t) i * k::kStepCount + k::kStepWidth] = c.widths[(size_t) i];
++        }
++        ck(cudaMemcpy(ids, hid.data(), hid.size() * 4, cudaMemcpyHostToDevice), "ids");
++        ck(cudaMemcpy(steps, hst.data(), hst.size() * 4, cudaMemcpyHostToDevice), "steps");
++        const size_t scratch_bytes = (size_t) k::qsa_decode_attn_scratch_floats(c.cap, s) * (size_t) c.n_q * 4;
++        ck(cudaMemset(scratch, 0xFF, scratch_bytes), "scratch NaN fill");
++        ck(cudaMemset(attn_old, 0xFF, (size_t) (c.n_q * NH * D) * 4), "attn_old fill");
++        ck(cudaMemset(attn_new, 0x7F, (size_t) (c.n_q * NH * D) * 4), "attn_new fill");
++        k::qsa_decode_attn_chunks_only(q, pools.view(c.fmt, table), ids, steps, c.cap, s, scratch, c.n_q, 0, nullptr);
++    }
++
++    // true when the two merges' outputs are bit-identical (and the original's has no NaN)
++    bool check(const Case& c, long long& nonzero) {
++        const int64_t D = s.head_dim, NH = s.n_head;
++        k::qsa_decode_attn_merge_only(steps, c.cap, s, scratch, attn_old, c.n_q, 0, nullptr);
++        k::qsa_decode_attn_merge_only(steps, c.cap, s, scratch, attn_new, c.n_q, 1, nullptr);
++        ck(cudaDeviceSynchronize(), "merge sync");
++        const size_t n = (size_t) (c.n_q * NH * D);
++        std::vector<float> a(n), b(n);
++        ck(cudaMemcpy(a.data(), attn_old, n * 4, cudaMemcpyDeviceToHost), "attn_old");
++        ck(cudaMemcpy(b.data(), attn_new, n * 4, cudaMemcpyDeviceToHost), "attn_new");
++        nonzero = 0;
++        long long nan = 0;
++        for (size_t i = 0; i < n; ++i) {
++            if (a[i] != 0.0f) ++nonzero;
++            if (!std::isfinite(a[i])) ++nan;
++        }
++        const bool same = std::memcmp(a.data(), b.data(), n * 4) == 0;
++        if (!same || nan) {
++            size_t first = 0;
++            while (first < n && std::memcmp(&a[first], &b[first], 4) == 0) ++first;
++            std::printf("FAIL %s cap %lld n_q %d widths", fmt_name(c.fmt), (long long) c.cap, c.n_q);
++            for (int32_t w : c.widths) std::printf(" %d", w);
++            if (first < n) {
++                uint32_t ua, ub;
++                std::memcpy(&ua, &a[first], 4);
++                std::memcpy(&ub, &b[first], 4);
++                std::printf(": first difference at query %lld head %lld dim %lld: %.9g (0x%08x) vs %.9g (0x%08x)",
++                            (long long) (first / (NH * D)), (long long) (first / D % NH), (long long) (first % D),
++                            a[first], ua, b[first], ub);
++            }
++            if (nan) std::printf(" (%lld nonfinite values in the original's output)", nan);
++            std::printf("\n");
++        }
++        // Exercise production entry points too: either selected merger must equal the reference partials.
++        bool entry_same = true;
++        k::qsa_decode_attn_batch(q, pools.view(c.fmt, table), ids, steps, c.cap, s, scratch, attn_new, c.n_q, nullptr);
++        ck(cudaDeviceSynchronize(), "batch entry sync");
++        ck(cudaMemcpy(b.data(), attn_new, n * 4, cudaMemcpyDeviceToHost), "batch entry output");
++        if (std::memcmp(a.data(), b.data(), n * 4) != 0) {
++            std::puts("FAIL production batch differs from merge reference");
++            entry_same = false;
++        }
++        if (c.n_q == 1) {
++            k::qsa_decode_attn_step(q, pools.view(c.fmt, table), ids, steps, c.cap, s, scratch, attn_new, nullptr);
++            ck(cudaDeviceSynchronize(), "step entry sync");
++            ck(cudaMemcpy(b.data(), attn_new, n * 4, cudaMemcpyDeviceToHost), "step entry output");
++            if (std::memcmp(a.data(), b.data(), n * 4) != 0) {
++                std::puts("FAIL production step differs from merge reference");
++                entry_same = false;
++            }
++        }
++        // The Daily's chunk kernel on the same inputs, into NaN-filled scratch, merged by both mergers.
++        bool daily_same = true;
++        const size_t scratch_bytes = (size_t) k::qsa_decode_attn_scratch_floats(c.cap, s) * (size_t) c.n_q * 4;
++        ck(cudaMemset(scratch, 0xFF, scratch_bytes), "scratch NaN refill");
++        k::qsa_decode_attn_chunks_only(q, pools.view(c.fmt, table), ids, steps, c.cap, s, scratch, c.n_q, 1, nullptr);
++        for (int v2 = 0; v2 < 2; ++v2) {
++            ck(cudaMemset(attn_new, 0x7F, n * 4), "attn_new refill");
++            k::qsa_decode_attn_merge_only(steps, c.cap, s, scratch, attn_new, c.n_q, v2, nullptr);
++            ck(cudaDeviceSynchronize(), "daily chunk sync");
++            ck(cudaMemcpy(b.data(), attn_new, n * 4, cudaMemcpyDeviceToHost), "daily chunk output");
++            if (std::memcmp(a.data(), b.data(), n * 4) != 0) {
++                std::printf("FAIL Daily chunk kernel + %s differs from upstream reference\n",
++                            v2 ? "attn_merge_v2_kernel" : "attn_merge_kernel");
++                daily_same = false;
++            }
++        }
++        return same && nan == 0 && entry_same && daily_same;
++    }
++};
++
++void bench(Harness& hx, std::mt19937& rng) {
++    std::printf("\n--bench: CUDA events over 200 calls per arm, each arm warmed outside timing, same buffers.\n"
++                "chunks BAB: B1(Daily chunk) -> A(upstream chunk) -> B2(Daily chunk); merges on hot partials:\n"
++                "BAB: B1(v2) -> A(upstream merger) -> B2(v2).\n");
++    std::printf("%-6s %6s %4s %6s | %9s %9s %9s %9s | %9s %9s %9s %9s\n", "fmt", "cap", "n_q", "width",
++                "chB1 us", "chA us", "chB2 us", "meanB/A", "B1 us", "A us", "B2 us", "meanB/A");
++    cudaEvent_t e0, e1;
++    ck(cudaEventCreate(&e0), "event");
++    ck(cudaEventCreate(&e1), "event");
++    const int iters = 200;
++    for (int64_t cap : {(int64_t) 2051, (int64_t) 32768})
++    for (int fmt : {kFmtQ4, kFmtInt8, kFmtF16}) {
++        for (int n_q : {1, 2, 3, 4}) {
++            for (int width : {64, 2051, 16384, 31000, 32768}) {
++                Case c;
++                c.fmt = fmt;
++                if (width > cap) continue;
++                c.cap = cap;
++                c.n_q = n_q;
++                c.widths.assign((size_t) n_q, width);
++                hx.prepare(c, rng);
++                ck(cudaDeviceSynchronize(), "bench prepare");
++                double us_ch[3] = {};
++                for (int arm = 0; arm < 3; ++arm) {   // B1 -> A -> B2: Daily, upstream, Daily chunk kernel
++                    const int daily = arm == 1 ? 0 : 1;
++                    auto chunks = [&] {
++                        k::qsa_decode_attn_chunks_only(hx.q, hx.pools.view(fmt, hx.table), hx.ids, hx.steps, c.cap,
++                                                       hx.s, hx.scratch, n_q, daily, nullptr);
++                    };
++                    for (int i = 0; i < iters; ++i) chunks();
++                    ck(cudaDeviceSynchronize(), "chunk warm");
++                    ck(cudaEventRecord(e0, nullptr), "record");
++                    for (int i = 0; i < iters; ++i) chunks();
++                    ck(cudaEventRecord(e1, nullptr), "record");
++                    ck(cudaEventSynchronize(e1), "sync");
++                    float ms_chunks = 0.0f;
++                    ck(cudaEventElapsedTime(&ms_chunks, e0, e1), "elapsed");
++                    us_ch[arm] = 1000.0 * ms_chunks / iters;
++                }
++                const double ratio_ch = us_ch[1] > 0.0 ? (us_ch[0] + us_ch[2]) / (2.0 * us_ch[1]) : std::nan("");
++                double us[3] = {};
++                for (int arm = 0; arm < 3; ++arm) {   // B1 -> A -> B2 at this identical shape
++                    const int v2 = arm == 1 ? 0 : 1;
++                    auto merge = [&] {
++                        k::qsa_decode_attn_merge_only(hx.steps, c.cap, hx.s, hx.scratch, hx.attn_new, n_q, v2, nullptr);
++                    };
++                    for (int i = 0; i < iters; ++i) merge();
++                    ck(cudaDeviceSynchronize(), "merge arm warm");
++                    ck(cudaEventRecord(e0, nullptr), "record");
++                    for (int i = 0; i < iters; ++i) merge();
++                    ck(cudaEventRecord(e1, nullptr), "record");
++                    ck(cudaEventSynchronize(e1), "sync");
++                    float ms = 0.0f;
++                    ck(cudaEventElapsedTime(&ms, e0, e1), "elapsed");
++                    us[arm] = 1000.0 * ms / iters;
++                }
++                const double ratio = us[1] > 0.0 ? (us[0] + us[2]) / (2.0 * us[1]) : std::nan("");
++                std::printf("%-6s %6lld %4d %6d | %9.2f %9.2f %9.2f %9.4f | %9.2f %9.2f %9.2f %9.4f\n",
++                            fmt_name(fmt), (long long) cap, n_q, width, us_ch[0], us_ch[1], us_ch[2], ratio_ch, us[0],
++                            us[1], us[2], ratio);
++            }
++        }
++    }
++    ck(cudaEventDestroy(e0), "destroy event");
++    ck(cudaEventDestroy(e1), "destroy event");
++}
++}  // namespace
++
++int main(int argc, char** argv) {
++    int device = 0;
++    bool do_bench = false;
++    for (int i = 1; i < argc; ++i) {
++        if (std::strcmp(argv[i], "--bench") == 0) do_bench = true;
++        else if (std::strcmp(argv[i], "--device") == 0 && i + 1 < argc) device = std::atoi(argv[++i]);
++        else {
++            std::fprintf(stderr, "usage: qsa_merge_daily_parity [--device N] [--bench]\n");
++            return 2;
++        }
++    }
++    int devices = 0;
++    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
++        std::puts("SKIP: no GPU");
++        return 77;
++    }
++    ck(cudaSetDevice(device), "cudaSetDevice");
++    cudaDeviceProp prop{};
++    ck(cudaGetDeviceProperties(&prop, device), "cudaGetDeviceProperties");
++    std::printf("qsa_merge_daily_parity on device %d (%s, %d.%d)\n", device, prop.name, prop.major, prop.minor);
++
++    std::mt19937 rng(20261004u);
++    Harness hx;
++    hx.init(rng, 7, 32768);
++
++    // 1023 / 1024 / 1025 and 16383 / 16385: the v2 merge's U = 16 chunks x 64 cells block edges
++    const int32_t widths[] = {-1, 0, 1, 63, 64, 65, 1023, 1024, 1025, 2051, 4096, 16383, 16384, 16385, 32768, std::numeric_limits<int32_t>::max()};
++    const int n_widths = (int) (sizeof(widths) / sizeof(widths[0]));
++    long long cases = 0, failed = 0, nonzero_total = 0;
++    for (int fmt = 0; fmt < 4; ++fmt) {
++        long long fmt_cases = 0, fmt_failed = 0;
++        for (int64_t cap : {(int64_t) 2051, (int64_t) 2112, (int64_t) 32768}) {
++            for (int n_q = 1; n_q <= 6; ++n_q) {
++                // every width for all queries alike, then three batches of mixed widths
++                for (int wc = 0; wc < n_widths + 3; ++wc) {
++                    Case c;
++                    c.fmt = fmt;
++                    c.cap = cap;
++                    c.n_q = n_q;
++                    for (int i = 0; i < n_q; ++i)
++                        c.widths.push_back(wc < n_widths ? widths[wc] : widths[rng() % (uint32_t) n_widths]);
++                    // The unchanged chunk contract requires width<=cap for an unaligned last chunk.
++                    // Overflow widths remain tested at aligned caps, where the grid bounds the reads.
++                    if (cap % 64 != 0 && std::any_of(c.widths.begin(), c.widths.end(),
++                            [cap](int32_t w) { return (int64_t) w > cap; })) continue;
++                    hx.prepare(c, rng);
++                    long long nz = 0;
++                    const bool ok = hx.check(c, nz);
++                    nonzero_total += nz;
++                    ++cases;
++                    ++fmt_cases;
++                    if (!ok) { ++failed; ++fmt_failed; }
++                }
++            }
++        }
++        std::printf("[%s] %lld cases, %s (%lld differ)\n", fmt_name(fmt), fmt_cases, fmt_failed ? "FAIL" : "bit-identical",
++                    fmt_failed);
++    }
++    std::printf("qsa_merge_daily_parity: %lld cases, %lld differ, %lld nonzero output values in all -> %s\n", cases, failed,
++                nonzero_total, failed == 0 && nonzero_total > 0 ? "PASS" : "FAIL");
++    if (do_bench) bench(hx, rng);
++    return failed == 0 && nonzero_total > 0 ? 0 : 1;
++}

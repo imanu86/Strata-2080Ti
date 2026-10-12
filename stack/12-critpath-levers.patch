@@ -1,0 +1,1302 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: imanu <imanu86@gmail.com>
+Date: Mon, 12 Oct 2026 07:35:49 +0200
+Subject: [PATCH] FABLE-STRATA-Porta su 0.1.43 le leve CRITPATH del percorso
+ critico (STRATA_CP_L1FIRST/S1FIRST/CHAIN_PRE/CHAIN_FUSE/RESPLAN, tutte
+ opt-in)
+
+Da lab/candidate2 14e5dbee..8b4fd975 (9 commit di lab/critpath2). Conflitto in verify.cpp: la dichiarazione
+hits_in_combine di 0.1.43 (STRATA_FUSE_HITS, gfx12) resta prima del ramo STRATA_CP_RESPLAN, che chiama moe_hit_add da se'.
+Misurate nel rumore (docs/CRITPATH.md).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/docs/CRITPATH.md b/docs/CRITPATH.md
+new file mode 100644
+index 00000000..afe01b6b
+--- /dev/null
++++ b/docs/CRITPATH.md
+@@ -0,0 +1,200 @@
++# CRITPATH: leve sul percorso critico della chat singola a 131k (due schede)
++
++Branch `lab/critpath2` del fork `imanu86/Strata-2080Ti`, da `lab/upsync` (`431e28a7`: upstream v0.1.42 più le patch del
++Daily, vedi `docs/UPSYNC.md`). Configurazione: 3060 = stadio 0 (layer 0-15), 2080 Ti = stadio 1 (layer 16-47, testa,
++MTP), `--layer-split 16 --pipeline-windows 2`, cache elastica, `--spec 4`.
++
++Obiettivo: da ~68 a 80 t/s, finestra media da ~26 a ~22-23 ms. Tutte le leve sono **opt-in** (variabili
++`STRATA_CP_*`); senza variabili il motore lancia gli stessi grafi e fa lo stesso ciclo di `lab/upsync`. Nessuna leva
++cambia un'aritmetica: l'output greedy resta identico bit per bit; le bozze MTP hanno gli stessi input negli stessi
++grafi (cambiano l'ordine e il momento dei lanci). Le finestre possono differire solo dove il motore dipende già dai tempi
++(policy del lookup, tier adattivo): col banco forzato `STRATA_FORCE_WINDOWS` sono le stesse.
++
++Stato: compilato sì (vedi in fondo), installato no, provato no. Nessuna GPU, nessun motore, nessun test.
++
++## Percorso critico di partenza (nsys + traccia della pipeline, Daily)
++
++- Finestre fresche (73%): verdetto → lancio catena MTP sull'host 0,37 ms + catena fino alla taglia di A 1,24 ms +
++  stadio 0 6,9 ms + passaggio 0→1 0,63 ms + stadio 1 16,8 ms + verdetto 0,12 ms.
++- Finestre speculative (27%): solo lo stadio 1, allungato di 2,5-3,6 ms dalla catena MTP sulla stessa scheda.
++- Stadio 1: kernel 82%, GPU ferma sui flag dell'host per layer 11% (22% nelle speculative), buchi fra i 1397 nodi ~6%.
++- Con la B speculativa sullo stadio 0 l'attesa dei flag dello stadio 1 sale da 1,16 a 2,05 ms: lo stesso thread serve B.
++
++## Misura comune (banco forzato, B-A-B)
++
++Stesso exe, stessi argomenti del Daily (`docs/UPSYNC.md`, «Riprodurre il Daily»), `STRATA_DECODE_TIMING=1`,
++`STRATA_FORCE_IDS=<liste>` e `STRATA_FORCE_WINDOWS=<traccia di riferimento>` (le finestre del riferimento rigiocate:
++stesso lavoro nei due bracci), `STRATA_PIPELINE_TRACE=<file>` facoltativo. Tre corse alternate: B (leva accesa), A
++(nessuna `STRATA_CP_*`), B. Una leva alla volta.
++
++Da leggere per richiesta:
++- `strata pipeline: N windows in X ms (Y ms/window)` e `strata pipeline classes: fresh … ms | speculative … ms`;
++- `strata pipeline rollback cost` (fresh/spec, +Bbeside);
++- `strata critpath: …` (una riga per richiesta quando una `STRATA_CP_*` è accesa: i contatori di ogni leva);
++- identità: `strata work: … accepted X of Y drafts, … target picks replaced on verified rows Z` deve dare la stessa
++  Z nei due bracci (le scelte del target sono le stesse); senza forzatura, il testo greedy identico.
++
++Contatori nella traccia della pipeline: `L1` (lancio dello stadio 1), `CP` (catena accodata, x0 = passi), `CL` (catena
++lanciata o adottata).
++
++## 1. Servizio dello stadio 1 prima della B — `STRATA_CP_S1FIRST=1`
++
++**Cosa fa.** Con `pl_yield` (profilo `STRATA_PIPELINE_ELASTIC`, di default con due schede) il ciclo serve A sullo
++stadio 0, poi lo stadio 1 di A, poi la B speculativa un layer per passata. Il buco: la chiamata al pool per un layer di
++B (CPU) può partire un attimo prima che lo stadio 1 suoni, e lo stadio 1 aspetta tutta la chiamata. Con la leva, mentre
++lo stadio 1 di A è in volo, un layer di B **già suonato** viene servito solo se:
++- lo stadio 1 non ha un layer suonato in attesa (altrimenti passa prima lui, alla passata successiva), e
++- il layer di B sta prima del prossimo squillo previsto dello stadio 1 (ultimo servizio + intervallo GPU fra uno
++  squillo servito e il successivo, EMA; costo di un layer di B, EMA), **oppure** siamo appena dopo un servizio dello
++  stadio 1 (inizio del suo intervallo: il punto in cui B ritarda meno lo stadio 1 se il suo layer non ci sta).
++- `STRATA_CP_S1FIRST_MAX_US` (1500) limita quanto un layer di B può aspettare.
++
++B ha margine: lo stadio 1 dura ~17 ms, lo stadio 0 di B 7-11 ms. Un thread host per stadio è stato scartato: il pool
++(`ExpertDispatch`) non è rientrante (piano, sink e contatori condivisi) e i due stadi si dividerebbero gli stessi core.
++
++**Contatori.** `S1FIRST B held N passes (X ms), M B layers in a stage-1 gap, K past the bound; stage-1 ring gap G ms,
++B layer C ms`.
++
++**Misura.** B-A-B; atteso: classe `speculative` e `fresh+Bbeside` del rollback cost giù di ~0,5-1 ms (obiettivo
++~1 ms), finestre `fresh` senza B invariate. Con `STRATA_VERIFY_PROFILE` non usare (blocca la pipeline, vedi handoff).
++
++**Rischi.** Se B è spesso sul percorso e il suo stadio 0 si allunga oltre lo stadio 1 di A, la finestra dopo il
++verdetto parte più tardi: guardare `K past the bound` e la classe `spec`. Solo con `pl_yield` acceso.
++
++## 2. Meno flag host per layer — `STRATA_CP_RESPLAN=1` (`STRATA_CP_RESPLAN_MIN`, default 1.0)
++
++**Perché DEVPLAN (E-6 in pipeline, `STRATA_FP_DEVPLAN` di `lab/expert-persist`) peggiorava del 6%.** Letto il
++codice di E-6 sotto `always_publish_`:
++1. **L'host serviva lo stesso ogni layer pianificato dal device**, e lo serviva tardi: il doorbell incrementa il
++   contatore e pubblica righe e id nello stesso buffer per ogni layer; la GPU, che non aspetta più l'host su quei layer,
++   va avanti e sovrascrive il buffer. L'host calcolava allora sulla CPU gli esperti «mancanti» con le righe di un altro
++   layer: lavoro CPU buttato sul thread che serve anche gli altri stadi e **conteggi d'uso inquinati** (le righe del
++   layer l+2 contate sul layer l) → scambi peggiori del tier adattivo → meno hit.
++2. `copy_or_zero_from_mapped` copiava **tutte** le n·k righe dalla memoria mappata quando il gruppo non era pianificato
++   sul device (T=4: 40 righe × 2048 float ≈ 320 KB su PCIe per layer), invece delle sole righe CPU come il percorso
++   normale (`copy_rows_from_mapped`): ~25 µs per layer, ~0,8 ms per finestra sullo stadio 1.
++3. `resident_plan` e le attese `_or` su **ogni** layer, anche dove quasi mai tutti gli instradamenti sono in VRAM.
++4. Tabella caricata con `cudaMemcpy` sincrono prima di ogni lancio in pipeline (quando cambia) e la stretta di mano col
++   fence del tier.
++
++**Cosa fa questa variante.**
++- Solo i layer dello stadio con residenza ≥ `STRATA_CP_RESPLAN_MIN` al momento della cattura (default 1.0: tutti i 512
++  esperti in VRAM, «i soli layer tutti residenti») entrano nella maschera; il primo layer dello stadio 0 resta fuori
++  (il suo flag sblocca le righe PLE). Gli altri layer hanno il grafo di sempre, senza kernel in più.
++- Secondo set di grafi (`exec_cp_`, catturati in `capture_all`): nei layer della maschera `resident_plan` prova il
++  piano sul device; se tutti gli instradamenti del gruppo sono in VRAM il doorbell (`doorbell_publish_cp`) pubblica
++  **solo gli id** in un registro per squillo e scrive `map[squillo] = 1`, le attese tornano subito e si copiano solo le
++  righe CPU (zero, senza leggere PCIe). Altrimenti pubblica tutto e `map = 2`: servizio normale.
++- Ogni squillo è **memorizzato** (valore), non incrementato: l'host legge `map[squillo]` e su `1` non chiama il pool,
++  conta solo l'uso degli id (`drive_note_split`: stessi incrementi del pool, ogni voce un hit) e passa oltre.
++- Coerenza tabella device/host: prima di ogni lancio (`cp_sync_res`) le righe dello stadio e gli offset degli slot (un
++  arena elastica li sposta) vanno sul device se l'host è cambiato, in asincrono sullo stream dello stadio da memoria
++  pinned. Un esperto sfrattato è `-1` sull'host prima che il suo slot venga riusato: una finestra lanciata dopo il marchio
++  ha la tabella nuova; una lanciata prima è dietro il fence del tier. Per il tier bloccante (thread a parte) il fence
++  aspetta che il ciclo passi un punto fra due lanci dopo i marchi (`cp_fence_req/ack`), così nessun lancio cade fra il
++  confronto e gli eventi del fence. Un layer tutto residente non ha candidati per il tier, quindi di solito non cambia.
++
++**Contatori.** All'avvio: `strata critpath: STRATA_CP_RESPLAN: layers [a, b) on CUDAx: N at >= M% VRAM residency …:
++<layer>`. Per richiesta: `RESPLAN (all requests): stage k: N layers, P planned / H host, U uploads`.
++
++**Misura.** Prima guardare la riga d'avvio: se nessun layer è al 100% (probabile sulla 3060, possibile sulla 2080 Ti),
++provare `STRATA_CP_RESPLAN_MIN=0.95` / `0.9` (più layer nella maschera, più `resident_plan` che falliscono: il rapporto
++P/H dice quanto rende). B-A-B; atteso: `ms_wait`/waitA dello stadio 1 giù per i layer pianificati (~0,05-0,2 ms per
++layer-finestra), CPU host libera per l'altro stadio; `U` pochi per richiesta (uno per giro del tier, non uno per
++finestra).
++
++**Rischi.** Spento da solo accanto a `STRATA_ROUTE_RESIDENT`/`STRATA_ROUTE_PRIOR` (instradano con la tabella del device
++in ogni layer) e se la cattura del secondo set di grafi fallisce (riga `off, allocation or capture failed`).
++Correttezza dipende dalla tabella device allineata (sopra); un errore lì produce output sbagliato, non un
++blocco: confrontare `target picks replaced` e il testo. L'uso dei layer pianificati è contato dagli id (giusto), ma il
++lookahead CS-T e il trace di routing (`--dump-routing`) non li vedono. Maschera decisa una volta (prima cattura): un
++layer che diventa tutto residente dopo non entra. Due set di grafi: più tempo di cattura e un po' di memoria.
++`STRATA_VERIFY_PROFILE` non mostra lo stadio waitA dei layer pianificati.
++
++## 3. Catena MTP — `STRATA_CP_CHAIN_PRE=n` e `STRATA_CP_CHAIN_FUSE=1`
++
++### 3a. Round e primi passi in coda allo stadio 1 — `STRATA_CP_CHAIN_PRE=n` (n = 1 .. S_mtp-1; 1 = «round e primo passo»)
++
++**Cosa fa.** Appena lanciato lo stadio 1 di A (e finita la catena che ha fatto B, e deciso se B parte), il ciclo
++accoda sullo stream della catena, **dietro l'evento di fine del grafo dello stadio 1**: copia delle righe R di A,
++kernel `mtp_chain_verdict` (dagli argmax di A sul device, più le sostituzioni del banco forzato: calcola a, «sul
++percorso», e scrive token, righe step/pos, riga e forzature come `chain_launch` sull'host), il round e i primi n passi
++(`MtpDrafter::chain_prelaunch`). La catena parte quando finisce lo stadio 1, senza giro dall'host (verdetto 0,12 ms +
++lancio 0,37 ms + latenza di polling). Al verdetto `chain_adopt` confronta quello che il device ha derivato con quello
++che l'host lancerebbe (stesse righe mappate, stessa B): se coincide lancia solo i passi restanti, altrimenti lascia
++finire la catena accodata e lancia come prima. Solo greedy senza campionamento sull'host (`host_sampling()`), MTP sulla
++stessa scheda dello stadio 1.
++
++**Contatori.** `CHAIN_PRE Q queued, A adopted, R redone`; traccia `CP`.
++
++**Misura.** B-A-B con `n=1`, poi `n=2`/`3`. Atteso: finestre `fresh` −0,3/−0,6 ms (`the chain from its launch to B:
++fresh` scende), `A adopted` vicino a `Q queued`. Le bozze sono le stesse di prima (stessi input, stessi grafi):
++`accepted X of Y drafts` uguale fra i bracci.
++
++**Rischi.** La catena accodata gira anche quando non serve (fine richiesta) o va rifatta (B cambiata dopo
++l'accodamento: `redone`): GPU della 2080 Ti occupata ~0,5-1,5 ms in più in quei casi. Mai con richieste campionate.
++
++### 3b. Meno lanci per passo — `STRATA_CP_CHAIN_FUSE=1`
++
++**Cosa fa.** Il round copia in una volta le righe step/pos di tutti i passi (l'host le prepara tutte prima del round,
++in `chain_launch` e `draft()`; la variante 3a le scrive tutte dal device), quindi un passo non copia più la sua; e
++`force_token` è dentro `mtp_select`. Due kernel in meno per passo (54 → 52), uno in meno nel round, parole identiche.
++
++**Onestà sul bersaglio 0,93 → 0,5 ms.** Questa leva toglie ~2 lanci su 54: ~0,02-0,04 ms per passo, non 0,4. Il passo è
++fatto di kernel piccoli limitati dalla latenza, ma i grandi (proiezioni, attenzione su 32k celle, testa sul
++sotto-vocabolario, esperti) restano; i grafi per passo esistono già (e il grafo unico della coda della catena,
++`STRATA_MTP_CHAIN_TAIL_GRAPH`, handoff del 7/10 §9, non ha dato beneficio ripetibile). Per dimezzare il passo serve una fusione vera dei kernel (norm+quantize,
++gate+quantize, argmax+top-prob, un kernel persistente per il layer MTP), da fare **con la lista per kernel del passo da
++nsys** e una prova di parità bit per bit per ogni fusione: non fatta qui alla cieca. Leva complementare già pronta:
++`STRATA_ATTN_DAILY=1` (kernel dell'attenzione QSA del Daily, ~2× sul kernel dei chunk, vale anche per il drafter).
++
++**Misura.** B-A-B; `the chain from its launch to B` e classe `spec` (la catena gira accanto allo stadio 1).
++
++**Rischi.** Bassi: stesse parole nelle stesse posizioni; HIP non cambia la copia per passo (solo `mtp_select`).
++
++## 4. Ordine di lancio — `STRATA_CP_L1FIRST=1`
++
++**Cosa fa.** Lo stadio 1 di A viene lanciato nella stessa passata in cui il ciclo vede A finire lo stadio 0, subito
++dopo i pump: prima della lettura della catena, del gap elastico e del lancio speculativo di B (commit di A sullo stadio
++0 con l'eventuale attesa del commit precedente, snapshot, staging). Prima lo stadio 1 aspettava tutto questo
++(~0,45 ms nelle finestre fresche). Non è `EARLY_L1` di FABLE (lancio anticipato dietro l'evento dello stadio 0): qui
++cambia solo l'ordine delle chiamate host.
++
++**Contatori.** `L1FIRST N early stage-1 launches`.
++
++**Misura.** B-A-B; atteso: finestre `fresh` −0,3/−0,45 ms; nella traccia l'intervallo `F0`→`L1` scende a pochi µs.
++
++**Rischi.** Nessuno noto: lo stadio 1 dipende solo dall'hand-off di A, già scritto; `--adapt-async` riceve `a_gap(1)`
++come prima. Il contatore `chain late` può cambiare di poco (conta B non pronta al lancio dello stadio 1).
++
++## Ordine consigliato delle prove
++
++Una variabile alla volta, B-A-B ciascuna, testo/`target picks replaced` identici:
++1. `STRATA_CP_L1FIRST=1`
++2. `STRATA_CP_S1FIRST=1`
++3. `STRATA_CP_CHAIN_PRE=1` (poi `2`, `3`)
++4. `STRATA_CP_CHAIN_FUSE=1`
++5. `STRATA_CP_RESPLAN=1` (leggere la riga d'avvio; se 0 layer, `STRATA_CP_RESPLAN_MIN=0.95`)
++
++Poi le promosse insieme contro A.
++
++## Stato della build
++
++Compilato sì (`build_lock.py`, CUDA 75;86, test spenti), installato no, provato no: nessuna GPU, nessun motore, nessun
++test. `strata.exe` dal codice di `39daa703`: sha256 `d5abe4738b4cd29d2a4438ac79c4d12aa1eeb08c212630d50bdb51851c3b09e8`,
++copiato con `build.json` nella cartella delle corse del lab (fuori dal repo), `build-critpath2-<sha>\`. Senza `STRATA_CP_*` deve comportarsi come `lab/upsync` `431e28a7`.
++
++Revisione avversaria (sola lettura) prima della build: nessun rilievo alto; chiusi in `39daa703` i medi (RESPLAN spento
++accanto a `STRATA_ROUTE_RESIDENT`/`STRATA_ROUTE_PRIOR`, contatori `experts`/`layers` dei gruppi pianificati) e i bassi
++(limite degli squilli, RESPLAN che si spegne invece di fermare il motore se la cattura fallisce, controllo dei token
++letti dal device prima di adottare la catena).
++
++## File toccati
++
++- `src/program/generate.cpp`: ciclo della pipeline (leve 1, 3a, 4, stretta di mano del fence, riga `strata critpath`),
++  `drive_note_split`, `cp_env_int`.
++- `src/core/verify.cpp`, `include/strata/core/verify.hpp`: leva 2 (`cp_prepare`, `cp_sync_res`, grafi `exec_cp_`,
++  servizio), accessori per 1 e 3a.
++- `src/core/mtp.cpp`, `include/strata/core/mtp.hpp`: `chain_prelaunch`, `chain_adopt`, FUSE.
++- `src/kernels/cuda/elementwise.cu`, `verify_kernels.cu` (+ header): `doorbell_publish_cp`, `mtp_chain_verdict`,
++  `mtp_select` con forzatura.
+diff --git a/include/strata/core/mtp.hpp b/include/strata/core/mtp.hpp
+index 74a02938..b57dd1c0 100644
+--- a/include/strata/core/mtp.hpp
++++ b/include/strata/core/mtp.hpp
+@@ -22,6 +22,7 @@
+ #include "strata/core/layer.hpp"
+ #include "strata/core/session.hpp"
+ #include "strata/kernels/sampler.hpp"
++#include "strata/kernels/verify_kernels.hpp"   // critpath: MtpChainVerdict
+ 
+ #include <cuda_runtime.h>
+ 
+@@ -139,7 +140,22 @@ public:
+     /// chain_tok()/chain_prob(); -1: an error.  A window's size is often decided by its first outputs (a draft below
+     /// spec_min_p ends it), so the next launch need not wait for all of them.
+     int chain_outputs_ready(std::string& err);
+-    bool chain_live() const { return chain_live_; }
++    /// A chain in flight, or a pre-launched one not yet adopted (critpath STRATA_CP_CHAIN_PRE).
++    bool chain_live() const { return chain_live_ || pre_live_; }
++
++    // ---- critpath STRATA_CP_CHAIN_PRE (docs/CRITPATH.md): the next chain's round and first `pre_steps` steps queued
++    // on the drafter's stream behind the last stage's window (`after`), their inputs derived on the device from the
++    // window's picks (`out_dev`, mtp_chain_verdict) - no host turn between the window's end and the round.  At the
++    // verdict chain_adopt takes it as the chain the host would launch (the same inputs: then only the remaining steps
++    // are launched), or lets it finish and returns 0 so the caller launches the chain as before.
++    /// `out_host`: the host view of `out_dev` (chain_adopt checks the rows the device read against the host's).
++    bool chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev, const int32_t* out_host,
++                         cudaEvent_t after, const float* src_R, int pre_steps, std::string& err);
++    /// chain_launch's arguments: 1 = adopted (the chain is live, as after chain_launch), 0 = not (nothing in flight
++    /// any more: launch it), -1 = an error.  No pre-launched chain: 0 at once.
++    int chain_adopt(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
++                    int n_early, std::string& err);
++    int64_t pre_launched = 0, pre_adopted = 0, pre_redone = 0;
+     const int32_t* chain_tok() const { return chain_tok_; }
+     const float* chain_prob() const { return chain_prob_; }
+ 
+@@ -225,6 +241,11 @@ private:
+     cudaEvent_t ev_chain_ = nullptr;
+     cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs
+     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
++    bool pre_live_ = false;                             ///< critpath STRATA_CP_CHAIN_PRE: queued, not adopted
++    int pre_steps_ = 0;
++    cudaEvent_t ev_pre_ = nullptr;                      ///< after the pre-launched round and steps
++    strata::kernels::MtpChainVerdict pre_v_;
++    const int32_t* pre_out_host_ = nullptr;             ///< the window's picks as the host reads them
+     int32_t chain_tok_[8] = {};
+     float chain_prob_[8] = {};
+     int64_t n_vocab_ = 0;
+diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
+index 875ae1db..f2cccfc8 100644
+--- a/include/strata/core/verify.hpp
++++ b/include/strata/core/verify.hpp
+@@ -277,6 +277,33 @@ public:
+     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
+     void diag_pipelined(std::FILE* f, const char* name) const;
+ 
++    // ---- critical-path levers of the pipelined windows (docs/CRITPATH.md); all opt-in, the default graphs unchanged.
++    /// STRATA_CP_S1FIRST: the window in flight has a ring the host has not served yet (its GPU waits on it now).
++    bool pl_rang() const {
++        return fl_active_ && fl_k_ < fl_total_ && !ar_on() && *(volatile const uint32_t*) h_seq_ >= (uint32_t) (fl_k_ + 1);
++    }
++    /// ... has layers left for the host to serve (its GPU will ring again).
++    bool pl_serving() const { return fl_active_ && fl_k_ < fl_total_ && !ar_on(); }
++    int64_t pl_served() const { return fl_k_; }
++    /// STRATA_CP_CHAIN_PRE: the event after the last pipelined window's graph, and its picks on the device (the mapped
++    /// argmax rows), for a chain launched behind it on the device.
++    cudaEvent_t done_event() const { return ev_done_; }
++    const int32_t* out_dev() const { return m_out_; }
++    const int32_t* out_host() const { return h_out_; }
++    /// pl_finish samples on the host (a sampled request, penalties, a logit bias): the graph's rows are not the picks.
++    bool host_sampling() const {
++        const bool sampled = !sampling_.greedy && sampling_.temperature > 0.0f;
++        return head_sampling_ && (sampled || hist_d_ != nullptr || sampling_.logit_bias != nullptr);
++    }
++    /// STRATA_CP_RESPLAN: the routes of a group the device planned (no host service) are still counted - the adaptive
++    /// tier ranks its victims by them.  Called with the pool's `user` instead of the pool.
++    using CpNoteFn = void (*)(void* user, const int32_t* ids, int64_t n, int64_t layer);
++    void set_cp_note(CpNoteFn fn) { cp_note_ = fn; }
++    int64_t cp_planned = 0;      ///< STRATA_CP_RESPLAN: layer-groups the device planned (no host service)
++    int64_t cp_host = 0;         ///< ... layer-groups of those layers the host served (a route outside VRAM)
++    int64_t cp_uploads = 0;      ///< ... residency table uploads before a launch (the host table had moved)
++    int cp_layers() const { int n = 0; for (uint8_t m : cp_mask_) n += m; return n; }
++
+     /// Measurement hook (STRATA_LOGPOS): after run(), write one line per row t of the last window's head -
+     /// "pos target logprob top top_logprob hit extra_logprob target_logprob_without_extra" - where row t is the
+     /// distribution at pos0 + t, targets[t] is the token at pos0 + t + 1, extra_logprob is the log-probability of
+@@ -369,6 +396,24 @@ private:
+     double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;
+     int32_t pl_prev_[2] = {-1, -1};
+     std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served
++    // critpath STRATA_CP_RESPLAN (capture_all): the pipelined graphs plan on the device the groups of the layers in
++    // cp_mask_ whose routes are all in VRAM, and the host never serves those (see record_window, service)
++    bool cp_rec_ = false;                 ///< record_window is capturing the RESPLAN variant
++    bool cp_win_ = false;                 ///< the window in flight runs it
++    std::vector<uint8_t> cp_mask_;        ///< per layer of [lb_, le_): planned on the device when every route hits
++    cudaGraphExec_t exec_cp_[9] = {};
++    uint32_t* h_cpmap_ = nullptr; uint32_t* m_cpmap_ = nullptr;   ///< per ring: 1 device-planned, 2 served by the host
++    int32_t* h_cpids_ = nullptr; int32_t* m_cpids_ = nullptr;     ///< per ring: the planned group's routed ids
++    static constexpr int kCpRings = 2 * 64 + 2;
++    CpNoteFn cp_note_ = nullptr;
++    std::vector<int32_t> cp_shadow_;      ///< the host table's [lb_, le_) rows as last queued to the device
++    std::vector<uint64_t> cp_off_shadow_; ///< the slot offsets as last queued (an elastic arena moves them)
++    unsigned long long* cp_off_d_ = nullptr;   ///< the device copy, room for every (layer, expert) slot
++    uint8_t* cp_pin_ = nullptr;           ///< pinned copies for the uploads: the rows, then the offsets
++    cudaEvent_t cp_up_ev_ = nullptr;      ///< after the last upload (the pinned copies are free again)
++    bool cp_sync_res(std::string& err);   ///< the stage's residency rows to the device when the host's moved
++    bool cp_prepare(std::string& err);    ///< capture_all: the mask and the RESPLAN graphs (once)
++    bool capture_into(int T, cudaGraphExec_t& exec_t, std::string& err);
+     bool capture_commit_batch(const int* rows, int S, int hbase, std::string& err);
+     bool stage_batch(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos, std::string& err);
+     strata::kernels::SamplerParams sampling_ = [] {
+diff --git a/include/strata/kernels/elementwise.hpp b/include/strata/kernels/elementwise.hpp
+index be7567b6..92880180 100644
+--- a/include/strata/kernels/elementwise.hpp
++++ b/include/strata/kernels/elementwise.hpp
+@@ -124,6 +124,13 @@ void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei
+                             void* stream);
+ void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_res, int n_expert, int64_t n, int64_t k,
+                           float* x_out, int32_t* ids_out, uint32_t* d_seq, void* stream);
++/// critpath STRATA_CP_RESPLAN (docs/CRITPATH.md): the pipelined window's doorbell, ring STORED as `value`.  `skip` null:
++/// doorbell_publish_value.  Else, when *skip == value (resident_plan planned the group on the device: every routed
++/// expert in VRAM) only the k routed ids go to `ids_log` and map[value] = 1 - the host has nothing to serve; otherwise
++/// the payload as doorbell_publish_value and map[value] = 2.  The map word is visible before the ring.
++void doorbell_publish_cp(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
++                         int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value, const uint32_t* skip,
++                         uint32_t* map, int32_t* ids_log, void* stream);
+ /// SYCL: publishes launched or recorded while `on` store the payload with plain stores instead of uncached ones, for
+ /// a caller that reads the payload only after the publishing kernel has ended (the stepped verify window).
+ void doorbell_plain_payload(bool on);
+diff --git a/include/strata/kernels/verify_kernels.hpp b/include/strata/kernels/verify_kernels.hpp
+index 87e5d5cc..fb2d7b04 100644
+--- a/include/strata/kernels/verify_kernels.hpp
++++ b/include/strata/kernels/verify_kernels.hpp
+@@ -102,12 +102,28 @@ void add_streams_broadcast(const float* h, const float* e, float* R, int64_t n_e
+ void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream);
+ /// The draft chain's next input: R_dst[:] = R_src[row], tok_dst[0] = ids[row], out[j] = ids[row], with
+ /// row = *row_dev (device memory).  `out` may be mapped host memory.
++/// `force` (critpath STRATA_CP_CHAIN_FUSE, mapped host memory): force_token folded in - *tok_dst = force[j] when it is
++/// >= 0, the pick otherwise; out[j] stays the pick.  The same words as mtp_select then force_token.
+ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
+                 int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs = nullptr,
+-                float* out_p = nullptr);
++                float* out_p = nullptr, const int32_t* force = nullptr);
+ /// --pipeline-windows, the drafter's chain teacher forced: `*tok = force[j]` when force[j] >= 0 (`force` is mapped
+ /// host memory, read when the kernel runs), else `*tok` is left as it is.
+ void force_token(int32_t* tok, const int32_t* force, int j, void* stream);
++/// critpath STRATA_CP_CHAIN_PRE (docs/CRITPATH.md): the next chain's inputs from the verified window's picks, on the
++/// device, so the round can follow the last stage's graph with no host turn.  `out` = the window's picks (the last
++/// stage's mapped argmax rows); row t's token is repl[t] when >= 0 (the forced bench), else out[t].  a = the accepted
++/// drafts (a_tok[t + 1] == token t), on = b_launched && a == T - 1 && b_tok[0] == token T - 1.  Writes what
++/// MtpDrafter::chain_launch stages on the host: tok[0, T), the step/pos rows of cells p + t (t < T), of p + a (row
++/// 2 max_t - 1) and of p + a + j (row max_t + j - 1, 1 <= j <= max_t - 2), row = {a, 0}, force[16] = b_tok[1 + j]
++/// for j < b_T - 1 when on, else -1.  All outputs mapped host memory (device aliases).
++struct MtpChainVerdict {
++    int T = 0, max_t = 0, nh = 0, b_launched = 0, b_T = 0;
++    long long p = 0;
++    int32_t a_tok[8] = {}, repl[8] = {}, b_tok[8] = {};
++};
++void mtp_chain_verdict(const MtpChainVerdict& v, const int32_t* out, int32_t* tok, int32_t* step, int32_t* pos,
++                       int32_t* row, int32_t* force, void* stream);
+ /// Row *row_dev of a, b and c (a_n, b_n, c_n floats a row) copied to their row 0 (the draft layer's rest runs on
+ /// row 0).  Graph-capturable: the row is read on the device.
+ void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b, int64_t b_n, float* c, int64_t c_n,
+diff --git a/src/core/mtp.cpp b/src/core/mtp.cpp
+index ced5f974..690708de 100644
+--- a/src/core/mtp.cpp
++++ b/src/core/mtp.cpp
+@@ -63,6 +63,20 @@ bool mtp_catchup_all() {
+     }();
+     return on;
+ }
++// critpath STRATA_CP_CHAIN_FUSE=1 (opt-in; docs/CRITPATH.md): the chain's graphs with fewer launches, every word the
++// same - the round copies every step's staged row at once (the host stages them all before the round, in chain_launch
++// and draft() alike, and chain_prelaunch's device verdict writes them all), so a step no longer copies its own; and
++// force_token rides in mtp_select.  The argmax graphs only; coupled sampling keeps its own.
++bool cp_chain_fuse() {
++    static const bool on = [] {
++        const char* v = std::getenv("STRATA_CP_CHAIN_FUSE");
++        const bool f = v != nullptr && v[0] != '\0' && v[0] != '0';
++        if (f) std::fprintf(stderr, "strata critpath: STRATA_CP_CHAIN_FUSE: the round copies every step row, mtp_select "
++                                    "forces the token (2 launches fewer a step)\n");
++        return f;
++    }();
++    return on;
++}
+ constexpr int GGML_Q8_0 = 8;
+ constexpr int GGML_Q4_0 = 2;
+ using Clock = std::chrono::steady_clock;
+@@ -155,6 +169,7 @@ MtpDrafter::~MtpDrafter() {
+     if (owns_draft_head_ && dhead_) { strata::kernels::native_q6_k_unpack(dhead_); cudaFree(dhead_); }
+     if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
+     if (ev_chain_) cudaEventDestroy(ev_chain_);
++    if (ev_pre_) cudaEventDestroy(ev_pre_);
+     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
+     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
+     for (void* h : hosts) if (h) cudaFreeHost(h);
+@@ -1070,9 +1085,12 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
+     copy_i32_from_mapped(step_ + ra * 4, m_step_ + ra * 4, 4, cs_);
+     copy_i32_from_mapped(pos_ + ra * NH, m_pos_ + ra * NH, NH, cs_);
+ #else   // the draft round's seven inputs in one launch
++    // critpath STRATA_CP_CHAIN_FUSE: rows max_t .. 2 max_t - 1 (every step's and output 0's, ra the last of them)
++    const bool fuse = cp_chain_fuse() && !coupled;
++    const int64_t r0 = fuse ? max_t_ : ra, nr = fuse ? max_t_ : 1;
+     const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
+-                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
+-                              {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
++                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + r0 * 4, m_step_ + r0 * 4, nr * 4},
++                              {pos_ + r0 * NH, m_pos_ + r0 * NH, nr * NH}};
+     copy_from_mapped_multi(in, 7, cs_);
+ #endif
+     ok = record_front(T, 0, cs_, err);
+@@ -1086,8 +1104,9 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
+         ok = record_rest(ra, cs_, err);
+         coupled_rec_ = false;
+     }
+-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
+-    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
++    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
++    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
++    if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
+     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
+ }
+ 
+@@ -1104,16 +1123,19 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
+     copy_i32_from_mapped(step_ + row * 4, m_step_ + row * 4, 4, cs_);
+     copy_i32_from_mapped(pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head, cs_);
+ #else
+-    const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
+-                              {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
+-    copy_from_mapped_multi(in, 2, cs_);
++    if (!(cp_chain_fuse() && !coupled)) {   // critpath STRATA_CP_CHAIN_FUSE: the round copied this row already
++        const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
++                                  {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
++        copy_from_mapped_multi(in, 2, cs_);
++    }
+ #endif
+     coupled_rec_ = coupled;
+     coupled_j_ = j;
+     bool ok = record_forward(1, row, cs_, err);
+     coupled_rec_ = false;
+-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
+-    if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
++    const bool fold = cp_chain_fuse() && force_on_ && !coupled;   // critpath: force_token inside mtp_select
++    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_, fold ? m_force_ : nullptr);
++    if (ok && force_on_ && !coupled && !fold) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
+     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
+ }
+ 
+@@ -1258,7 +1280,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+                        float* probs, float min_p, int* n_drafts) {
+     const OnDevice on_device(device_);
+     if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = "mtp: draft arguments out of range"; return false; }
+-    if (chain_live_) { err = "mtp: a pipelined chain is still in flight"; return false; }
++    if (chain_live_ || pre_live_) { err = "mtp: a pipelined chain is still in flight"; return false; }
+     // #783 PR-i (stuchapin909): the round runs for the cells up to the accepted row a (T = a + 1): the K/V of the rejected
+     // rows is not caught up - no later read reaches a cell past the one being drafted and the next round writes it first
+     if (!mtp_catchup_all()) T = a + 1;
+@@ -1483,7 +1505,15 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
+ }
+ 
+ int MtpDrafter::chain_poll(std::string& err) {
+-    if (!chain_live_) return 1;
++    if (!chain_live_) {
++        if (!pre_live_) return 1;
++        const OnDevice on_device(device_);   // critpath: a pre-launched chain nobody adopted (the request ended)
++        const cudaError_t q = cudaEventQuery(ev_pre_);
++        if (q == cudaErrorNotReady) return 0;
++        pre_live_ = false;
++        if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
++        return 1;
++    }
+     const OnDevice on_device(device_);
+     const cudaError_t q = cudaEventQuery(ev_chain_);
+     if (q == cudaErrorNotReady) return 0;
+@@ -1497,6 +1527,104 @@ int MtpDrafter::chain_poll(std::string& err) {
+     return 1;
+ }
+ 
++bool MtpDrafter::chain_prelaunch(const strata::kernels::MtpChainVerdict& v, const int32_t* out_dev,
++                                 const int32_t* out_host, cudaEvent_t after, const float* src_R, int pre_steps,
++                                 std::string& err) {
++    const OnDevice on_device(device_);
++    if (chain_live_ || pre_live_) { err = "mtp: a chain is already in flight"; return false; }
++    if (!force_on_ || ev_chain_ == nullptr || h_force_ == nullptr) { err = "mtp: chains need prepare_chain"; return false; }
++    const int T = v.T;
++    if (T < 1 || T > max_t_ || pre_steps < 0 || pre_steps > max_t_ - 2 || v.b_T < 0 || v.b_T > 8 || out_dev == nullptr ||
++        out_host == nullptr || after == nullptr || round_exec_[T] == nullptr) {
++        err = "mtp: pre-launched chain arguments out of range";
++        return false;
++    }
++    for (int j = 1; j <= pre_steps; ++j)
++        if (step_exec_[j] == nullptr) { err = "mtp: chain graphs not prepared"; return false; }
++    if (ev_pre_ == nullptr && cudaEventCreateWithFlags(&ev_pre_, cudaEventDisableTiming) != cudaSuccess) {
++        err = "mtp: event creation failed";
++        return false;
++    }
++    const Clock::time_point t0 = Clock::now();
++    strata::kernels::MtpChainVerdict w = v;
++    w.max_t = max_t_;
++    w.nh = (int) g_->n_head;
++    // behind the window: its picks, its residual rows; then the inputs chain_launch stages, the round and the steps
++    bool ok = cudaStreamWaitEvent(cs_, after, 0) == cudaSuccess;
++    if (ok && src_R != nullptr && src_R != window_R_)
++        ok = cudaMemcpyAsync((void*) window_R_, src_R, (size_t) T * (size_t) (g_->hc * g_->n_embd) * sizeof(float),
++                             cudaMemcpyDeviceToDevice, cs_) == cudaSuccess;
++    if (ok) strata::kernels::mtp_chain_verdict(w, out_dev, m_tok_, m_step_, m_pos_, m_row_, m_force_, cs_);
++    ok = ok && cudaGraphLaunch(round_exec_[T], cs_) == cudaSuccess && cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
++    for (int j = 1; ok && j <= pre_steps; ++j)
++        ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess && cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
++    ok = ok && cudaEventRecord(ev_pre_, cs_) == cudaSuccess;
++    if (!ok) {
++        err = std::string("mtp pre-launched chain: ") + cudaGetErrorString(cudaGetLastError());
++        return false;
++    }
++    (void) cudaStreamQuery(cs_);   // WDDM: submit now
++    pre_live_ = true;
++    pre_steps_ = pre_steps;
++    pre_v_ = w;
++    pre_out_host_ = out_host;
++    ++pre_launched;
++    ms_draft += ms_since(t0);
++    return true;
++}
++
++int MtpDrafter::chain_adopt(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
++                            int n_early, std::string& err) {
++    if (!pre_live_) return 0;
++    const OnDevice on_device(device_);
++    const strata::kernels::MtpChainVerdict& v = pre_v_;
++    // what the device derived from the window's picks - the mapped rows and replacements the host read too
++    int a_dev = 0;
++    while (a_dev < v.T - 1 && v.a_tok[a_dev + 1] == tokens[a_dev]) ++a_dev;
++    const bool on_dev = v.b_launched != 0 && a_dev == v.T - 1 && v.b_tok[0] == tokens[v.T - 1];
++    const int nf_dev = on_dev ? std::max(0, v.b_T - 1) : 0;
++    bool same = v.T == T && v.p == (long long) p && a_dev == a && nf_dev == n_force && n_out >= pre_steps_ + 1 &&
++                n_out <= max_t_ - 1;
++    for (int j = 0; same && j < n_force; ++j) same = force[j] == v.b_tok[1 + j];
++    // and the rows themselves: what the device read (the mapped picks, or the forced bench's) is what the host passes
++    for (int t = 0; same && t < T; ++t)
++        same = tokens[t] == (v.repl[t] >= 0 ? v.repl[t] : ((const volatile int32_t*) pre_out_host_)[t]);
++    if (!same) {
++        // it ran on another guess (B changed after it was queued): it wrote only what a launch writes again, so let it
++        // finish and the caller launches the chain as before
++        cudaError_t q;
++        while ((q = cudaEventQuery(ev_pre_)) == cudaErrorNotReady) {
++#if defined(_WIN32) || defined(__x86_64__)
++            _mm_pause();
++#endif
++        }
++        pre_live_ = false;
++        ++pre_redone;
++        if (q != cudaSuccess) { err = std::string("mtp pre-launched chain: ") + cudaGetErrorString(q); return -1; }
++        return 0;
++    }
++    const Clock::time_point t0 = Clock::now();
++    chain_early_ = std::max(0, std::min(n_early, n_out));
++    bool ok = true;
++    for (int j = pre_steps_ + 1; ok && j < n_out; ++j) {
++        ok = step_exec_[j] != nullptr && cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
++        if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
++    }
++    if (!ok || cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {
++        err = std::string("mtp chain: ") + cudaGetErrorString(cudaGetLastError());
++        return -1;
++    }
++    (void) cudaStreamQuery(cs_);
++    pre_live_ = false;
++    steps_seen_ = 0;
++    chain_live_ = true;
++    chain_n_ = n_out;
++    ++pre_adopted;
++    ms_draft += ms_since(t0);
++    ++rounds;
++    return 1;
++}
++
+ bool MtpDrafter::draft_first(int T, const float* R_row, int32_t token, int64_t cell, int32_t* drafts, std::string& err,
+                              float* probs, float min_p, int* n_drafts) {
+     const OnDevice on_device(device_);
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index 833ab8c1..2d734f0c 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -487,6 +487,13 @@ Verifier::~Verifier() {
+         if (e) cudaGraphExecDestroy(e);
+     for (auto& e : exec_nr_)
+         if (e) cudaGraphExecDestroy(e);
++    for (auto& e : exec_cp_)
++        if (e) cudaGraphExecDestroy(e);
++    if (cp_up_ev_) { cudaEventSynchronize(cp_up_ev_); cudaEventDestroy(cp_up_ev_); }
++    if (cp_pin_) cudaFreeHost(cp_pin_);
++    if (cp_off_d_) cudaFree(cp_off_d_);
++    if (h_cpmap_) cudaFreeHost(h_cpmap_);
++    if (h_cpids_) cudaFreeHost(h_cpids_);
+     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
+     for (auto& kv : exec_bm_)
+         if (kv.second) cudaGraphExecDestroy(kv.second);
+@@ -1490,6 +1497,25 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+             resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
+                           hits_.cache_base, slot_off_d_, (long long) hits_.blob,
+                           plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, nullptr, 0, cs, m_plan_err_);
++        } else if (cp_rec_) {
++            // critpath STRATA_CP_RESPLAN: a layer of cp_mask_ plans its group on the device when every route is in VRAM
++            // (resident_plan writes skip_[grp] = ring); its doorbell then carries only the routed ids (the host counts
++            // their usage and serves nothing) and its waits below return at once.  Every ring is STORED (a planned
++            // group does not ring the host), so the host reads the ring's map word before it serves a masked layer.
++            const uint32_t ring = (uint32_t) ((l - lb_) * G + grp + 1);
++            const bool cpl = cp_mask_[(size_t) (l - lb_)] != 0;
++            if (cpl)
++                resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
++                              hits_.cache_base, hits_.slot_off != nullptr ? cp_off_d_ : nullptr, (long long) hits_.blob,
++                              plan_ + (size_t) grp * (size_t) (plan_i32_ + 16), (long long) max_t_ * K, skip_ + grp,
++                              ring, cs);
++            doorbell_publish_cp(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
++                                m_ids_ + tb * K, m_w_ + tb * K, m_seq_, ring, cpl ? skip_ + grp : nullptr,
++                                cpl ? m_cpmap_ : nullptr, m_cpids_ + (size_t) ring * (size_t) (max_t_ * K), cs);
++            if (sh_fork_late) {
++                cudaEventRecord(ev_fork_, cs);
++                cudaStreamWaitEvent(sh_cs_, ev_fork_, 0);
++            }
+         } else {
+             if (device_plan_)   // E-6: every routed expert resident: this group's plan without the host
+                 resident_plan(ids_ + tb * K, n * (int) K, (int) K, hits_.d_res + l * g.n_expert, (int) g.n_expert,
+@@ -1599,7 +1625,35 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+             }
+         };
+         bool hits_in_combine = false;
+-        if (ar_on()) {
++        // critpath STRATA_CP_RESPLAN: a masked layer's group waits like E-6's (returns at once when the device planned
++        // it) but copies only the CPU's rows, as the host-planned path does: a planned group's plan lists every entry as
++        // a GPU row, so copy_rows_from_mapped writes zeros and reads nothing over PCIe (E-6 copied all n*k rows).
++        const bool cpl = cp_rec_ && !ar_on() && cp_mask_[(size_t) (l - lb_)] != 0;
++        if (cpl) {
++            wait_flag_ge_or(m_flagA_, ring, skip_ + grp, cs);
++            copy_i32_from_mapped_unless(pl, m_plan_ + (size_t) grp * (size_t) plan_i32_, plan_i32_, skip_ + grp, ring, cs);
++            stamp(l, 19, grp);
++            grouped(p_ptr, p_start, p_counts, 0, hit_out);
++            stamp(l, 20, grp);
++            wait_flag_ge_or(m_flagB_, ring, skip_ + grp, cs);
++            if (sink_.pcie_mode == 2) {
++                const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
++                uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
++                fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
++                rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs);
++            }
++            stamp(l, 21, grp);
++            grouped(p_ptr2, p_start2, p_counts + 2, kPcieGroupRows, hit_out);
++            stamp(l, 22, grp);
++            wait_flag_ge_or(m_flag_, ring, skip_ + grp, cs);
++            stamp(l, 23, grp);
++            if (dec_batch)
++                copy_rows_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (int64_t) n * K, N, p_dst, p_counts + 1, cs);
++            else
++                copy_or_zero_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (long long) n * K * N, skip_ + grp,
++                                         ring, cs);
++            moe_hit_add(parts_out, hit_out, p_dst, p_counts + 1, cap, N, cs);
++        } else if (ar_on()) {
+             stamp(l, 19, grp);
+             grouped(p_ptr, p_start, p_counts, 0, parts_out);
+             stamp(l, 20, grp);
+@@ -1856,7 +1910,11 @@ void Verifier::refresh_ar() {
+ }
+ 
+ bool Verifier::capture(int T, std::string& err) {
+-    cudaGraphExec_t& exec_t = ar_off_ ? exec_nr_[T] : exec_[T];
++    return capture_into(T, ar_off_ ? exec_nr_[T] : exec_[T], err);
++}
++
++// the window graph into `exec_t` (exec_ / exec_nr_ by ar_off_, or exec_cp_ while cp_rec_ is set)
++bool Verifier::capture_into(int T, cudaGraphExec_t& exec_t, std::string& err) {
+     if (exec_t != nullptr) return true;
+     {   // said before the capture: a process that exits inside it (#1275: Windows, 313 MiB free) leaves this line as the trace
+         size_t free_b = 0, total_b = 0;
+@@ -2072,6 +2130,7 @@ void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
+     *(volatile uint32_t*) h_flag_ = 0;
+     *(volatile uint32_t*) h_flagA_ = 0;
+     *(volatile uint32_t*) h_flagB_ = 0;
++    if (h_cpmap_ != nullptr) std::memset(h_cpmap_, 0, (size_t) kCpRings * 4);   // critpath STRATA_CP_RESPLAN
+     std::atomic_thread_fence(std::memory_order_seq_cst);
+     last_t_ = T;
+     last_pos0_ = pos0;
+@@ -3216,6 +3275,125 @@ bool Verifier::capture_all(std::string& err) {
+         cudaGetLastError();
+     }
+     pl_ple_rows_.assign((size_t) strata::kernels::kVerifyMaxT * strata::kernels::PLE_N_HEADS, 0u);
++    if (!cp_prepare(err)) return false;
++    return true;
++}
++
++// critpath STRATA_CP_RESPLAN=1 (opt-in; docs/CRITPATH.md): the pipelined windows' second graph set.  A layer of this
++// stage whose experts are resident at least STRATA_CP_RESPLAN_MIN (default 1.0: all 512) when the graphs are captured
++// plans each group on the device when every route of the group is in VRAM (resident_plan, E-6), and then neither rings
++// the host nor waits for it; the host skips it (service) and only counts its routes' usage (set_cp_note).  A group with
++// a route outside VRAM rings and is served as always.  The device table follows the host's before every launch
++// (cp_sync_res): an expert the tier evicts is -1 on the host before its slot is reused, so a later window never plans
++// a stale slot; a window launched before is covered by the tier's fence, as the doorbell path is.
++namespace {
++double cp_resplan_min() {
++    static const double v = [] {
++        const char* e = std::getenv("STRATA_CP_RESPLAN");
++        if (e == nullptr || e[0] == 0 || e[0] == '0') return -1.0;
++        const char* m = std::getenv("STRATA_CP_RESPLAN_MIN");
++        const double x = m != nullptr ? std::atof(m) : 1.0;
++        return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x;
++    }();
++    return v;
++}
++}  // namespace
++
++bool Verifier::cp_prepare(std::string& err) {
++    const double cp_min = cp_resplan_min();
++    if (cp_min < 0.0 || exec_cp_[1] != nullptr || !cp_mask_.empty()) return true;   // off, or prepared already
++    cp_mask_.assign((size_t) (le_ - lb_), 0);   // (non-empty from here on: decided once)
++    if (!always_publish_ || all_resident_ || h_res_ == nullptr || hits_.d_res == nullptr) return true;
++    // STRATA_ROUTE_RESIDENT / STRATA_ROUTE_PRIOR route by the device table in every layer: the marks this lever uploads
++    // at each launch would reach their routing sooner than res_upload does, and change their output - off beside them
++    const char* rp = std::getenv("STRATA_ROUTE_PRIOR");
++    if (route_resident_cfg().margin > 0.0f || (rp != nullptr && std::atof(rp) > 0.0)) {
++        std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: off beside STRATA_ROUTE_RESIDENT / STRATA_ROUTE_PRIOR\n");
++        return true;
++    }
++    if ((le_ - lb_) * 2 + 2 > kCpRings) {   // the rings of a split window (G = 2) must fit the map
++        std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: off, %lld layers in one stage\n", (long long) (le_ - lb_));
++        return true;
++    }
++    const int64_t ne = g_->n_expert;
++    std::string list;
++    for (int64_t l = lb_; l < le_; ++l) {
++        if (l == lb_ && ple_stage()) continue;   // its ring's flag releases the PLE rows (gathered when it is served)
++        int64_t res = 0;
++        for (int64_t e = 0; e < ne; ++e) res += h_res_[l * ne + e] >= 0 ? 1 : 0;
++        if (res > 0 && (double) res >= cp_min * (double) ne) {
++            cp_mask_[(size_t) (l - lb_)] = 1;
++            list += " " + std::to_string((long long) l);
++        }
++    }
++    std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: layers [%lld, %lld) on CUDA%d: %d at >= %.0f%% VRAM "
++                         "residency planned on the device when every route hits:%s\n", (long long) lb_, (long long) le_,
++                 device_, cp_layers(), cp_min * 100.0, list.empty() ? " none" : list.c_str());
++    if (cp_layers() == 0) return true;
++    const size_t rows_b = (size_t) ((le_ - lb_) * ne) * 4, off_b = (size_t) (g_->n_layers * ne) * 8;
++    bool ok = true;
++    if (skip_ == nullptr)
++        ok = cudaMalloc((void**) &skip_, 64) == cudaSuccess && cudaMemset(skip_, 0, 64) == cudaSuccess;
++    if (ok && hits_.slot_off != nullptr) ok = cudaMalloc((void**) &cp_off_d_, off_b) == cudaSuccess;
++    ok = ok && mapped((size_t) kCpRings * 4, (void**) &h_cpmap_, (void**) &m_cpmap_) &&
++         mapped((size_t) kCpRings * (size_t) (max_t_ * ss_->k) * 4, (void**) &h_cpids_, (void**) &m_cpids_) &&
++         cudaHostAlloc((void**) &cp_pin_, rows_b + off_b, cudaHostAllocDefault) == cudaSuccess &&
++         cudaEventCreateWithFlags(&cp_up_ev_, cudaEventDisableTiming) == cudaSuccess && cudaEventRecord(cp_up_ev_, cs_) == cudaSuccess;
++    if (ok) ok = cp_sync_res(err) && cudaStreamSynchronize(cs_) == cudaSuccess;   // the tables before any capture
++    cp_rec_ = true;
++    for (int T = 1; ok && T <= max_t_; ++T) ok = capture_into(T, exec_cp_[T], err);
++    cp_rec_ = false;
++    if (!ok) {   // the lever only: the windows run the graphs they always ran (exec_)
++        cudaGetLastError();
++        std::fprintf(stderr, "strata critpath: STRATA_CP_RESPLAN: off, allocation or capture failed (%s)\n",
++                     err.empty() ? "out of memory?" : err.c_str());
++        err.clear();
++        for (auto& e : exec_cp_)
++            if (e) { cudaGraphExecDestroy(e); e = nullptr; }
++        std::fill(cp_mask_.begin(), cp_mask_.end(), (uint8_t) 0);
++    }
++    return true;
++}
++
++bool Verifier::cp_sync_res(std::string& err) {
++    const int64_t ne = g_->n_expert;
++    const size_t nrow = (size_t) ((le_ - lb_) * ne);
++    const int32_t* hr = h_res_ + lb_ * ne;
++    // (an offset moves only when the elastic arena regrows a slot, and its expert is published into the rows after:
++    // unchanged rows, nothing to upload - the usual launch costs one 64 KiB compare)
++    const bool rows_same = cp_shadow_.size() == nrow && std::memcmp(cp_shadow_.data(), hr, nrow * 4) == 0;
++    if (rows_same && (hits_.slot_off == nullptr || !cp_off_shadow_.empty())) return true;
++    int64_t max_slot = -1;   // the highest slot a planned layer holds: its offset and every lower one go to the device
++    for (int64_t l = lb_; l < le_; ++l)
++        if (cp_mask_[(size_t) (l - lb_)])
++            for (int64_t e = 0; e < ne; ++e) max_slot = std::max<int64_t>(max_slot, hr[(l - lb_) * ne + e]);
++    const size_t n_off = hits_.slot_off != nullptr && max_slot >= 0 ? (size_t) max_slot + 1 : 0;
++    const bool off_same = n_off == 0 || (cp_off_shadow_.size() >= n_off &&
++                                         std::memcmp(cp_off_shadow_.data(), hits_.slot_off, n_off * 8) == 0);
++    if (rows_same && off_same) return true;
++    if (n_off > (size_t) (g_->n_layers * ne)) { err = "verify: STRATA_CP_RESPLAN: a slot past the offset table"; return false; }
++    // the pinned copies are reused: the last upload must have left them (at a launch the stage's stream holds no
++    // window, so this does not wait in practice)
++    if (cudaEventSynchronize(cp_up_ev_) != cudaSuccess) { err = "verify: STRATA_CP_RESPLAN: upload event failed"; return false; }
++    const size_t rows_b = nrow * 4;
++    if (!off_same) {   // the offsets first: a row may name a slot the elastic arena has just added
++        std::memcpy(cp_pin_ + rows_b, hits_.slot_off, n_off * 8);
++        if (cudaMemcpyAsync(cp_off_d_, cp_pin_ + rows_b, n_off * 8, cudaMemcpyHostToDevice, cs_) != cudaSuccess) {
++            err = "verify: STRATA_CP_RESPLAN: slot offset upload failed";
++            return false;
++        }
++        cp_off_shadow_.assign(hits_.slot_off, hits_.slot_off + n_off);
++    }
++    if (!rows_same) {
++        std::memcpy(cp_pin_, hr, rows_b);
++        if (cudaMemcpyAsync((void*) (hits_.d_res + lb_ * ne), cp_pin_, rows_b, cudaMemcpyHostToDevice, cs_) != cudaSuccess) {
++            err = "verify: STRATA_CP_RESPLAN: residency upload failed";
++            return false;
++        }
++        cp_shadow_.assign(hr, hr + nrow);
++    }
++    if (cudaEventRecord(cp_up_ev_, cs_) != cudaSuccess) { err = "verify: STRATA_CP_RESPLAN: upload event failed"; return false; }
++    ++cp_uploads;
+     return true;
+ }
+ 
+@@ -3276,10 +3454,13 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
+     fl_total_ = (le_ - lb_) * G;
+     fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;
+     if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);   // #649: this window's breadcrumbs only
++    // critpath STRATA_CP_RESPLAN: the RESPLAN graph, behind the residency rows the host holds now
++    cp_win_ = exec_cp_[T] != nullptr;
++    if (cp_win_ && !cp_sync_res(err)) return false;
+     std::atomic_thread_fence(std::memory_order_seq_cst);
+     trace_ev("WINDOW (pipelined)", -1, -1, pos0 * 16 + T);
+     ms_host += ms_since(t0);
+-    const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
++    const cudaError_t le = cudaGraphLaunch(cp_win_ ? exec_cp_[T] : exec_[T], cs_);
+     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
+     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
+     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
+@@ -3351,6 +3532,22 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
+             }
+             return 0;
+         }
++        if (cp_win_ && cp_mask_[(size_t) (l - lb_)]) {   // critpath STRATA_CP_RESPLAN: did the device plan this group?
++            const uint32_t m = *(volatile uint32_t*) (h_cpmap_ + want);
++            if (m == 1) {   // yes: its GPU waits for nothing; its routes still count for the adaptive tier
++                const int grp = (int) (fl_k_ % G);
++                const int n = gte[grp] - gtb[grp];
++                if (cp_note_ != nullptr && pool != nullptr)
++                    cp_note_(user, h_cpids_ + (size_t) want * (size_t) (max_t_ * ss.k), (int64_t) n * ss.k, l);
++                ++cp_planned;
++                ++fl_k_;
++                const double now = now_ms();
++                ms_wait += now - fl_since_ms_;
++                fl_since_ms_ = fl_flush_ms_ = now;
++                continue;
++            }
++            ++cp_host;
++        }
+         const Clock::time_point b = Clock::now();
+         ms_wait += now_ms() - fl_since_ms_;
+         const int grp = (int) (fl_k_ % G);
+@@ -3464,6 +3661,8 @@ bool Verifier::pl_commit_async(int n_keep, std::string& err) {
+ void Verifier::absorb_stats(Verifier& o) {
+     ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
+     windows += o.windows;
++    cp_planned += o.cp_planned; cp_host += o.cp_host; cp_uploads += o.cp_uploads;   // critpath STRATA_CP_RESPLAN
++    o.cp_planned = o.cp_host = o.cp_uploads = 0;
+     o.ms_wait = o.ms_pool = o.ms_host = o.ms_commit = 0;
+     o.windows = 0;
+     for (int k = 0; k < 2; ++k)
+diff --git a/src/kernels/cuda/elementwise.cu b/src/kernels/cuda/elementwise.cu
+index a67550a1..4622f2ee 100644
+--- a/src/kernels/cuda/elementwise.cu
++++ b/src/kernels/cuda/elementwise.cu
+@@ -374,6 +374,40 @@ void doorbell_publish_value(const float* x, const int32_t* ids, const float* wei
+                                                                           ids_out, weights_out, d_seq, value);
+ }
+ 
++// critpath STRATA_CP_RESPLAN: see elementwise.hpp.  The unplanned branch is doorbell_publish_value_kernel's body.
++__global__ void doorbell_publish_cp_kernel(const float* __restrict__ x, const int32_t* __restrict__ ids,
++                                           const float* __restrict__ w, int n, int k, float* x_out, int32_t* ids_out,
++                                           float* w_out, uint32_t* seq, uint32_t value, const uint32_t* skip,
++                                           uint32_t* map, int32_t* ids_log) {
++    const bool planned = skip != nullptr && *(const volatile uint32_t*) skip == value;
++    if (planned) {
++        if ((int) threadIdx.x < k) ids_log[threadIdx.x] = ids[threadIdx.x];
++    } else {
++        for (int i = threadIdx.x; i < n; i += blockDim.x) x_out[i] = x[i];
++        if ((int) threadIdx.x < k) { ids_out[threadIdx.x] = ids[threadIdx.x]; w_out[threadIdx.x] = w[threadIdx.x]; }
++    }
++    __threadfence_system();
++    __syncthreads();
++    if (threadIdx.x == 0) {
++        __threadfence_system();
++        if (map != nullptr) {
++            *(volatile uint32_t*) (map + value) = planned ? 1u : 2u;
++            __threadfence_system();
++        }
++        *(volatile uint32_t*) seq = value;
++        __threadfence_system();
++    }
++}
++
++void doorbell_publish_cp(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
++                         int32_t* ids_out, float* weights_out, uint32_t* d_seq, uint32_t value, const uint32_t* skip,
++                         uint32_t* map, int32_t* ids_log, void* stream) {
++    if (k > 1024) { std::fprintf(stderr, "doorbell_publish_cp: k too large\n"); std::exit(1); }
++    doorbell_publish_cp_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(x, ids, weights, (int) n, (int) k, x_out, ids_out,
++                                                                       weights_out, d_seq, value, skip, map, ids_log);
++    check_launch("doorbell_publish_cp");
++}
++
+ void doorbell_publish(const float* x, const int32_t* ids, const float* weights, int64_t n, int64_t k, float* x_out,
+                       int32_t* ids_out, float* weights_out, uint32_t* d_seq, void* stream) {
+     if (k > 1024) { std::fprintf(stderr, "doorbell_publish: k too large\n"); std::exit(1); }
+diff --git a/src/kernels/cuda/verify_kernels.cu b/src/kernels/cuda/verify_kernels.cu
+index ac2855d7..518e218c 100644
+--- a/src/kernels/cuda/verify_kernels.cu
++++ b/src/kernels/cuda/verify_kernels.cu
+@@ -597,14 +597,16 @@ __global__ void row_top_prob_kernel(const float* __restrict__ logits, int n_voca
+ 
+ __global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t stride, const int32_t* __restrict__ ids,
+                                   const int32_t* __restrict__ row_dev, float* __restrict__ R_dst,
+-                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p) {
++                                  int32_t* __restrict__ tok_dst, int32_t* out, int j, const float* probs, float* out_p,
++                                  const int32_t* force) {
+     const int row = *row_dev;
+     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < stride; i += (int64_t) gridDim.x * blockDim.x)
+         R_dst[i] = R_src[(size_t) row * stride + i];
+     __syncthreads();
+     if (blockIdx.x == 0 && threadIdx.x == 0) {
+         const int32_t tok = ids[row];
+-        *tok_dst = tok;
++        const int32_t f = force != nullptr ? ((const volatile int32_t*) force)[j] : -1;   // critpath: force_token folded in
++        *tok_dst = f >= 0 ? f : tok;
+         if (probs != nullptr && out_p != nullptr) ((volatile float*) out_p)[j] = probs[row];
+         __threadfence_system();
+         if (out != nullptr) ((volatile int32_t*) out)[j] = tok;
+@@ -627,6 +629,41 @@ __global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {
+     if (f >= 0) *tok = f;
+ }
+ 
++// critpath STRATA_CP_CHAIN_PRE: see mtp_chain_verdict in verify_kernels.hpp.  The rows are MtpDrafter::chain_launch's
++// put(): {cell, cell + 1, (cell + 1) / 4, cell + 1} and nh copies of cell.
++__global__ void mtp_chain_verdict_kernel(MtpChainVerdict v, const int32_t* out, int32_t* tok, int32_t* step,
++                                         int32_t* pos, int32_t* row, int32_t* force) {
++    __shared__ int32_t s_o[8];
++    __shared__ int s_a, s_on;
++    const int i = threadIdx.x;
++    if (i == 0) {
++        for (int t = 0; t < v.T; ++t) s_o[t] = v.repl[t] >= 0 ? v.repl[t] : ((const volatile int32_t*) out)[t];
++        int a = 0;
++        while (a < v.T - 1 && v.a_tok[a + 1] == s_o[a]) ++a;
++        s_a = a;
++        s_on = (v.b_launched != 0 && a == v.T - 1 && v.b_tok[0] == s_o[v.T - 1]) ? 1 : 0;
++    }
++    __syncthreads();
++    const int a = s_a;
++    const int n_rows = v.T + 1 + (v.max_t - 2);   // the window's cells, output 0's cell, every step's cell
++    for (int r = i; r < n_rows; r += blockDim.x) {
++        int rw;
++        long long cell;
++        if (r < v.T) { rw = r; cell = v.p + r; }
++        else if (r == v.T) { rw = 2 * v.max_t - 1; cell = v.p + a; }
++        else { const int j = r - v.T; rw = v.max_t + j - 1; cell = v.p + a + j; }
++        step[rw * 4 + 0] = (int32_t) cell;
++        step[rw * 4 + 1] = (int32_t) (cell + 1);
++        step[rw * 4 + 2] = (int32_t) ((cell + 1) / 4);
++        step[rw * 4 + 3] = (int32_t) (cell + 1);
++        for (int h = 0; h < v.nh; ++h) pos[rw * v.nh + h] = (int32_t) cell;
++    }
++    if (i < v.T) tok[i] = s_o[i];
++    if (i < 16) force[i] = (s_on && i < v.b_T - 1) ? v.b_tok[1 + i] : -1;
++    if (i == 0) { row[0] = a; row[1] = 0; }
++    __threadfence_system();
++}
++
+ }  // namespace
+ 
+ void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
+@@ -672,12 +709,23 @@ void copy_row_to_first(const int32_t* row_dev, float* a, int64_t a_n, float* b,
+ }
+ 
+ void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
+-                int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs, float* out_p) {
++                int32_t* tok_dst, int32_t* out, int j, void* stream, const float* probs, float* out_p,
++                const int32_t* force) {
+     mtp_select_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(R_src, R_stride, ids, row_dev, R_dst, tok_dst, out, j,
+-                                                            probs, out_p);
++                                                            probs, out_p, force);
+     check("mtp_select");
+ }
+ 
++void mtp_chain_verdict(const MtpChainVerdict& v, const int32_t* out, int32_t* tok, int32_t* step, int32_t* pos,
++                       int32_t* row, int32_t* force, void* stream) {
++    if (v.T < 1 || v.T > 8 || v.max_t < 2 || v.max_t > 8 || v.b_T > 8) {
++        std::fprintf(stderr, "mtp_chain_verdict: window size out of range\n");
++        std::exit(1);
++    }
++    mtp_chain_verdict_kernel<<<1, 64, 0, (cudaStream_t) stream>>>(v, out, tok, step, pos, row, force);
++    check("mtp_chain_verdict");
++}
++
+ void force_token(int32_t* tok, const int32_t* force, int j, void* stream) {
+     force_token_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(tok, force, j);
+     check("force_token");
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index d89b6d86..4468dcc1 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -1179,6 +1179,23 @@ void drive_pool_split(void* user, const float* x_f, const int32_t* ids, int64_t
+     d.d.pcie_num = s->pcie_num[st];
+     drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);
+ }
++/// critpath STRATA_CP_RESPLAN (Verifier::set_cp_note): a group the device planned is never served, but its routes
++/// count as the pool would count them (usage for the adaptive tier, every entry a VRAM hit).
++void drive_note_split(void* user, const int32_t* ids, int64_t n, int64_t layer) {
++    SplitDrive* s = (SplitDrive*) user;
++    strata::core::ExpertDispatch& d = s->base->d;
++    if (!d.usage.empty())
++        for (int64_t i = 0; i < n; ++i)
++            if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) layer * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
++    d.cache_hits += n;     // (the multi dispatch's counts for a window whose entries are all VRAM hits)
++    d.experts += n;
++    d.layers = layer + 1;
++}
++/// critpath (docs/CRITPATH.md): an integer lever, `dflt` when unset or empty.
++int cp_env_int(const char* name, int dflt) {
++    const char* v = std::getenv(name);
++    return v != nullptr && v[0] != 0 ? std::atoi(v) : dflt;
++}
+ 
+ /// Layer split across GPUs: a later stage on its own device, with its own copy of the dense weights, a session, an
+ /// expert cache for its layers, a verify window and a prompt path; the last one also holds the head (the drafter
+@@ -7673,6 +7690,7 @@ int main(int argc, char** argv) {
+                 for (int par = 0; par < 2; ++par) {
+                     stage_ver_p(st, par).set_stream(pl_stream[(size_t) st]);
+                     stage_ver_p(st, par).set_always_publish(true);
++                    stage_ver_p(st, par).set_cp_note(&drive_note_split);   // critpath STRATA_CP_RESPLAN (opt-in)
+                 }
+         }
+         if (n_stages > 1) {
+@@ -12114,6 +12132,13 @@ int main(int argc, char** argv) {
+                 std::thread pl_adapt_thr;
+                 std::atomic<bool> pl_adapt_done{true};
+                 bool pl_adapt_ok = true;
++                // critpath STRATA_CP_RESPLAN (docs/CRITPATH.md): the blocking tier's fence waits until this loop has passed a
++                // point between two launches after the tier marked its evictions on the host (cp_fence_ack, at the top of
++                // every pass): a later launch then uploads the marks before its window plans on the device (Verifier::
++                // cp_sync_res), an earlier one is behind the fence's events.  Open once the loop ends (no launch follows).
++                static const bool cp_resplan = cp_env_int("STRATA_CP_RESPLAN", 0) != 0;
++                std::atomic<int64_t> cp_fence_req{0}, cp_fence_ack{0};
++                std::atomic<bool> cp_fence_open{false};
+                 // an error ends the engine, as the serial loop's do: every GPU wait is released first (#267), so no
+                 // window in flight keeps spinning on a flag nobody raises, and the tier's thread can finish (the
+                 // asynchronous tier's job does host work alone: it ends)
+@@ -12121,6 +12146,7 @@ int main(int argc, char** argv) {
+                     std::fprintf(stderr, "strata serve: pipelined decode: %s\n", m.c_str());
+                     strata::core::diag_pipeline_fn().store(nullptr);
+                     strata::core::release_gpu_waits(stderr);
++                    cp_fence_open.store(true);   // critpath: the tier's fence never waits for this loop again
+                     if (pl_adapt_thr.joinable()) pl_adapt_thr.join();
+                     if (ajob) {
+                         ajob->wait();
+@@ -12208,6 +12234,10 @@ int main(int argc, char** argv) {
+                 // adapt()'s fence, on the tier's thread: it waits on the HOST.  A device-side wait (the refill streams
+                 // waiting for the stages' events) would queue copies behind windows that need this loop, beside it.
+                 adapt_fence = [&]() {
++                    if (cp_resplan) {   // critpath STRATA_CP_RESPLAN: the loop past a point between launches first
++                        const int64_t r = cp_fence_req.fetch_add(1) + 1;
++                        while (cp_fence_ack.load() < r && !cp_fence_open.load()) std::this_thread::yield();
++                    }
+                     stage_record(fence_ev);
+                     while (!stage_passed(fence_ev)) std::this_thread::yield();
+                 };
+@@ -12456,7 +12486,38 @@ int main(int argc, char** argv) {
+                     return v == nullptr || std::atoi(v) != 0;
+                 }();
+                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
++                // ---- critpath levers (docs/CRITPATH.md), each opt-in; unset, the loop is the one above
++                // STRATA_CP_L1FIRST=1: A's last stage is launched in the pass that sees its front stage finish, right after
++                // the pumps - before the chain read, the elastic gap and B's speculative launch (its commit wait, snapshot
++                // and staging), which held the stage-1 launch ~0.45 ms in the fresh windows.
++                static const bool cp_l1first = cp_env_int("STRATA_CP_L1FIRST", 0) != 0;
++                // STRATA_CP_S1FIRST=1: while A's last stage runs, a rung layer of the speculative B is served only when its
++                // pool call fits before stage 1's next ring (the GPU's time from a served ring to the next one and B's layer
++                // time, both measured: EMAs) or right after stage 1 was served; else B waits a pass.
++                // STRATA_CP_S1FIRST_MAX_US (1500) bounds how long one B layer may wait.  B has slack: stage 1 takes ~17 ms,
++                // B's stage 0 ~7-11 ms.
++                static const bool cp_s1first = cp_env_int("STRATA_CP_S1FIRST", 0) != 0;
++                static const double cp_s1_max = std::max(0, cp_env_int("STRATA_CP_S1FIRST_MAX_US", 1500)) / 1000.0;
++                // STRATA_CP_CHAIN_PRE=n (1..S_mtp-1): the next chain's round and first n steps queued on the drafter's
++                // stream behind A's stage-1 window (MtpDrafter::chain_prelaunch), adopted at the verdict
++                static const int cp_chain_pre = cp_env_int("STRATA_CP_CHAIN_PRE", 0);
++                int64_t cp_l1_early = 0, cp_b_held = 0, cp_b_gap = 0, cp_b_forced = 0, cp_pre_seq = -1;
++                double cp_b_hold_ms = 0.0, cp_b_wait0 = -1.0;
++                double cp_s1_last = -1.0, cp_s1_gap = 0.35, cp_b_cost = 0.15;   // ms: stage 1's ring gap, B's layer
++                int64_t cp_s1_k = -1, cp_s1_seq = -1;
++                bool cp_prev_b = false;   // the pass before served a B layer (its ring gap sample is late)
++                const int64_t cp_pre0 = mtp.pre_launched, cp_ado0 = mtp.pre_adopted, cp_redo0 = mtp.pre_redone;
++                // A's last stage, once every front stage is done
++                auto launch_s1 = [&]() -> bool {
++                    if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
++                    if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
++                    if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return false;
++                    A.s1 = true;
++                    tre("L1", A.seq, A.T);
++                    return true;
++                };
+                 while (true) {
++                    if (cp_resplan) cp_fence_ack.store(cp_fence_req.load());   // critpath: between two launches
+                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
+                     g_pl_diag.a_seq.store(A.seq, std::memory_order_relaxed);
+                     g_pl_diag.a_bits.store(pw_bits(A), std::memory_order_relaxed);
+@@ -12481,9 +12542,23 @@ int main(int argc, char** argv) {
+                     // verdict), and while A's last stage runs, B one layer per pass
+                     if (!pl_yield && ((doomed && !pump0(D)) || !pump0(A) || !pump0(B))) return die(err);
+                     if (pl_yield && !pump0(A)) return die(err);
++                    if (cp_l1first && A.finished && !A.s1) {   // critpath STRATA_CP_L1FIRST: stage 1 before anything else
++                        if (!launch_s1()) return die(err);
++                        ++cp_l1_early;
++                    }
+                     if (A.s1 && !A.s1_done) {
+                         strata::core::Verifier& v = V1(A);
++                        const double cp_t_in = cp_s1first ? ms_now() : 0.0;
++                        const int64_t cp_k0 = v.pl_served();
++                        const bool cp_rang = cp_s1first && v.pl_rang();
+                         if (v.service(&drive_pool_split, SDf(A), err) < 0) return die(err);
++                        if (cp_s1first && v.pl_served() > cp_k0) {   // critpath STRATA_CP_S1FIRST: stage 1's ring gap
++                            if (cp_rang && cp_s1_seq == A.seq && cp_s1_last >= 0.0 && !cp_prev_b && cp_k0 == cp_s1_k)
++                                cp_s1_gap += 0.125 * ((cp_t_in - cp_s1_last) - cp_s1_gap);
++                            cp_s1_last = ms_now();
++                            cp_s1_k = v.pl_served();
++                            cp_s1_seq = A.seq;
++                        }
+                         if (v.done(err)) {
+                             if (!v.pl_finish(outp.data(), err)) return die(err);
+                             force_rows_out(outp.data(), A.T, produced_n);   // lab bench: STRATA_FORCE_IDS
+@@ -12491,7 +12566,50 @@ int main(int argc, char** argv) {
+                             tre("F1", A.seq, A.T);
+                         } else if (!err.empty()) return die(err);
+                     }
+-                    if (pl_yield && ((doomed && !pump0(D)) || !pump0(B, A.s1 && !A.s1_done ? 1 : 0))) return die(err);
++                    if (pl_yield) {
++                        if (doomed && !pump0(D)) return die(err);
++                        // critpath STRATA_CP_S1FIRST: B's rung layer waits while stage 1 is about to ring (see above)
++                        bool serve_b = true;
++                        const double cp_now = cp_s1first ? ms_now() : 0.0;
++                        if (cp_s1first && A.s1 && !A.s1_done && B.fl && VF(B.fr, B).pl_rang()) {
++                            strata::core::Verifier& v1 = V1(A);
++                            bool hold = v1.pl_rang();   // stage 1 rang meanwhile: the next pass serves it first
++                            // else B goes when its layer fits before the predicted ring, or right after stage 1 was
++                            // served (the start of its gap: the least B can delay it when the layer does not fit)
++                            if (!hold && v1.pl_serving() && cp_s1_seq == A.seq && cp_s1_last >= 0.0)
++                                hold = cp_now + cp_b_cost > cp_s1_last + cp_s1_gap - 0.03 && cp_now - cp_s1_last > 0.05;
++                            bool bound = false;
++                            if (hold) {
++                                if (cp_b_wait0 < 0.0) cp_b_wait0 = cp_now;
++                                if (cp_now - cp_b_wait0 > cp_s1_max) {   // the bound: B's layer goes now
++                                    hold = false;
++                                    bound = true;
++                                    ++cp_b_forced;
++                                }
++                            }
++                            if (hold) {
++                                ++cp_b_held;
++                                serve_b = false;
++                            } else if (!bound) {
++                                ++cp_b_gap;
++                            }
++                        }
++                        if (serve_b && cp_b_wait0 >= 0.0) {
++                            cp_b_hold_ms += cp_now - cp_b_wait0;
++                            cp_b_wait0 = -1.0;
++                        }
++                        cp_prev_b = false;
++                        if (serve_b) {
++                            strata::core::Verifier* vb = B.fl ? &VF(B.fr, B) : nullptr;
++                            const int64_t kb0 = vb != nullptr ? vb->pl_served() : 0;
++                            if (!pump0(B, A.s1 && !A.s1_done ? 1 : 0)) return die(err);
++                            if (cp_s1first && vb != nullptr && vb->pl_served() > kb0) {   // B's layer time
++                                const double dt = ms_now() - cp_now;
++                                cp_b_cost += 0.125 * (dt - cp_b_cost);
++                                cp_prev_b = true;
++                            }
++                        }
++                    }
+                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
+                     if (!el_gap()) return die(err);   // fork: the elastic tail at a gap of stage 0
+                     // ---- a wrong speculative window has stopped (it is launched on no further stage once doomed):
+@@ -12662,12 +12780,38 @@ int main(int argc, char** argv) {
+                         }
+                     }
+                     // ---- the last stage: A, once every front stage is done
+-                    if (A.finished && !A.s1) {
+-                        if (chain_kind == 1 && !B.ready) ++pl_late;   // stage 0 idles until the chain has B
+-                        if (ajob) a_gap(1);   // --adapt-async: stage 1 is idle until this launch
+-                        if (!V1(A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
+-                        A.s1 = true;
+-                        tre("L1", A.seq, A.T);
++                    if (A.finished && !A.s1 && !launch_s1()) return die(err);
++                    // ---- critpath STRATA_CP_CHAIN_PRE: the chain after A's verdict, queued behind A's stage-1 window on the
++                    // drafter's stream, its inputs derived on the device from A's picks (MtpDrafter::chain_prelaunch).  Once
++                    // the chain that made B is done and B's launch is settled (B is part of the verdict); greedy rows only
++                    if (cp_chain_pre > 0 && A.s1 && !A.s1_done && cp_pre_seq != A.seq && chain_kind == 0 &&
++                        !mtp.chain_live() && !(B.ready && !B.launched) && !ending && S_mtp >= 2 && mtp.max_t() >= 3 &&
++                        A.T <= mtp.max_t()) {
++                        strata::core::Verifier& v1 = V1(A);
++                        if (!v1.host_sampling() && mtp.device() == v1.device()) {
++                            strata::kernels::MtpChainVerdict cv;
++                            cv.T = A.T;
++                            cv.p = (long long) A.p;
++                            cv.b_launched = B.launched ? 1 : 0;
++                            cv.b_T = B.launched ? B.T : 0;
++                            for (int i = 0; i < 8; ++i) {
++                                cv.a_tok[i] = A.tok[i];
++                                cv.b_tok[i] = B.tok[i];
++                                cv.repl[i] = -1;
++                            }
++                            if (forced != nullptr)   // the forced bench: the rows force_rows_out replaces at the verdict
++                                for (int i = 0; i < A.T; ++i) {
++                                    const int64_t k = produced_n + i;
++                                    if (k >= (int64_t) forced->size()) break;
++                                    cv.repl[i] = (*forced)[(size_t) k];
++                                }
++                            const int pre = std::max(1, std::min(cp_chain_pre, std::min(S_mtp - 1, mtp.max_t() - 2)));
++                            if (!mtp.chain_prelaunch(cv, v1.out_dev(), v1.out_host(), v1.done_event(), v1.final_R(0), pre,
++                                                     err))
++                                return die(err);
++                            tre("CP", A.seq, pre);
++                        }
++                        cp_pre_seq = A.seq;   // once per A (also when it could not be queued)
+                     }
+                     // ---- A's verdict
+                     if (!A.s1_done) continue;
+@@ -12740,7 +12884,12 @@ int main(int argc, char** argv) {
+                         // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
+                         mtp.set_source_R(V1(A).final_R(0));
+                         chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
+-                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
++                        int cp_ad = 0;   // critpath STRATA_CP_CHAIN_PRE: the chain queued behind A's window, if it fits
++                        if (cp_pre_seq == A.seq &&
++                            (cp_ad = mtp.chain_adopt(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err)) < 0)
++                            return die(err);
++                        if (cp_ad == 0 &&
++                            !mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
+                             return die(err);
+                         chain_kind = 1;
+                         tre("CL", A.seq, 1);
+@@ -12772,7 +12921,11 @@ int main(int argc, char** argv) {
+                         if (!last) {
+                             mtp.set_source_R(V1(A).final_R(0));
+                             chain_n = strata::kernels::kVerifyMaxT - 1;
+-                            if (!mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
++                            int cp_ad = 0;   // critpath STRATA_CP_CHAIN_PRE (see above)
++                            if (cp_pre_seq == A.seq &&
++                                (cp_ad = mtp.chain_adopt(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err)) < 0)
++                                return die(err);
++                            if (cp_ad == 0 && !mtp.chain_launch(A.T, outp.data(), A.p, a, nullptr, 0, chain_n, chain_n, err))
+                                 return die(err);
+                             chain_kind = 2;
+                             tre("CL", A.seq, 2);
+@@ -12790,6 +12943,7 @@ int main(int argc, char** argv) {
+                     if (!last && ajob && !adapt_tick(false)) return die("an adaptive refill failed");
+                     if (last) ending = true;
+                 }
++                cp_fence_open.store(true);   // critpath: no launch follows, the tier's fence never waits for the loop
+                 pl_drain();   // nothing in flight: both stages' commits and the drafter have landed
+                 strata::core::diag_pipeline_fn().store(nullptr);
+                 if (pl_adapt_thr.joinable()) pl_adapt_thr.join();   // its copies waited only for finished work
+@@ -12824,6 +12978,28 @@ int main(int argc, char** argv) {
+                 }
+                 // the odd windows' counters and GPU profiles into the verifiers that report them
+                 for (int st = 0; st < n_stages; ++st) stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 1));
++                // critpath (docs/CRITPATH.md): one line per request with every lever's counters while any is on
++                static const bool cp_any = cp_l1first || cp_s1first || cp_chain_pre > 0 || cp_resplan ||
++                                           cp_env_int("STRATA_CP_CHAIN_FUSE", 0) != 0;
++                if (cp_any) {
++                    std::string rp;
++                    for (int st = 0; st < n_stages; ++st) {
++                        const strata::core::Verifier& v = stage_ver_p(st, 0);
++                        char b[160];
++                        std::snprintf(b, sizeof b, " stage %d: %d layers, %lld planned / %lld host, %lld uploads;", st,
++                                      v.cp_layers(), (long long) v.cp_planned, (long long) v.cp_host,
++                                      (long long) v.cp_uploads);
++                        rp += b;
++                    }
++                    std::fprintf(stderr, "strata critpath: L1FIRST %lld early stage-1 launches | S1FIRST B held %lld passes "
++                                         "(%.1f ms), %lld B layers in a stage-1 gap, %lld past the bound; stage-1 ring gap "
++                                         "%.3f ms, B layer %.3f ms | CHAIN_PRE %lld queued, %lld adopted, %lld redone | "
++                                         "RESPLAN (all requests):%s\n",
++                                 (long long) cp_l1_early, (long long) cp_b_held, cp_b_hold_ms, (long long) cp_b_gap,
++                                 (long long) cp_b_forced, cp_s1_gap, cp_b_cost, (long long) (mtp.pre_launched - cp_pre0),
++                                 (long long) (mtp.pre_adopted - cp_ado0), (long long) (mtp.pre_redone - cp_redo0),
++                                 rp.c_str());
++                }
+                 if (!pl_adapt_ok) {
+                     std::printf("ERR an adaptive refill failed\n");
+                     return 1;
