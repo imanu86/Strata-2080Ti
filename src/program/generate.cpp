@@ -8875,10 +8875,14 @@ int main(int argc, char** argv) {
         std::deque<std::pair<Clock::time_point, int64_t>> el_seen;
         Clock::time_point el_last_grow{}, el_last_shrink{};
         int el_backoff = 1;
+        // upsync: with STRATA_VRAM_FREE=device (#1911) the whole card's free VRAM (NVML), the smaller of the two: under
+        // WDDM cudaMemGetInfo counts this process only, so the desktop and other programs on CUDA0 (the card with the
+        // display) were invisible to the policy and the cache grew until Windows paged.  Without it, as before.
         auto el_free = []() -> int64_t {
             const strata::core::OnDevice on(0);   // the elastic cache's card (CUDA0)
             size_t f = 0, t = 0;
-            return cudaMemGetInfo(&f, &t) == cudaSuccess ? (int64_t) f : -1;
+            if (cudaMemGetInfo(&f, &t) != cudaSuccess) return -1;
+            return (int64_t) std::min(f, strata::core::device_free_bytes());
         };
         // the tail moved: the prompt path's chunk and first lendable slot are planned again by the startup's own rule
         // (plan_lend: auto takes the largest chunk that lends at most its share of the slots), and the next lend lays
@@ -9546,6 +9550,8 @@ int main(int argc, char** argv) {
             // and a page-in while the verify graph spins on a host flag stalls the request for good
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
+            // STRATA_VRAM_FREE=device: the whole card's figure when it is the smaller one (the same value otherwise)
+            free_b = std::min(free_b, strata::core::device_free_bytes());
             // below ~256 MiB a later allocation (a first-used window's buffers, the desktop, another program) can make
             // the driver page GPU memory, and a verify graph spinning on a host flag then never finishes
             const int64_t free_mib = (int64_t) (free_b >> 20);
