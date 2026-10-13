@@ -13,7 +13,7 @@ Convenzione: **M** = misurato (micro-bench, log del motore, tracce), **S** = sti
 
 | fase | stato |
 |---|---|
-| 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state a campioni fitti (§2c) |
+| 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state: log al secondo letti, campionamento fitto **da fare** (§2c, comando pronto) |
 | 2. report all'owner | consegnato il 13/10 (questo documento): **si aspetta il via** |
 | 3. implementazione a tappe | **non iniziata**. Niente codice del motore cambiato in questo branch |
 
@@ -154,8 +154,16 @@ contano le differenze fra gli scenari. Output in `D:\ds4_work\strata\pipeline2\e
   3060 è in **P0, memoria a 7501 MHz** nel 94-97% dei campioni e in P3 (5001 MHz) nel 3-6%; la 2080 Ti sempre **P0,
   7000-7250 MHz**, SM a 1800-1875 MHz. Nessun P5 a 810 MHz con il motore al lavoro (2 campioni su ~290, ai bordi).
   Da ferma la 3060 sta in P5/810 MHz e il link scende a PCIe gen 2 (x4).
-- Campionamento fitto (`nvidia-smi -lms 10`) durante una richiesta: **in coda** dietro il `bench.lock` di un'altra
-  corsa (`pstate_probe.py` in `D:\ds4_work\strata\pipeline2\`); il risultato va qui.
+- Campionamento fitto (`nvidia-smi -lms 10`) durante una richiesta: **non ancora fatto**. Il 13/10 notte il
+  `bench.lock` era della coda multi-chat del coordinatore (`DET-mc2-*`, ~14 min a braccio) e la sonda è scaduta in
+  attesa senza girare. Comando pronto (~4 min, sotto `bench.lock`):
+
+  `cd D:\ds4_work\strata\pipeline2 && python <corse_2080ti>\20261006_due_schede\bench_lock.py pipeline2-pstate --
+  python pstate_probe.py <corse_2080ti>\20261004_routed_keep\build-structa-075ce875 P2-pstate1 700`
+
+  Uscite `P2-pstate1_smi.csv` (pstate, clock SM/memoria, utilizzo, link ogni ~10 ms) e `P2-pstate1_result.json`
+  (istanti della richiesta). Da leggere: quota dei campioni sotto P0 o con la memoria < 7000 MHz fra «request» e
+  «done», per scheda.
 
 ## 3. Le alternative
 
