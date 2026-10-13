@@ -274,6 +274,10 @@ public:
         return best;
     }
 
+    /// STRATA_PACK_PREFILL: a parked conversation read in place (a packed prompt read restores its prefix into a
+    /// pack slot and leaves it parked).
+    const SavedConversation& peek(size_t index) const { return entries_.at(index); }
+
     SavedConversation take(size_t index) {
         SavedConversation out = std::move(entries_.at(index));
         bytes_ -= out.bytes();

@@ -1258,6 +1258,17 @@ class StrataEngine:
             self.slot_cv.notify_all()
         return True
 
+    def _pack_hint(self, prompt, embeddings):
+        """STRATA_PACK_PREFILL (the engine says INFO pack_hints=N): a request that is about to wait for the control lines
+        sends its prompt ahead (`BHINT <ids>`, no answer), so the engine can read it in the same chunks as the prompt it
+        reads next and the request then reads only its last few tokens (docs/MULTICHAT.md).  Text only."""
+        if embeddings or not int((self.info or {}).get("pack_hints") or 0) or not self.ctl.locked():
+            return
+        try:
+            self._send("BHINT " + ",".join(str(int(t)) for t in prompt))
+        except EngineDied:
+            pass
+
     SOLO_AGAIN_MAX = 2      # how often a request left alone in a slot goes back to the solo path
     SOLO_AGAIN_MIN_LEFT = 32  # ... only with at least this many tokens still allowed (max_tokens)
 
@@ -1295,6 +1306,7 @@ class StrataEngine:
         prompt, left = list(ids), int(max_new)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
+        self._pack_hint(prompt, embeddings)
         ok = yield from self._take_control(cancel, len(prompt))
         if not ok:
             return

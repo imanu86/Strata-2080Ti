@@ -3582,6 +3582,10 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: --pipeline-windows 2 is on by default for a layer split of %zu stages "
                                  "(--pipeline-windows 0 or STRATA_PIPELINE_AUTO=0 turns it off)\n", split_devs.size() + 1);
     }
+    // STRATA_BATCH_PIPELINE=1 (opt-in, docs/MULTICHAT.md L1): --pipeline-windows stays on with --batch.  The solo path
+    // (one request alone: GEN) runs its two windows in flight as without --batch; the batch windows only run between
+    // requests and between a prompt's chunks, when no pipelined window is in flight (the solo loop drains at its end).
+    static const bool batch_pipe = [] { const char* e = std::getenv("STRATA_BATCH_PIPELINE"); return e && e[0] == '1'; }();
     if (o.pipeline_windows > 0) {
         const bool helpers = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
         const char* off = !o.serve ? "it needs --serve"
@@ -3591,7 +3595,7 @@ int main(int argc, char** argv) {
                         : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
                         : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
                         : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
-                        : o.batch != 0 ? "not with --batch slots"
+                        : o.batch != 0 && !batch_pipe ? "not with --batch slots"
                         : o.peer_device >= 1 ? "not with --peer-device"
                         : helpers ? "not with the helper caches (--expert-cache-device1..3, --remote-expert-opt)"
                         : nullptr;
@@ -4557,6 +4561,11 @@ int main(int argc, char** argv) {
         }
     }
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+    // STRATA_PACK_PREFILL=N (opt-in, docs/MULTICHAT.md): N pack slots - sessions on every stage that no batch window
+    // touches.  A request waiting for the control lines sends its prompt ahead (BHINT); the next prompt read takes it
+    // into a pack slot in the same chunks (Prefill::run_packed), and the request continues from there when its turn
+    // comes.  Unset or 0: none allocated, nothing changes.
+    std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> pack_ss;
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -4643,6 +4652,41 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
                                  "expert cache would otherwise hold\n", o.batch,
                          (double) bytes0 * o.batch / 1073741824.0);
+        }
+    }
+    if (const char* pe = std::getenv("STRATA_PACK_PREFILL"); pe != nullptr && std::atoi(pe) > 0 && o.batch > 0) {
+        const int want = std::min(8, std::atoi(pe));
+        const char* why = batch_mtp ? "not with --batch-mtp" : o.prompt_cache <= 0 ? "it needs --prompt-cache" : nullptr;
+        if (why != nullptr) {
+            std::fprintf(stderr, "strata generate: STRATA_PACK_PREFILL ignored: %s\n", why);
+        } else {
+            pack_ss.resize(bslot_ss.size());
+            int fit = want;
+            for (size_t k = 0; k < pack_ss.size(); ++k) {
+                const int dev = k == 0 ? 0 : stages[k - 1]->dev;
+                const int64_t lo = k == 0 ? 0 : stages[k - 1]->lb;
+                const int64_t hi = k == 0 ? (multi_gpu ? split_at[0] : -1) : stages[k - 1]->le;
+                const strata::core::OnDevice on_k(dev);
+                const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+                for (int j = 0; j < fit; ++j) {
+                    auto u = std::make_unique<strata::core::SessionState>();
+                    void* buf = nullptr;
+                    if (cudaMalloc(&buf, bytes) != cudaSuccess ||
+                        strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi) == 0) {
+                        cudaGetLastError();
+                        if (buf != nullptr) cudaFree(buf);
+                        fit = j;
+                        break;
+                    }
+                    strata::core::session_zero(*u, g, nullptr, nullptr);
+                    pack_ss[k].push_back(std::move(u));
+                }
+                cudaDeviceSynchronize();
+            }
+            for (auto& v : pack_ss) if ((int) v.size() > fit) v.resize((size_t) fit);
+            if (fit < 1) pack_ss.clear();
+            std::fprintf(stderr, "strata generate: STRATA_PACK_PREFILL: %d pack slot%s (a session per stage each, outside "
+                                 "the batch windows)\n", fit, fit == 1 ? "" : "s");
         }
     }
 
@@ -9826,7 +9870,8 @@ int main(int argc, char** argv) {
                         (long long) o.tail_role_token, xcache.segmented() ? 1 : 0,
                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
-                                       " batch_groups=" + std::to_string(o.batch_groups)).c_str() : "");
+                                       " batch_groups=" + std::to_string(o.batch_groups) +
+                                       (pack_ss.empty() ? std::string() : " pack_hints=" + std::to_string(pack_ss[0].size()))).c_str() : "");
         }
         // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
         // a flag nobody will raise - end the engine with where it was, so the server starts it again instead of the
@@ -10049,6 +10094,33 @@ int main(int argc, char** argv) {
             bool tainted = false;
         };
         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
+        // STRATA_PACK_PREFILL: what each pack slot holds (a waiting request's prompt up to its last turn boundary,
+        // read with another prompt) and the prompts sent ahead (BHINT), oldest first
+        struct PkSlot {
+            std::vector<int32_t> ids;
+            std::vector<ConvCheckpoint> checks;   ///< its state at the end of `ids` (and every stage's part)
+            bool cached = false;
+            uint64_t used = 0;
+        };
+        std::vector<PkSlot> pks(pack_ss.empty() ? 0 : pack_ss[0].size());
+        std::deque<std::vector<int64_t>> pk_hints;
+        uint64_t pk_clock = 0;
+        auto pk_hint_add = [&](const std::string& hl) {
+            if (pks.empty()) return;
+            std::vector<int64_t> h;
+            std::string he;
+            if (!parse_i64_list(hl.c_str() + 6, h, he) || h.size() < 2) return;
+            for (const auto& x : pk_hints) if (x == h) return;
+            pk_hints.push_back(std::move(h));
+            while (pk_hints.size() > 2 * pks.size() + 2) pk_hints.pop_front();
+        };
+        // copy_from_slot's sessions and tokens: index bs.size() + j is pack slot j
+        auto slot_sess = [&](size_t k, int b) -> strata::core::SessionState& {
+            return b < (int) bs.size() ? *bslot_ss[k][(size_t) b] : *pack_ss[k][(size_t) b - bs.size()];
+        };
+        auto slot_ids = [&](int b) -> const std::vector<int32_t>& {
+            return b < (int) bs.size() ? bs[(size_t) b].ids : pks[(size_t) b - bs.size()].ids;
+        };
         // timing of the batch windows since the slots were last all idle (one stderr line then)
         double bt_run = 0, bt_commit = 0, bt_emit = 0;
         double bt_wait0 = 0, bt_pool0 = 0;
@@ -10120,10 +10192,10 @@ int main(int argc, char** argv) {
         auto copy_from_slot = [&](int b, const ConvCheckpoint* at, std::string& e) -> bool {
             // the main session's K/V is replaced by the slot's: K/V retained from a restore described the old one
             conversations.take_reuse();
-            const int64_t upto = at != nullptr ? (int64_t) at->ids.size() : (int64_t) bs[(size_t) b].ids.size();
+            const int64_t upto = at != nullptr ? (int64_t) at->ids.size() : (int64_t) slot_ids(b).size();
             if (at != nullptr && at->stage_parts.size() != stages.size()) { e = "a checkpoint without its stage parts"; return false; }
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
-                strata::core::SessionState& from = *bslot_ss[k][(size_t) b];
+                strata::core::SessionState& from = slot_sess(k, b);
                 strata::core::SessionState& to = k == 0 ? ss : stages[k - 1]->ss;
                 const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
                 if (cudaDeviceSynchronize() != cudaSuccess) { e = "batch slot restore: device sync failed"; return false; }
@@ -10132,7 +10204,7 @@ int main(int argc, char** argv) {
                         return false;
                 } else {
                     strata::core::ConversationCheckpoint ck;
-                    ck.ids = bs[(size_t) b].ids;
+                    ck.ids = slot_ids(b);
                     if (!strata::core::conversation_checkpoint_save(ck, from, g, e) ||
                         !strata::core::conversation_checkpoint_restore(ck, to, g, e))
                         return false;
@@ -10147,7 +10219,7 @@ int main(int argc, char** argv) {
                 }
                 if (cudaDeviceSynchronize() != cudaSuccess) { e = "batch slot restore: device sync failed"; return false; }
             }
-            if (batch_mtp) {
+            if (batch_mtp && b < (int) bs.size()) {
                 // A returning solo request resumes from its slot's draft KV (on the drafter's device, as above).
                 const strata::core::OnDevice on_mtp(mtp.device());
                 strata::core::ConversationKv image;
@@ -10544,7 +10616,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 // a request reads its prompt through every stage: the groups in flight finish first
-                if (piped && line.rfind("BSTOP ", 0) != 0 && !pipe_drain()) return 1;
+                if (piped && line.rfind("BSTOP ", 0) != 0 && line.rfind("BHINT ", 0) != 0 && !pipe_drain()) return 1;
             } else if (!next_line(line)) {
                 break;
             }
@@ -10556,6 +10628,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (line.rfind("BYIELD", 0) == 0) continue;   // for a prompt read that has ended meanwhile
+            if (line.rfind("BHINT ", 0) == 0) { pk_hint_add(line); continue; }   // STRATA_PACK_PREFILL (no answer)
             if (line.rfind("VRAM", 0) == 0) {   // #533 (above): between requests, not a request
                 std::string verr;
                 if (batch_on()) verr = "VRAM: not while batch slots are decoding";
@@ -10923,6 +10996,10 @@ int main(int argc, char** argv) {
             }
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
+            // STRATA_PACK_PREFILL: this request's own prompt sent ahead is not read for it again
+            for (auto it = pk_hints.begin(); it != pk_hints.end();)
+                if (it->size() <= ids.size() && std::equal(it->begin(), it->end(), ids.begin())) it = pk_hints.erase(it);
+                else ++it;
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {
                 // positions for every cell this request can reach; the identity again for a text request
@@ -11077,6 +11154,8 @@ int main(int argc, char** argv) {
                 tail_ckpt_len = -1;
                 const size_t n_parked = conversations.clear();
                 size_t n_slots = 0, n_running = 0;
+                for (PkSlot& q : pks) { q.cached = false; q.checks.clear(); }
+                pk_hints.clear();
                 for (BSlot& sl : bs)
                     if (sl.active) {   // a running slot finishes its reply, but is not kept as a cache after it
                         sl.tainted = true;
@@ -11125,10 +11204,21 @@ int main(int argc, char** argv) {
                             slot_ck = &c;
                         }
                 }
+            // STRATA_PACK_PREFILL: a pack slot that read this prompt with an earlier one is a source too
+            int pack_source = -1;
+            int64_t pack_tokens = 0;
+            if (o.prompt_cache > 0 && req_imgs.empty() && want_cvec)
+                for (size_t j = 0; j < pks.size(); ++j)
+                    if (pks[j].cached && (int64_t) pks[j].ids.size() > std::max({resume, slot_tokens, pack_tokens}) &&
+                        starts_with(pks[j].ids, {})) {
+                        pack_source = (int) j;
+                        pack_tokens = (int64_t) pks[j].ids.size();
+                    }
+            if (pack_source >= 0) slot_source = -1;
             const auto parked = conversations.best(ids, req_imgs, want_cvec);
             std::optional<strata::core::SavedConversation> incoming;
-            if (parked.tokens > std::max(resume, slot_tokens)) incoming.emplace(conversations.take(parked.index));
-            if (incoming) slot_source = -1;
+            if (parked.tokens > std::max({resume, slot_tokens, pack_tokens})) incoming.emplace(conversations.take(parked.index));
+            if (incoming) { slot_source = -1; pack_source = -1; }
             // Reject the entire image before parking/overwriting the outgoing
             // state. Invalid entries can safely fall back to its existing prefix.
             if (incoming && incoming->stage_images.size() != stages.size()) {
@@ -11162,7 +11252,7 @@ int main(int argc, char** argv) {
                 for (int64_t i = n - 1; i > 0; --i) if (ids[size_t(i)] == o.turn_token) { last_turn = i; break; }
                 for (int64_t i = 1; i < last_turn; ++i) if (ids[size_t(i)] == o.turn_token) { disk_root = i; break; }
                 if (disk_root >= o.prompt_cache_root && disk_root <= int64_t(strata::core::prefix_cache_max_tokens) &&
-                        disk_root > std::max(resume, incoming ? incoming_tokens : int64_t(0))) {
+                        disk_root > std::max({resume, pack_tokens, incoming ? incoming_tokens : int64_t(0)})) {
                     const auto t0 = Clock::now();
                     std::error_code ec;
                     const auto bytes = std::filesystem::file_size(o.prompt_cache_file, ec);
@@ -11195,6 +11285,7 @@ int main(int argc, char** argv) {
                             incoming.emplace(std::move(image)); incoming_tokens = disk_root;
                             incoming_live = true; incoming_disk = true;
                             slot_source = -1;   // batch slots: the disk root is the longer match
+                            pack_source = -1;
                         } else {
                             std::fprintf(stderr, "strata serve: prefix disk cache: miss (%s)\n", err.c_str()); err.clear();
                         }
@@ -11216,7 +11307,8 @@ int main(int argc, char** argv) {
                 resume == req_pin && live_ok)
                 for (const ConvCheckpoint& c : checks)
                     if ((int64_t) c.ids.size() == resume && c.pinned) pin_sibling = true;
-            if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && !park_current(incoming ? incoming->bytes() : 0)) {
+            if ((!from_live || incoming || slot_source >= 0 || pack_source >= 0) && !pin_sibling &&
+                !park_current(incoming ? incoming->bytes() : 0)) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
             }
@@ -11256,6 +11348,36 @@ int main(int argc, char** argv) {
                                  slot_ck != nullptr ? "its turn checkpoint" : "all it holds",
                                  std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
                 }
+            }
+            if (pack_source >= 0) {   // STRATA_PACK_PREFILL: as a slot's, then the pack slot is free for the next hint
+                const auto t0 = Clock::now();
+                PkSlot& q = pks[(size_t) pack_source];
+                if (!copy_from_slot((int) bs.size() + pack_source, nullptr, err)) {
+                    std::fprintf(stderr, "strata pack: restoring pack slot %d failed (%s); reading the prompt\n",
+                                 pack_source, err.c_str());
+                    err.clear();
+                    live.clear();
+                    live_imgs.clear();
+                    checks.clear();
+                    resume = 0;
+                    from_live = false;
+                } else {
+                    checks.clear();   // the main session's chain is the pack slot's now: its boundary checkpoint
+                    for (const ConvCheckpoint& c : q.checks) {
+                        checks.push_back(c);
+                        checks.back().used = ++check_clock;
+                    }
+                    live = q.ids;
+                    live_imgs.clear();
+                    resume = pack_tokens;
+                    from_live = true;
+                    std::fprintf(stderr, "strata pack: pack slot %d gave back %lld tokens read ahead of this request in "
+                                 "%.1f ms\n", pack_source, (long long) pack_tokens,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+                }
+                q.cached = false;
+                q.ids.clear();
+                q.checks.clear();
             }
             // the elastic K/V: a parked conversation is restored whole, and it may be longer than this prompt
             if (incoming && !kvg_ensure((int64_t) incoming->live.ids.size() + 256, kv_quiesce)) {
@@ -11756,6 +11878,215 @@ int main(int argc, char** argv) {
             // far is copied into <slot> (this admission's own, or a free one the server reserved for a solo request),
             // the request ends with `YIELDED <slot> <tokens>` + DONE cancel, and the server sends it again later: it
             // continues from the slot with the same chunks.  #656's cooperative preemption, with a slot as the park.
+            // STRATA_PACK_PREFILL (docs/MULTICHAT.md): the prompts of waiting requests (BHINT) are read with this one, in the
+            // same chunks, each into a pack slot from its longest cached prefix (a parked conversation, or a checkpoint of
+            // this prompt below a0) up to its last turn boundary, where it gets the checkpoint its own read would take.
+            // `packed` false: nothing to pack, the caller reads alone.
+            auto pk_read = [&](int64_t a0, int64_t b0, std::string& e, bool& packed) -> bool {
+                packed = false;
+                if (pks.empty() || !req_imgs.empty() || !want_cvec || o.prompt_cache <= 0 || o.turn_token < 0 ||
+                    sp.embd_rows != nullptr)
+                    return true;
+                {   // the prompts sent ahead after this request's own line
+                    std::lock_guard<std::mutex> lk(in_mu);
+                    for (auto it = in_lines.begin(); it != in_lines.end();) {
+                        if (it->rfind("BHINT ", 0) == 0) { pk_hint_add(*it); it = in_lines.erase(it); }
+                        else ++it;
+                    }
+                }
+                if (pk_hints.empty()) return true;
+                static const int64_t pk_min = [] {
+                    const char* v = std::getenv("STRATA_PACK_MIN");
+                    return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : (int64_t) 128;
+                }();
+                auto same = [](int32_t x, int64_t y) { return (int64_t) x == y; };
+                struct Plan {
+                    size_t slot = 0;
+                    std::vector<int64_t> h;
+                    int64_t m = 0, L = 0;
+                    int src = 0;                       // 1: parked conversation pi, 2: checkpoint mc of this prompt
+                    size_t pi = 0;
+                    const ConvCheckpoint* mc = nullptr;
+                };
+                std::vector<Plan> plans;
+                std::vector<bool> taken(pks.size(), false);
+                const auto tp0 = Clock::now();
+                while (!pk_hints.empty() && plans.size() < pks.size()) {
+                    Plan pl;
+                    pl.h = std::move(pk_hints.front());
+                    pk_hints.pop_front();
+                    const std::vector<int64_t>& h = pl.h;
+                    // its last turn boundary, as its own request finds it (with #458's tail role)
+                    int64_t L = -1;
+                    for (int64_t i = (int64_t) h.size() - 1; i > 0; --i)
+                        if (h[(size_t) i] == o.turn_token) { L = i; break; }
+                    if (L > 0 && o.tail_role_token >= 0)
+                        for (int64_t i = L - 1; i > 0; --i)
+                            if (h[(size_t) i] == o.turn_token) {
+                                if (h[(size_t) i + 1] == o.tail_role_token) L = i;
+                                break;
+                            }
+                    if (L <= 1) continue;
+                    bool held = false;   // a pack slot holds it already
+                    for (const PkSlot& q : pks)
+                        held = held || (q.cached && (int64_t) q.ids.size() >= L &&
+                                        std::equal(q.ids.begin(), q.ids.begin() + L, h.begin(), same));
+                    if (held) continue;
+                    const auto pm = conversations.best(h, {}, true);
+                    if (pm.tokens > 0 && pm.tokens < L) { pl.m = pm.tokens; pl.src = 1; pl.pi = pm.index; }
+                    for (const ConvCheckpoint& c : checks) {
+                        const int64_t cl = (int64_t) c.ids.size();
+                        if (cl <= pl.m || cl > a0 || cl >= L || !c.imgs.empty() || c.stage_parts.size() != stages.size() ||
+                            !std::equal(c.ids.begin(), c.ids.end(), ids.begin(), same) ||
+                            !std::equal(c.ids.begin(), c.ids.end(), h.begin(), same))
+                            continue;
+                        pl.m = cl;
+                        pl.src = 2;
+                        pl.mc = &c;
+                    }
+                    if (pl.src == 0 || L - pl.m < pk_min) continue;
+                    pl.L = L;
+                    size_t best = pks.size();   // a free pack slot, else the one filled longest ago
+                    for (size_t j = 0; j < pks.size(); ++j) {
+                        if (taken[j]) continue;
+                        if (best == pks.size() || (!pks[j].cached && pks[best].cached) ||
+                            (pks[j].cached == pks[best].cached && pks[j].used < pks[best].used))
+                            best = j;
+                    }
+                    if (best == pks.size()) break;
+                    taken[best] = true;
+                    pl.slot = best;
+                    plans.push_back(std::move(pl));
+                }
+                if (plans.empty()) return true;
+                // the prefixes into the pack slots, on every stage (what a slot held before is dropped)
+                for (Plan& pl : plans) {
+                    PkSlot& q = pks[pl.slot];
+                    q.cached = false;
+                    q.ids.clear();
+                    q.checks.clear();
+                    bool ok = true;
+                    std::string pe;
+                    for (size_t k = 0; ok && k < pack_ss.size(); ++k) {
+                        const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+                        strata::core::SessionState& to = *pack_ss[k][pl.slot];
+                        ok = cudaDeviceSynchronize() == cudaSuccess;
+                        if (ok && pl.src == 1) {
+                            const strata::core::SavedConversation& top = conversations.peek(pl.pi);
+                            const strata::core::SavedConversation* im = k == 0 ? &top
+                                : k - 1 < top.stage_images.size() ? &top.stage_images[k - 1] : nullptr;
+                            const ConvCheckpoint* ck = nullptr;
+                            if (im != nullptr && (int64_t) im->live.ids.size() == pl.m) ck = &im->live;
+                            for (size_t c = 0; im != nullptr && ck == nullptr && c < im->checkpoints.size(); ++c)
+                                if ((int64_t) im->checkpoints[c].ids.size() == pl.m) ck = &im->checkpoints[c];
+                            if (ck == nullptr || (int64_t) im->kv.size() < to.qsa_alloc) {
+                                pe = "the parked image holds no state there";
+                                ok = false;
+                            }
+                            for (int64_t j = 0; ok && j < to.qsa_alloc; ++j)
+                                ok = strata::core::conversation_kv_restore(im->kv[(size_t) j], to.qsa_states[to.qsa_ord0 + j], g,
+                                                                           im->kv[(size_t) j].cells, true, pe);
+                            ok = ok && cudaDeviceSynchronize() == cudaSuccess && checkpoint_restore(*ck, to, g);
+                        } else if (ok) {
+                            strata::core::SessionState& from = k == 0 ? ss : stages[k - 1]->ss;
+                            for (int64_t j = 0; ok && j < from.qsa_alloc; ++j) {
+                                strata::core::ConversationKv img;
+                                ok = strata::core::conversation_kv_save(img, from.qsa_states[from.qsa_ord0 + j], g, pl.m, true, pe) &&
+                                     cudaDeviceSynchronize() == cudaSuccess &&
+                                     strata::core::conversation_kv_restore(img, to.qsa_states[to.qsa_ord0 + j], g, pl.m, true, pe);
+                            }
+                            ok = ok && cudaDeviceSynchronize() == cudaSuccess &&
+                                 checkpoint_restore(k == 0 ? *pl.mc : pl.mc->stage_parts[k - 1], to, g);
+                        }
+                        ok = ok && cudaDeviceSynchronize() == cudaSuccess;
+                    }
+                    if (!ok) {
+                        std::fprintf(stderr, "strata pack: a prompt sent ahead is left out: its prefix did not restore (%s)\n",
+                                     pe.c_str());
+                        pl.L = 0;
+                    }
+                }
+                std::vector<strata::prefill::Prefill::PackSeg> segs(1);
+                segs[0].tokens = ids.data() + a0;
+                segs[0].n = b0 - a0;
+                segs[0].pos0 = a0;
+                segs[0].prev[0] = ss.ple_prev[0];
+                segs[0].prev[1] = ss.ple_prev[1];
+                int64_t total = b0 - a0, extra = 0;
+                std::string what;
+                for (const Plan& pl : plans) {
+                    if (pl.L <= 0) continue;
+                    strata::prefill::Prefill::PackSeg sg;
+                    sg.tokens = pl.h.data() + pl.m;
+                    sg.n = pl.L - pl.m;
+                    sg.pos0 = pl.m;
+                    sg.prev[0] = pl.m >= 2 ? (int32_t) pl.h[(size_t) pl.m - 2] : -1;
+                    sg.prev[1] = (int32_t) pl.h[(size_t) pl.m - 1];
+                    for (size_t k = 0; k < pack_ss.size(); ++k) sg.ss.push_back(pack_ss[k][pl.slot].get());
+                    segs.push_back(sg);
+                    total += sg.n;
+                    extra += sg.n;
+                    what += " " + std::to_string((long long) sg.n) + (pl.src == 1 ? "@parked:" : "@checkpoint:") +
+                            std::to_string((long long) pl.m);
+                }
+                if (segs.size() == 1) return true;
+                const double prep_ms = std::chrono::duration<double, std::milli>(Clock::now() - tp0).count();
+                // STRATA_PACK_CHUNK=N: the packed read in chunks of about N tokens (0, default: as one read of `total`),
+                // so a large pack runs its chunks through the two stages as a pipeline
+                static const int64_t pk_chunk = [] {
+                    const char* v = std::getenv("STRATA_PACK_CHUNK");
+                    return v != nullptr ? std::max<int64_t>(0, std::atoll(v)) : (int64_t) 0;
+                }();
+                if (!lend(pk_chunk > 0 ? std::min(total, pk_chunk) : total, e)) return false;
+                const auto tr0 = Clock::now();
+                if (!sp.run_packed(segs, e)) return false;
+                packed = true;
+                const double run_ms = std::chrono::duration<double, std::milli>(Clock::now() - tr0).count();
+                // each one's state at its boundary: the checkpoint its own read would take there, and its tokens
+                int kept = 0;
+                for (const Plan& pl : plans) {
+                    if (pl.L <= 0) continue;
+                    ConvCheckpoint c;
+                    c.ids.resize((size_t) pl.L);
+                    for (int64_t i = 0; i < pl.L; ++i) c.ids[(size_t) i] = (int32_t) pl.h[(size_t) i];
+                    bool ok = true;
+                    for (size_t k = 0; ok && k < pack_ss.size(); ++k) {
+                        const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+                        ok = cudaDeviceSynchronize() == cudaSuccess;
+                        if (ok && k == 0) ok = checkpoint_save(c, *pack_ss[0][pl.slot], g);
+                        else if (ok) {
+                            ConvCheckpoint part;
+                            part.ids = c.ids;
+                            ok = checkpoint_save(part, *pack_ss[k][pl.slot], g);
+                            c.stage_parts.push_back(std::move(part));
+                        }
+                    }
+                    if (!ok) continue;
+                    PkSlot& q = pks[pl.slot];
+                    c.used = ++check_clock;
+                    q.ids = c.ids;
+                    q.checks.push_back(std::move(c));
+                    q.cached = true;
+                    q.used = ++pk_clock;
+                    ++kept;
+                }
+                std::fprintf(stderr, "strata pack: %lld tokens of this prompt read with %d prompt%s sent ahead (%lld tokens:%s) "
+                                     "in %.0f ms, their prefixes restored in %.0f ms\n", (long long) (b0 - a0), kept,
+                             kept == 1 ? "" : "s", (long long) extra, what.c_str(), run_ms, prep_ms);
+                return true;
+            };
+            // STRATA_PACK_PREFILL: prompts sent ahead are waiting (the queued lines are taken in first)
+            auto pk_pending = [&]() -> bool {
+                if (pks.empty() || !req_imgs.empty() || !want_cvec) return false;
+                {
+                    std::lock_guard<std::mutex> lk(in_mu);
+                    for (auto it = in_lines.begin(); it != in_lines.end();) {
+                        if (it->rfind("BHINT ", 0) == 0) { pk_hint_add(*it); it = in_lines.erase(it); }
+                        else ++it;
+                    }
+                }
+                return !pk_hints.empty();
+            };
             auto read_part = [&](int64_t a0, int64_t b0, std::string& e) -> bool {
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
                 // none decoding in pieces of STRATA_BATCH_YIELD_CHUNKS chunks (default 8; 0 = one run) so a BYIELD is taken)
@@ -11765,6 +12096,11 @@ int main(int argc, char** argv) {
                 }();
                 const int64_t C = std::max<int64_t>(sp.chunk(), 1);
                 const int64_t piece = strata::program::batch_read_piece(o.batch > 0, piped, !stages.empty(), batch_on(), C, yield_chunks);
+                if (piece <= 0 && !pks.empty()) {   // STRATA_PACK_PREFILL: the prompts sent ahead, in the same chunks
+                    bool packed = false;
+                    if (!pk_read(a0, b0, e, packed)) return false;
+                    if (packed) return true;
+                }
                 if (piece <= 0) return sp.run(ids.data() + a0, b0 - a0, a0, e);
                 for (int64_t q = a0; q < b0;) {
                     const int64_t r = std::min(b0, q + piece);
@@ -11969,7 +12305,8 @@ int main(int argc, char** argv) {
             for (const int64_t to : cuts) {
                 if (to <= at) continue;
                 err.clear();
-                const bool win = windows_ok(at, to);
+                bool win = windows_ok(at, to);
+                if (win && pk_pending()) win = false;   // STRATA_PACK_PREFILL: a short read carries the prompts sent ahead
                 if (win && !refill(err)) {
                     std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
                     return 1;
