@@ -71,7 +71,36 @@ ttft43 coi default, ttft43 con le leve); A / B / C con la config del Daily per i
 
 ## Misure
 
-(in corso: coda `coda_ttft43.sh build-ttft43-a2111f8b "fA fB0 A B fBL C"`, 13/10 dalle 03:10)
+**Nessuna misura ancora.** La coda è partita il 13/10 alle 03:09 ed è stata fermata alle 03:20 (fine del piano
+settimanale) senza aver preso il `bench.lock`: la coda notturna del multi-chat (`20261013_multichat\coda_mc2_notte.sh` e
+seguenti, bracci `DET-mc2-*`) lo riprende appena lo rilascia. Nessuna cartella `ttft_<tag>` né
+`D:\ds4_work\strata\lab_prefix\ttft43` creata; resta solo `ttft_fA.runlog` vuoto.
+
+Stime di `docs/TTFT.md` (dai log del 7-12/10, **non misurate**): Claude Code ~40k con il file del suo prefisso 16-20 s,
+col file sovrascritto da un altro client ~42 s; ripresa di 130k dopo un riavvio 65-80 s. Attese: con
+`STRATA_PREFIX_DISK_MULTI` 42 → 16-20 s quando i client si alternano; con `STRATA_CONV_DISK` la ripresa dopo un riavvio
+≈ lettura del file (113k: 2,3 s nel banco del 9/10) + il solo ultimo turno.
+
+## Prossimo passo (esatto)
+
+1. Lanciare la coda, in una finestra libera (nessun `lab_locks\pause`, owner fuori dal PC):
+
+       cd C:\Users\imanu\source\repos\moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261006_due_schede
+       bash coda_ttft43.sh build-ttft43-a2111f8b "fA fB0 A B fBL C" > coda_ttft43.out 2>&1
+
+   ~7-8 min per braccio (due avvii da ~65 s + 12 richieste), ~45 min in tutto. Ogni braccio prende il lock da solo.
+   Se un'altra coda lo monopolizza, accodarsi dopo di lei.
+2. Testo: `ttft_fB0\results.json` → `same_text_as` deve essere tutto vero contro fA (port). Per fBL una differenza su
+   `cc1_t5` / `dsh1_t3` (caso d) è attesa solo se fA rilegge a chunk diversi; tutto il resto deve coincidere.
+3. Tabella: `python ttft_tabella.py A B C` (e `fA fB0 fBL`), da incollare qui con i numeri misurati.
+4. Controllare nei log del braccio B (`ttft_B\engine1.log`, `engine2.log`): `conversation disk cache: saved` dopo la pausa
+   di 12 s e dopo l'ultima richiesta; in vita 2 `conversation disk cache: hit` su cc1_t5 e dsh1_t3, `prefix disk cache:
+   restored` su cc3_t1 e dsh2_t1; righe `waited ... PLE rows` per decidere la leva 4.
+5. Poi, in ordine: leva 4 (cache PLE salvata) solo se le attese PLE restano sopra ~1 s; leva 5 (riscaldamento
+   all'avvio) solo se il primo TTFT dopo il riavvio mostra il costo della cattura dei grafi; `STRATA_PREFILL_HELP`
+   (braccio C, non bit per bit) per i turni corti c/e.
+6. Proposta per il Daily dopo le misure (non prima): `STRATA_PREFIX_DISK_MULTI=24`, `STRATA_CONV_DISK=10` nell'env del
+   JSON e `STRATA_PROMPT_ENCODER=1` nell'ambiente del server (il bat), se B batte A e il testo di fB0/fBL è uguale.
 
 ## Penalità di ripetizione (controllo del 13/10, sola lettura)
 
