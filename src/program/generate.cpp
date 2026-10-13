@@ -11985,7 +11985,7 @@ int main(int argc, char** argv) {
                             }
                             for (int64_t j = 0; ok && j < to.qsa_alloc; ++j)
                                 ok = strata::core::conversation_kv_restore(im->kv[(size_t) j], to.qsa_states[to.qsa_ord0 + j], g,
-                                                                           im->kv[(size_t) j].cells, true, pe);
+                                                                           (int64_t) im->live.ids.size(), true, pe);   // as parked
                             ok = ok && cudaDeviceSynchronize() == cudaSuccess && checkpoint_restore(*ck, to, g);
                         } else if (ok) {
                             strata::core::SessionState& from = k == 0 ? ss : stages[k - 1]->ss;
@@ -12001,8 +12001,8 @@ int main(int argc, char** argv) {
                         ok = ok && cudaDeviceSynchronize() == cudaSuccess;
                     }
                     if (!ok) {
-                        std::fprintf(stderr, "strata pack: a prompt sent ahead is left out: its prefix did not restore (%s)\n",
-                                     pe.c_str());
+                        std::fprintf(stderr, "strata pack: a prompt sent ahead is left out: its prefix (%s, %lld "
+                                     "tokens) did not restore (%s)\n", pl.src == 1 ? "parked" : "checkpoint", (long long) pl.m, pe.c_str());
                         pl.L = 0;
                     }
                 }
