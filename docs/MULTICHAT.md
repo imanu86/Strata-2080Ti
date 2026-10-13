@@ -357,6 +357,11 @@ La patch originaria aggiungeva soltanto un callback e campi non usati. Il comple
 
 La ricostruzione riguarda gli slot di packing: **il caso preesistente di ritorno da uno slot batch senza
 `--batch-mtp` rimane da risolvere**, così come l'eventuale storia approssimata già presente nell'immagine sorgente.
+Il blocco `copy_from_slot` è identico alla build precedente `b6d8df2d`: copia sempre lo stato target, ma il K/V
+del drafter solo quando `batch_mtp` è attivo; con più gruppi questa opzione è disabilitata. Ripristinare il ring
+del drafter e aggiornare la lunghezza non ricrea le righe prodotte nel batch ordinario. Risolverlo richiederebbe
+conservare quei residui, mantenere un drafter per slot o rileggere la storia: è un lavoro distinto dal replay dei
+suffissi packed già disponibili. Non è stata introdotta qui una riscrittura L2.
 Il drafter propone, il target verifica; ricostruire le bozze non è una prova di identità del testo fra geometrie diverse.
 Non è stata individuata una violazione specifica del drain fra `STRATA_BATCH_PIPELINE` e packing: i percorsi batch
 continuano dopo il drain della richiesta solo. Il peggioramento prestazionale della coda resta non attribuito.
@@ -369,6 +374,9 @@ Verifiche CPU eseguite: `tools/test_pack_prefill.cpp` compilato con clang++ 19.1
 vocabolario, overflow del budget, chunk consecutivi/duplicati/incompleti); `python -B -m unittest serve.test_pack_hint -v`
 (4 test superati), più `python -B -m unittest serve.test_parallel` (25 test superati in 43,35 s: scheduling,
 cancellazione, ritorno al solo, errori e isolamento delle richieste con motore simulato).
+Comandi, esiti e provenienza sono registrati nell'output esterno `multichat/cpu_validation/provenance.json`:
+gli estratti sono trascritti dagli output tool conservati, non log grezzi ritrovati né nuove esecuzioni. Il codice
+di uscita originale è conservato per i 25 test; per gli altri due comandi non era stato riportato separatamente.
 Build **CUDA sm75 + sm86 verificata**, `cmake --build build-sm7586 --target strata -j 2` sotto lock: completata
 con exit code 0 in 14 s. SHA256 dell'eseguibile:
 `b1f3ccd05450293cea4c7bd985885977cf2d227fcddf4d57cd69d4c627db5162`.
@@ -411,12 +419,52 @@ l'intervallo è fra invio GEN e log di completamento packed, non una misura degl
 Sul medesimo motore, gli hint con token negativo, fuori vocabolario e prompt di **299964 token** oltre il contesto
 sono stati ignorati; la richiesta valida successiva è passata e il protocollo è rimasto sincronizzato.
 
-## Misure ancora pendenti
+## PACK a identica allocazione degli slot (M, 13/10)
 
-Restano i confronti **B–A–B del PACK a identica allocazione degli slot** (baseline con `STRATA_PACK_MIN=999999`)
-e della leva NOSWITCH, coordinati dal processo principale dopo pipeline/TTFT. Non sono ancora disponibili esiti
-da attribuire a queste misure. Non è stata ripetuta sulla nuova build la variante PACK_CHUNK=4096.
-Le verifiche superate sopra autorizzano la correzione opt-in, non una promozione al Daily né una promessa di throughput.
+Fonti esterne: `mc2_pack_perf_B1`, `mc2_pack_perf_A_resume1`, `mc2_pack_perf_B2_resume1`, ciascuna con
+`res.json`, configurazione, engine/server log e telemetria `DET-mc-codex-pack_perf_*.environment.jsonl`.
+Sorgenti `a6830a02`, eseguibile CUDA con SHA256 `b1f3ccd…` riportato sopra, invariati durante le prove.
+B1/B2 usano `STRATA_PACK_PREFILL=3`; A mantiene i tre slot allocati ma disattiva la lettura anticipata con
+`STRATA_PACK_MIN=999999`. Gli argomenti e le altre variabili sono identici: batch 4, due gruppi, cache conversazioni
+28672 MiB/16 slot, expert cache 1500, adapt 0, senza elastic né BPIPE. Tutti riportano chunk automatico **3328 token,
+ring di 96 slot**. Ogni motore esegue prima il warm-up P0, poi 4 e 8 agenti con tre turni e limite 200 token;
+il caso a 8 agenti può quindi riusare la storia del caso a 4.
+
+| agenti | braccio | token generati | wall scenario, s | aggregato, t/s | `dec_agg`, t/s | stop prima di 200 token |
+|---:|---|---:|---:|---:|---:|---:|
+| 4 | B1, PACK | 2104 | 76,703 | 27,4305 | 32,1767 | 4/12 |
+| 4 | A, letture separate | 2089 | 89,578 | 23,3205 | 24,4399 | 3/12 |
+| 4 | B2, PACK | 2266 | 78,891 | 28,7232 | 33,5322 | 1/12 |
+| 8 | B1, PACK | 4185 | 162,000 | 25,8333 | 25,7422 | 5/24 |
+| 8 | A, letture separate | 4160 | 153,829 | 27,0430 | 26,9473 | 6/24 |
+| 8 | B2, PACK | 4470 | 160,219 | 27,8993 | 27,8120 | 4/24 |
+
+Tutte le **36 richieste per braccio** sono terminate senza errori o cancellazioni. I server log confermano
+`stop` per le risposte corte, `length` per quelle a 200 token: non sono tutti lavori di uguale lunghezza.
+L'aggregato è token/wall dal primo invio all'ultima fine; `dec_agg` è la somma di `out-1` divisa per l'intervallo
+dal primo token ricevuto all'ultima fine. **Include letture e ammissioni successive**, non misura il solo kernel decode.
+
+Con 4 agenti il beneficio osservato mantiene il segno: **+17,6% / +23,2%** di throughput in B1/B2 rispetto ad A,
+wall **−14,4% / −11,9%**. Con 8 agenti il throughput cambia segno (**−4,47% / +3,17%**) e il wall peggiora in
+entrambi (**+5,31% / +4,15%**). B2 genera il 7,45% di token in più di A: il suo throughput maggiore non equivale
+a concludere prima. Questa serie non dimostra un vantaggio stabile con 8 agenti.
+
+Le risposte e l'ordine di ammissione variano. Nel caso a 4 agenti i primi gruppi sono a0+a3 / a2+a1 in B1,
+a0+a1 / a2+a3 in A, a0+a1 / a3+a2 in B2; nel caso a 8 partono a0+a2 / a1+a3 in tutti, ma le ammissioni
+successive e gli stop divergono. Testi identici B1/A: **0/12 e 2/24**; B2/A: **0/12 e 0/24**;
+B1/B2: **1/12 e 1/24**. Non è dimostrata parità bitwise o numerica, né è isolato il contributo causale di
+packing, scheduling e lunghezza dell'output.
+
+La sequenza comprende una pausa richiesta dall'utente, non un B–A–B continuo: campioni ambiente B1
+**11:08:59–11:14:45**, A ripreso **11:38:24–11:44:12**, B2 **11:44:22–11:52:21** (ora locale).
+Il primo `mc2_pack_perf_A`, interrotto durante il caso a 8 dopo aver finito solo quello a 4, è preservato ed
+**escluso** dalla tabella. Avvio motore 74/74/205 s e warm-up 32,5/32,6/32,8 s per B1/A/B2, fuori dal wall
+degli scenari; durata totale dei job 353/358/485 s. Telemetria disponibile, ma nessuna equivalenza rigorosa di
+carico CPU, disco, desktop o temperatura è dimostrata. Due campioni PACK e uno A non sono una stima statistica
+del beneficio. Il confronto a uguale allocazione degli slot elimina quel fattore, non tutte le fonti di variabilità.
+
+La variante PACK_CHUNK=4096 e la leva NOSWITCH non sono state rimisurate in questo confronto. Le prove CUDA e
+funzionali superate autorizzano la correzione opt-in, **non una promozione al Daily né una promessa di throughput**.
 
 L'harness originale scrive accanto a sé e contiene percorsi della macchina precedente: copiarlo/adattarlo **fuori dal
 repository lab**, lasciando fixture e configurazione Daily in sola lettura. Le prove non autorizzano cambi al Daily.
@@ -443,5 +491,8 @@ repository lab**, lasciando fixture e configurazione Daily in sola lettura. Le p
 
 La prosecuzione autorizzata resta su `lab/multichat43`. L1 opt-in è già presente (`STRATA_BATCH_PIPELINE=1`),
 L3 è implementato senza righe di decode agganciate e la patch drafter è completata e verificata su CUDA, con i
-limiti di parità e prestazioni elencati sopra. L2 gruppi con MTP, ammissione senza copia, condivisione fisica del
+limiti di parità e prestazioni elencati sopra. Il confronto PACK a pari slot è concluso: beneficio osservato a
+4 agenti, segno non stabile a 8; nessun cambio di default o del Daily. HIP rimane non compilato e il drafter
+al ritorno dal batch ordinario senza `--batch-mtp` resta il limite preesistente descritto sopra.
+L2 gruppi con MTP, ammissione senza copia, condivisione fisica del
 prefisso e tuning esteso restano lavori futuri: non sono necessari per validare questa correzione.
