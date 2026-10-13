@@ -590,6 +590,18 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     }
     release_gpu_fn().store(&release_live_verifiers);
     cudaGetDevice(&device_);   // a layer split's stage on another GPU: its streams, graphs and buffers live there
+    {   // lab/pipeline2 (docs/PIPELINE2.md, tappa 2a): STRATA_P2_SMEM=1 asks every kernel of this card for the shared
+        // side of the L1/shared split, before any graph is captured.  On the 2080 Ti the hyper-connection read flips the
+        // SM between 64 KiB (gr_down_staged, carveout 100) and 32 KiB (the rest) twice a layer, and nsys shows 11 us of
+        // idle before each gr_up_multi (65 a window).  A cache split moves no value: bitwise.
+        static const bool p2_smem = std::getenv("STRATA_P2_SMEM") != nullptr && std::atoi(std::getenv("STRATA_P2_SMEM")) != 0;
+        if (p2_smem) {
+            const cudaError_t ce = cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
+            std::fprintf(stderr, "strata pipeline2: STRATA_P2_SMEM: CUDA%d prefers shared memory (%s)\n", device_,
+                         ce == cudaSuccess ? "ok" : cudaGetErrorString(ce));
+            (void) cudaGetLastError();
+        }
+    }
     rr_stats_ = route_resident_cfg().stats_on(device_);   // STRATA_ROUTE_RESIDENT: this GPU's counters, outside graph capture
     strata::kernels::fused_gr_check();   // once per card: which bitwise-equal hyper-connection read runs there
     wt_ = &wt;
@@ -3372,6 +3384,15 @@ namespace {
 double now_ms() { return std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count(); }
 }  // namespace
 
+// lab/pipeline2 0b (on_device.hpp): a poll without the device switch was refused: switch again from now on
+void p2_noswitch_refuse(cudaError_t e) {
+    if (!p2_noswitch_off().exchange(true))
+        std::fprintf(stderr, "strata pipeline2: the poll without the device switch was refused (%s): switching again\n",
+                     cudaGetErrorString(e));
+    p2_switch().refused.fetch_add(1, std::memory_order_relaxed);
+    (void) cudaGetLastError();
+}
+
 void Verifier::diag_pipelined(std::FILE* f, const char* name) const {
     auto rd = [](const uint32_t* p) { return p ? *(const volatile uint32_t*) p : 0u; };
     auto ev = [](cudaEvent_t e) {
@@ -3490,6 +3511,24 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
     if (!ar_on() && *(volatile uint32_t*) h_seq_ < (uint32_t) (fl_k_ + 1)) {
         const double now = now_ms();
         if (now - fl_flush_ms_ <= 2.0 && now - fl_since_ms_ <= 20000.0) return 0;
+        // lab/pipeline2 0b (STRATA_P2_FLUSH_NOSWITCH=1): the due flush without the device switch while the graph still
+        // runs - cudaEventQuery works on any device's event, the stream carries its own context (NTRYourWaifu v7)
+        if (now - fl_since_ms_ <= 20000.0 && p2_flush_noswitch() && !p2_noswitch_refused()) {
+            const double was = fl_flush_ms_;
+            fl_flush_ms_ = now;
+            const cudaError_t q = cudaEventQuery(sa_head_ ? ev_head_ : ev_done_);
+            if (q == cudaErrorNotReady) {
+                const cudaError_t s = cudaStreamQuery(cs_);
+                if (s == cudaSuccess || s == cudaErrorNotReady) {
+                    if (p2_switch_stat()) p2_switch().noswitch.fetch_add(1, std::memory_order_relaxed);
+                    return 0;
+                }
+                p2_noswitch_refuse(s);
+            } else if (q != cudaSuccess) {
+                p2_noswitch_refuse(q);
+            }
+            fl_flush_ms_ = was;   // finished, failed or refused: the loop below asks again under the device
+        }
     }
     const OnDevice on_device(device_);
     const ModelGeometry& g = *g_;
@@ -3578,6 +3617,23 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
 
 bool Verifier::done(std::string& err) {
     if (!fl_active_ || fl_k_ < fl_total_) return false;
+    if (p2_flush_noswitch() && !p2_noswitch_refused()) {   // lab/pipeline2 0b: the poll while the tail runs, no switch
+        const cudaError_t q = cudaEventQuery(ev_done_);
+        if (q == cudaErrorNotReady) {
+            const double now = now_ms();
+            if (now - fl_since_ms_ <= 20000.0) {
+                if (now - fl_flush_ms_ > 2.0) {
+                    fl_flush_ms_ = now;
+                    const cudaError_t s = cudaStreamQuery(cs_);
+                    if (s != cudaSuccess && s != cudaErrorNotReady) p2_noswitch_refuse(s);
+                }
+                if (p2_switch_stat()) p2_switch().noswitch.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+        } else if (q != cudaSuccess) {
+            p2_noswitch_refuse(q);
+        }
+    }
     const OnDevice on_device(device_);
     const cudaError_t q = cudaEventQuery(ev_done_);
     if (q == cudaErrorNotReady) {
