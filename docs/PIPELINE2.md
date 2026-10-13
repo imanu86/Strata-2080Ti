@@ -378,3 +378,99 @@ Prima lettura sulla cattura vecchia `DET-x3-hostgap-nsysB2` (build `72fc813a`, s
   ogni scheda prima delle catture. Atteso: −0,3/−0,6 ms a finestra sullo stadio 1 (S, dagli 0,74 ms nsys gonfiati
   ~1,5-2×). Da confermare con la cattura nuova e una cattura con la leva accesa.
 
+## 9. Appendice: tensor-parallel «bivalente» (richiesta dell'owner, 13/10 notte; solo analisi, S)
+
+Proposta: prefill come oggi (layer split), decode in tensor-parallel (TP); variante senza MTP e variante con MTP (finestre
+di verifica a T righe in TP, catena di bozze in serie, perdita della sola pipeline B). Ogni numero qui è **stimato** (S)
+dalle misure del §1-2 (tempi puliti per stadio di `STRUCT_A`/`STRUCT_B`, famiglie di kernel di `ROOFLINE` §1c, salto del
+§2a); nessun codice TP esiste.
+
+### 9a. Il passaggio di un token in TP (T=1)
+
+Riferimento in serie oggi a T=1, senza MTP (M): stadio 0 7,93 + stadio 1 13,1 + F0→L1 0,17 + host ~0,4 = **~21,6 ms**
+(46 t/s). Il TP ne cambia così le voci:
+
+| voce | oggi in serie, T=1 | TP, T=1 | perché |
+|---|---|---|---|
+| kernel che leggono pesi (5,09 GB a T=1) | 5,4 (3060) + 8,5 (2080 Ti) = 13,9 | **8,7** | 5,09 GB / (280 + 389 GB/s effettivi oggi) = 7,6 ms, ×1,15 per griglie dimezzate |
+| kernel piccoli (< 8 µs: norme, quantize, swiglu, route, doorbell, flag) | 1,6 + 2,2 = 3,8 | **~4,3** | non si dividono: ognuna delle due schede li esegue per tutti i 48 layer (la 3060 più lenta) |
+| buchi fra i nodi | ~1,5 | ~2,2 | ~48 × 45 nodi per scheda invece di 32 × 40 |
+| scambi (all-gather di 10 KB a T=1) | 0 | **~2,0** | 4-5 scambi per layer (hc lato attenzione, uscita attenzione, hc lato FFN, uscita MoE, router) × 48 × ~9 µs del §2a, in serie: il consumatore aspetta sempre |
+| QSA con le 2 teste K/V divise | (dentro i kernel) | +0,4 | una testa K/V e 12 teste q per scheda; i punteggi dell'indicizzatore (4 teste) vanno sommati fra le schede prima del top-k: 12 all-reduce da 128 KB (~30 µs) |
+| attese degli esperti CPU | ~3,5 | ~3,0 | stesso lavoro CPU, un solo percorso |
+| host, lancio, campionamento | ~0,6 | ~0,3 | il token successivo può partire dal device |
+| **totale** | **~21,6** | **~19-21** (forchetta 17-23) | |
+
+### 9b. Le due varianti, sul banco a 131k
+
+Oggi (M): ~77 / ~70 t/s su L01 / L02 con MTP, 1,97 / 1,71 token a finestra (media 1,85), ~25,6 / ~24,4 ms a finestra.
+
+| variante | ms a finestra | token a finestra | L01 | L02 |
+|---|---|---|---|---|
+| **TP senza MTP** | 17-23 (centro ~20) | 1 | **43-59 (~50)** | **43-59 (~50)** |
+| **TP con MTP** (catena in serie sulla 2080 Ti) | catena prima della finestra ~2,1 (3060 ferma) + host 0,3 + passaggio a T≈2 ~23,4 (T=1 ~20 + ~3,4 per la riga in più: la pendenza di oggi, 5,7 ms per riga in serie, divisa fra le schede) = **~25,8** | 1,97 / 1,71 | **~76** (forchetta 70-87) | **~66** (forchetta 61-76) |
+| TP con MTP, catena anch'essa in TP (passo 0,93 → ~0,65 ms) | ~25,2 | | ~78 | ~68 |
+
+Perché il TP con MTP non guadagna: rispetto a oggi accorcia la finestra fresca (28,3 → ~25,8: −2,5 ms nel 72% delle
+finestre) ma allunga la speculativa (19,8 → ~25,8: +6 ms nel 28%), perché senza la pipeline B ogni finestra paga catena
++ tutti i layer. Netto sulla media: **−0,3/+0,5 ms a finestra**, cioè pari. La catena in serie costa ~2,1 ms a finestra
+(~8%) con la 3060 ferma; in TP la si accorcia di ~0,6 ms, non di più (latenza dei passi, non banda).
+
+Soglia: per 80 t/s su L02 (1,71 token) serve 21,4 ms a finestra → un passaggio a T≈2 ≤ ~19 ms → **≤ 0,38 ms per layer a
+T=2** in TP (testa compresa a parte). La stima è 0,46-0,49 ms per layer. Su L01 la soglia è 0,45 ms per layer: al bordo.
+
+### 9c. Il cambio di modalità (pesi ricaricati dalla RAM, correzione dell'owner)
+
+I pesi non passano fra le schede: ogni scheda ricarica dalla RAM (arena col nucleo RAM, `dense.bin`) la sua fetta, le due
+copie in parallelo, 3060 sull'Oculink ~6,7 GB/s, 2080 Ti in x16 ~12,9 GB/s.
+
+| | 3060 | 2080 Ti |
+|---|---|---|
+| densi + testa nel layout TP (fetta per banda, ~41% / 59% di 3,83 GB) | 1,57 GB | 2,26 GB |
+| cache degli esperti da riempire (fette di riga degli esperti residenti, §9d) | ~4,9 GB | ~10,7 GB |
+| totale | **~6,5 GB → ~0,97 s** | **~13 GB → ~1,0 s** |
+| stato: K/V QSA da ridistribuire per testa (1 KB per token e layer, metà per scheda; la parte residente in VRAM, 32 768 celle × 12 layer: metà = ~0,2 GB; la parte oltre `--kv-resident` sta in RAM bloccata e non si muove) + chiavi dell'indicizzatore (16,8 MB per layer QSA a 131k, metà: ~0,1 GB) + stato GDN per testa (36 × 3,1 MB, metà: ~56 MB) | ~0,2 GB in entrata | ~0,1 GB in entrata |
+
+Un cambio costa **~1,0-1,2 s** se l'arena e `dense.bin` sono in RAM e le copie sono pinned; **1,5-2,5 s** con la parte
+pageable dell'arena (oggi pinned solo 8 GiB su 29,6) o `dense.bin` da leggere dal disco. Il ritorno al layer split
+(prefill lungo successivo) costa uguale. Due layout dei pesi insieme non stanno: la 3060 perderebbe 1,57 GB di esperti
+(~1 050 slot, −10 punti di hit sullo stadio 0 dal §2b), la 2080 Ti 2,26 GB (~1 200 slot).
+
+### 9d. Residenza degli esperti in TP
+
+Ogni esperto residente è diviso per righe fra le due schede (gate/up per `n_ff`, down per righe d'uscita o d'ingresso),
+quindi **le due schede hanno lo stesso insieme residente e lo stesso hit**. Con la fetta degli esperti al ~31% sulla 3060
+(4,9 / 15,6 GB, diversa dal 41% dei densi: si bilancia per classe di kernel) l'insieme vale ~15,6 GB, come la somma di
+oggi, ma scelto per frequenza su **tutti** i 48 layer invece che a quote fisse per stadio: dal §2b oggi lo stadio 0 è
+sotto-servito, quindi l'hit globale sale di poco (S: +0,5/+1 punto). Gli esperti CPU restano interi sulla CPU; ogni
+scheda legge la sua fetta delle righe. La cache elastica della 3060 (monitor 8K) diventa più rigida: togliere una fetta
+dalla 3060 toglie l'esperto a entrambe.
+
+### 9e. Prefill in TP (variante mista)
+
+- **Prefill lungo a freddo**: in layer split come oggi, poi un cambio (~1-2,5 s): **+1,5-3%** su un 131k da ~75-80 s.
+- **Prefill incrementale in TP** (pochi k token): a 2k token un all-gather/all-reduce porta ~21 MB per scambio; con 1
+  scambio per layer (~1 GB, l'ipotesi del coordinatore) la 3060 riceve e manda ~1 GB sull'Oculink full duplex: **~150
+  ms**; con 3 scambi per layer, realistici col hc e il MoE, **~0,3-0,45 s**. Oggi 2k token di prefill costano ~1,2 s
+  (131k in ~75 s): **+12/+38%** se gli scambi non si sovrappongono al calcolo, meno con i chunk a pipeline. In più la 3060
+  riceve dalla RAM il 41% (contro ~33% di oggi) degli esperti non residenti che il prefill legge: +~25% sul suo link.
+- **Prefill tutto in TP**: 131k = 32 chunk da 4K × 48 layer × 3 scambi da 42 MB ≈ 190 GB sull'Oculink → **+25-40 s**
+  sul 131k (oggi il layer split già fa lavorare le due schede insieme sui chunk diversi: il TP non accelera il calcolo).
+
+### 9f. Verdetto
+
+- **TP senza MTP: no.** ~50 t/s (43-59) contro 77/70: la catena MTP vale ~1,85 token a finestra e il TP non lo recupera.
+- **TP con MTP: non sposta.** ~76 / ~66 t/s al centro (forchette 70-87 / 61-76) contro 77 / 70: pari o peggio, perché si
+  perde la pipeline B. TTFT: +1-2,5 s dopo ogni prefill lungo a freddo, +0,15-0,45 s sui turni incrementali da 2k.
+  Lavoro: TP del decode con tutte le famiglie di kernel a fette (densi, hc, router, esperti, QSA a teste, indicizzatore,
+  GDN, PLE, testa), scambi nel grafo, cambio di modalità, tier adattivo ed elastico a fette, checkpoint delle
+  conversazioni divisi: **4-6 settimane**; un prototipo minimo (solo decode, cache fissa, `--adapt-every 0`, greedy, niente
+  batch) 8-12 giorni.
+- **Prototipo di 1-2 giorni**: un TP vero non sta in 1-2 giorni. Ha senso solo come **banco di un layer**: i kernel veri
+  (`b6_mmvq_rows`, `gr_*`, `expdec_gu`, `native_down_multi`, QSA) su fette 41/59 sulle due schede, con gli scambi del §2a,
+  in un grafo da 48 copie. Misura l'incertezza che decide (pavimenti dei kernel a fette + scambi): **se il layer a T=2 sta
+  sotto ~0,38 ms il TP con MTP passa gli 80 su L02; la stima è 0,46-0,49**. Lo consiglio solo se l'owner vuole chiudere la
+  domanda con un numero; non lo metto davanti alle tappe.
+- **Contro il kernel persistente / meno nodi** (tappe 2-3): −0,7/−1,5 ms a finestra (+3/+6%) su tutte le finestre, bit
+  per bit, giorni invece di settimane, nessun costo sul TTFT, la pipeline B resta. Resta la strada; il TP no.
+
