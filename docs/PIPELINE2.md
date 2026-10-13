@@ -441,8 +441,7 @@ Prima lettura sulla cattura vecchia `DET-x3-hostgap-nsysB2` (build `72fc813a`, s
   ~1,5-2×). Da confermare con la cattura nuova e una cattura con la leva accesa.
 
 **Catture nuove (13/10, M sotto nsys)**: `DET-p2-nsys-base` e `DET-p2-nsys-smem` (`build-pipeline2-cd3bd31b`, L01 16 +
-L02 200 token forzati, env della Daily 0.1.43; la seconda con `STRATA_P2_SMEM=1`); `.sqlite` in `D:\ds4_work\strata
-sys`,
+L02 200 token forzati, env della Daily 0.1.43; la seconda con `STRATA_P2_SMEM=1`); `.sqlite` in `D:\ds4_work\strata\nsys`,
 censimenti in `D:\ds4_work\strata\pipeline2\census_{base,smem}.txt`.
 
 | | 3060: nodi, muro, idle nel grafo | 2080 Ti: nodi, muro, idle nel grafo | spigolo `gr_down_staged → gr_up_multi` (2080 Ti) |
@@ -467,6 +466,40 @@ censimenti in `D:\ds4_work\strata\pipeline2\census_{base,smem}.txt`.
   `done` e `pl_head_done` (default invariato). Prova: cattura con `STRATA_P2_FLUSH_US=250` (e `STRATA_P2_FLUSH_NOSWITCH=1`,
   che rende il flush economico): il buco deve scendere sotto ~0,3 ms. Se scende: fino a −1,5/−2 ms a finestra sullo
   stadio 1 nell'80% delle finestre (S, sotto nsys; quanto ne resta fuori da nsys lo dice il B-A-B).
+
+**Prova di `STRATA_P2_FLUSH_US=250` (13/10 04:50-05:03, M)**: build `build-pipeline2-6b6f62a3`.
+- Testo (`p2_check.py … DET-p2-chk2 256 off,fl250,fl250sw`, uscita `D:\ds4_work\strata\pipeline2\p2_chk2.txt`):
+  `L02.txt` **identico** a `off` con `FLUSH_US=250` + `NOSWITCH` (`fl250`) e con `FLUSH_US=250` da solo (`fl250sw`);
+  stesse bozze, finestre e classi.
+- Cattura `DET-p2-nsys-fl250` (`FLUSH_US=250` + `NOSWITCH`, censimento `census_fl250.txt`): 2080 Ti idle nel grafo
+  **3,13 ms** come la base, lo spigolo `gr_down_staged → gr_up_multi` 65 × 33,2 µs = 2,16 ms come la base. **Il flush
+  non è la causa**: ipotesi smentita (M). `FLUSH_US` resta opt-in, effetto atteso ~0 (S); non va al B-A-B.
+
+**Il buco è il lancio del grafo, e sotto nsys è gonfiato ~20× (13/10 05:05-05:58, M).**
+- Dalla cattura (`D:\ds4_work\strata\pipeline2\launch_cost.py <sqlite>`, `cudaGraphLaunch` ↔ kernel per
+  `correlationId`): sulla 2080 Ti il `cudaGraphLaunch` del grafo da 1302 nodi dura **2,07-2,09 ms** (p10 1,92, p90
+  2,55) e il primo kernel parte **2,0 ms prima che la chiamata ritorni**: la scheda esegue i primi nodi (passaggio dallo
+  stadio 0, `gr_down_staged` del layer 16) e poi aspetta il resto del grafo. È il buco del censimento. Sulla 3060 il
+  lancio (663 nodi) dura 0,9 ms ma il primo kernel parte dopo il ritorno: nessun buco. Uguale in base, `smem` e `fl250`.
+- Nel codice (`generate.cpp`, «the last stage: A, once every front stage is done») lo stadio 1 viene lanciato dall'host
+  solo dopo che il poll ha visto lo stadio 0 finito: il lancio è in serie.
+- **Fuori da nsys** (contatore nuovo, commit `e7c7a938`: con `STRATA_P2_SWITCH_STAT=1` la riga `strata pipeline2
+  launches:` dà il tempo host dentro `cudaGraphLaunch` per scheda), `p2_check.py build-pipeline2-e7c7a938 DET-p2-chk3 256
+  off,stat,nosw` (uscita `p2_chk3.txt`, 143 finestre per braccio):
+
+| braccio | 2080 Ti (stadio 1): lancio, ms host | più lungo | 3060 (stadio 0): lancio, ms host | più lungo |
+|---|---|---|---|---|
+| `stat` | **0,100** | 0,220 | 0,013 | 0,045 |
+| `nosw` (+ `FLUSH_NOSWITCH`) | **0,094** | 0,192 | 0,013 | 0,033 |
+
+  `L02.txt` identico a `off` in `stat` e `nosw` (1199 caratteri). Il lancio vero costa **0,1 ms**, non 2: nsys con
+  `--cuda-graph-trace=node` strumenta ogni nodo e lo gonfia ~20×. È coerente con il prelancio di Fable
+  (`STRATA_HG_PRELAUNCH=2`, `lab/hostgap`): −3,2% sotto nsys e neutro al B-A-B `DET-x5`.
+- Resta da escludere che la consegna WDDM vera avvenga nel `cudaStreamQuery` subito dopo il lancio (non era nel
+  contatore): commit successivo, il contatore copre lancio + record dell'evento + `cudaStreamQuery`.
+- **Conseguenza per le tappe**: lo spigolo da ~2 ms non è una leva (S, salvo sorprese dalla consegna). Tolto lo spigolo,
+  il tempo morto nel grafo della 2080 Ti è ~1,0 ms a finestra **sotto nsys** (3,13 − 2,14), sparso su centinaia di
+  confini da 1-3 µs; fuori da nsys è meno (non misurabile senza nsys). È il bacino della tappa 2.
 
 ## 9. Appendice: tensor-parallel «bivalente» (richiesta dell'owner, 13/10 notte; solo analisi, S)
 
