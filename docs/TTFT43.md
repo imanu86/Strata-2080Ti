@@ -94,7 +94,7 @@ ttft43 coi default, ttft43 con le leve); A / B / C con la config del Daily per i
 
 `a2111f8b` (codice): `build_lock.py`, rc 0, 3485 s di cui 3212 in attesa del lock. `strata.exe` sha256
 `22a2eb857ed36b36ab25c9089af251740bd6c398ba79d062de759b6fc41e5e29`, copiata con `copia_build.py` in
-`corse_2080ti61004_routed_keepuild-ttft43-a2111f8b\` (build.json, `source\serve` e `source	ools` di a2111f8b,
+`corse_2080ti\20261004_routed_keep\build-ttft43-a2111f8b\` (build.json, `source\serve` e `source\tools` di a2111f8b,
 `strata-vision.exe` del Daily). Test del server: test_prompt_encoder 7 OK, test_strata_tokenizer 11 OK, test_server
 304 OK. `prefix_cache_file_test` (chiavi in un passaggio) scritto, non eseguito: è sotto
 `STRATA_BUILD_CONVERSATION_TESTS`, che `build_lock.py` non accende. Compilato sì, installato no.
