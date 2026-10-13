@@ -13,7 +13,7 @@ Convenzione: **M** = misurato (micro-bench, log del motore, tracce), **S** = sti
 
 | fase | stato |
 |---|---|
-| 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state: log al secondo letti, campionamento fitto **da fare** (§2c, comando pronto) |
+| 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state: campionamento fitto **fatto** il 13/10, P0 nel 100% del decode (§8, tappa 0a) |
 | 2. report all'owner | consegnato il 13/10; **via del coordinatore** il 13/10 notte per le tappe 0a → 4 del §5 (opt-in, bit per bit). Restano fuori expert-parallel, tensor-parallel, stadi invertiti, B ad albero |
 | 3. implementazione a tappe | ripresa il 13/10 alle 03:25 (crediti API). 0b e 2a **compilate e verificate a testo identico** (build `build-pipeline2-cd3bd31b`); 0a e 1 in corso. Diario e ripartenza nel §8 |
 | 4. stima TP bivalente (richiesta dell'owner) | **fatta**, §9: TP senza MTP ~50 t/s, TP con MTP ~76/66 (L01/L02) = pari a oggi → **no** |
@@ -34,7 +34,7 @@ Braccio A = env della Daily 0.1.43; braccio B = A + `STRATA_P2_SMEM=1`; a parte 
    off,stat,nosw,smem,both` (L02 a cache fissa 1500, senza `--elastic`, `--adapt-every 0`, env della Daily 0.1.43; ogni
    braccio prende da sé il `bench.lock`). Tutti i bracci devono dare `L02.txt` e primi logit IDENTICI a `off`. Leggere le
    righe `strata pipeline2 switches:` (bracci `stat`/`nosw`) e `strata pipeline2: STRATA_P2_SMEM` (bracci `smem`/`both`).
-4. Tappa 0a: `bash D:\ds4_work\strata\pipeline2\p2_pstate.sh DET-p2-pstate3` (il primo tentativo `DET-p2-pstate1` è
+4. *(fatto il 13/10: non serve, §8)* Tappa 0a: `bash D:\ds4_work\strata\pipeline2\p2_pstate.sh DET-p2-pstate3` (il primo tentativo `DET-p2-pstate1` è
    morto per «Startup deadline» a 300 s dopo la notte multi-chat: riprovare a PC fermo).
 5. Tappa 1: `D:\ds4_work\strata\pipeline2\nsys_base.bat DET-p2-nsys-base` (base) e la stessa con
    `build-pipeline2-<sha>` e `--env STRATA_P2_SMEM=1` come 3° argomento e seguenti (cattura con la leva); poi
@@ -369,11 +369,22 @@ Regole: ogni leva è opt-in (`STRATA_P2_*`); ogni tappa chiude con una build in
 verifica del testo a cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, L02 corto identico al
 braccio spento). I B-A-B li fa il coordinatore.
 
-### Tappa 0a — P-state a ~10 ms (da rifare: primo tentativo morto all'avvio)
+### Tappa 0a — P-state a campioni fitti (chiusa il 13/10 04:29: non serve)
 
-`D:\ds4_work\strata\pipeline2\p2_pstate.sh`: corsa forzata breve `DET-p2-pstate1` (L01+L02 131k, 256 token, env della
-Daily 0.1.43 sulla `build-structa-075ce875`), `nvidia-smi -lms 10` solo mentre il `bench.lock` porta il suo nome.
-Lanciata il 13/10 alle 02:20, in coda dietro la notte multi-chat del coordinatore (`DET-mc2-*`).
+`D:\ds4_work\strata\pipeline2\p2_pstate.sh DET-p2-pstate3`: corsa forzata breve (L01+L02 131k, 256 token, env della
+Daily 0.1.43 sulla `build-structa-075ce875` = exe della Daily), `nvidia-smi -lms 10` mentre il `bench.lock` porta il
+suo nome (`DET-p2-pstate3.smi.csv`, 16728 righe). Il passo reale è **~17 ms** per scheda, non 10. Corsa: L01 72,2 t/s,
+L02 71,5 t/s, 28,2 / 26,7 ms a finestra (M, una corsa, non B-A-B). Il primo tentativo `DET-p2-pstate1` era morto
+all'avvio; il `-pstate2` non era partito.
+
+Dentro decode di L01 + prefill corto e decode di L02 (da 04:29:07,2 a 04:29:17,7, ~600 campioni per scheda, M):
+- **3060: P0, memoria a 7501 MHz nel 100% dei campioni**; SM a 1912-1927 MHz.
+- **2080 Ti: P0, memoria a 7000 MHz nel 100% dei campioni**; SM a 1785-1860 MHz.
+- Alla fine del prefill lungo (gli ultimi ~2,5 s, quando lavora la sola 2080 Ti) la 3060 scende a **P3 / 5001 MHz** e
+  torna in P0 in meno di ~0,1 s quando riparte. Fra le richieste, da ferma, scende a P5 / 810 MHz e il link a gen 2.
+
+Verdetto: **nessuna leva di P-state nel decode** (d6 chiusa). Al massimo la prima finestra dopo una pausa paga la
+risalita della 3060: riguarda il TTFT (`lab/ttft43`), non la velocità a regime.
 
 ### Verifica del testo di 0b e 2a (13/10 04:10-04:30, M)
 
