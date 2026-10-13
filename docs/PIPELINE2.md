@@ -15,21 +15,22 @@ Convenzione: **M** = misurato (micro-bench, log del motore, tracce), **S** = sti
 |---|---|
 | 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state: log al secondo letti, campionamento fitto **da fare** (§2c, comando pronto) |
 | 2. report all'owner | consegnato il 13/10; **via del coordinatore** il 13/10 notte per le tappe 0a → 4 del §5 (opt-in, bit per bit). Restano fuori expert-parallel, tensor-parallel, stadi invertiti, B ad albero |
-| 3. implementazione a tappe | **ferma a un punto pulito il 13/10 alle 03:20** (fine dei crediti della settimana). Diario e ripartenza nel §8 |
+| 3. implementazione a tappe | ripresa il 13/10 alle 03:25 (crediti API). 0b e 2a **compilate e verificate a testo identico** (build `build-pipeline2-cd3bd31b`); 0a e 1 in corso. Diario e ripartenza nel §8 |
 | 4. stima TP bivalente (richiesta dell'owner) | **fatta**, §9: TP senza MTP ~50 t/s, TP con MTP ~76/66 (L01/L02) = pari a oggi → **no** |
 
-**Compilato**: solo `tools/hop_bench.cu` (micro-bench). Il codice delle tappe 0b e 2a (commit sotto) **non è compilato**:
-la prima build è fallita per una stringa C spezzata, corretta; la seconda non è partita (il `bench.lock` era della coda
-multi-chat del coordinatore). Installato no. Provato no. B-A-B no. **Nessuna build pronta per il B-A-B.**
+**Build pronta per il B-A-B**: `corse_2080ti\20261004_routed_keep\build-pipeline2-cd3bd31b\` (codice `e76d96dc`,
+`strata.exe` sha256 `3b884217…605e1e`, `build.json`). Compilato sì (build_lock, CUDA 12.6 sm_75+86, 13/10 04:05).
+Provato sì, solo a testo (§8, tappa 0b): L02 da 256 token identico a spento in tutti i bracci. Installato no. B-A-B no.
+Braccio A = env della Daily 0.1.43; braccio B = A + `STRATA_P2_SMEM=1`; a parte A + `STRATA_P2_FLUSH_NOSWITCH=1`.
 
 ### Ripartenza (per un agente senza contesto)
 
 1. `cd C:\Users\imanu\source\repos\Strata-wt\pipeline2` (branch `lab/pipeline2`): `git status`, `git pull --ff-only`.
-2. Build: `python <corse_2080ti>\20261006_due_schede\build_lock.py C:\Users\imanu\source\repos\Strata-wt\pipeline2`
+2. *(fatto il 13/10: `build-pipeline2-cd3bd31b`)* Build: `python <corse_2080ti>\20261006_due_schede\build_lock.py C:\Users\imanu\source\repos\Strata-wt\pipeline2`
    (la cartella `build-sm7586` è già configurata: è incrementale). Se compila, copiare `build-sm7586\strata.exe`
    (+ `strata-vision.exe` da `build-structa-075ce875`, `source\serve`, `source\tools`, come le build precedenti) in
    `<corse_2080ti>\20261004_routed_keep\build-pipeline2-<sha>\` con `build.json` (`status`, `executable_sha256`, `note`).
-3. Verifica del testo: `python D:\ds4_work\strata\pipeline2\p2_check.py build-pipeline2-<sha> DET-p2-chk1 256
+3. *(fatto il 13/10: testo identico, §8)* Verifica del testo: `python D:\ds4_work\strata\pipeline2\p2_check.py build-pipeline2-<sha> DET-p2-chk1 256
    off,stat,nosw,smem,both` (L02 a cache fissa 1500, senza `--elastic`, `--adapt-every 0`, env della Daily 0.1.43; ogni
    braccio prende da sé il `bench.lock`). Tutti i bracci devono dare `L02.txt` e primi logit IDENTICI a `off`. Leggere le
    righe `strata pipeline2 switches:` (bracci `stat`/`nosw`) e `strata pipeline2: STRATA_P2_SMEM` (bracci `smem`/`both`).
@@ -374,7 +375,33 @@ braccio spento). I B-A-B li fa il coordinatore.
 Daily 0.1.43 sulla `build-structa-075ce875`), `nvidia-smi -lms 10` solo mentre il `bench.lock` porta il suo nome.
 Lanciata il 13/10 alle 02:20, in coda dietro la notte multi-chat del coordinatore (`DET-mc2-*`).
 
-### Tappa 0b — polling senza `cudaSetDevice` (codice scritto e committato, non compilato)
+### Verifica del testo di 0b e 2a (13/10 04:10-04:30, M)
+
+`p2_check.py build-pipeline2-cd3bd31b DET-p2-chk1 256 off,stat,nosw,smem,both` (L02 131k, greedy libero, cache fissa
+1500, senza `--elastic`, `--adapt-every 0`, env della Daily 0.1.43; uscita `D:\ds4_work\strata\pipeline2\p2_chk1.txt`):
+
+- **`L02.txt` identico a `off` (1199 caratteri) in `stat`, `nosw`, `smem`, `both`**; bozze accettate identiche in tutti
+  i bracci (`[113, 187]`), stesse 143 finestre, stesse classi (112 fresche, 31 speculative, 10 disaccordi della catena).
+- I **primi logit non sono confrontati**: `STRATA_DUMP_FIRST_LOGITS` scrive solo nel ciclo di serve non in pipeline
+  (`generate.cpp` ~13369); con `--pipeline-windows 2` non scatta (nessun file, nessun errore). La prova è il testo.
+- `STRATA_P2_SMEM`: «CUDA0/CUDA1 prefers shared memory (ok)», due volte per scheda (un `Verifier::init` per stadio e
+  per la seconda finestra; innocuo).
+- Le velocità di queste corse (53,6-55,0 t/s, 32,5-33,4 ms a finestra) sono **una corsa per braccio senza
+  riscaldamento né testo forzato**: non sono un confronto di velocità (servono i B-A-B del coordinatore).
+
+### Tappa 0b — polling senza `cudaSetDevice` (compilata, testo identico; B-A-B da fare)
+
+Misura dei cambi di scheda (M, corse sopra, 143 finestre):
+
+| braccio | cambi di scheda per finestra | ms host dentro i cambi per finestra | più lungo | poll senza cambio |
+|---|---|---|---|---|
+| `stat` (solo conteggio) | **8088** | **3,37** | 0,076 ms (nessuno > 0,1 ms) | 0 |
+| `nosw` (+ `STRATA_P2_FLUSH_NOSWITCH=1`) | **37** | **0,05** | 0,015 ms | 5,15 milioni, nessun rifiuto |
+
+Lettura: il polling senza cambio funziona sul driver dell'owner (nessuna query rifiutata) e toglie il 99,5% dei cambi.
+I 3,4 ms host a finestra sono del filo che fa il polling, in gran parte **sovrapposti** al lavoro GPU: quanto ne stava
+sul percorso critico lo dice solo il B-A-B (S: 0/−0,5 ms a finestra, come nel §5). Nessun cambio > 0,1 ms in questa
+corsa: lo stallo dentro `cudaSetDevice` visto su 0.1.41 qui non si è presentato.
 
 - `STRATA_P2_FLUSH_NOSWITCH=1`: `Verifier::service` (flush ogni 2 ms), `Verifier::done`, `MtpDrafter::chain_outputs_ready`
   e `chain_poll` interrogano eventi e stream senza `OnDevice` (porto di NTRYourWaifu `two-pc-042` v7/v8, che lì è acceso
@@ -398,7 +425,7 @@ Prima lettura sulla cattura vecchia `DET-x3-hostgap-nsysB2` (build `72fc813a`, s
 - Causa probabile (dalla cattura: `sharedMemoryExecuted`): sulla 2080 Ti `gr_down_staged` chiede carveout 100 (64 KiB di
   shared) e quasi tutti gli altri kernel girano a 32 KiB: lo SM cambia configurazione L1/shared due volte per lettura
   hc, e su Turing il cambio scarica lo SM. Sulla 3060 (Ampere) il cambio non costa.
-- **Tappa 2a nuova, piccola e bit per bit** (codice in `Verifier::init`, committato, non compilato): `STRATA_P2_SMEM=1` → `cudaDeviceSetCacheConfig(cudaFuncCachePreferShared)` su
+- **Tappa 2a nuova, piccola e bit per bit** (codice in `Verifier::init`, compilato in `build-pipeline2-cd3bd31b`, testo identico): `STRATA_P2_SMEM=1` → `cudaDeviceSetCacheConfig(cudaFuncCachePreferShared)` su
   ogni scheda prima delle catture. Atteso: −0,3/−0,6 ms a finestra sullo stadio 1 (S, dagli 0,74 ms nsys gonfiati
   ~1,5-2×). Da confermare con la cattura nuova e una cattura con la leva accesa.
 
