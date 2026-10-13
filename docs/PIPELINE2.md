@@ -422,7 +422,7 @@ corsa: lo stallo dentro `cudaSetDevice` visto su 0.1.41 qui non si è presentato
   switches (x per window), y ms host in them per window, longest z ms, k over 0.1 ms; polls without a switch …`.
 - Bit: nessun lavoro GPU cambia.
 
-### Tappa 1 — censimento dei nodi (strumento pronto, cattura nuova da fare)
+### Tappa 1 — censimento dei nodi (fatta il 13/10 04:39; la lettura vecchia era sbagliata, vedi sotto)
 
 `tools/graph_census.py <cattura.sqlite>`: per scheda, la finestra mediana (nodi, somma dei kernel, tempo in cui nessun
 kernel della finestra gira), per kernel nodi/µs/idle prima, e gli «spigoli» di idle (kernel finito per ultimo → kernel
@@ -439,6 +439,34 @@ Prima lettura sulla cattura vecchia `DET-x3-hostgap-nsysB2` (build `72fc813a`, s
 - **Tappa 2a nuova, piccola e bit per bit** (codice in `Verifier::init`, compilato in `build-pipeline2-cd3bd31b`, testo identico): `STRATA_P2_SMEM=1` → `cudaDeviceSetCacheConfig(cudaFuncCachePreferShared)` su
   ogni scheda prima delle catture. Atteso: −0,3/−0,6 ms a finestra sullo stadio 1 (S, dagli 0,74 ms nsys gonfiati
   ~1,5-2×). Da confermare con la cattura nuova e una cattura con la leva accesa.
+
+**Catture nuove (13/10, M sotto nsys)**: `DET-p2-nsys-base` e `DET-p2-nsys-smem` (`build-pipeline2-cd3bd31b`, L01 16 +
+L02 200 token forzati, env della Daily 0.1.43; la seconda con `STRATA_P2_SMEM=1`); `.sqlite` in `D:\ds4_work\strata
+sys`,
+censimenti in `D:\ds4_work\strata\pipeline2\census_{base,smem}.txt`.
+
+| | 3060: nodi, muro, idle nel grafo | 2080 Ti: nodi, muro, idle nel grafo | spigolo `gr_down_staged → gr_up_multi` (2080 Ti) |
+|---|---|---|---|
+| base | 663, 10,81 ms, 0,01 ms | 1302, 20,17 ms, **3,13 ms** | 65 a finestra, «32,9 µs» ciascuno = **2,14 ms** |
+| `STRATA_P2_SMEM=1` | 663, 11,25 ms, 0,01 ms | 1302, 20,94 ms, **3,16 ms** | 65 a finestra, «33,2 µs» = **2,16 ms** |
+
+- **La leva 2a fa quello che dice**: con `STRATA_P2_SMEM=1` la 2080 Ti esegue tutti i kernel a 64 KiB di shared e la
+  3060 tutti a 100 KiB (`sharedMemoryExecuted`: nessun cambio di configurazione; nella base la 2080 Ti alterna 32 e
+  64 KiB). **Ma lo spigolo non cambia.** L'ipotesi del cambio di carveout è **smentita** (M). La 2a non va al B-A-B
+  come leva per lo spigolo; resta opt-in e bit per bit, effetto atteso ~0 (S).
+- **Lettura giusta dello spigolo** (M, dai kernel della 2080 Ti in ordine di inizio, idle = nessun kernel della scheda
+  in corsa): non sono 65 buchi da 33 µs. È **un buco solo per finestra, mediana ~2,0 ms** (decili 0,76 / 1,91 / … /
+  2,48 ms), in ~90 finestre su ~110, sempre **fra `gr_down_staged` e `gr_up_multi` del primo layer dello stadio 1**
+  (nodi consecutivi del grafo, subito dopo `copy_from_mapped` del passaggio dallo stadio 0), ~2,0 ms dopo l'ingresso
+  nello stadio 1. In mezzo, sulla 2080 Ti, non gira nulla. La media del censimento (totale / 65 nodi) lo spalmava. Nella
+  cattura vecchia lo stesso conto dava 0,74 ms a finestra.
+- **Causa probabile** (S, da confermare): 2 ms è il periodo del flush WDDM (`cudaStreamQuery`) nei poll in pipeline
+  (`Verifier::service` / `done`): la GPU resta senza comandi finché l'host non fa il flush successivo. Sulla 3060 non
+  succede.
+- **Leva nuova, bit per bit** (commit `6b6f62a3`): `STRATA_P2_FLUSH_US=<µs>` sostituisce i 2 ms del flush in `service`,
+  `done` e `pl_head_done` (default invariato). Prova: cattura con `STRATA_P2_FLUSH_US=250` (e `STRATA_P2_FLUSH_NOSWITCH=1`,
+  che rende il flush economico): il buco deve scendere sotto ~0,3 ms. Se scende: fino a −1,5/−2 ms a finestra sullo
+  stadio 1 nell'80% delle finestre (S, sotto nsys; quanto ne resta fuori da nsys lo dice il B-A-B).
 
 ## 9. Appendice: tensor-parallel «bivalente» (richiesta dell'owner, 13/10 notte; solo analisi, S)
 
