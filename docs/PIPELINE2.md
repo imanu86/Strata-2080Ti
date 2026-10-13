@@ -340,7 +340,7 @@ albero (d2).
 ## 8. Diario delle tappe
 
 Regole: ogni leva è opt-in (`STRATA_P2_*`); ogni tappa chiude con una build in
-`corse_2080ti61004_routed_keepuild-pipeline2-<sha>\` (`build.json`), l'env per il braccio B del B-A-B e la
+`corse_2080ti\20261004_routed_keep\build-pipeline2-<sha>\` (`build.json`), l'env per il braccio B del B-A-B e la
 verifica del testo a cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, L02 corto identico al
 braccio spento). I B-A-B li fa il coordinatore.
 
