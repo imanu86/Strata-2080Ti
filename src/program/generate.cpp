@@ -13264,7 +13264,7 @@ int main(int argc, char** argv) {
                                             lmx = s.launch_max_ns[k].exchange(0);
                             if (n > 0)
                                 std::fprintf(stderr, "strata pipeline2 launches: CUDA%d %lld window graph launches, %.3f ms "
-                                                     "host each (%.3f ms per window), longest %.3f ms\n",
+                                                     "host each in launch + submit (%.3f ms per window), longest %.3f ms\n",
                                              k, n, lns / 1e6 / (double) n, lns / 1e6 / nw_, lmx / 1e6);
                         }
                     }

@@ -3490,12 +3490,12 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
     ms_host += ms_since(t0);
     const auto p2_t0 = std::chrono::steady_clock::now();
     const cudaError_t le = cudaGraphLaunch(exec_[T], cs_);
-    if (p2_switch_stat()) p2_launch_note(device_, p2_t0);   // lab/pipeline2 tappa 1
     trace_ev("LAUNCHED", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: launch: ") + cudaGetErrorString(le); return false; }
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
     if (cudaEventRecord(ev_done_, cs_) != cudaSuccess) { err = "verify: event record failed"; return false; }
     (void) cudaStreamQuery(cs_);   // WDDM: submit now
+    if (p2_switch_stat()) p2_launch_note(device_, p2_t0);   // lab/pipeline2 tappa 1: launch + WDDM submit
     fl_active_ = true;
     fl_since_ms_ = fl_flush_ms_ = fl_launch_ms_ = now_ms();
     return true;
@@ -3797,10 +3797,10 @@ bool Verifier::pl_launch_head(int T, const int32_t* tokens, int64_t pos0, std::s
     }
     const auto p2_t0 = std::chrono::steady_clock::now();
     const cudaError_t le = cudaGraphLaunch(exec_head_[T], cs_);
-    if (p2_switch_stat()) p2_launch_note(device_, p2_t0);   // lab/pipeline2 tappa 1
     if (le != cudaSuccess) { err = std::string("verify: head launch: ") + cudaGetErrorString(le); return false; }
     if (cudaEventRecord(ev_head_, cs_) != cudaSuccess) { err = "verify: event record failed"; return false; }
     (void) cudaStreamQuery(cs_);   // WDDM: submit now
+    if (p2_switch_stat()) p2_launch_note(device_, p2_t0);   // lab/pipeline2 tappa 1: launch + WDDM submit
     fl_active_ = true;
     sa_head_ = true;
     fl_since_ms_ = fl_flush_ms_ = fl_launch_ms_ = now_ms();
@@ -3834,12 +3834,12 @@ bool Verifier::pl_launch_tail(std::string& err) {
     fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;
     const auto p2_t0 = std::chrono::steady_clock::now();
     const cudaError_t le = cudaGraphLaunch(exec_tail_[T], cs_);
-    if (p2_switch_stat()) p2_launch_note(device_, p2_t0);   // lab/pipeline2 tappa 1
     trace_ev("LAUNCHED TAIL", -1, -1, (int64_t) le);
     if (le != cudaSuccess) { err = std::string("verify: tail launch: ") + cudaGetErrorString(le); return false; }
     if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
     if (cudaEventRecord(ev_done_, cs_) != cudaSuccess) { err = "verify: event record failed"; return false; }
     (void) cudaStreamQuery(cs_);
+    if (p2_switch_stat()) p2_launch_note(device_, p2_t0);   // lab/pipeline2 tappa 1: launch + WDDM submit
     fl_since_ms_ = fl_flush_ms_ = now_ms();   // GPU-reach wait counts from here, as from a launch
     return true;
 }
