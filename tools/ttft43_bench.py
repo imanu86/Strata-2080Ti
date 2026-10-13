@@ -2,7 +2,7 @@
 
 The original lab script supplies the public prompts, HTTP bodies and server configuration.
 It is imported read-only; no output is written next to it. Run under the workstation's
-benchmark lock, with one engine at a time. Use --plan short for seven requests and a restart.
+benchmark lock, with one engine at a time. Use --plan short for eight requests and a restart.
 
 Arguments after this wrapper's options are passed to ttft_bench.py, for example:
     --tag direct1 --exe PATH --server-env STRATA_PROMPT_ENCODER=1
@@ -24,10 +24,13 @@ SHORT_PLAN = [
     (1, "cc1_t2", "c", "cc", "cc1", 2),
     (1, "idle12", "pausa", "idle", "", 12),
     (1, "dsh1_t1", "b-freddo", "dsh", "dsh1", 1),
+    # DSH's first boundary adds only 3044 tokens to its system prefix, below
+    # STRATA_CONV_DISK_MIN=4096. Turn 2 adds 4585 and is eligible for an idle save.
+    (1, "dsh1_t2", "c", "dsh", "dsh1", 2),
     (2, "cc3_t1", "a", "cc", "cc3", 1),
     (2, "dsh2_t1", "a", "dsh", "dsh2", 1),
     (2, "cc1_t3", "d", "cc", "cc1", 3),
-    (2, "dsh1_t2", "d", "dsh", "dsh1", 2),
+    (2, "dsh1_t3", "d", "dsh", "dsh1", 3),
 ]
 
 

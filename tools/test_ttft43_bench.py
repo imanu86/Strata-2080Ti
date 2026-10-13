@@ -111,15 +111,23 @@ class BenchTest(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return bench.run(legacy, options)
 
-    def test_success_runs_seven_requests_and_cleans_up_both_lives(self):
+    def test_success_runs_eight_requests_and_cleans_up_both_lives(self):
         with tempfile.TemporaryDirectory() as temp:
             legacy = self.make_legacy(Path(temp))
             self.assertEqual(self.run_legacy(legacy), 0)
             result = json.loads((legacy.OUT / "results.json").read_text())
             self.assertTrue(result["ok"])
-            self.assertEqual(len(result["requests"]), 7)
-            self.assertEqual(legacy.calls, [0.25] * 7)
+            self.assertEqual(len(result["requests"]), 8)
+            self.assertEqual(legacy.calls, [0.25] * 8)
             self.assertEqual(legacy.stops, [1, 2])
+
+    def test_short_plan_saves_eligible_dsh_turn_before_restart(self):
+        dsh = [row for row in bench.SHORT_PLAN if row[4] == "dsh1"]
+        self.assertEqual([(row[0], row[5]) for row in dsh], [(1, 1), (1, 2), (2, 3)])
+        # Check eligibility using boundaries measured with the unchanged public fixture.
+        root, first, second, minimum = 29296, 32340, 33881, 4096
+        self.assertLess(first - root, minimum)
+        self.assertGreaterEqual(second - root, minimum)
 
     def test_timeout_fails_fast_and_preserves_result(self):
         with tempfile.TemporaryDirectory() as temp:
