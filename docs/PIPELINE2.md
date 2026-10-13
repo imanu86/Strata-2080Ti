@@ -15,13 +15,20 @@ Convenzione: **M** = misurato (micro-bench, log del motore, tracce), **S** = sti
 |---|---|
 | 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state: campionamento fitto **fatto** il 13/10, P0 nel 100% del decode (§8, tappa 0a) |
 | 2. report all'owner | consegnato il 13/10; **via del coordinatore** il 13/10 notte per le tappe 0a → 4 del §5 (opt-in, bit per bit). Restano fuori expert-parallel, tensor-parallel, stadi invertiti, B ad albero |
-| 3. implementazione a tappe | ripresa il 13/10 alle 03:25 (crediti API). 0b e 2a **compilate e verificate a testo identico** (build `build-pipeline2-cd3bd31b`); 0a e 1 in corso. Diario e ripartenza nel §8 |
+| 3. implementazione a tappe | ripresa il 13/10 alle 03:25 (crediti API). 0b, 2a e `FLUSH_US` **compilate e verificate a testo identico** (ultima build `build-pipeline2-f6a0b6b2`); 0a **chiusa** (non serve); 1 **fatta** (lo spigolo da 2 ms della 2080 Ti è un artefatto di nsys: il lancio vero costa 0,1 ms); 2 **rimandata** (bacino ≤ 0,95 ms, stima −0,2/−0,5 ms). Diario nel §8 |
 | 4. stima TP bivalente (richiesta dell'owner) | **fatta**, §9: TP senza MTP ~50 t/s, TP con MTP ~76/66 (L01/L02) = pari a oggi → **no** |
 
-**Build pronta per il B-A-B**: `corse_2080ti\20261004_routed_keep\build-pipeline2-cd3bd31b\` (codice `e76d96dc`,
-`strata.exe` sha256 `3b884217…605e1e`, `build.json`). Compilato sì (build_lock, CUDA 12.6 sm_75+86, 13/10 04:05).
-Provato sì, solo a testo (§8, tappa 0b): L02 da 256 token identico a spento in tutti i bracci. Installato no. B-A-B no.
-Braccio A = env della Daily 0.1.43; braccio B = A + `STRATA_P2_SMEM=1`; a parte A + `STRATA_P2_FLUSH_NOSWITCH=1`.
+**Build pronta per il B-A-B**: `corse_2080ti\20261004_routed_keep\build-pipeline2-f6a0b6b2\` (codice `f6a0b6b2`,
+`strata.exe` sha256 `389fac82…a5e34`, `build.json`). Compilato sì (build_lock, CUDA 12.6 sm_75+86, 13/10 06:02).
+Provato sì, solo a testo (§8): L02 da 256 token identico a spento in `stat`, `nosw`, `both` (`p2_chk4.txt`). Installato
+no. B-A-B no. Default = struct-a `075ce875` (tutte le leve opt-in).
+- Braccio A = env della Daily 0.1.43 (stessa build). **Braccio B = A + `STRATA_P2_FLUSH_NOSWITCH=1`**: toglie 8100 cambi
+  di scheda e 3,4 ms host per finestra dal filo dei poll (M); quanto ne sta sul percorso critico lo dice solo il B-A-B
+  (S: 0/−0,5 ms a finestra).
+- `STRATA_P2_SMEM=1` e `STRATA_P2_FLUSH_US`: bit per bit ma senza effetto sul buco che dovevano chiudere (§8, M); non
+  meritano un B-A-B da sole. Se il coordinatore vuole un terzo braccio: A + `STRATA_P2_FLUSH_NOSWITCH=1` +
+  `STRATA_P2_SMEM=1` (verificato a testo, braccio `both`).
+- Le build `build-pipeline2-cd3bd31b`, `-6b6f62a3`, `-e7c7a938` sono superate (stesse leve, contatori diversi).
 
 ### Ripartenza (per un agente senza contesto)
 
@@ -36,13 +43,16 @@ Braccio A = env della Daily 0.1.43; braccio B = A + `STRATA_P2_SMEM=1`; a parte 
    righe `strata pipeline2 switches:` (bracci `stat`/`nosw`) e `strata pipeline2: STRATA_P2_SMEM` (bracci `smem`/`both`).
 4. *(fatto il 13/10: non serve, §8)* Tappa 0a: `bash D:\ds4_work\strata\pipeline2\p2_pstate.sh DET-p2-pstate3` (il primo tentativo `DET-p2-pstate1` è
    morto per «Startup deadline» a 300 s dopo la notte multi-chat: riprovare a PC fermo).
-5. Tappa 1: `D:\ds4_work\strata\pipeline2\nsys_base.bat DET-p2-nsys-base` (base) e la stessa con
+5. *(fatto il 13/10, §8)* Tappa 1: `D:\ds4_work\strata\pipeline2\nsys_base.bat DET-p2-nsys-base` (base) e la stessa con
    `build-pipeline2-<sha>` e `--env STRATA_P2_SMEM=1` come 3° argomento e seguenti (cattura con la leva); poi
-   `python tools\graph_census.py D:\ds4_work\strata\nsys\<nome>.sqlite`. Decide la tappa 2a: lo spigolo
-   `gr_down_staged → gr_up_multi` della 2080 Ti deve sparire o calare.
-6. Al coordinatore per il B-A-B: braccio A = env della Daily 0.1.43; braccio B = A + `STRATA_P2_SMEM=1` (e, a parte,
-   A + `STRATA_P2_FLUSH_NOSWITCH=1`). Solo dopo la verifica del testo.
-7. Poi le tappe 2-3 del §5 (meno nodi nel `post()`), scelte sul censimento del punto 5.
+   `python tools\graph_census.py D:\ds4_work\strata\nsys\<nome>.sqlite`. Attenzione: il tracciamento per nodo gonfia
+   il lancio del grafo della 2080 Ti ~20× (2 ms invece di 0,1) e crea lo spigolo `gr_down_staged → gr_up_multi`; per i
+   muri usare `nsys_graph.bat` + `graph_wall.py` (livello di grafo) e per il lancio la riga `strata
+   pipeline2 launches:` (`STRATA_P2_SWITCH_STAT=1`).
+6. **Prossimo passo: al coordinatore per il B-A-B** con `build-pipeline2-f6a0b6b2`: braccio A = env della Daily 0.1.43;
+   braccio B = A + `STRATA_P2_FLUSH_NOSWITCH=1` (eventuale terzo braccio + `STRATA_P2_SMEM=1`). Testo già verificato.
+7. Tappa 2 rimandata (§8). Se il B-A-B di 0b rende, la leva successiva da studiare è l'attesa delle righe CPU sullo
+   stadio 1, non i buchi della GPU; la tappa 3 (stadio 0) ha idle nel grafo 0,01 ms a finestra (M sotto nsys) e non ha bacino.
 
 ## 0. Conclusione
 
@@ -361,6 +371,11 @@ albero (d2).
 - `tools/ep_residency.py`: modello di residenza da un trace di routing (§2b).
 - `D:\ds4_work\strata\pipeline2\pstate_probe.py`: richiesta di prova col motore del laboratorio e `nvidia-smi -lms 10`
   (§2c); usa la config della Daily 0.1.43 in sola lettura, porta 8102, senza file del prefisso né visione.
+- `tools/graph_census.py`: censimento dei nodi per finestra da una cattura con `--cuda-graph-trace=node` (§8, tappa 1).
+- `tools/launch_cost.py`: tempo dentro `cudaGraphLaunch` per scheda e dove parte il primo kernel (cattura per nodo).
+- `tools/graph_wall.py`: muro di ogni grafo e del gruppo delle finestre per scheda da una cattura con
+  `--cuda-graph-trace=graph` (`D:\ds4_work\strata\pipeline2\nsys_graph.bat`).
+- `D:\ds4_work\strata\pipeline2\p2_check.py`: verifica del testo a cache fissa, un braccio per leva.
 
 ## 8. Diario delle tappe
 
@@ -476,7 +491,7 @@ censimenti in `D:\ds4_work\strata\pipeline2\census_{base,smem}.txt`.
   non è la causa**: ipotesi smentita (M). `FLUSH_US` resta opt-in, effetto atteso ~0 (S); non va al B-A-B.
 
 **Il buco è il lancio del grafo, e sotto nsys è gonfiato ~20× (13/10 05:05-05:58, M).**
-- Dalla cattura (`D:\ds4_work\strata\pipeline2\launch_cost.py <sqlite>`, `cudaGraphLaunch` ↔ kernel per
+- Dalla cattura (`tools/launch_cost.py <sqlite>`, `cudaGraphLaunch` ↔ kernel per
   `correlationId`): sulla 2080 Ti il `cudaGraphLaunch` del grafo da 1302 nodi dura **2,07-2,09 ms** (p10 1,92, p90
   2,55) e il primo kernel parte **2,0 ms prima che la chiamata ritorni**: la scheda esegue i primi nodi (passaggio dallo
   stadio 0, `gr_down_staged` del layer 16) e poi aspetta il resto del grafo. È il buco del censimento. Sulla 3060 il
@@ -495,11 +510,43 @@ censimenti in `D:\ds4_work\strata\pipeline2\census_{base,smem}.txt`.
   `L02.txt` identico a `off` in `stat` e `nosw` (1199 caratteri). Il lancio vero costa **0,1 ms**, non 2: nsys con
   `--cuda-graph-trace=node` strumenta ogni nodo e lo gonfia ~20×. È coerente con il prelancio di Fable
   (`STRATA_HG_PRELAUNCH=2`, `lab/hostgap`): −3,2% sotto nsys e neutro al B-A-B `DET-x5`.
-- Resta da escludere che la consegna WDDM vera avvenga nel `cudaStreamQuery` subito dopo il lancio (non era nel
-  contatore): commit successivo, il contatore copre lancio + record dell'evento + `cudaStreamQuery`.
+- Consegna WDDM: dal commit `f6a0b6b2` il contatore copre lancio + record dell'evento + `cudaStreamQuery` (dove WDDM
+  consegna davvero). `p2_check.py build-pipeline2-f6a0b6b2 DET-p2-chk4 256 off,stat,nosw,both` (`p2_chk4.txt`): 2080 Ti
+  **0,101 ms** (`stat`, più lungo 0,198) e 0,136 ms (`nosw`, più lungo 0,273); 3060 0,019 / 0,024 ms. La consegna non
+  aggiunge nulla di rilevante (M, una corsa per braccio).
 - **Conseguenza per le tappe**: lo spigolo da ~2 ms non è una leva (S, salvo sorprese dalla consegna). Tolto lo spigolo,
   il tempo morto nel grafo della 2080 Ti è ~1,0 ms a finestra **sotto nsys** (3,13 − 2,14), sparso su centinaia di
   confini da 1-3 µs; fuori da nsys è meno (non misurabile senza nsys). È il bacino della tappa 2.
+
+**Cattura a livello di grafo (13/10 06:00, M sotto nsys leggero)**: `D:\ds4_work\strata\pipeline2\nsys_graph.bat
+DET-p2-nsys-graph build-pipeline2-e7c7a938` (come `nsys_base.bat` ma `--cuda-graph-trace=graph`: nessuna strumentazione
+per nodo; L01 16 + L02 200 token forzati, env della Daily 0.1.43), analisi `tools/graph_wall.py <sqlite>`:
+
+| | finestre | muro del grafo, mediana (p10 / p90) | `cudaGraphLaunch`, mediana | stesso muro col tracciamento per nodo (`census_base.txt`) |
+|---|---|---|---|---|
+| 3060 (stadio 0) | 173 | **9,10 ms** (6,80 / 14,73) | 128 µs | 10,81 ms |
+| 2080 Ti (stadio 1) | 109 | **17,99 ms** (12,75 / 27,80) | 422 µs | 20,17 ms |
+
+- Sulla 2080 Ti il muro scende di **2,18 ms** togliendo il tracciamento per nodo: è lo spigolo da 2,14 ms. **Confermato
+  artefatto di nsys** (M). Il grafo parte 21-35 µs dopo l'inizio della chiamata.
+- Tetto del tempo morto vero nel grafo della 2080 Ti: 17,99 − 17,04 ms di kernel in corsa (muro − idle della cattura per
+  nodo) ≈ **≤ 0,95 ms a finestra** (S: le durate dei kernel sotto tracciamento per nodo sono un po' gonfiate, quindi è un
+  tetto). Dentro il «tempo in corsa» ci sono anche gli spin di attesa delle righe CPU (`wait_copy_i32` 1,8 ms,
+  `copy_rows_from_mapped` 1,5 ms a finestra): sono attesa della CPU, non buchi della GPU.
+
+### Tappa 2 — `post()` persistente sulla 2080 Ti: rimandata (13/10 06:10, decisione su misure)
+
+- Bacino: ≤ 0,95 ms a finestra di tempo morto nel grafo dello stadio 1 (sopra), sparso su ~250 confini per finestra.
+- Un lancio persistente cooperativo sostituisce i confini fra kernel con sincronizzazioni di griglia; su Turing una
+  sincronizzazione di griglia costa qualche µs, come un confine fra nodi di un grafo (~1-2 µs fuori da nsys). Si
+  guadagnano solo i confini dove oggi c'è uno spin che aspetta (piano, righe CPU), non i calcoli. Stima: **−0,2/−0,5 ms a
+  finestra** (S), sotto il rumore dei B-A-B (la lezione di `HG_PRELAUNCH`, `ROOFLINE_2026-10-12.md` voce 12: «non
+  riaprire senza un banco più fino»).
+- Costo: riscrivere `expdec_gu`, `swiglu_q8_1_entries`, `native_down_multi`, `copy_rows_from_mapped` e il combine in un
+  solo kernel con gli stessi accumuli (bit per bit): giorni, rischio alto.
+- **Verdetto: non la implemento ora.** Sul percorso dello stadio 1 pesano di più le attese delle righe CPU (la riga
+  `decode timing` dà «CPU 13,56» ms a finestra di esperti CPU, M; quanto ne sta sul percorso critico è S) che i buchi
+  della GPU. Riaprire la tappa 2 solo con un banco che risolve 0,3 ms.
 
 ## 9. Appendice: tensor-parallel «bivalente» (richiesta dell'owner, 13/10 notte; solo analisi, S)
 
