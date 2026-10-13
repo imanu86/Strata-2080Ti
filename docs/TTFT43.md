@@ -125,18 +125,37 @@ causa:
    amministratore: `Get-StorageReliabilityCounter`), oppure il blocco in RAM di 33 GB (VirtualLock + working-set
    minimum) che rientra nel tasso misurato. Non è Windows Search: `lab_prefix` non è indicizzata.
 
-Codice **non modificato**: un secondo meccanismo pigro sopra quello esistente non cambierebbe nulla. Proposta per il
-Daily r2 (decide l'owner, config e bat non toccati): rimettere `STRATA_CONV_DISK=10` porta la ripresa dopo un riavvio
-da 19,7 / 10,4 a 6,4 / 5,2 s, senza costo sull'avvio. Il riavvio lento (6% degli avvii) resta da capire a parte.
+Codice del motore **non modificato**: un secondo meccanismo pigro sopra quello esistente non cambierebbe nulla.
+La proposta di riaccendere `STRATA_CONV_DISK=10` è stata applicata al Daily r2 alle 08:37 del 13/10: il controllo
+successivo in sola lettura trova `STRATA_PREFIX_DISK_MULTI=24` e `STRATA_CONV_DISK=10` nell'env di
+`D:\ds4_work\strata\Strata\strata-0143-daily.json`. Il lanciatore ha `STRATA_PROMPT_ENCODER=1`; il banco lo deve
+impostare esplicitamente perché non usa il lanciatore. Il riavvio lento (6% degli avvii storici) resta da capire.
+
+Il controllo senza elevazione del 13/10 trova entrambi i dischi `Healthy`, ma `Get-StorageReliabilityCounter`
+fallisce con «Accesso a una risorsa CIM non disponibile per il client». Non ci sono nuove misure della temperatura
+e non si attribuisce il rallentamento alla temperatura o a `VirtualLock` senza una misura.
 
 ## Prossimo passo (esatto)
 
-1. Owner: decidere se riaccendere `STRATA_CONV_DISK=10` nell'env di `strata-0143-daily.json` (misure sopra).
-2. Avvio lento al 6%: da amministratore, leggere temperatura e `TemperatureMax` dell'NVMe C: prima e dopo una serie di
-   avvii consecutivi; in alternativa `monitor_avvio.py` su una serie di 8-10 avvii di fila, finché uno scende a
-   ~0,2 GiB/s, per vedere se cala la lettura di C: o se il tempo va nel blocco della memoria.
-3. Leva 4 (cache PLE salvata) solo se le attese PLE restano sopra ~1 s: oggi `waited 2584-4058 ms` solo sul primo
-   chunk dei prompt a freddo o con 12k+ nuovi (cc1_t1, dsh1_t1, cc2_t1, cc3_t1); nessuna attesa sui casi d.
+1. Sotto `bench.lock`, B-A-B con lo stesso Daily r2: `--ple-io direct`, `--ple-io ram`, `--ple-io direct`. Tutte le
+   altre opzioni e gli env uguali (MULTI 24, CONV 10, prompt encoder 1). Il PLE in RAM richiede circa 26,8 GiB
+   aggiuntivi: i circa 78 GiB liberi a macchina ferma non sono una misura del margine dopo il caricamento degli
+   esperti. Registrare RAM libera e working set dopo READY, costo di caricamento PLE, avvio e TTFT di entrambe le
+   vite. Il braccio RAM è valido solo con la riga `PLE table locked in RAM (--ple-io ram)`; altrimenti fermarlo.
+2. Per chiudere questo confronto usare `tools/ttft43_bench.py`, che importa il banco originale in sola lettura e
+   copia la fixture pubblica già esistente (SHA-256
+   `0cd2059a3e705c99544e0f78e7eda40f76be45c034f794bbfdabc8054df9a1be`). `--output-root` va nel workspace Codex,
+   `--prefix-root D:\ds4_work\strata\lab_prefix\codex_completion_20261013` tiene le cache sullo stesso disco del
+   banco precedente; ogni tag crea una cartella nuova e non cancella le precedenti. Piano `short`: cc1_t1, cc1_t2,
+   pausa 12 s, dsh1_t1, pausa 25 s e riavvio; cc3_t1, dsh2_t1, cc1_t3, dsh1_t2. Sono sette richieste con ripresa di
+   entrambe le conversazioni e due client nuovi col prefisso su disco. `--require-prefix-hits 2` e
+   `--require-conversation-hits 2` verificano il riuso; `--require-ram-locked` per il braccio RAM. Timeout o risposta
+   vuota fermano la corsa, lasciano log e risultati parziali e restituiscono un codice diverso da zero. Impostare
+   la modalità con `--args="--ple-io direct"`/`--args="--ple-io ram"`: la config Daily non contiene `--ple-io`, quindi
+   il vecchio `--set-opt` non può sostituirla. Le nuove misure GPU sono ancora **da eseguire**.
+3. Se le attese PLE restano un costo materiale, valutare la cache delle sole righe usate salvata su disco; oggi non
+   è implementata. Prima misurare la modalità RAM già esistente. Il rallentamento sporadico dell'arena esperti è
+   separato: una diagnosi termica richiede accesso ai contatori, senza riavvii ripetuti arbitrariamente.
 
 ## Penalità di ripetizione (controllo del 13/10, sola lettura)
 
@@ -161,7 +180,38 @@ da 19,7 / 10,4 a 6,4 / 5,2 s, senza costo sull'avvio. Il riavvio lento (6% degli
 `22a2eb857ed36b36ab25c9089af251740bd6c398ba79d062de759b6fc41e5e29`, copiata con `copia_build.py` in
 `corse_2080ti\20261004_routed_keep\build-ttft43-a2111f8b\` (build.json, `source\serve` e `source\tools` di a2111f8b,
 `strata-vision.exe` del Daily). Test del server: test_prompt_encoder 7 OK, test_strata_tokenizer 11 OK, test_server
-304 OK. `prefix_cache_file_test` (chiavi in un passaggio) scritto, non eseguito: è sotto
-`STRATA_BUILD_CONVERSATION_TESTS`, che `build_lock.py` non accende. Compilato sì, installato no.
+304 OK. L'eseguibile è installato come Daily r2; config e lanciatore non sono stati modificati nel completamento.
 
 Misure del 13/10 (sezione Misure) tutte con questa build: nessuna build nuova, il codice non è cambiato.
+
+### Completamento CPU del 13/10
+
+La verifica rimasta aperta era `prefix_cache_file_test`, sotto `STRATA_BUILD_CONVERSATION_TESTS`, che
+`build_lock.py` non accende. Build separata `build-ttft-cpu-completion`, MSVC 19.44, Visual Studio 2022 x64 Release,
+CUDA/HIP spenti, `STRATA_BUILD_TESTS=OFF`, `STRATA_BUILD_CONVERSATION_TESTS=ON`, `STRATA_NATIVE_EXPERTS=OFF`:
+
+```powershell
+cmake -S . -B build-ttft-cpu-completion -G "Visual Studio 17 2022" -A x64 `
+  -DSTRATA_ENABLE_CUDA=OFF -DSTRATA_ENABLE_HIP=OFF -DSTRATA_NATIVE_EXPERTS=OFF `
+  -DSTRATA_BUILD_TESTS=OFF -DSTRATA_BUILD_CONVERSATION_TESTS=ON
+cmake --build build-ttft-cpu-completion --config Release --parallel 2 --target `
+  prefix_cache_file_test prefix_cache_portable_test conversation_cache_test `
+  conversation_split_failure_test conversation_memory_test conversation_file_test `
+  session_save_reclaim_test message_boundary_test conv_cache_test
+ctest --test-dir build-ttft-cpu-completion -C Release --verbose --output-on-failure --timeout 60 `
+  -R '^(prefix_cache_file_test|prefix_cache_portable_test|conversation_cache_test|conversation_split_failure_test|conversation_memory_test|conversation_file_test|session_save_reclaim_test|message_boundary_test|conv_cache_test)$'
+python -B tools/test_ttft43_bench.py
+```
+
+**Misurato: 9/9 CTest passati, 7,32 s**. Native e portable SHA-256: 252 controlli ciascuno; cache conversazioni
+4225; memoria 25; file 183; reclaim 119; confini messaggi 21. Fallimenti di allocazione sullo split: preservati
+8/12/16 casi con 1/2/3 stadi. Politica di ritenzione: 17 casi passati. Comprende roundtrip v2 multi-stadio e 131k,
+file corrotti, atomicità della scrittura, chiavi in un passaggio dei confini di turno e LRU. File temporanei nel
+build e `TEMP`/`TMP` impostate a `build-ttft-cpu-completion/test-scratch`; nessun modello o GPU usati. Log:
+`build-ttft-cpu-completion/ttft-cpu-ctest.log`.
+
+**6/6 test CPU del wrapper passati**: rifiuto del PLE non bloccato in RAM e di hit mancanti, pulizia del processo
+proprio se l'avvio fallisce (nessuna pulizia quando la porta è occupata prima del lancio), sette richieste e due
+vite, timeout fermato alla prima richiesta con risultato parziale conservato. Import della fixture reale verificato
+con `--only-fixture`, senza motore. Il codice del motore/server non cambia: non si ripete la suite server da 304
+test già passata, né si ricompila CUDA per un aggiornamento del banco e della documentazione.
