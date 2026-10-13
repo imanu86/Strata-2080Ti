@@ -279,6 +279,41 @@ Dalla tabella `STRATA_PREFILL_TIMING`: 4 code da 2k costano 4 x (2,34 + 2,25) = 
 impacchettata restano copia dallo slot di pacco (~0,2 s), intestazione, copia nello slot e park (~0,6 s). Sugli agenti
 a 8: S 40-50 t/s contro 33,5 (la stima di 55-65 sopra contava anche le righe di decode agganciate, non fatte).
 
+### Misure di costo e parità (M, 13/10 05:22-08:45, build `build-multichat-b6d8df2d`)
+
+Scenario `packdet:4:P` di `mc2.py`: 4 sotto-agenti sul prefisso da 33k, turno 0 uno alla volta, poi il turno 1 (coda
+~1,6k token a testa) mandato **insieme** con `max_tokens 1` (il wall di questa fase è il costo delle letture), poi il
+turno 1 di nuovo uno alla volta da 200 token (decodificato da solo dal checkpoint di confine che la lettura concorrente
+ha lasciato). Config: g2 + 16 posti, `--expert-cache 1500 --adapt-every 0` (cache fissa). Il braccio base ha gli stessi
+slot di pacco allocati e mai usati (`STRATA_PACK_MIN=999999`), quindi la stessa VRAM.
+
+| braccio | letture concorrenti di 4 code | TTFT a0/a1/a2/a3 (s) | testo t0 | testo t1 a0 / a1 a2 a3 |
+|---|---|---|---|---|
+| base (con MTP) | 18,80 s | 4,8 / 9,4 / 14,0 / 18,6 | = | = / = = = |
+| `STRATA_PACK_PREFILL=3` | **11,12 s (−41%)** | 9,6 / 10,1 / 10,6 / 11,0 | identico | identico / diverso a 590, 47, 128 caratteri |
+| `PACK=3 STRATA_PACK_CHUNK=4096` | 11,08 s | 9,3 / 10,4 / 11,0 / 9,7 | identico | identico / diverso a 207, 47, 128 |
+| base senza MTP | 19,30 s | 5,1 / 9,7 / 14,4 / 19,2 | = | = / = = = |
+| `PACK=3` senza MTP | **12,33 s (−36%)** | 10,7 / 12,3 / 11,1 / 11,6 | identico | identico / diverso a 381, 231, 135 |
+
+- Il pacco legge 1569 + 3 x ~1610 token in **8,5 s** (un passo da 6,4k), contro ~4,6 s a coda letta da sola.
+  La prima richiesta (quella che ha le control lines) aspetta il pacco: il suo TTFT sale da ~5 a ~10 s, le altre
+  scendono; l'ultima da 18,6 a 11 s.
+- `STRATA_PACK_CHUNK=4096` (due chunk in pipeline fra gli stadi) non cambia il wall: con 6,4k token il pacco è già
+  dominato dal calcolo, non dal fisso degli esperti.
+- **Parità**: il testo della richiesta che legge (a0) è identico in tutte le corse, con le sue righe dentro il pacco. Le
+  tre richieste impacchettate divergono a metà testo su un token quasi pari (testo coerente, stesso contenuto: per
+  esempio `-hf, -mu, -dr` contro `-hf, -dr`). **Non è il drafter MTP**: senza `--mtp` divergono lo stesso. È la
+  numerica della geometria del chunk: lo stesso pacco tagliato diversamente (`STRATA_PACK_CHUNK=4096`) sposta già la
+  divergenza di a1 da 590 a 207 caratteri. Tra due corse base con VRAM diversa (`base` senza slot di pacco contro
+  `base3`) divergono perfino i turni 0. Il testo identico bit a bit è possibile solo se ogni segmento si legge con la
+  sua geometria da solo, cioè senza pacco. Conclusione: parità **numerica** (stesso contenuto, divergenza solo sui quasi
+  pari), non bitwise.
+- Il drafter MTP di una richiesta che riparte da uno slot di pacco ha il K/V di un'altra conversazione: le bozze
+  rendono meno nel primo decode da solo, ma il testo non dipende da questo (la verifica è esatta). È così anche oggi
+  per chi riparte da uno slot batch senza `--batch-mtp`. Una ricostruzione del K/V del drafter (righe finali del
+  pacco ripassate nel drafter alla ripresa) è abbozzata in
+  `corse_2080ti/20261013_multichat/wip_pack_drafter_rows_b6d8df2d.patch`, non finita.
+
 ## Leve di codice, in ordine
 
 1. **L3 — prefill impacchettato di più sessioni con le righe di decode agganciate** (la direzione dell'owner, nella
