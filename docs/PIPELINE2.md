@@ -14,8 +14,8 @@ Convenzione: **M** = misurato (micro-bench, log del motore, tracce), **S** = sti
 | fase | stato |
 |---|---|
 | 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state: log al secondo letti, campionamento fitto **da fare** (§2c, comando pronto) |
-| 2. report all'owner | consegnato il 13/10 (questo documento): **si aspetta il via** |
-| 3. implementazione a tappe | **non iniziata**. Niente codice del motore cambiato in questo branch |
+| 2. report all'owner | consegnato il 13/10; **via del coordinatore** il 13/10 notte per le tappe 0a → 4 del §5 (opt-in, bit per bit). Restano fuori expert-parallel, tensor-parallel, stadi invertiti, B ad albero |
+| 3. implementazione a tappe | **in corso**: diario nel §8 (per tappa: codice, build, env, verifica del testo, misure) |
 
 Compilato: solo `tools/hop_bench.cu` (micro-bench, fuori dal motore). Installato no. B-A-B no.
 
@@ -336,3 +336,45 @@ albero (d2).
 - `tools/ep_residency.py`: modello di residenza da un trace di routing (§2b).
 - `D:\ds4_work\strata\pipeline2\pstate_probe.py`: richiesta di prova col motore del laboratorio e `nvidia-smi -lms 10`
   (§2c); usa la config della Daily 0.1.43 in sola lettura, porta 8102, senza file del prefisso né visione.
+
+## 8. Diario delle tappe
+
+Regole: ogni leva è opt-in (`STRATA_P2_*`); ogni tappa chiude con una build in
+`corse_2080ti61004_routed_keepuild-pipeline2-<sha>\` (`build.json`), l'env per il braccio B del B-A-B e la
+verifica del testo a cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, L02 corto identico al
+braccio spento). I B-A-B li fa il coordinatore.
+
+### Tappa 0a — P-state a ~10 ms (in coda)
+
+`D:\ds4_work\strata\pipeline2\p2_pstate.sh`: corsa forzata breve `DET-p2-pstate1` (L01+L02 131k, 256 token, env della
+Daily 0.1.43 sulla `build-structa-075ce875`), `nvidia-smi -lms 10` solo mentre il `bench.lock` porta il suo nome.
+Lanciata il 13/10 alle 02:20, in coda dietro la notte multi-chat del coordinatore (`DET-mc2-*`).
+
+### Tappa 0b — polling senza `cudaSetDevice` (codice scritto, build in coda)
+
+- `STRATA_P2_FLUSH_NOSWITCH=1`: `Verifier::service` (flush ogni 2 ms), `Verifier::done`, `MtpDrafter::chain_outputs_ready`
+  e `chain_poll` interrogano eventi e stream senza `OnDevice` (porto di NTRYourWaifu `two-pc-042` v7/v8, che lì è acceso
+  di default). Se una query rifiuta la scheda «straniera» il motore lo dice una volta e torna al cambio di scheda.
+- `STRATA_P2_SWITCH_STAT=1` (solo misura): conta i cambi di scheda di `OnDevice` e il tempo host dentro
+  `cudaGetDevice/cudaSetDevice`; riga a fine richiesta con `STRATA_DECODE_TIMING`: `strata pipeline2 switches: N device
+  switches (x per window), y ms host in them per window, longest z ms, k over 0.1 ms; polls without a switch …`.
+- Bit: nessun lavoro GPU cambia.
+
+### Tappa 1 — censimento dei nodi (strumento pronto, cattura in coda)
+
+`tools/graph_census.py <cattura.sqlite>`: per scheda, la finestra mediana (nodi, somma dei kernel, tempo in cui nessun
+kernel della finestra gira), per kernel nodi/µs/idle prima, e gli «spigoli» di idle (kernel finito per ultimo → kernel
+dopo). Cattura nuova della base in coda: `D:\ds4_work\strata\pipeline2\nsys_base.bat DET-p2-nsys-base` (L01 16 + L02 200
+token, env della Daily 0.1.43, `--cuda-graph-trace=node`).
+
+Prima lettura sulla cattura vecchia `DET-x3-hostgap-nsysB2` (build `72fc813a`, senza NODECUT, M sotto nsys):
+- 2080 Ti: ~1398 nodi a finestra, idle dentro il grafo **1,17 ms**, di cui **0,74 ms su un solo spigolo:
+  `gr_down_staged` → `gr_up_multi`, 11,4 µs ciascuno, 65 a finestra**. Gli altri spigoli valgono 0,03-0,13 ms.
+- 3060: idle dentro il grafo 0,01 ms; lo stesso spigolo vale 0,10 µs.
+- Causa probabile (dalla cattura: `sharedMemoryExecuted`): sulla 2080 Ti `gr_down_staged` chiede carveout 100 (64 KiB di
+  shared) e quasi tutti gli altri kernel girano a 32 KiB: lo SM cambia configurazione L1/shared due volte per lettura
+  hc, e su Turing il cambio scarica lo SM. Sulla 3060 (Ampere) il cambio non costa.
+- **Tappa 2a nuova, piccola e bit per bit**: `STRATA_P2_SMEM=1` → `cudaDeviceSetCacheConfig(cudaFuncCachePreferShared)` su
+  ogni scheda prima delle catture. Atteso: −0,3/−0,6 ms a finestra sullo stadio 1 (S, dagli 0,74 ms nsys gonfiati
+  ~1,5-2×). Da confermare con la cattura nuova e una cattura con la leva accesa.
+

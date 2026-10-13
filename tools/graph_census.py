@@ -40,15 +40,22 @@ for dev, wins in sorted(per_dev.items()):
     wins = [w for w in wins if abs(len(w) - sizes) <= 0.15 * sizes]
     walls, kern, idle = [], [], []
     stat = defaultdict(lambda: [0, [], []])   # name -> [nodes, durations, preceding idle]
+    edges = defaultdict(lambda: [0, 0])        # (kernel that ended last, next kernel) -> [count, idle ns]
     for w in wins:
         t0, t1 = w[0][0], max(k[1] for k in w)
         busy_end = t0
+        last_nm = '(start)'
         tot_idle = 0
         cnt = defaultdict(int)
         for st, en, nm in w:
             gap = max(0, st - busy_end)
             tot_idle += gap
-            busy_end = max(busy_end, en)
+            if gap > 0:
+                e = edges[(last_nm, nm)]
+                e[0] += 1
+                e[1] += gap
+            if en >= busy_end:
+                busy_end, last_nm = en, nm
             s = stat[nm]
             s[1].append(en - st)
             s[2].append(gap)
@@ -67,6 +74,9 @@ for dev, wins in sorted(per_dev.items()):
     for nm, (n, d, g) in order[:a.top]:
         print(f'{nm[:44]:<44} {n / nw:>9.1f} {statistics.median(d) / 1e3:>8.1f} {sum(d) / nw / 1e6:>7.3f} '
               f'{statistics.mean(g) / 1e3:>21.2f} {sum(g) / nw / 1e6:>11.3f}')
+    print('idle edges (the kernel that ended last -> the next kernel): count/window, us each, ms/window')
+    for (x, y), (n, g) in sorted(edges.items(), key=lambda kv: -kv[1][1])[:15]:
+        print(f'  {x[:34]:<34} -> {y[:34]:<34} {n / nw:>6.1f} {g / n / 1e3:>7.2f} {g / nw / 1e6:>7.3f}')
     small = [(nm, v) for nm, v in stat.items() if statistics.median(v[1]) < 8000]
     print(f'kernels under 8 us: {sum(v[0] for _, v in small) / nw:.0f} nodes/window, '
           f'{sum(sum(v[1]) for _, v in small) / nw / 1e6:.2f} ms kernel + {sum(sum(v[2]) for _, v in small) / nw / 1e6:.2f} ms idle before them')
