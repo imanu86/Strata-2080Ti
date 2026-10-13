@@ -18,13 +18,13 @@ Convenzione: **M** = misurato (micro-bench, log del motore, tracce), **S** = sti
 | 3. implementazione a tappe | ripresa il 13/10 alle 03:25 (crediti API). 0b, 2a e `FLUSH_US` **compilate e verificate a testo identico** (ultima build `build-pipeline2-f6a0b6b2`); 0a **chiusa** (non serve); 1 **fatta** (lo spigolo da 2 ms della 2080 Ti è un artefatto di nsys: il lancio vero costa 0,1 ms); 2 **rimandata** (bacino ≤ 0,95 ms, stima −0,2/−0,5 ms). Diario nel §8 |
 | 4. stima TP bivalente (richiesta dell'owner) | **fatta**, §9: TP senza MTP ~50 t/s, TP con MTP ~76/66 (L01/L02) = pari a oggi → **no** |
 
-**Build pronta per il B-A-B**: `corse_2080ti\20261004_routed_keep\build-pipeline2-f6a0b6b2\` (codice `f6a0b6b2`,
+**Build del B-A-B concluso (§11)**: `corse_2080ti\20261004_routed_keep\build-pipeline2-f6a0b6b2\` (codice `f6a0b6b2`,
 `strata.exe` sha256 `389fac82…a5e34`, `build.json`). Compilato sì (build_lock, CUDA 12.6 sm_75+86, 13/10 06:02).
 Provato sì, solo a testo (§8): L02 da 256 token identico a spento in `stat`, `nosw`, `both` (`p2_chk4.txt`). Installato
-no. B-A-B no. Default = struct-a `075ce875` (tutte le leve opt-in).
+no. B-A-B fatto il 13/10 (§11): L01 inconclusivo, L02 −3/−4% di tempo decode con un solo A; nessuna promozione.
+Default = struct-a `075ce875` (tutte le leve opt-in).
 - Braccio A = env della Daily 0.1.43 (stessa build). **Braccio B = A + `STRATA_P2_FLUSH_NOSWITCH=1`**: toglie 8100 cambi
-  di scheda e 3,4 ms host per finestra dal filo dei poll (M); quanto ne sta sul percorso critico lo dice solo il B-A-B
-  (S: 0/−0,5 ms a finestra).
+  di scheda e 3,4 ms host per finestra dal filo dei poll (M); il B-A-B completo è nel §11, su cache fissa 1500.
 - `STRATA_P2_SMEM=1` e `STRATA_P2_FLUSH_US`: bit per bit ma senza effetto sul buco che dovevano chiudere (§8, M); non
   meritano un B-A-B da sole. Se il coordinatore vuole un terzo braccio: A + `STRATA_P2_FLUSH_NOSWITCH=1` +
   `STRATA_P2_SMEM=1` (verificato a testo, braccio `both`).
@@ -39,7 +39,8 @@ no. B-A-B no. Default = struct-a `075ce875` (tutte le leve opt-in).
    `<corse_2080ti>\20261004_routed_keep\build-pipeline2-<sha>\` con `build.json` (`status`, `executable_sha256`, `note`).
 3. *(fatto il 13/10: testo identico, §8)* Verifica del testo: `python D:\ds4_work\strata\pipeline2\p2_check.py build-pipeline2-<sha> DET-p2-chk1 256
    off,stat,nosw,smem,both` (L02 a cache fissa 1500, senza `--elastic`, `--adapt-every 0`, env della Daily 0.1.43; ogni
-   braccio prende da sé il `bench.lock`). Tutti i bracci devono dare `L02.txt` e primi logit IDENTICI a `off`. Leggere le
+   braccio prende da sé il `bench.lock`). Tutti i bracci devono dare `L02.txt` IDENTICO a `off`. Il percorso pipeline
+   non produce `STRATA_DUMP_FIRST_LOGITS`: i logit non sono stati verificati da questo script. Leggere le
    righe `strata pipeline2 switches:` (bracci `stat`/`nosw`) e `strata pipeline2: STRATA_P2_SMEM` (bracci `smem`/`both`).
 4. *(fatto il 13/10: non serve, §8)* Tappa 0a: `bash D:\ds4_work\strata\pipeline2\p2_pstate.sh DET-p2-pstate3` (il primo tentativo `DET-p2-pstate1` è
    morto per «Startup deadline» a 300 s dopo la notte multi-chat: riprovare a PC fermo).
@@ -49,8 +50,8 @@ no. B-A-B no. Default = struct-a `075ce875` (tutte le leve opt-in).
    il lancio del grafo della 2080 Ti ~20× (2 ms invece di 0,1) e crea lo spigolo `gr_down_staged → gr_up_multi`; per i
    muri usare `nsys_graph.bat` + `graph_wall.py` (livello di grafo) e per il lancio la riga `strata
    pipeline2 launches:` (`STRATA_P2_SWITCH_STAT=1`).
-6. **Prossimo passo: al coordinatore per il B-A-B** con `build-pipeline2-f6a0b6b2`: braccio A = env della Daily 0.1.43;
-   braccio B = A + `STRATA_P2_FLUSH_NOSWITCH=1` (eventuale terzo braccio + `STRATA_P2_SMEM=1`). Testo già verificato.
+6. **B-A-B fatto (§11)** con `build-pipeline2-f6a0b6b2`: braccio A = env della Daily 0.1.43;
+   braccio B = A + `STRATA_P2_FLUSH_NOSWITCH=1`. ID/testo verificati; la leva resta opt-in, senza installazione.
 7. Tappa 2 rimandata (§8). Se il B-A-B di 0b rende, la leva successiva da studiare è l'attesa delle righe CPU sullo
    stadio 1, non i buchi della GPU; la tappa 3 (stadio 0) ha idle nel grafo 0,01 ms a finestra (M sotto nsys) e non ha bacino.
 
@@ -644,3 +645,83 @@ dalla 3060 toglie l'esperto a entrambe.
 - **Contro il kernel persistente / meno nodi** (tappe 2-3): −0,7/−1,5 ms a finestra (+3/+6%) su tutte le finestre, bit
   per bit, giorni invece di settimane, nessun costo sul TTFT, la pipeline B resta. Resta la strada; il TP no.
 
+## 10. Ripresa Codex (13/10, preparazione del B-A-B)
+
+Controllo del codice `f6a0b6b2`: NOSWITCH interroga eventi/stream e legge le stesse righe mapped; se una query viene
+rifiutata, il processo disattiva la leva e torna a `OnDevice`. Nessun calcolo GPU cambia. Le prove precedenti hanno
+verificato il testo, non i primi logit: il percorso pipeline non esegue il punto che li salva.
+
+`tools/pipeline2_bench.py` riusa `run_nsys.py` del banco già esistente, senza modificarlo. Importa il suo `main`, non
+il blocco che prende il lock; richiede quindi `bench_lock.py <nome> -- python tools/pipeline2_bench.py run …` con lo
+stesso `<nome>` di `--name`. Risultati e trace vanno in `--output-root`, obbligatoriamente fuori dai repository.
+La build è un percorso assoluto e il suo hash deve corrispondere a `build.json`. Nessun bytecode viene scritto nel
+repository del banco. `--dry-run` stampa il comando senza caricare il motore. Il profilo ripete la Daily 0.1.43 e
+fissa cache 1500, `--adapt-every 0`, senza `--elastic`; A e B differiscono soltanto per NOSWITCH.
+
+Sequenza affidata al coordinatore, una sola corsa GPU alla volta:
+
+1. **Correttezza**: A e B sulla stessa build `build-pipeline2-f6a0b6b2`, `--cases L01,L02 --tokens 256`, greedy libero,
+   nessun `--force-ids`/`--force-windows`. `compare <A> <B>` deve trovare ID identici, entrambe le richieste complete
+   e Daily invariata; registra trace, numero di finestre e classi, che possono cambiare con la schedulazione.
+   Un output forzato identico non dimostra correttezza numerica.
+2. **Riscaldamento escluso dalla misura**: 64 token L01/L02 con le due liste forzate. Il prefill lungo scalda anche
+   pesi e file. A/B mantengono lo stesso layout user-turn a 131k, così le posizioni del trace storico coincidono.
+3. **B-A-B**: 1024 token L01/L02. B1, A, B2 sulla stessa build, stesse liste
+   `20261006_due_schede/force_ids/force_L01.txt` e `force_L02.txt`, stesso
+   `--force-windows …/ref_def1_trace.txt`. Ogni lista si passa con un `--force-ids` ripetuto, nell'ordine L01/L02.
+   `compare <A> <B1> <B2>` controlla hash/args/env, ID e tempo decode di ogni caso. Con `STRATA_FORCE_WINDOWS`
+   attivo anche il trace delle finestre deve essere identico, per confrontare lo stesso lavoro.
+4. Leggere per caso t/s, ms/finestra e classi fresh/speculative; il coordinatore registra temperature, clock,
+   occupazione CPU e processi concorrenti. Entrambi i B devono concordare nel segno; un effetto pari alla dispersione
+   resta **inconclusivo**. Nessuna promozione sulla sola riduzione dei cambi di scheda.
+
+`STRATA_P2_SWITCH_STAT` resta **spento** nei tempi: misurare milioni di cambi con clock/atomiche altera proprio il
+costo che si confronta. `--switch-stat` è disponibile solo per una corsa diagnostica separata. SMEM e FLUSH_US non
+vanno aggiunti a B; il periodo resta 2000 µs. Le tappe persistenti e TP restano rimandate come nel §8–9.
+
+**Greedy A/B completato dal coordinatore**: `DET-codex-p2-check-A` e `-B`, 256 token per caso L01/L02 a 131k,
+stessa build e cache fissa; entrambi rc0 (195/174 s). ID emessi identici su entrambi i casi, trace delle finestre
+diverso. Il primo verificatore richiedeva erroneamente trace identici anche nel greedy libero ed è stato corretto
+senza ripetere il motore. Il log originario resta in `parity_compare.json`; il nuovo rapporto è
+`outputs/strata_completion_20261013/pipeline2/parity_compare_corrected.json` nella chat Codex di recupero.
+Questa è verifica di ID/testo, non parità di tutti i float: nessun logit è stato prodotto.
+
+## 11. B-A-B NOSWITCH concluso (13/10, M)
+
+Il coordinatore ha eseguito in sequenza `DET-codex-p2-forced-warm` (64 token, escluso dai tempi qui sotto), poi
+`DET-codex-p2-forced-B1`, `-A`, `-B2`; tutte le corse e `forced_compare.json` sono terminate con rc0. Hardware:
+3060 12 GB + 2080 Ti 22 GB, `CUDA_VISIBLE_DEVICES=1,0`, split 16/32 layer, pipeline a due finestre, `rt_it48k`,
+L01/L02 a 131k, 1024 token ciascuno. Stessa build `f6a0b6b2`, env Daily 0.1.43, cache **fissa 1500**,
+`--adapt-every 0`, senza `--elastic`; SWITCH_STAT, SMEM e altri bracci P2 spenti. B differisce da A per il solo
+`STRATA_P2_FLUSH_NOSWITCH=1`. Motore e Daily non sono stati modificati da questa ripresa.
+
+**Parità del lavoro verificato**: ID L01 e L02 e trace delle finestre byte-identici in A/B1/B2; SHA256 del trace
+`000af0df02e3b3d325f9614ffd75ec82aa7213e82220fcb55e58f97881c7791d`. L01: 521 finestre, 503 bozze accettate
+su 690; L02: 600 finestre, 426 su 614. Le classi fresh/speculative possono cambiare (su L02: 436/164 in A,
+437/163 in B1, 442/158 in B2): il trace controlla le finestre verificate, non ogni ramo speculativo. Il test greedy
+libero del §10 ha verificato gli ID su 256 token per caso; i token forzati qui non sono una prova sui float.
+
+| caso | B1 t/s · ms/finestra | A t/s · ms/finestra | B2 t/s · ms/finestra | riduzione tempo decode B1/B2 rispetto ad A |
+|---|---:|---:|---:|---:|
+| L01 | 57,09 · 34,43 | 60,92 · 32,27 | 61,43 · 31,99 | **−6,69% / +0,84%** |
+| L02 | 55,67 · 30,66 | 54,01 · 31,60 | 56,21 · 30,36 | **+2,97% / +3,91%** |
+
+Il segno positivo indica meno tempo decode. La dispersione fra B1 e B2, `(max-min)/media` dei tempi decode, è
+**7,32% su L01**, **0,97% su L02**. La media dei tempi B rispetto ad A dà **−2,93% su L01**, **+3,44% su L02**;
+sommando L01+L02, B1 dà −1,57%, B2 +2,46%, media B **+0,45%**. Si fa la media dei tempi, non dei t/s.
+
+**Avvio separato dal decode**: warm 67,33 s; B1 **275,84 s**, A **69,45 s**, B2 **277,05 s**. Nessun braccio è
+stato scartato. Nella telemetria di B1 C: legge circa 63 MB/s per circa 180 s; il caricamento lento degli esperti
+resta visibile nei log. Il decode è misurato dopo il caricamento e il prefill. Il prefill L01 è 80,30–80,65 s;
+L02 riusa 118272 token e legge 12967 token in 12,22–12,26 s in tutti e tre i bracci.
+
+**Verdetto**: L01 inconclusivo; L02 mostra −3/−4% di tempo nei due B, ma c'è un solo A e nessun intervallo di
+confidenza. Il guadagno combinato è inferiore alla dispersione: **nessuna promozione o installazione di NOSWITCH**.
+Il filone ha chiuso il B-A-B richiesto. Questo profilo a cache fissa 1500 non valida gli 80 t/s e non è confrontabile
+in assoluto con i 77/70 t/s storici a cache auto. Le tappe persistenti/TP restano rimandate.
+
+Fonti complete nella chat Codex di recupero:
+`C:\Users\imanu\Documents\Codex\2026-10-13\recupero-claude-strata-handoff\outputs\strata_completion_20261013\pipeline2`.
+Per ogni braccio: `plan.json`, `result.json`, `engine.log`, `force_trace.txt`, `.runlog` e `.environment.jsonl`;
+rapporti `parity_compare_corrected.json` e `forced_compare.json`. In `cpu_validation` le copie dei rapporti
+generati su CPU da questi output, con `provenance.json`: nessuna nuova corsa GPU per validarli.
