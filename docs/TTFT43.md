@@ -121,9 +121,10 @@ causa:
    `mc2_m43b-pack3b-det` alle 05:41: 0,22 GiB/s, senza la leva. Con la leva: 2 lente su 7 vite 2; senza (fA fB0 A A2):
    0 su 4. Sono numeri troppo piccoli per legare la leva al rallentamento, e il codice non tocca né C: né l'avvio.
 4. **Causa del caricamento lento: non identificata.** Le vite lente erano il 9° (B, 03:47) e il 4° (B3, 05:18) avvio
-   da 40 GB in pochi minuti. Ipotesi da verificare: l'NVMe C: che rallenta per temperatura (lettura SMART solo da
-   amministratore: `Get-StorageReliabilityCounter`), oppure il blocco in RAM di 33 GB (VirtualLock + working-set
-   minimum) che rientra nel tasso misurato. Non è Windows Search: `lab_prefix` non è indicizzata.
+   da 40 GB in pochi minuti. La prima analisi proponeva temperatura dell'NVMe C: o tempo del blocco in RAM. I
+   contatori aggiunti sotto localizzano due nuove occorrenze nella lettura fisica; il tasso del lettore esclude la
+   precedente costruzione/lock dell'arena. La causa nella catena SSD/driver rimane sconosciuta; temperatura SMART
+   non disponibile senza privilegi. `lab_prefix` non è indicizzata da Windows Search.
 
 Codice del motore **non modificato**: un secondo meccanismo pigro sopra quello esistente non cambierebbe nulla.
 La proposta di riaccendere `STRATA_CONV_DISK=10` è stata applicata al Daily r2 alle 08:37 del 13/10: il controllo
@@ -135,27 +136,99 @@ Il controllo senza elevazione del 13/10 trova entrambi i dischi `Healthy`, ma `G
 fallisce con «Accesso a una risorsa CIM non disponibile per il client». Non ci sono nuove misure della temperatura
 e non si attribuisce il rallentamento alla temperatura o a `VirtualLock` senza una misura.
 
-## Prossimo passo (esatto)
+### Localizzazione del rallentamento con contatori fisici
 
-1. Sotto `bench.lock`, B-A-B con lo stesso Daily r2: `--ple-io direct`, `--ple-io ram`, `--ple-io direct`. Tutte le
-   altre opzioni e gli env uguali (MULTI 24, CONV 10, prompt encoder 1). Il PLE in RAM richiede circa 26,8 GiB
-   aggiuntivi: i circa 78 GiB liberi a macchina ferma non sono una misura del margine dopo il caricamento degli
-   esperti. Registrare RAM libera e working set dopo READY, costo di caricamento PLE, avvio e TTFT di entrambe le
-   vite. Il braccio RAM è valido solo con la riga `PLE table locked in RAM (--ple-io ram)`; altrimenti fermarlo.
-2. Per chiudere questo confronto usare `tools/ttft43_bench.py`, che importa il banco originale in sola lettura e
-   copia la fixture pubblica già esistente (SHA-256
-   `0cd2059a3e705c99544e0f78e7eda40f76be45c034f794bbfdabc8054df9a1be`). `--output-root` va nel workspace Codex,
-   `--prefix-root D:\ds4_work\strata\lab_prefix\codex_completion_20261013` tiene le cache sullo stesso disco del
-   banco precedente; ogni tag crea una cartella nuova e non cancella le precedenti. Piano `short`: cc1_t1, cc1_t2,
-   pausa 12 s, dsh1_t1, pausa 25 s e riavvio; cc3_t1, dsh2_t1, cc1_t3, dsh1_t2. Sono sette richieste con ripresa di
-   entrambe le conversazioni e due client nuovi col prefisso su disco. `--require-prefix-hits 2` e
-   `--require-conversation-hits 2` verificano il riuso; `--require-ram-locked` per il braccio RAM. Timeout o risposta
-   vuota fermano la corsa, lasciano log e risultati parziali e restituiscono un codice diverso da zero. Impostare
-   la modalità con `--args="--ple-io direct"`/`--args="--ple-io ram"`: la config Daily non contiene `--ple-io`, quindi
-   il vecchio `--set-opt` non può sostituirla. Le nuove misure GPU sono ancora **da eseguire**.
-3. Se le attese PLE restano un costo materiale, valutare la cache delle sole righe usate salvata su disco; oggi non
-   è implementata. Prima misurare la modalità RAM già esistente. Il rallentamento sporadico dell'arena esperti è
-   separato: una diagnosi termica richiede accesso ai contatori, senza riavvii ripetuti arbitrariamente.
+Il completamento pipeline ha riprodotto due avvii lenti naturali, `DET-codex-p2-forced-B1` e `B2`, senza lanciare
+una serie aggiuntiva per la diagnosi. Avvii **275,84 / 277,05 s**, arena 39,97 GiB a **0,16 GiB/s**; il riferimento
+`DET-codex-p2-forced-warm` arriva in 67,33 s a 0,89 GiB/s. Contatori ogni circa 5 s:
+
+- B1, intervallo 21,22-200,38 s dal primo campione: C: **63,21 MB/s** medi (35 campioni), CPU del motore 0,0072
+  core; B2, 21,16-237,18 s: **63,33 MB/s** (42 campioni), 0,0084 core. Il riferimento legge **963,04 MB/s**.
+- In entrambi RSS ~45,9 GiB già dopo 16 s e RAM disponibile ~32 GiB rimangono stabili durante la lunga lettura;
+  D: praticamente fermo. Le letture C: tornano temporaneamente a ~0,9-1,2 GB/s. Il volume fisico integrato prima
+  di READY, escluso il primo intervallo, è ~44,9 / 44,7 GB: coerente con la lettura dell'arena.
+- `STRATA_ARENA_PIN_GIB=8` limita `cudaHostRegister`, ma il log dichiara ancora **33352 MiB tramite VirtualLock**
+  oltre alle dieci slice registrate (~7,4 GiB). Il lock esiste anche nel riferimento veloce. `PinnedArena` viene
+  costruita prima del lettore; la velocità `loaded ... at` divide i byte per il tempo del lettore successivo.
+
+**Inferenza sostenuta dai contatori:** in queste due occorrenze il tempo aggiuntivo è nel percorso della lettura
+fisica di C:/storage stack, con l'arena già residente; non in una lunga fase CPU/copia o in un lock dopo la lettura.
+I contatori sono per disco, non esclusivi del motore. **Causa precisa ancora sconosciuta:** SSD/temperatura,
+driver, gestione energia o priorità/QoS non si distinguono con queste misure. Per un prossimo avvio già previsto
+servono latenza/queue/busy e priorità insieme ai contatori; temperatura SMART solo quando l'accesso è disponibile.
+Fonti, intervalli e medie: `outputs/strata_completion_20261013/ttft/startup_io_analysis.json` nel workspace Codex.
+
+## Chiusura del banco (13/10, 12:05-12:22)
+
+`tools/ttft43_bench.py` importa il banco originale in sola lettura. Fixture pubblica **immutata**, SHA-256
+`0cd2059a3e705c99544e0f78e7eda40f76be45c034f794bbfdabc8054df9a1be`; stesso Daily r2 a2111f8b e stesso hash
+dell'exe riportato nella sezione Build. Tre bracci seriali sotto `bench.lock`: `codex_direct1_plan8`,
+`codex_ram1_plan8`, `codex_direct2_plan8`. Cambia solo `--ple-io direct/ram/direct`; env sempre MULTI 24, CONV 10 e
+prompt encoder 1, config Daily con `--expert-cache auto --elastic`. Config e lanciatore operativi non modificati.
+
+Log/risultati nel workspace
+`C:\Users\imanu\Documents\Codex\2026-10-13\recupero-claude-strata-handoff\outputs\strata_completion_20261013\ttft`.
+Prefissi in nuove cartelle di `D:\ds4_work\strata\lab_prefix\codex_completion_20261013`, stesso disco del banco
+storico, senza cancellare cache precedenti. Modalità passata con `--args="--ple-io direct"`/`--args="--ple-io ram"`:
+la config non contiene `--ple-io`, quindi il vecchio `--set-opt` non la può sostituire.
+
+Piano `short` finale: cc1_t1, cc1_t2, pausa 12 s, dsh1_t1, **dsh1_t2**, pausa 25 s e riavvio; cc3_t1, dsh2_t1,
+cc1_t3, **dsh1_t3**. Sono **otto richieste**. La prima boundary DSH è 32340, root 29296: appena **3044** nuovi
+token, sotto `STRATA_CONV_DISK_MIN=4096`. Il secondo turno arriva a 33881: **4585** nuovi token, eleggibile al
+salvataggio nativo (`generate.cpp`, `conv_idle_save`). MIN, fixture e gate non sono stati abbassati.
+
+**PASS 8/8 in tutti e tre i bracci**, con quattro ripristini dal file di prefisso, inclusi due hit conversazione
+(CC 43006 e DSH 33881 token), e `--require-conversation-hits 2` soddisfatto. RAM confermata `locked in RAM` in
+entrambe le vite. Verifica successiva: tutti i **24 stream SSE** hanno marker di completamento, payload e nessun
+errore; i byte SSE decodificati UTF-8 coincidono con gli eventi JSON conservati. Sintesi e digest raw:
+`plan8_validation_summary.json` sotto il percorso dei risultati.
+
+| richiesta / misura | direct 1 | RAM | direct 2 |
+|---|---:|---:|---:|
+| cc1_t1 freddo, TTFT s | 34,20 | 30,58 | 35,33 |
+| cc1_t2 turno, TTFT s | 8,92 | 8,09 | 8,83 |
+| dsh1_t1 freddo, TTFT s | 30,50 | 25,58 | 29,41 |
+| dsh1_t2 turno, TTFT s | 4,38 | 3,77 | 4,49 |
+| cc3_t1 prefisso su disco, TTFT s | 15,05 | 12,92 | 15,69 |
+| dsh2_t1 prefisso su disco, TTFT s | 4,94 | 4,86 | 4,88 |
+| cc1_t3 ripresa, TTFT s | 6,25 | 5,70 | 6,25 |
+| dsh1_t3 ripresa, TTFT s | 5,14 | 4,58 | 5,19 |
+| avvio vita 1 / vita 2, s | 69,39 / 69,20 | 178,89 / 81,47 | 70,36 / 69,38 |
+| caricamento PLE RAM vita 1 / 2, s | — | 110,1 / 11,4 | — |
+| working set motore dopo READY, GiB | 33,66 | 60,99 | 33,66 |
+| RAM disponibile dopo READY vita 1 / 2, GiB | 46,86 / 46,88 | 19,89 / 19,95 | 46,80 / 46,81 |
+| minimo RAM disponibile nel monitor ogni ~5 s, GiB | 36,35 | 9,54 | 36,00 |
+
+PLE in RAM risparmia, rispetto alla media dei due direct, **4,2 s** sul CC a freddo, **4,4 s** sul DSH a freddo,
+**2,5 s** sul CC nuovo col prefisso e ~**0,6 s** sulle riprese. La somma TTFT delle otto richieste passa da
+109,4-110,1 a **96,1 s** (~14 s risparmiati), ma i due avvii da 138,6-139,7 a **260,4 s** (~121 s aggiuntivi) e il
+working set cresce di **27,3 GiB**. Misure di una corsa per braccio su questa macchina libera; il minimo del monitor
+è campionato ogni ~5 s, non un minimo continuo.
+
+Contenuto effettivo confrontato: testo, thinking e nome/argomenti dei tool; esclusi solo ID generati dall'API e
+confini dei chunk. RAM contro direct 1: **3/8 identici**; anche direct 2 contro direct 1: **3/8**, negli stessi casi;
+RAM contro direct 2: **8/8**. Il controllo direct ripetuto non è bit-identico con la cache adattiva del Daily: questi
+bracci non certificano parità bitwise del PLE. L'osservazione è compatibile con la variabilità della cache già
+documentata, e non basta ad attribuire le differenze alla modalità RAM.
+
+**Decisione per questo completamento: conservare `--ple-io direct` nel Daily.** Il risparmio misurato sul TTFT non
+compensa il costo dei due avvii di questo ciclo, mentre il margine RAM si riduce molto. La modalità RAM resta una
+scelta opt-in per carichi che possono assorbire avvio e memoria; nessuna promozione o nuova cache PLE persistente
+in questo giro. L'eventuale cache delle sole righe usate è una ricerca futura; la causa della lentezza intermittente
+di C: resta una diagnosi separata. Le verifiche rimaste aperte del banco TTFT e della persistenza sono concluse.
+
+### Due corse fallite conservate e correzioni del banco
+
+- `codex_direct1`: stop alla sesta richiesta perché il primo wrapper richiedeva testo, mentre il lettore legacy
+  già misurava la prima delta `partial_json`/thinking ma conservava solo il testo. Motore e server riportavano
+  24 token senza errore; quella corsa non conservava SSE e resta **FAIL**, senza attribuirle un tipo output certo.
+- `codex_direct1_retry`: tutti i sette payload ricevuti e SSE conservati; cc1_t3 è realmente un tool-only, ma il
+  gate segnala **1/2** hit conversazione perché il primo turno DSH non raggiunge i 4096 nuovi token. Resta **FAIL**.
+  La richiesta DSH aggiunta nel piano finale riproduce la condizione già presente nel banco storico completo.
+- `e42ed14f`: il wrapper conserva `.sse` e `.output.json`, riconosce payload testuali/tool/thinking con la stessa
+  metrica del primo delta, rifiuta stream vuoti, errori e interruzioni. Non fabbrica testo per i tool. Nei bracci
+  finali cc1_t3 produce `Grep` con JSON argomenti incompleto a **max_tokens=24**: output reale utile a misurare TTFT,
+  nessuna esecuzione o validazione di tool prevista dal banco. `f576b44f` aggiunge il turno DSH eleggibile.
 
 ## Penalità di ripetizione (controllo del 13/10, sola lettura)
 
@@ -210,8 +283,16 @@ file corrotti, atomicità della scrittura, chiavi in un passaggio dei confini di
 build e `TEMP`/`TMP` impostate a `build-ttft-cpu-completion/test-scratch`; nessun modello o GPU usati. Log:
 `build-ttft-cpu-completion/ttft-cpu-ctest.log`.
 
-**6/6 test CPU del wrapper passati**: rifiuto del PLE non bloccato in RAM e di hit mancanti, pulizia del processo
+Verifica iniziale del wrapper `67fd43ae`: **6/6 test CPU passati**, rifiuto del PLE non bloccato in RAM e di hit
+mancanti, pulizia del processo
 proprio se l'avvio fallisce (nessuna pulizia quando la porta è occupata prima del lancio), sette richieste e due
 vite, timeout fermato alla prima richiesta con risultato parziale conservato. Import della fixture reale verificato
 con `--only-fixture`, senza motore. Il codice del motore/server non cambia: non si ripete la suite server da 304
 test già passata, né si ricompila CUDA per un aggiornamento del banco e della documentazione.
+
+Dopo le due correzioni sopra, **15/15 test CPU del wrapper passati (0,064 s)**, inclusi SSE testo/tool-only,
+argomenti troncati conservati, start/stop senza payload rifiutato anche dal banco intero, errore SSE e interruzione
+con raw conservato, compatibilità OpenAI, confronto tool che ignora ID/chunk ma rileva argomenti diversi, e piano
+di otto richieste con checkpoint DSH eleggibile. Log grezzi, configure log, CMakeCache e provenienza delle suite
+sono copiati e verificati per SHA-256 in `outputs/strata_completion_20261013/ttft/cpu_validation` nel workspace
+Codex. I test C++ già passati non sono stati ripetuti per le correzioni Python o per questa documentazione.
