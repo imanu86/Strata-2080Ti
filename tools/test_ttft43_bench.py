@@ -11,6 +11,22 @@ from unittest.mock import patch
 import ttft43_bench as bench
 
 
+def sse(events):
+    return b"".join(b"data: " + (event.encode() if isinstance(event, str) else
+                    json.dumps(event).encode()) + b"\n\n" for event in events)
+
+
+def messages(payload="reply", kind="text_delta", call_id="toolu_123"):
+    block = {"type": "text", "text": ""} if kind == "text_delta" else {
+        "type": "tool_use", "id": call_id, "name": "Read", "input": {}}
+    field = "text" if kind == "text_delta" else "partial_json"
+    return [{"type": "message_start", "message": {"usage": {"input_tokens": 40}}},
+            {"type": "content_block_start", "index": 0, "content_block": block},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": kind, field: payload}},
+            {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {"output_tokens": 24}},
+            {"type": "message_stop"}]
+
+
 class BenchTest(unittest.TestCase):
     def test_ram_arm_requires_actual_lock(self):
         log = "strata generate: PLE table loaded (not locked) (--ple-io ram) in 4.0 s"
@@ -54,19 +70,21 @@ class BenchTest(unittest.TestCase):
     def make_legacy(self, root, failure=None):
         legacy = types.SimpleNamespace(H=root, OUT=root / "ttft_test", PREFIX_ROOT=root / "cache")
         legacy.a = types.SimpleNamespace(tag="test", exe=str(root / "fake.exe"), serve="fake",
-            env="", args="", set_opt=[], drop_opt=[], server_env="", maxt=24, idle=25, compare=None)
+            env="", args="", set_opt=[], drop_opt=[], server_env="", maxt=24, idle=25, compare=None, port=8102)
         (root / "ttft_fixture.json").write_text("{}", encoding="utf-8")
         legacy.sha = lambda path: "fixture-hash"
         legacy.cc_body = legacy.dsh_body = lambda *args: {"stream": True}
         legacy.side_body = lambda *args: {"stream": True}
         calls = []
         legacy.calls = calls
-        def stream(*args, **kwargs):
-            calls.append(kwargs["timeout"])
+        def urlopen(request, timeout):
+            calls.append(timeout)
             if failure:
                 raise failure
-            return 1.0, 2.0, "reply", {"prompt_tokens": 40}
-        legacy.stream = stream
+            events = (messages() if request.full_url.endswith("/v1/messages") else
+                      [{"choices": [{"delta": {"content": "reply"}}]}, "[DONE]"])
+            return io.BytesIO(sse(events))
+        legacy.urlopen = urlopen
         legacy.log_lines = lambda life, pos: ([], pos)
         legacy.stops = []
         class Server:
@@ -89,6 +107,7 @@ class BenchTest(unittest.TestCase):
         options = types.SimpleNamespace(plan="short", request_timeout=0.25, require_ram_locked=False,
             require_prefix_hits=2, require_conversation_hits=2, require_identical=False)
         with patch.object(bench.time, "sleep"), patch.object(bench, "memory_sample", return_value={}), \
+                patch.object(bench.urllib.request, "urlopen", side_effect=legacy.urlopen), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return bench.run(legacy, options)
 
@@ -111,6 +130,81 @@ class BenchTest(unittest.TestCase):
             self.assertIn("request timed out", result["error"])
             self.assertEqual(len(result["requests"]), 1)
             self.assertEqual(legacy.stops, [1])
+
+    def stream_events(self, root, events, path="/v1/messages"):
+        legacy = types.SimpleNamespace(OUT=root, a=types.SimpleNamespace(port=8102))
+        raw = sse(events)
+        with patch.object(bench.urllib.request, "urlopen", return_value=io.BytesIO(raw)):
+            result = bench.stream_output(legacy, path, {"stream": True}, 1, "response")
+        self.assertEqual((root / "response.sse").read_bytes(), raw)
+        return result
+
+    def test_adapter_retains_text_usage_and_first_delta(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.stream_events(Path(temp), messages())
+            self.assertEqual(result["text"], "reply")
+            self.assertIsNotNone(result["ttft"])
+            self.assertEqual(result["first_delta_type"], "text_delta")
+            self.assertEqual(result["usage"], {"input_tokens": 40, "output_tokens": 24})
+
+    def test_adapter_retains_tool_only_and_truncated_arguments(self):
+        with tempfile.TemporaryDirectory() as temp:
+            partial = '{"file_path":"/work/strata/src'
+            result = self.stream_events(Path(temp), messages(partial, "input_json_delta"))
+            self.assertEqual(result["text"], "")
+            self.assertIsNotNone(result["ttft"])
+            self.assertEqual(result["first_delta_type"], "input_json_delta")
+            tool = bench.content_for_comparison(result)["tools"][0]
+            self.assertEqual(tool, {"name": "Read", "input": {}, "partial_json": partial})
+
+    def test_empty_start_stop_has_no_ttft(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.stream_events(Path(temp), [messages()[0], {"type": "message_stop"}])
+            self.assertIsNone(result["ttft"])
+            self.assertEqual(bench.content_for_comparison(result), {"text": "", "thinking": "", "tools": []})
+
+    def test_empty_response_fails_benchmark_and_stops_server(self):
+        with tempfile.TemporaryDirectory() as temp:
+            legacy = self.make_legacy(Path(temp))
+            legacy.urlopen = lambda *args, **kwargs: io.BytesIO(sse([messages()[0], {"type": "message_stop"}]))
+            self.assertEqual(self.run_legacy(legacy), 1)
+            result = json.loads((legacy.OUT / "results.json").read_text())
+            self.assertIn("no output payload", result["error"])
+            self.assertEqual(len(result["requests"]), 1)
+            self.assertEqual(legacy.stops, [1])
+
+    def test_sse_error_keeps_raw_and_error_record(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaisesRegex(RuntimeError, "SSE error"):
+                self.stream_events(root, [{"type": "error", "error": {"message": "engine failed"}}])
+            self.assertIn(b"engine failed", (root / "response.sse").read_bytes())
+            result = json.loads((root / "response.output.json").read_text())
+            self.assertIn("engine failed", result["error"])
+
+    def test_interrupted_stream_does_not_pass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(RuntimeError, "completion marker"):
+                self.stream_events(Path(temp), messages()[:-1])
+
+    def test_openai_text_preserves_same_first_payload_definition(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.stream_events(Path(temp), [
+                {"choices": [{"delta": {"content": "reply"}}]},
+                {"choices": [], "usage": {"completion_tokens": 24}}, "[DONE]"], "/v1/chat/completions")
+            self.assertEqual(result["text"], "reply")
+            self.assertEqual(result["first_delta_type"], "content")
+            self.assertIsNotNone(result["ttft"])
+
+    def test_tool_comparison_ignores_ids_and_chunk_boundaries_but_checks_payload(self):
+        first = {"text": "", "events": messages('{"x":1}', "input_json_delta", "first")}
+        second_events = messages('{"x":', "input_json_delta", "second")
+        second_events.insert(3, {"type": "content_block_delta", "index": 0,
+                                 "delta": {"type": "input_json_delta", "partial_json": "1}"}})
+        second = {"text": "", "events": second_events}
+        self.assertEqual(bench.content_for_comparison(first), bench.content_for_comparison(second))
+        second_events[3]["delta"]["partial_json"] = "2}"
+        self.assertNotEqual(bench.content_for_comparison(first), bench.content_for_comparison(second))
 
 
 if __name__ == "__main__":

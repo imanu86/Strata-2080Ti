@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 
@@ -97,6 +98,103 @@ def require_cache_hits(log, prefix_hits, conversation_hits):
     return {"prefix": prefix, "conversation": conversation}
 
 
+def content_for_comparison(response):
+    """Compare real output; API-generated call ids and chunk boundaries are not content."""
+    tools = {}
+    thinking = []
+    for event in response["events"]:
+        if event.get("type") == "content_block_start":
+            block = event.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                tools[event["index"]] = {"name": block.get("name"), "input": block.get("input"),
+                                         "partial_json": ""}
+        elif event.get("type") == "content_block_delta":
+            delta = event.get("delta") or {}
+            if delta.get("thinking"):
+                thinking.append(delta["thinking"])
+            if delta.get("partial_json"):
+                index = event["index"]
+                if index not in tools:
+                    raise RuntimeError("tool delta has no tool_use block")
+                tools[index]["partial_json"] += delta["partial_json"]
+        else:
+            for choice in event.get("choices") or []:
+                if (choice.get("delta") or {}).get("reasoning_content"):
+                    thinking.append(choice["delta"]["reasoning_content"])
+    return {"text": response["text"], "thinking": "".join(thinking),
+            "tools": [tools[index] for index in sorted(tools)]}
+
+
+def stream_output(legacy, path, body, timeout, name):
+    """Keep the legacy first-payload TTFT definition and retain every SSE event.
+
+    A tool-only or thinking-only response has output even though its text is empty.
+    Start/stop events without a payload do not. Arguments cut off by max_tokens are
+    retained as partial_json; this benchmark neither executes nor validates a tool call.
+    """
+    request = urllib.request.Request(f"http://127.0.0.1:{legacy.a.port}{path}",
+        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    first, parts, usage, events, first_type, terminal = None, [], {}, [], None, False
+    response = {"endpoint": path, "events": events, "text": "", "usage": usage,
+                "first_delta_type": None, "ttft": None, "wall": None, "error": None}
+    start = time.monotonic()
+    try:
+        with (legacy.OUT / f"{name}.sse").open("wb") as raw_file:
+            with urllib.request.urlopen(request, timeout=timeout) as reply:
+                for raw in reply:
+                    raw_file.write(raw)
+                    line = raw.decode("utf-8").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        terminal = True
+                        continue
+                    event = json.loads(data)
+                    events.append(event)
+                    if event.get("type") == "error" or event.get("error"):
+                        raise RuntimeError("SSE error: " + json.dumps(event, ensure_ascii=False))
+                    if path == "/v1/messages":
+                        kind = event.get("type")
+                        if kind == "content_block_delta":
+                            delta = event.get("delta") or {}
+                            piece = delta.get("text") or delta.get("partial_json") or delta.get("thinking") or ""
+                            if piece and first is None:
+                                first, first_type = time.monotonic(), delta.get("type")
+                            if delta.get("text"):
+                                parts.append(delta["text"])
+                        elif kind == "message_start":
+                            usage.update((event.get("message") or {}).get("usage") or {})
+                        elif kind == "message_delta":
+                            usage.update(event.get("usage") or {})
+                        elif kind == "message_stop":
+                            terminal = True
+                    else:
+                        if event.get("usage"):
+                            usage.update(event["usage"])
+                            usage["timings"] = event.get("timings")
+                        for choice in event.get("choices") or []:
+                            delta = choice.get("delta") or {}
+                            piece = delta.get("content") or delta.get("reasoning_content") or ""
+                            if piece and first is None:
+                                first = time.monotonic()
+                                first_type = "content" if delta.get("content") else "reasoning_content"
+                            if delta.get("content"):
+                                parts.append(delta["content"])
+        if not terminal:
+            raise RuntimeError("SSE stream ended without its completion marker")
+    except Exception as exc:
+        response["error"] = str(exc)
+        raise
+    finally:
+        response.update(text="".join(parts), first_delta_type=first_type,
+                        ttft=None if first is None else first - start, wall=time.monotonic() - start,
+                        terminal=terminal)
+        (legacy.OUT / f"{name}.output.json").write_text(
+            json.dumps(response, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return response
+
+
 def run(legacy, options):
     a, out = legacy.a, legacy.OUT
     out.mkdir(exist_ok=False)
@@ -140,9 +238,14 @@ def run(legacy, options):
                     entry = {"life": life, "name": name, "case": case, "ok": False}
                     result["requests"].append(entry)
                     try:
-                        ttft, wall, text, usage = legacy.stream(path, body, timeout=options.request_timeout)
-                        if ttft is None or not text:
-                            raise RuntimeError("response contained no text token")
+                        response = stream_output(legacy, path, body, options.request_timeout, name)
+                        ttft, wall, text, usage = (response[key] for key in ("ttft", "wall", "text", "usage"))
+                        entry.update(ttft=None if ttft is None else round(ttft, 2), wall=round(wall, 2),
+                                     usage=usage, first_delta_type=response["first_delta_type"],
+                                     raw_sse=f"{name}.sse", structured_output=f"{name}.output.json")
+                        if ttft is None:
+                            raise RuntimeError("response contained no output payload")
+                        content_for_comparison(response)
                     except Exception as exc:
                         entry["error"] = str(exc)
                         raise RuntimeError(f"{name} failed: {exc}") from exc
@@ -164,13 +267,19 @@ def run(legacy, options):
             options.require_prefix_hits, options.require_conversation_hits)
         if a.compare:
             other = legacy.H / f"ttft_{a.compare}"
+            result["comparison_mode"] = "structured_output"
+            result["same_content_as"] = {entry["name"]:
+                (other / f"{entry['name']}.output.json").is_file() and
+                content_for_comparison(json.loads((other / f"{entry['name']}.output.json").read_text(encoding="utf-8"))) ==
+                content_for_comparison(json.loads((out / f"{entry['name']}.output.json").read_text(encoding="utf-8")))
+                for entry in result["requests"]}
             result["same_text_as"] = {entry["name"]:
                 (other / f"{entry['name']}.txt").is_file() and
                 (other / f"{entry['name']}.txt").read_text(encoding="utf-8") ==
                 (out / f"{entry['name']}.txt").read_text(encoding="utf-8")
                 for entry in result["requests"]}
-            if options.require_identical and not all(result["same_text_as"].values()):
-                raise RuntimeError("reply text differs from the comparison arm")
+            if options.require_identical and not all(result["same_content_as"].values()):
+                raise RuntimeError("reply content differs from the comparison arm")
     except Exception as exc:
         error = str(exc)
     finally:
