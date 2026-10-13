@@ -72,6 +72,7 @@
 #include "strata/platform/host_limits.hpp"
 #include "strata/program/split_ring.hpp"
 #include "strata/program/draft_kv_plan.hpp"
+#include "strata/program/pack_prefill.hpp"
 #include "strata/program/message_boundary.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/draft_source.hpp"
@@ -10101,6 +10102,14 @@ int main(int argc, char** argv) {
             std::vector<ConvCheckpoint> checks;   ///< its state at the end of `ids` (and every stage's part)
             bool cached = false;
             uint64_t used = 0;
+            // the MTP draft layer's K/V as its own read would leave it: the source's K/V of [0, m) (`draft`, of
+            // `draft_upto` cells) and the last stage's final residual rows of [m, ids.size()) with the token after each
+            // (`rows`, `nxt`), replayed through the drafter when the request continues from this slot
+            int64_t m = 0, row_floats = 0, draft_upto = 0;
+            bool has_draft = false;
+            strata::core::ConversationKv draft;
+            std::vector<float> rows;
+            std::vector<int32_t> nxt;
         };
         std::vector<PkSlot> pks(pack_ss.empty() ? 0 : pack_ss[0].size());
         std::deque<std::vector<int64_t>> pk_hints;
@@ -10109,10 +10118,16 @@ int main(int argc, char** argv) {
             if (pks.empty()) return;
             std::vector<int64_t> h;
             std::string he;
-            if (!parse_i64_list(hl.c_str() + 6, h, he) || h.size() < 2) return;
+            if (!parse_i64_list(hl.c_str() + 6, h, he) ||
+                !strata::program::pack_prefill::valid_hint(h, o.max_context, n_vocab)) return;
             for (const auto& x : pk_hints) if (x == h) return;
             pk_hints.push_back(std::move(h));
             while (pk_hints.size() > 2 * pks.size() + 2) pk_hints.pop_front();
+        };
+        auto pk_forget = [&](const std::vector<int64_t>& ids) {
+            for (PkSlot& q : pks)
+                if (q.cached && q.ids.size() < ids.size() &&
+                    std::equal(q.ids.begin(), q.ids.end(), ids.begin())) q = PkSlot{};
         };
         // copy_from_slot's sessions and tokens: index bs.size() + j is pack slot j
         auto slot_sess = [&](size_t k, int b) -> strata::core::SessionState& {
@@ -10120,6 +10135,40 @@ int main(int argc, char** argv) {
         };
         auto slot_ids = [&](int b) -> const std::vector<int32_t>& {
             return b < (int) bs.size() ? bs[(size_t) b].ids : pks[(size_t) b - bs.size()].ids;
+        };
+        auto pack_draft_restore = [&](const PkSlot& q, int64_t prompt_len, std::string& e) -> bool {
+            if (!use_mtp) return true;
+            const int64_t rows = (int64_t) q.nxt.size();
+            if (!q.has_draft || q.row_floats != g.hc * g.n_embd ||
+                rows != (int64_t) q.ids.size() - q.m ||
+                !strata::program::pack_prefill::draft_rows_fit(rows, q.row_floats) ||
+                q.rows.size() != (size_t) rows * (size_t) q.row_floats) {
+                e = "pack draft: incomplete residual rows";
+                return false;
+            }
+            const strata::core::OnDevice on_mtp(mtp.device());
+            if (!mtp.idle(e) || !strata::core::conversation_kv_restore(q.draft, mtp.kv_state(), draft_geometry,
+                    q.draft_upto, false, e) || cudaDeviceSynchronize() != cudaSuccess) return false;
+            mtp.set_prompt_len(prompt_len);
+            // Only 64 residual rows on the device, independent of prompt length; do not take hundreds of MiB
+            // from the VRAM expert cache just to replay a packed suffix.
+            struct Rows { float* p = nullptr; ~Rows() { if (p) cudaFree(p); } } buf;
+            constexpr int64_t chunk = 64;
+            if (cudaMalloc((void**) &buf.p, (size_t) (chunk * q.row_floats) * sizeof(float)) != cudaSuccess) {
+                e = "pack draft: residual staging allocation failed";
+                return false;
+            }
+            for (int64_t a = 0; a < rows; a += chunk) {
+                const int64_t count = std::min(chunk, rows - a);
+                if (cudaMemcpy(buf.p, q.rows.data() + (size_t) (a * q.row_floats),
+                               (size_t) (count * q.row_floats) * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
+                    e = "pack draft: residual upload failed";
+                    return false;
+                }
+                if (!mtp.prefill(buf.p, q.nxt.data() + a, count, q.m + a, e)) return false;
+            }
+            std::fprintf(stderr, "strata pack: draft K/V restored from its prefix and %lld residual rows\n", (long long) rows);
+            return true;
         };
         // timing of the batch windows since the slots were last all idle (one stderr line then)
         double bt_run = 0, bt_commit = 0, bt_emit = 0;
@@ -11092,13 +11141,14 @@ int main(int argc, char** argv) {
             }
             sp.embd_rows = geni ? row_ptr.data() : nullptr;
             if (n + max_new + 8 > o.max_context) {
+                pk_forget(ids);
                 std::printf("ERR prompt (%lld tokens) + max_new (%lld) exceeds the context (%lld)\n", (long long) n,
                             (long long) max_new, (long long) o.max_context);
                 continue;
             }
             bool bad = false;
             for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
-            if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); continue; }
+            if (bad) { pk_forget(ids); std::printf("ERR a token id is outside the vocabulary\n"); continue; }
             std::array<int64_t, 3> remote_before{};
             std::array<int64_t, 3> launches_before{};
             std::array<uint64_t, 3> compact_before{}, full_before{};
@@ -11154,7 +11204,7 @@ int main(int argc, char** argv) {
                 tail_ckpt_len = -1;
                 const size_t n_parked = conversations.clear();
                 size_t n_slots = 0, n_running = 0;
-                for (PkSlot& q : pks) { q.cached = false; q.checks.clear(); }
+                for (PkSlot& q : pks) q = PkSlot{};
                 pk_hints.clear();
                 for (BSlot& sl : bs)
                     if (sl.active) {   // a running slot finishes its reply, but is not kept as a cache after it
@@ -11352,7 +11402,8 @@ int main(int argc, char** argv) {
             if (pack_source >= 0) {   // STRATA_PACK_PREFILL: as a slot's, then the pack slot is free for the next hint
                 const auto t0 = Clock::now();
                 PkSlot& q = pks[(size_t) pack_source];
-                if (!copy_from_slot((int) bs.size() + pack_source, nullptr, err)) {
+                if (!copy_from_slot((int) bs.size() + pack_source, nullptr, err) ||
+                    !pack_draft_restore(q, n, err)) {
                     std::fprintf(stderr, "strata pack: restoring pack slot %d failed (%s); reading the prompt\n",
                                  pack_source, err.c_str());
                     err.clear();
@@ -11375,9 +11426,7 @@ int main(int argc, char** argv) {
                                  "%.1f ms\n", pack_source, (long long) pack_tokens,
                                  std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
                 }
-                q.cached = false;
-                q.ids.clear();
-                q.checks.clear();
+                q = PkSlot{};   // also release a cancelled/reused hint's draft image and residual capacity
             }
             // the elastic K/V: a parked conversation is restored whole, and it may be longer than this prompt
             if (incoming && !kvg_ensure((int64_t) incoming->live.ids.size() + 256, kv_quiesce)) {
@@ -11944,7 +11993,8 @@ int main(int argc, char** argv) {
                         pl.src = 2;
                         pl.mc = &c;
                     }
-                    if (pl.src == 0 || L - pl.m < pk_min) continue;
+                    if (pl.src == 0 || L - pl.m < pk_min ||
+                        (use_mtp && !strata::program::pack_prefill::draft_rows_fit(L - pl.m, g.hc * g.n_embd))) continue;
                     pl.L = L;
                     size_t best = pks.size();   // a free pack slot, else the one filled longest ago
                     for (size_t j = 0; j < pks.size(); ++j) {
@@ -11959,12 +12009,17 @@ int main(int argc, char** argv) {
                     plans.push_back(std::move(pl));
                 }
                 if (plans.empty()) return true;
+                struct DropUncached {
+                    std::vector<PkSlot>& slots;
+                    const std::vector<Plan>& plans;
+                    ~DropUncached() {
+                        for (const Plan& pl : plans) if (!slots[pl.slot].cached) slots[pl.slot] = PkSlot{};
+                    }
+                } drop_uncached{pks, plans};
                 // the prefixes into the pack slots, on every stage (what a slot held before is dropped)
                 for (Plan& pl : plans) {
                     PkSlot& q = pks[pl.slot];
-                    q.cached = false;
-                    q.ids.clear();
-                    q.checks.clear();
+                    q = PkSlot{};
                     bool ok = true;
                     std::string pe;
                     for (size_t k = 0; ok && k < pack_ss.size(); ++k) {
@@ -12000,6 +12055,34 @@ int main(int argc, char** argv) {
                         }
                         ok = ok && cudaDeviceSynchronize() == cudaSuccess;
                     }
+                    if (ok && use_mtp) {
+                        // Capture before run_packed updates the own session's drafter. A parked image must carry
+                        // its draft layer too; a target-only snapshot is not permission to borrow another chat's.
+                        const strata::core::OnDevice on_mtp(mtp.device());
+                        q.m = pl.m;
+                        q.row_floats = g.hc * g.n_embd;
+                        q.draft_upto = pl.m;
+                        if (pl.src == 1) {
+                            const auto& top = conversations.peek(pl.pi);
+                            const auto& im = stages.empty() ? top : top.stage_images.back();
+                            const auto& target = stages.empty() ? ss : stages.back()->ss;
+                            ok = im.kv.size() == (size_t) target.qsa_alloc + 1;
+                            if (ok) {
+                                q.draft = im.kv.back();
+                                q.draft_upto = (int64_t) im.live.ids.size();
+                                ok = strata::core::conversation_kv_validate(q.draft, mtp.kv_state(), draft_geometry,
+                                                                            q.draft_upto, false, pe);
+                            } else pe = "the parked image has no draft layer";
+                        } else {
+                            ok = mtp.idle(pe) && strata::core::conversation_kv_save(q.draft, mtp.kv_state(),
+                                                                                 draft_geometry, pl.m, false, pe);
+                        }
+                        q.has_draft = ok;
+                        if (ok) {
+                            q.rows.reserve((size_t) (pl.L - pl.m) * (size_t) q.row_floats);
+                            q.nxt.reserve((size_t) (pl.L - pl.m));
+                        }
+                    }
                     if (!ok) {
                         std::fprintf(stderr, "strata pack: a prompt sent ahead is left out: its prefix (%s, %lld "
                                      "tokens) did not restore (%s)\n", pl.src == 1 ? "parked" : "checkpoint", (long long) pl.m, pe.c_str());
@@ -12014,7 +12097,8 @@ int main(int argc, char** argv) {
                 segs[0].prev[1] = ss.ple_prev[1];
                 int64_t total = b0 - a0, extra = 0;
                 std::string what;
-                for (const Plan& pl : plans) {
+                std::vector<Plan*> seg_plans(1, nullptr);
+                for (Plan& pl : plans) {
                     if (pl.L <= 0) continue;
                     strata::prefill::Prefill::PackSeg sg;
                     sg.tokens = pl.h.data() + pl.m;
@@ -12024,6 +12108,7 @@ int main(int argc, char** argv) {
                     sg.prev[1] = (int32_t) pl.h[(size_t) pl.m - 1];
                     for (size_t k = 0; k < pack_ss.size(); ++k) sg.ss.push_back(pack_ss[k][pl.slot].get());
                     segs.push_back(sg);
+                    seg_plans.push_back(&pl);
                     total += sg.n;
                     extra += sg.n;
                     what += " " + std::to_string((long long) sg.n) + (pl.src == 1 ? "@parked:" : "@checkpoint:") +
@@ -12039,6 +12124,32 @@ int main(int argc, char** argv) {
                 }();
                 if (!lend(pk_chunk > 0 ? std::min(total, pk_chunk) : total, e)) return false;
                 const auto tr0 = Clock::now();
+                auto& last_sp = stages.empty() ? sp : stages.back()->sp;
+                // run_packed drains all stage workers before returning, including failure paths. Do not leave a
+                // callback referencing this request installed for the next request or for an ordinary prefill.
+                struct ClearPackRows {
+                    strata::prefill::Prefill& sp;
+                    ~ClearPackRows() { sp.on_pack_rows = nullptr; }
+                } clear_pack_rows{last_sp};
+                if (use_mtp) last_sp.on_pack_rows = [&](int seg, const float* R, int64_t T, int64_t p0,
+                                                        int64_t width, std::string& ce) -> bool {
+                    if (seg <= 0 || (size_t) seg >= seg_plans.size()) { ce = "pack draft: bad segment"; return false; }
+                    const Plan& pl = *seg_plans[(size_t) seg];
+                    PkSlot& q = pks[pl.slot];
+                    if (!strata::program::pack_prefill::next_chunk(pl.m, pl.L, q.row_floats, q.rows.size(), p0, T, width)) {
+                        ce = "pack draft: missing or out-of-order residual rows";
+                        return false;
+                    }
+                    const size_t at = q.rows.size();
+                    q.rows.resize(at + (size_t) (T * width));
+                    if (cudaMemcpy(q.rows.data() + at, R, (size_t) (T * width) * sizeof(float),
+                                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+                        ce = "pack draft: residual download failed";
+                        return false;
+                    }
+                    for (int64_t t = 0; t < T; ++t) q.nxt.push_back((int32_t) pl.h[(size_t) (p0 + t + 1)]);
+                    return true;
+                };
                 if (!sp.run_packed(segs, e)) return false;
                 packed = true;
                 const double run_ms = std::chrono::duration<double, std::milli>(Clock::now() - tr0).count();
@@ -12063,6 +12174,8 @@ int main(int argc, char** argv) {
                     }
                     if (!ok) continue;
                     PkSlot& q = pks[pl.slot];
+                    if (use_mtp && (!q.has_draft || q.nxt.size() != (size_t) (pl.L - pl.m) ||
+                        q.rows.size() != q.nxt.size() * (size_t) q.row_floats)) continue;
                     c.used = ++check_clock;
                     q.ids = c.ids;
                     q.checks.push_back(std::move(c));

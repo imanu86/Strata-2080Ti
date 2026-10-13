@@ -160,6 +160,12 @@ public:
     /// K/V from them.  The prefill stream is synchronized before the call.
     std::function<bool(const float* R_rows, int64_t T, int64_t pos0, std::string& err)> on_chunk;
 
+    /// STRATA_PACK_PREFILL (run_packed): as `on_chunk`, for the rows of a segment that is not the stage's own session
+    /// (`seg`: its index in run_packed's segments), with the row width in floats; called by the last stage only, after
+    /// `on_chunk`, so the MTP draft layer's K/V of a packed prompt can be built when its request continues.
+    std::function<bool(int seg, const float* R_rows, int64_t T, int64_t pos0, int64_t row_floats, std::string& err)>
+        on_pack_rows;
+
     /// Layer split: called by every stage when it has read a chunk, with the position reached, while its own state
     /// is still at that chunk's end (its stream synchronized; the last stage calls it just before `on_chunk`).  An
     /// earlier stage is a chunk or more ahead of the last one by the time `on_chunk` runs, so this is where a

@@ -1,6 +1,6 @@
 # Multi-chat su 3060 + 2080 Ti (lab/multichat43)
 
-Stato al 13/10, notte. Obiettivo dell'owner: più chat (Claude Code / DSH, anche sotto-agenti della stessa chat madre)
+Stato al 13/10, ripresa dopo la coda notturna. Obiettivo dell'owner: più chat (Claude Code / DSH, anche sotto-agenti della stessa chat madre)
 in parallelo, con un aggregato vicino al doppio della chat singola (~77/70 t/s) e la chat singola che non peggiora.
 
 - Base: `lab/struct-a` d21b2870; la build provata è `build-structa-075ce875` (sha256 9ef62e54..., **lo stesso exe
@@ -301,18 +301,125 @@ slot di pacco allocati e mai usati (`STRATA_PACK_MIN=999999`), quindi la stessa 
 - `STRATA_PACK_CHUNK=4096` (due chunk in pipeline fra gli stadi) non cambia il wall: con 6,4k token il pacco è già
   dominato dal calcolo, non dal fisso degli esperti.
 - **Parità**: il testo della richiesta che legge (a0) è identico in tutte le corse, con le sue righe dentro il pacco. Le
-  tre richieste impacchettate divergono a metà testo su un token quasi pari (testo coerente, stesso contenuto: per
-  esempio `-hf, -mu, -dr` contro `-hf, -dr`). **Non è il drafter MTP**: senza `--mtp` divergono lo stesso. È la
+  tre richieste impacchettate divergono a metà testo (testo osservato coerente, contenuto simile: per
+  esempio `-hf, -mu, -dr` contro `-hf, -dr`). **La divergenza esiste anche senza MTP**. È compatibile con la
   numerica della geometria del chunk: lo stesso pacco tagliato diversamente (`STRATA_PACK_CHUNK=4096`) sposta già la
   divergenza di a1 da 590 a 207 caratteri. Tra due corse base con VRAM diversa (`base` senza slot di pacco contro
-  `base3`) divergono perfino i turni 0. Il testo identico bit a bit è possibile solo se ogni segmento si legge con la
-  sua geometria da solo, cioè senza pacco. Conclusione: parità **numerica** (stesso contenuto, divergenza solo sui quasi
-  pari), non bitwise.
+  `base3`) divergono perfino i turni 0. **La parità bitwise non è dimostrata ed è fallita in questi confronti**.
+  Senza confronto dei logits o margini misurati non si può dichiarare neppure parità numerica o attribuire ogni
+  divergenza a token quasi pari. Il contenuto simile è un'osservazione qualitativa, non una verifica numerica.
 - Il drafter MTP di una richiesta che riparte da uno slot di pacco ha il K/V di un'altra conversazione: le bozze
   rendono meno nel primo decode da solo, ma il testo non dipende da questo (la verifica è esatta). È così anche oggi
-  per chi riparte da uno slot batch senza `--batch-mtp`. Una ricostruzione del K/V del drafter (righe finali del
-  pacco ripassate nel drafter alla ripresa) è abbozzata in
-  `corse_2080ti/20261013_multichat/wip_pack_drafter_rows_b6d8df2d.patch`, non finita.
+  per chi riparte da uno slot batch senza `--batch-mtp`. La patch incompleta
+  `corse_2080ti/20261013_multichat/wip_pack_drafter_rows_b6d8df2d.patch` è stata completata nella ripresa del 13/10
+  per gli slot di pacco; dettagli e limiti sotto. Queste misure precedono la correzione.
+
+## Ultima coda consolidata (M, 13/10, conclusa alle 09:15)
+
+Fonte: `corse_2080ti/20261013_multichat/mc2_m43d-{daily,base,bpipe,pack3,both}/res.json`.
+RTX 3060 + 2080 Ti, stesso harness `mc2.py`, build `build-multichat-b6d8df2d`.
+Base = `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16`.
+
+| braccio | solo:S decode medio, t/s | agents:4:P aggregato, t/s | agents:8:P aggregato, t/s |
+|---|---:|---:|---:|
+| Daily | 72,8 | 26,455 | 25,285 |
+| base | 70,7 | 28,531 | 32,502 |
+| base + `STRATA_BATCH_PIPELINE=1` | 74,0 | — | — |
+| base + `STRATA_PACK_PREFILL=3` | — | 31,336 | 28,219 |
+| base + entrambe le variabili | 69,7 | — | 23,744 |
+
+**Una corsa per braccio, risposte diverse, solo due richieste nel campione solo:S: dati esplorativi**.
+Packing guadagna con 4 agenti ma perde con 8 in questa coda; insieme alla pipeline perde ancora.
+Non basta per attribuire la regressione a un bug dell'interazione: i tre slot di packing tolgono VRAM agli esperti,
+il costo delle ammissioni e l'alternanza solo/batch cambiano, e le risposte non fanno lo stesso lavoro.
+`STRATA_BATCH_PIPELINE=1` supera qui il Daily nel solo:S senza packing, ma non dimostra assenza di regressione generale.
+Nessuna di queste opzioni viene promossa a default o al Daily.
+
+## Correzione del 13/10: hints e drafter degli slot di pacco
+
+La patch originaria aggiungeva soltanto un callback e campi non usati. Il completamento aggiunge:
+
+- Validazione di `BHINT` **prima** che possa essere eseguito: almeno due token, tutti nel vocabolario e spazio
+  per almeno un token generato più gli otto di margine del protocollo. Prima un hint invalido poteva raggiungere
+  embedding e K/V senza passare dai controlli di `GEN`.
+- Per ogni slot, immagine K/V del drafter della sorgente e residui FP32 del solo suffisso letto in pacco,
+  associati ai token successivi della stessa sessione. Alla ripresa il drafter ripristina quell'immagine e
+  ricostruisce il suffisso prima di leggere l'intestazione o lanciare le finestre speculative.
+- Limite di **256 MiB di payload residui per slot** (6553 righe con larghezza 10240 float); suffissi più lunghi
+  seguono la lettura ordinaria quando MTP è attivo. Si aggiungono l'immagine K/V del prefisso, metadati e token;
+  non è un limite di 256 MiB all'intero slot. Replay con staging GPU di 64 righe, circa 2,5 MiB per questa geometria.
+- Consumo, eviction, errore del packed prefill e invalidazione dopo non-finiti liberano immagine e vettori.
+  Un `GEN` parsato ma respinto per contesto o vocabolario scarta gli slot pack corrispondenti.
+  `BHINT` non contiene un request ID: una cancellazione prima del `GEN`, o una riga non parsabile, può lasciare
+  il risultato anticipato fino alla prossima eviction; il numero di slot e il payload per slot restano limitati.
+- I callback dei segmenti devono coprire il suffisso in ordine, senza buchi o sovrapposizioni. Il callback viene
+  rimosso solo dopo che `run_packed` ha drenato tutti gli stadi, anche sul percorso di errore.
+
+La ricostruzione riguarda gli slot di packing: **il caso preesistente di ritorno da uno slot batch senza
+`--batch-mtp` rimane da risolvere**, così come l'eventuale storia approssimata già presente nell'immagine sorgente.
+Il drafter propone, il target verifica; ricostruire le bozze non è una prova di identità del testo fra geometrie diverse.
+Non è stata individuata una violazione specifica del drain fra `STRATA_BATCH_PIPELINE` e packing: i percorsi batch
+continuano dopo il drain della richiesta solo. Il peggioramento prestazionale della coda resta non attribuito.
+
+Senza `STRATA_PACK_PREFILL` non si allocano sessioni, immagini o residui nuovi; `BHINT` non è pubblicizzato dal server.
+Il percorso ordinario `pk == nullptr` conserva il calcolo precedente. I confronti della nuova build sotto
+non dimostrano una parità globale di output: l'assenza di cambi al calcolo di default è una verifica del codice.
+
+Verifiche CPU eseguite: `tools/test_pack_prefill.cpp` compilato con clang++ 19.1.5 (17 assert superati: limiti,
+vocabolario, overflow del budget, chunk consecutivi/duplicati/incompleti); `python -B -m unittest serve.test_pack_hint -v`
+(4 test superati), più `python -B -m unittest serve.test_parallel` (25 test superati in 43,35 s: scheduling,
+cancellazione, ritorno al solo, errori e isolamento delle richieste con motore simulato).
+Build **CUDA sm75 + sm86 verificata**, `cmake --build build-sm7586 --target strata -j 2` sotto lock: completata
+con exit code 0 in 14 s. SHA256 dell'eseguibile:
+`b1f3ccd05450293cea4c7bd985885977cf2d227fcddf4d57cd69d4c627db5162`.
+I `.cpp` toccati sono condivisi da CUDA e HIP; **HIP non compilato** nell'ambiente corrente e rimane non verificato.
+SYCL usa copie proprie di `generate.cpp` e `prefill.cpp`, non modificate; il campo nel header pubblico è additivo.
+
+## Verifiche GPU della correzione (M, 13/10)
+
+Hardware riconfermato via `nvidia-smi`: RTX 3060 **12288 MiB**, RTX 2080 Ti modificata **22528 MiB** (22 GiB).
+Il desktop occupava circa 2412 MiB sulla 3060 all'avvio. Le prove correnti usano `--expert-cache 1500
+--adapt-every 0`, cache elastica disabilitata: non confrontare i loro t/s assoluti con i 77/70 del profilo auto storico.
+Output esterni al repository, nella workspace Codex `recupero-claude-strata-handoff`, sotto
+`outputs/strata_completion_20261013/multichat/`.
+
+**Default, senza PACK né BPIPE** (`mc2_default_old`, `mc2_default_new`, `mc2_default_old_repeat`): tutte le richieste
+completate senza errore. Old contro new: testi identici **6/10**, cioè solo:S 2/2 e same:4:S 4/4, diff:4:S 0/4.
+Old contro ripetizione old: **9/10**, differisce la seconda chat singola S1; repeat old contro new: **5/10**.
+La variabilità della baseline è dimostrata, ma non spiega da sola tutte le divergenze old/new.
+In diff:4 i primi caratteri diversi, indice da zero, sono 46/142/161/502 per S0/S1/S2/S3.
+I log mostrano gruppi diversi: old e repeat accoppiano S0+S2 / S1+S3, new S0+S3 / S1+S2; il lock di ammissione
+del server non è FIFO, quindi partenze sfalsate di 50 ms non fissano l'ordine delle righe. Prefissi riusati e
+conteggi finali coincidono (200 token per risposta, 400 group-step e 795 righe). È una differenza osservata di
+scheduling, **non una prova causale dell'intera divergenza**. Nessuna parità bitwise o numerica globale dichiarata.
+Report: `default_regression_compare.json` e `default_repeat_compare.json`.
+
+**Packing e replay** (`mc2_pack_parity_new`, `mc2_pack_bpipe_new`, `packdet:4:P`): tutte le richieste completate.
+Con PACK=3, letture concorrenti **11,016 s**, tre replay da **1659/1656/1590** righe, ripristino degli slot
+0/1/2 in 360,8/330,7/340,0 ms (copia target e ricostruzione drafter comprese).
+Con PACK=3 e BPIPE=1, **11,594 s**, tre replay da 1660/1591/1656 righe e nessun errore osservato.
+Sono controlli di funzionamento su una corsa per configurazione, non un confronto ripetuto di prestazioni:
+le code lette differiscono leggermente e il nome `pack_parity_new` non certifica parità del testo.
+
+**Ciclo di vita** (`tools/test_pack_lifecycle.py`, report `pack_lifecycle/result.json`): **PASS**, un solo processo
+motore, circa 160 s inclusa apertura/chiusura; intervallo delle richieste 81,953 s. Prefisso comune di 36208 token,
+19 richieste/cancellazioni, tre burst. Verificate cancellazione di una richiesta in attesa durante l'intervallo
+di una lettura packed, ripresa con replay, riempimento e sostituzione di tutti e tre gli slot, ripresa dei nuovi
+slot 0/1/2 e di una vecchia sessione espulsa. Tutte le risposte valide contengono il proprio marcatore SESSION e
+nessun marcatore altrui. Il test usa l'Event che il server imposta dopo una disconnessione, non un socket HTTP;
+l'intervallo è fra invio GEN e log di completamento packed, non una misura degli istanti dei singoli kernel.
+Sul medesimo motore, gli hint con token negativo, fuori vocabolario e prompt di **299964 token** oltre il contesto
+sono stati ignorati; la richiesta valida successiva è passata e il protocollo è rimasto sincronizzato.
+
+## Misure ancora pendenti
+
+Restano i confronti **B–A–B del PACK a identica allocazione degli slot** (baseline con `STRATA_PACK_MIN=999999`)
+e della leva NOSWITCH, coordinati dal processo principale dopo pipeline/TTFT. Non sono ancora disponibili esiti
+da attribuire a queste misure. Non è stata ripetuta sulla nuova build la variante PACK_CHUNK=4096.
+Le verifiche superate sopra autorizzano la correzione opt-in, non una promozione al Daily né una promessa di throughput.
+
+L'harness originale scrive accanto a sé e contiene percorsi della macchina precedente: copiarlo/adattarlo **fuori dal
+repository lab**, lasciando fixture e configurazione Daily in sola lettura. Le prove non autorizzano cambi al Daily.
 
 ## Leve di codice, in ordine
 
@@ -332,9 +439,9 @@ slot di pacco allocati e mai usati (`STRATA_PACK_MIN=999999`), quindi la stessa 
 6. Config da provare (pronte negli script): `STRATA_PREFILL_HELP=1`, `STRATA_SPLIT_MTP_BATCH=1`,
    `STRATA_BATCH_DECODE_SHARE`, `--kv-resident 16384`, contesti 64k.
 
-## Prossimo passo esatto
+## Chiusura del filone
 
-1. Lanciare `coda_mc2_notte3.sh` (chat singola Daily contro g2+16 posti, 8 richieste ciascuno; ~20 min) e le righe
-   rimaste di `coda_mc2_notte2.sh` (da `b4g2-cc16-help`), sempre con `bench_lock.py`.
-2. Decidere con l'owner il nome del branch (`lab/multichat43` qui) e con l'agente di `lab/pipeline2` chi fa L1.
-3. Cominciare L3 dal prefill impacchettato di 2 sessioni (senza decode), parità di testo e tempo contro due letture.
+La prosecuzione autorizzata resta su `lab/multichat43`. L1 opt-in è già presente (`STRATA_BATCH_PIPELINE=1`),
+L3 è implementato senza righe di decode agganciate e la patch drafter è completata e verificata su CUDA, con i
+limiti di parità e prestazioni elencati sopra. L2 gruppi con MTP, ammissione senza copia, condivisione fisica del
+prefisso e tuning esteso restano lavori futuri: non sono necessari per validare questa correzione.

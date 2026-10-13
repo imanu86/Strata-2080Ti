@@ -2320,7 +2320,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                            pk != nullptr ? pk->row_pos[(size_t) (pk_base + c0 + t)] : p0 + t, s);
         // run_packed: this chunk's runs of rows of one segment - their offset in the chunk, count, first position and
         // session on this stage (`own`: the stage's own session)
-        struct PackSub { int64_t off, len, p0; core::SessionState* ss; bool own; };
+        struct PackSub { int64_t off, len, p0; core::SessionState* ss; bool own; int seg; };
         std::vector<PackSub> subs;
         for (int64_t t = 0; pk != nullptr && t < T;) {
             const int64_t r = pk_base + c0 + t;
@@ -2329,7 +2329,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             while (e < T && pk->row_seg[(size_t) (pk_base + c0 + e)] == sgi) ++e;
             const PackSeg& sg = pk->segs[(size_t) sgi];
             core::SessionState* x = (size_t) pack_stage_ < sg.ss.size() ? sg.ss[(size_t) pack_stage_] : nullptr;
-            subs.push_back({t, e - t, pk->row_pos[(size_t) r], x != nullptr ? x : &ss, x == nullptr});
+            subs.push_back({t, e - t, pk->row_pos[(size_t) r], x != nullptr ? x : &ss, x == nullptr, (int) sgi});
             t = e;
         }
         const PackSub* own_sub = nullptr;
@@ -4360,7 +4360,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 std::fclose(f);
             }
         }
-        if (on_chunk || on_stage_chunk) {
+        if (on_chunk || on_stage_chunk || (pk != nullptr && on_pack_rows)) {
             const auto toc = Clock::now();
             if (cudaStreamSynchronize(m.cs) != cudaSuccess) {
                 err = std::string("prefill: ") + cudaGetErrorString(cudaGetLastError());
@@ -4374,6 +4374,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 if (on_stage_chunk && !on_stage_chunk(own_sub->p0 + own_sub->len, err)) return false;
                 if (on_chunk && !on_chunk(m.R + own_sub->off * D, own_sub->len, own_sub->p0, err)) return false;
             }
+            if (pk != nullptr && on_pack_rows)   // run_packed: the other segments' rows (the drafter's K/V, later)
+                for (const PackSub& u : subs)
+                    if (!u.own && !on_pack_rows(u.seg, m.R + u.off * D, u.len, u.p0, D, err)) return false;
             host_sync_ms += std::chrono::duration<double, std::milli>(toc2 - toc).count();
             host_chunk_ms += ms_since(toc2);
         }
