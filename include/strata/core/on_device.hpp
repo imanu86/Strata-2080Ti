@@ -22,6 +22,18 @@ inline bool p2_env(const char* name) {
 }
 inline bool p2_switch_stat() { static const bool on = p2_env("STRATA_P2_SWITCH_STAT"); return on; }
 inline bool p2_flush_noswitch() { static const bool on = p2_env("STRATA_P2_FLUSH_NOSWITCH"); return on; }
+// lab/pipeline2 (docs/PIPELINE2.md, tappa 1): STRATA_P2_FLUSH_US=<us> sets the period of the WDDM flush
+// (cudaStreamQuery) in the pipelined polls (Verifier::service, done, pl_head_done); unset = 2000 us as before.  nsys
+// shows the 2080 Ti's stage-1 graph idle ~2 ms in most windows between gr_down_staged and gr_up_multi of its first layer,
+// until that flush.  No GPU work changes.
+inline double p2_flush_ms() {
+    static const double ms = [] {
+        const char* v = std::getenv("STRATA_P2_FLUSH_US");
+        const int us = v != nullptr ? std::atoi(v) : 0;
+        return us > 0 ? us / 1000.0 : 2.0;
+    }();
+    return ms;
+}
 struct P2SwitchStat {
     std::atomic<long long> calls{0};      // OnDevice scopes that switched
     std::atomic<long long> ns{0};         // host time inside the switch calls (both ways)

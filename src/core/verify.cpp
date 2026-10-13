@@ -3510,7 +3510,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
     // on it (0.1.41, Windows, an RTX 3060 + RTX 5070 Ti split).  The same answer as the loop below gives.
     if (!ar_on() && *(volatile uint32_t*) h_seq_ < (uint32_t) (fl_k_ + 1)) {
         const double now = now_ms();
-        if (now - fl_flush_ms_ <= 2.0 && now - fl_since_ms_ <= 20000.0) return 0;
+        if (now - fl_flush_ms_ <= p2_flush_ms() && now - fl_since_ms_ <= 20000.0) return 0;
         // lab/pipeline2 0b (STRATA_P2_FLUSH_NOSWITCH=1): the due flush without the device switch while the graph still
         // runs - cudaEventQuery works on any device's event, the stream carries its own context (NTRYourWaifu v7)
         if (now - fl_since_ms_ <= 20000.0 && p2_flush_noswitch() && !p2_noswitch_refused()) {
@@ -3562,7 +3562,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
         const uint32_t want = (uint32_t) (fl_k_ + 1);
         if (*(volatile uint32_t*) h_seq_ < want) {
             const double now = now_ms();
-            if (now - fl_flush_ms_ > 2.0) {   // flush WDDM and notice a dead graph, as run() does
+            if (now - fl_flush_ms_ > p2_flush_ms()) {   // flush WDDM and notice a dead graph, as run() does
                 fl_flush_ms_ = now;
                 const cudaError_t q = cudaEventQuery(sa_head_ ? ev_head_ : ev_done_);   // STRUCT-A: a head bet has no done event yet
                 if (q != cudaErrorNotReady && *(volatile uint32_t*) h_seq_ < want) {
@@ -3622,7 +3622,7 @@ bool Verifier::done(std::string& err) {
         if (q == cudaErrorNotReady) {
             const double now = now_ms();
             if (now - fl_since_ms_ <= 20000.0) {
-                if (now - fl_flush_ms_ > 2.0) {
+                if (now - fl_flush_ms_ > p2_flush_ms()) {
                     fl_flush_ms_ = now;
                     const cudaError_t s = cudaStreamQuery(cs_);
                     if (s != cudaSuccess && s != cudaErrorNotReady) p2_noswitch_refuse(s);
@@ -3638,7 +3638,7 @@ bool Verifier::done(std::string& err) {
     const cudaError_t q = cudaEventQuery(ev_done_);
     if (q == cudaErrorNotReady) {
         const double now = now_ms();
-        if (now - fl_flush_ms_ > 2.0) { fl_flush_ms_ = now; (void) cudaStreamQuery(cs_); }
+        if (now - fl_flush_ms_ > p2_flush_ms()) { fl_flush_ms_ = now; (void) cudaStreamQuery(cs_); }
         if (now - fl_since_ms_ > 20000.0) {   // every layer served, and the graph still runs: #267 as above
             err = "verify: the window never finished" + released_note(release_gpu_waits(5000));
         }
@@ -3809,7 +3809,7 @@ bool Verifier::pl_head_done(std::string& err) {
     const cudaError_t q = cudaEventQuery(ev_head_);
     if (q == cudaErrorNotReady) {
         const double now = now_ms();
-        if (now - fl_flush_ms_ > 2.0) { fl_flush_ms_ = now; (void) cudaStreamQuery(cs_); }
+        if (now - fl_flush_ms_ > p2_flush_ms()) { fl_flush_ms_ = now; (void) cudaStreamQuery(cs_); }
         return false;
     }
     if (q != cudaSuccess) { err = std::string("verify: head: ") + cudaGetErrorString(q); return false; }
