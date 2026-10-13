@@ -132,10 +132,130 @@ token a riga invece di 1,74), l'adattivo e la cache elastica.
   cherry-pick. Nota del fork: un gruppo finito aspetta che gli altri stadi abbiano servito gli esperti CPU prima del
   commit, quindi con esperti in RAM (noi) la sovrapposizione si riduce.
 
-## Leve di codice (prima stima; nessuna scritta)
+## Seconda coda (M, 13/10 02:54-03:19; interrotta per fine budget)
 
-In testa l'indicazione dell'owner: **una sola lettura dei pesi per più sessioni, prefill e decode nella stessa
-passata** (batching misto alla Sarathi-Serve).
+**Cache a 16 posti** (`--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16`):
 
-Vedi il report intermedio per le stime per 2/4/8 chat; le misure della seconda coda (costo fisso della lettura, cache a
-16 posti, quota decode/prefill, contesti 64k, kv-resident 16k) e della terza (chat singola) vanno qui sotto.
+| scenario | Daily | g2 + 8 posti | **g2 + 16 posti** |
+|---|---|---|---|
+| solo:S (decode) | 55,8 / 75,2 | 66,4 / 68,3 | 66,6 / 71,2 (media 68,9) |
+| same:4 | 70,8 | 84,7 | 80,3 |
+| diff:4 | 37,4 | 40,2 | **85,9** (nessuna rilettura) |
+| diff:8 | 24,7 | 39,3 | **70,3** |
+| cold:4 | 23,8 | 47,9 | 48,1 |
+| agents:4:P | 18,4 | 23,3 | **26,6** |
+| agents:8:P | 27,5 | 33,3 | 33,5 |
+
+La cache più grande raddoppia le chat su contesti diversi (diff:4 2,3x il Daily). È config pura: RAM 96 GB, un
+contesto da 8k parcheggiato pesa ~0,48 GB, da 33k ~1,1 GB, da 131k ~3,5-4 GB (S); 28 GiB bastano per ~8 agenti a 64k.
+
+**Da dove viene il secondo fisso di ogni lettura** (`STRATA_PREFILL_TIMING=1`, Daily, prefisso 8k in cache, M):
+
+| coda nuova | stadio 0 (GPU) | stadio 1 (GPU) | totale richiesta | dequant (st.0/st.1) |
+|---|---|---|---|---|
+| 139 token | 483 ms | 510 ms | 1,36 s | 46% / 43% |
+| 529 token | 910 ms | 970 ms | 2,27 s | 39% / 39% |
+| 2026 token | 2344 ms | 2245 ms | 5,31 s | 26% / 22% |
+| 8192+399 token | 4653+1298 ms | 6989 ms | 13,1 s | 14% |
+
+- Un pezzo di prompt tocca quasi tutti gli esperti dei suoi layer già da ~140 token (140 x 10 scelte su 512 esperti):
+  **dequantizzare e caricare tutti gli esperti costa ~0,2-0,6 s a stadio, qualunque sia la lunghezza**. È questo il
+  «secondo fisso», non la cache (il ripristino del checkpoint è 44 ms).
+- **Con un pezzo solo gli stadi vanno in serie** (stadio 0 poi stadio 1): la pipeline fra stadi c'è solo fra i chunk
+  di una lettura lunga. Un tool result da 2k tiene ferma ogni scheda metà del tempo.
+- Il drafter dopo ogni chunk costa 89-365 ms sullo stadio 1 (`STRATA_SPLIT_MTP_BATCH=1` lo mette in batch: non provato).
+
+Non misurati (coda fermata): `STRATA_PREFILL_HELP=1`, `STRATA_BATCH_DECODE_SHARE=2`, contesti 64k (`:G`),
+`--kv-resident 16384`, la chat singola a 8 richieste (coda 3). Gli script sono pronti: `coda_mc2_notte2.sh` dalla riga
+`b4g2-cc16-help`, `coda_mc2_notte3.sh`.
+
+## Configurazione proposta oggi (M)
+
+`--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` sopra la config del Daily.
+Aggregato: 2 chat ~60 (come il Daily), 4 chat 80-86, 8 chat 70, agenti 27-34 t/s. **Costo: chat singola −8/−10%**
+(66-71 contro 75 del Daily, campione piccolo) perché `--batch` spegne `--pipeline-windows 2` e la cache elastica e
+toglie ~15-20% di slot esperti. Quindi **non** va nel Daily finché la leva L1 non riporta la chat singola al livello del
+Daily: oggi è una config da usare solo nelle sessioni con più agenti.
+
+## Disegno: una sola lettura dei pesi per più sessioni (direzione dell'owner)
+
+### Cosa dicono i numeri
+
+- Finestra di decode batch (4 chat, 7 righe): ~77 ms, cioè ~11 ms a riga; una riga in più nella stessa chat ~5 ms
+  (2,2 + 2,9 ms dei due stadi).
+- Un pezzo di prefill paga comunque tutti gli esperti (dequant + caricamento, ~0,5 s a stadio): una riga di decode
+  agganciata costa solo il suo calcolo e la sua attenzione, ~0,57 ms a token a stadio al ritmo di un chunk da 8k,
+  **~1,1-1,5 ms a riga sui due stadi contro ~11 ms in finestra (S)**.
+- Ma un passo misto dura quanto il chunk (0,5-5 s): la chat in decode avanza di 1,7 token a passo. Agganciare righe di
+  decode a un singolo prefill risparmia solo una finestra da 77 ms per chunk (−2…−15% del tempo di prefill):
+  **il batching misto puro, da solo, rende poco qui**, perché il nostro prefill non è limitato dalla lettura dei pesi
+  residenti (il caso di Sarathi/vLLM), ma dal toccare tutti gli esperti in ogni chunk.
+- La forma che rende è il **prefill impacchettato di più sessioni**: le code di più agenti (tool result di 1-2k) nello
+  stesso chunk. Quattro letture da 2k costano oggi 4 x 2,3 s a stadio = 9,2 s; un chunk da 8k ne costa 4,65 (M per i
+  pezzi, S per l'impacchettamento): **−50% del tempo di prefill**, che negli agenti è il 64% del wall. Le righe di
+  decode delle altre chat salgono sullo stesso chunk quasi gratis.
+- E i chunk impacchettati consecutivi vanno in **pipeline fra i due stadi** (pacco k sullo stadio 1, pacco k+1 sullo
+  stadio 0), come già fa la lettura lunga.
+
+### Cosa serve nel motore
+
+1. Un passo di prefill con **segmenti**: ogni riga ha la sua sessione (`SessionState` dello slot). Pesi densi, HC,
+   esperto condiviso e esperti instradati sono per riga: si concatenano. Per sessione: GDN (scan a chunk con stato
+   iniziale per segmento, oggi uno solo), attenzione QSA di prompt sul K/V del segmento (causale) e append K/V, PLE,
+   indexer. Le righe di decode sono segmenti lunghi 1-2 (riga + bozza MTP) che usano l'attenzione di decode
+   (`qsa_decode_attn_batch` esiste già).
+2. Commit per segmento: accetta/rifiuta la bozza (`commit_slot_prefixes`), bozze MTP degli slot dopo il passo
+   (come `batch_step`).
+3. Scheduler (server + motore): a ogni passo prende tutte le letture in attesa (fino a un tetto di token) e le righe
+   delle chat in decode; quando nessuno legge, finestre di decode (gruppi in pipeline). Con le sessioni in fasi diverse
+   (una legge, una genera, una aspetta un tool) ogni passata si riempie con quello che c'è.
+4. Ammissione senza copia: la lettura scrive direttamente nella sessione dello slot (oggi legge nella sessione
+   principale e poi `copy_to_slot` copia tutto il K/V: ~13 ms per 1k token, 1-1,5 s a 131k, a ogni turno).
+
+### Prefisso condiviso dei sotto-agenti
+
+Funziona già, senza codice (M): la lettura dei sotto-agenti riprende dal checkpoint del turno parcheggiato che contiene
+il prefisso comune (in agents:8 `cached 33380` su 35k: si leggono solo le code). Serve solo una cache con abbastanza
+posti, uno per agente più il prefisso (16 posti sopra). Il K/V e lo stato GDN del prefisso però si **copiano** a ogni
+ammissione (nessuna condivisione fisica): oltre 64k la copia pesa (0,7-1,5 s a 131k); la condivisione vera (pagine K/V
+copy-on-write fra slot) è un passo successivo, utile solo coi contesti lunghi.
+
+### Stima (S) degli aggregati, t/s
+
+| | 2 chat | 4 chat | 8 chat |
+|---|---|---|---|
+| Daily oggi, chat in decode (same/diff) (M) | 61 / 36 | 71 / 37 | 71 / 25 |
+| g2 + 16 posti oggi (M) | 61 / 35 | 80 / 86 | 70 / 70 |
+| + L1 L2 (pipeline per il solo, gruppi con MTP) | 65-70 | 105-120 | 100-120 |
+| Agenti, Daily oggi (M) | ~29 (S) | 18 | 28 |
+| Agenti, g2 + 16 posti oggi (M) | — | 27 | 34 |
+| + L3 prefill impacchettato e righe agganciate | 35-40 | 45-55 | 55-65 |
+| + L2 | 40-45 | 50-60 | 60-75 |
+
+Il 2x della chat singola (~150) non è raggiungibile con queste leve su due stadi con il 45% degli esperti in RAM:
+il massimo realistico è ~1,5x (S) sulle chat in decode e ~2x il Daily attuale sugli agenti.
+
+## Leve di codice, in ordine (nessuna scritta)
+
+1. **L3 — prefill impacchettato di più sessioni con le righe di decode agganciate** (la direzione dell'owner, nella
+   forma che rende qui). Grande: `Prefill::run` a segmenti (GDN e attenzione per segmento), scheduler. Primo passo
+   misurabile: impacchettare solo le letture (senza righe di decode), 2 sessioni, parità di testo contro le letture
+   separate.
+2. **L1 — `--pipeline-windows 2` per la richiesta sola anche con `--batch`**: togliere il cancello «not with --batch
+   slots» e scaricare la pipeline prima di promuovere la richiesta in uno slot; insieme, la cache elastica con i gruppi.
+   Media. Condizione per mettere il batch nel Daily. **Si tocca con `lab/pipeline2`** (l'altro agente ridisegna la
+   pipeline della chat singola): concordare prima chi tocca il cancello.
+3. **L2 — gruppi in pipeline con le bozze MTP** (idea di spec208, da riscrivere sulla nostra base: il fork ha 957
+   commit propri): S +30-40% sulle chat in decode (1,74 token a riga contro 1).
+4. **#2050** di upstream: con i gruppi una lettura non ferma più gli altri (`batch_read_piece` torna 0 con `piped`).
+   Media, cold:4 e agenti.
+5. Ammissione senza copia (scrivere nello slot), utile coi contesti lunghi.
+6. Config da provare (pronte negli script): `STRATA_PREFILL_HELP=1`, `STRATA_SPLIT_MTP_BATCH=1`,
+   `STRATA_BATCH_DECODE_SHARE`, `--kv-resident 16384`, contesti 64k.
+
+## Prossimo passo esatto
+
+1. Lanciare `coda_mc2_notte3.sh` (chat singola Daily contro g2+16 posti, 8 richieste ciascuno; ~20 min) e le righe
+   rimaste di `coda_mc2_notte2.sh` (da `b4g2-cc16-help`), sempre con `bench_lock.py`.
+2. Decidere con l'owner il nome del branch (`lab/multichat43` qui) e con l'agente di `lab/pipeline2` chi fa L1.
+3. Cominciare L3 dal prefill impacchettato di 2 sessioni (senza decode), parità di testo e tempo contro due letture.
