@@ -15,9 +15,33 @@ Convenzione: **M** = misurato (micro-bench, log del motore, tracce), **S** = sti
 |---|---|
 | 1. analisi e disegno (questo file) | **fatto** il 13/10; micro-bench del salto fra le schede **misurato** (§2a); modello di residenza dal trace (§2b); P-state: log al secondo letti, campionamento fitto **da fare** (§2c, comando pronto) |
 | 2. report all'owner | consegnato il 13/10; **via del coordinatore** il 13/10 notte per le tappe 0a → 4 del §5 (opt-in, bit per bit). Restano fuori expert-parallel, tensor-parallel, stadi invertiti, B ad albero |
-| 3. implementazione a tappe | **in corso**: diario nel §8 (per tappa: codice, build, env, verifica del testo, misure) |
+| 3. implementazione a tappe | **ferma a un punto pulito il 13/10 alle 03:20** (fine dei crediti della settimana). Diario e ripartenza nel §8 |
+| 4. stima TP bivalente (richiesta dell'owner) | **fatta**, §9: TP senza MTP ~50 t/s, TP con MTP ~76/66 (L01/L02) = pari a oggi → **no** |
 
-Compilato: solo `tools/hop_bench.cu` (micro-bench, fuori dal motore). Installato no. B-A-B no.
+**Compilato**: solo `tools/hop_bench.cu` (micro-bench). Il codice delle tappe 0b e 2a (commit sotto) **non è compilato**:
+la prima build è fallita per una stringa C spezzata, corretta; la seconda non è partita (il `bench.lock` era della coda
+multi-chat del coordinatore). Installato no. Provato no. B-A-B no. **Nessuna build pronta per il B-A-B.**
+
+### Ripartenza (per un agente senza contesto)
+
+1. `cd C:\Users\imanu\source\repos\Strata-wt\pipeline2` (branch `lab/pipeline2`): `git status`, `git pull --ff-only`.
+2. Build: `python <corse_2080ti>\20261006_due_schede\build_lock.py C:\Users\imanu\source\repos\Strata-wt\pipeline2`
+   (la cartella `build-sm7586` è già configurata: è incrementale). Se compila, copiare `build-sm7586\strata.exe`
+   (+ `strata-vision.exe` da `build-structa-075ce875`, `source\serve`, `source\tools`, come le build precedenti) in
+   `<corse_2080ti>\20261004_routed_keep\build-pipeline2-<sha>\` con `build.json` (`status`, `executable_sha256`, `note`).
+3. Verifica del testo: `python D:\ds4_work\strata\pipeline2\p2_check.py build-pipeline2-<sha> DET-p2-chk1 256
+   off,stat,nosw,smem,both` (L02 a cache fissa 1500, senza `--elastic`, `--adapt-every 0`, env della Daily 0.1.43; ogni
+   braccio prende da sé il `bench.lock`). Tutti i bracci devono dare `L02.txt` e primi logit IDENTICI a `off`. Leggere le
+   righe `strata pipeline2 switches:` (bracci `stat`/`nosw`) e `strata pipeline2: STRATA_P2_SMEM` (bracci `smem`/`both`).
+4. Tappa 0a: `bash D:\ds4_work\strata\pipeline2\p2_pstate.sh DET-p2-pstate3` (il primo tentativo `DET-p2-pstate1` è
+   morto per «Startup deadline» a 300 s dopo la notte multi-chat: riprovare a PC fermo).
+5. Tappa 1: `D:\ds4_work\strata\pipeline2\nsys_base.bat DET-p2-nsys-base` (base) e la stessa con
+   `build-pipeline2-<sha>` e `--env STRATA_P2_SMEM=1` come 3° argomento e seguenti (cattura con la leva); poi
+   `python tools\graph_census.py D:\ds4_work\strata\nsys\<nome>.sqlite`. Decide la tappa 2a: lo spigolo
+   `gr_down_staged → gr_up_multi` della 2080 Ti deve sparire o calare.
+6. Al coordinatore per il B-A-B: braccio A = env della Daily 0.1.43; braccio B = A + `STRATA_P2_SMEM=1` (e, a parte,
+   A + `STRATA_P2_FLUSH_NOSWITCH=1`). Solo dopo la verifica del testo.
+7. Poi le tappe 2-3 del §5 (meno nodi nel `post()`), scelte sul censimento del punto 5.
 
 ## 0. Conclusione
 
@@ -344,13 +368,13 @@ Regole: ogni leva è opt-in (`STRATA_P2_*`); ogni tappa chiude con una build in
 verifica del testo a cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, L02 corto identico al
 braccio spento). I B-A-B li fa il coordinatore.
 
-### Tappa 0a — P-state a ~10 ms (in coda)
+### Tappa 0a — P-state a ~10 ms (da rifare: primo tentativo morto all'avvio)
 
 `D:\ds4_work\strata\pipeline2\p2_pstate.sh`: corsa forzata breve `DET-p2-pstate1` (L01+L02 131k, 256 token, env della
 Daily 0.1.43 sulla `build-structa-075ce875`), `nvidia-smi -lms 10` solo mentre il `bench.lock` porta il suo nome.
 Lanciata il 13/10 alle 02:20, in coda dietro la notte multi-chat del coordinatore (`DET-mc2-*`).
 
-### Tappa 0b — polling senza `cudaSetDevice` (codice scritto, build in coda)
+### Tappa 0b — polling senza `cudaSetDevice` (codice scritto e committato, non compilato)
 
 - `STRATA_P2_FLUSH_NOSWITCH=1`: `Verifier::service` (flush ogni 2 ms), `Verifier::done`, `MtpDrafter::chain_outputs_ready`
   e `chain_poll` interrogano eventi e stream senza `OnDevice` (porto di NTRYourWaifu `two-pc-042` v7/v8, che lì è acceso
@@ -360,7 +384,7 @@ Lanciata il 13/10 alle 02:20, in coda dietro la notte multi-chat del coordinator
   switches (x per window), y ms host in them per window, longest z ms, k over 0.1 ms; polls without a switch …`.
 - Bit: nessun lavoro GPU cambia.
 
-### Tappa 1 — censimento dei nodi (strumento pronto, cattura in coda)
+### Tappa 1 — censimento dei nodi (strumento pronto, cattura nuova da fare)
 
 `tools/graph_census.py <cattura.sqlite>`: per scheda, la finestra mediana (nodi, somma dei kernel, tempo in cui nessun
 kernel della finestra gira), per kernel nodi/µs/idle prima, e gli «spigoli» di idle (kernel finito per ultimo → kernel
@@ -374,7 +398,7 @@ Prima lettura sulla cattura vecchia `DET-x3-hostgap-nsysB2` (build `72fc813a`, s
 - Causa probabile (dalla cattura: `sharedMemoryExecuted`): sulla 2080 Ti `gr_down_staged` chiede carveout 100 (64 KiB di
   shared) e quasi tutti gli altri kernel girano a 32 KiB: lo SM cambia configurazione L1/shared due volte per lettura
   hc, e su Turing il cambio scarica lo SM. Sulla 3060 (Ampere) il cambio non costa.
-- **Tappa 2a nuova, piccola e bit per bit**: `STRATA_P2_SMEM=1` → `cudaDeviceSetCacheConfig(cudaFuncCachePreferShared)` su
+- **Tappa 2a nuova, piccola e bit per bit** (codice in `Verifier::init`, committato, non compilato): `STRATA_P2_SMEM=1` → `cudaDeviceSetCacheConfig(cudaFuncCachePreferShared)` su
   ogni scheda prima delle catture. Atteso: −0,3/−0,6 ms a finestra sullo stadio 1 (S, dagli 0,74 ms nsys gonfiati
   ~1,5-2×). Da confermare con la cattura nuova e una cattura con la leva accesa.
 
