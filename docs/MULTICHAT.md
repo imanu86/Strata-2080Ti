@@ -235,10 +235,54 @@ copy-on-write fra slot) è un passo successivo, utile solo coi contesti lunghi.
 Il 2x della chat singola (~150) non è raggiungibile con queste leve su due stadi con il 45% degli esperti in RAM:
 il massimo realistico è ~1,5x (S) sulle chat in decode e ~2x il Daily attuale sugli agenti.
 
-## Leve di codice, in ordine (nessuna scritta)
+## L3 — prefill impacchettato: `STRATA_PACK_PREFILL` (scritto il 13/10, opt-in)
+
+### Cosa dice il log degli agenti (M, `mc2_b4g2-cc16`, agents:8)
+
+Ogni turno di un agente costa ~4,6 s di control lines: lettura della coda (1,6-2,1k token su 35k in cache) **~4,1 s**
+(390-480 tok/s), park della conversazione uscente 65-180 ms, ripristino di quella entrante 70-110 ms, copia nello slot
+210-250 ms. Il server dà le control lines a **una richiesta alla volta** (`_take_control`): il motore non vede mai due
+prompt insieme, quindi l'impacchettamento ha bisogno anche del server.
+
+### Disegno
+
+1. **Server** (`_pack_hint`): una richiesta che sta per aspettare le control lines (lock preso da un'altra) manda
+   avanti il suo prompt, `BHINT <id,...>`, senza risposta. Solo testo, solo se l'INFO del motore dice `pack_hints=N`.
+2. **Motore, slot di pacco**: con `STRATA_PACK_PREFILL=N` (1-8) il motore crea N sessioni per stadio, come gli slot del
+   batch ma **fuori dalle finestre** (coi gruppi in pipeline uno slot inattivo viene sporcato dalle righe di
+   riempimento: non può fare da deposito). Costano VRAM come uno slot (0,36 GiB su CUDA0 e 0,66 GiB su CUDA1 ciascuna,
+   M dal log; RAM pinned del K/V in streaming come uno slot).
+3. **Lettura impacchettata** (`pk_read`, nella `read_part` della richiesta che ha le control lines, solo per una
+   lettura in un pezzo, cioè coi gruppi in pipeline): per ogni prompt mandato avanti, fino a N, il motore prende il
+   prefisso in cache più lungo (una conversazione parcheggiata, letta sul posto con `ConversationCache::peek`, o un
+   checkpoint del prompt corrente sotto la sua posizione), lo ripristina nello slot di pacco su ogni stadio, e legge
+   la coda fino all'**ultimo confine di turno** (lo stesso `turn_at` che la richiesta userebbe) **negli stessi chunk**
+   della lettura corrente: `Prefill::run_packed`. Poi salva lì il checkpoint di confine.
+4. **`Prefill::run_packed`**: le righe dei segmenti concatenate e lette a chunk; hyper-connection, proiezioni ed
+   esperti sul chunk intero (una lettura e un dequant degli esperti per tutti), per segmento sulla sua sessione e alle
+   sue posizioni: storia PLE, conv e ricorrenza GDN, append K/V (con lo staging per segmento se il K/V è in streaming),
+   indexer, selezione, attenzione. `on_chunk`/`on_stage_chunk` vedono solo le righe della sessione propria (draft MTP,
+   checkpoint periodici). Il percorso di default è un ramo `pk == nullptr`: stesso codice di prima.
+5. **Ripresa**: quando arriva la `BGEN` della richiesta mandata avanti, lo slot di pacco è una sorgente come uno slot
+   (`copy_from_slot`), più lunga del parcheggio; il checkpoint di confine passa nella catena principale (il turno
+   dopo riparte da lì), la richiesta legge solo l'intestazione del turno. Lo slot di pacco si libera.
+6. Opzioni: `STRATA_PACK_MIN` (default 128: code più corte non si impacchettano), `STRATA_PACK_CHUNK` (default 0 = un
+   chunk come una lettura sola fino a 8192; N = chunk di ~N token, così un pacco grande va in pipeline fra i due stadi).
+
+Limiti: niente immagini, niente `--batch-mtp`, solo con `--prompt-cache`; un `BHINT` di una richiesta poi annullata
+legge per niente (lo slot si ricicla dal più vecchio); la richiesta che ha già le control lines non aspetta nessuno.
+
+### Stima prima della misura (S)
+
+Dalla tabella `STRATA_PREFILL_TIMING`: 4 code da 2k costano 4 x (2,34 + 2,25) = 18,4 s di GPU in serie, una da 8,6k
+5,95 + 6,99 = 12,9 s (−30%); con `STRATA_PACK_CHUNK=4096` i due stadi si sovrappongono (S −40…−50%). Per ogni richiesta
+impacchettata restano copia dallo slot di pacco (~0,2 s), intestazione, copia nello slot e park (~0,6 s). Sugli agenti
+a 8: S 40-50 t/s contro 33,5 (la stima di 55-65 sopra contava anche le righe di decode agganciate, non fatte).
+
+## Leve di codice, in ordine
 
 1. **L3 — prefill impacchettato di più sessioni con le righe di decode agganciate** (la direzione dell'owner, nella
-   forma che rende qui). Grande: `Prefill::run` a segmenti (GDN e attenzione per segmento), scheduler. Primo passo
+   forma che rende qui). **Scritto il 13/10 senza le righe di decode** (sopra, `STRATA_PACK_PREFILL`). Grande: `Prefill::run` a segmenti (GDN e attenzione per segmento), scheduler. Primo passo
    misurabile: impacchettare solo le letture (senza righe di decode), 2 sessioni, parità di testo contro le letture
    separate.
 2. **L1 — `--pipeline-windows 2` per la richiesta sola anche con `--batch`**: togliere il cancello «not with --batch
