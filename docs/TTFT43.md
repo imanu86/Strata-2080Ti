@@ -69,38 +69,74 @@ Bracci: fA / fB0 / fBL a cache fissa (`--expert-cache 1500`, senza `--elastic`, 
 ttft43 coi default, ttft43 con le leve); A / B / C con la config del Daily per i tempi (Daily; ttft43 con
 `STRATA_PREFIX_DISK_MULTI=24 STRATA_CONV_DISK=10` + `STRATA_PROMPT_ENCODER=1`; C = B + `STRATA_PREFILL_HELP=1`).
 
-## Misure
+## Misure (13/10, banco TTFT, build a2111f8b)
 
-**Nessuna misura ancora.** La coda è partita il 13/10 alle 03:09 ed è stata fermata alle 03:20 (fine del piano
-settimanale) senza aver preso il `bench.lock`: la coda notturna del multi-chat (`20261013_multichat\coda_mc2_notte.sh` e
-seguenti, bracci `DET-mc2-*`) lo riprende appena lo rilascia. Nessuna cartella `ttft_<tag>` né
-`D:\ds4_work\strata\lab_prefix\ttft43` creata; resta solo `ttft_fA.runlog` vuoto.
+Coda `coda_ttft43.sh` dalle 03:20 alle 04:05 (fA fB0 A B fBL C), poi B2 B3 (05:08-05:22, `coda_ttft43_avvio.sh`) e B4 A2
+B5 con `monitor_avvio.py` sulla vita 2 (05:24-06:17, `coda_ttft43_avvio2.sh`). Prompt e richieste come nella tabella
+sopra; TTFT in secondi, **misurato**.
 
-Stime di `docs/TTFT.md` (dai log del 7-12/10, **non misurate**): Claude Code ~40k con il file del suo prefisso 16-20 s,
-col file sovrascritto da un altro client ~42 s; ripresa di 130k dopo un riavvio 65-80 s. Attese: con
-`STRATA_PREFIX_DISK_MULTI` 42 → 16-20 s quando i client si alternano; con `STRATA_CONV_DISK` la ripresa dopo un riavvio
-≈ lettura del file (113k: 2,3 s nel banco del 9/10) + il solo ultimo turno.
+| richiesta | caso | A Daily r1 | A2 = Daily r2 (MULTI, senza CONV_DISK) | B (leve) | B2 | B3 | B4 | B5 | C (B + HELP) |
+|---|---|---|---|---|---|---|---|---|---|
+| cc1_t1 | freddo | 39,38 | | 35,31 | 45,80 | 36,75 | | | 34,75 |
+| cc1_t2 | c | 10,11 | | 8,94 | 11,44 | 8,89 | | | 8,95 |
+| cc2_t1 | b | 14,94 | | 14,50 | 14,75 | 16,08 | | | 14,67 |
+| cc1_t4 | b | 16,33 | | 16,81 | 16,91 | 16,26 | | | 16,33 |
+| cc3_t1 | a | 38,17 | 16,81 | 16,23 | 15,22 | 16,31 | 15,05 | 16,48 | 15,06 |
+| dsh2_t1 | a | 32,53 | 4,88 | 4,91 | 4,95 | 4,86 | 5,06 | 4,89 | 4,89 |
+| cc1_t5 | d | 20,16 | 19,69 | 6,39 | 6,45 | 6,36 | 6,34 | 6,36 | 6,33 |
+| dsh1_t3 | d | 10,33 | 10,36 | 5,14 | 5,30 | 5,06 | 5,19 | 5,26 | 5,09 |
+| **avvio vita 1 / vita 2 (s)** | | 67 / 66 | 67 / 68 | 67 / **277** | 67 / 70 | 68 / **206** | 67 / 67 | 70 / 68 | 67 / 67 |
+| arena vita 2 (GiB/s) | | 0,92 | 0,91 | **0,19** | 0,91 | **0,22** | 0,91 | 0,91 | 0,91 |
+
+- Caso d (ripresa dopo il riavvio): 20,2 / 10,3 s → **6,3-6,5 / 5,1-5,3 s** in tutte e sei le corse con
+  `STRATA_CONV_DISK=10` (`conversation disk cache: hit 48188` e `hit 33881` in ogni `engine2.log`, lettura e
+  validazione del file 0,7-0,9 s). Caso a (client alternati, file del prefisso): 38,2 / 32,5 → 15-16,8 / 4,9-5,1 s.
+- Testo a cache fissa: fB0 e fBL uguali a fA su **12/12** richieste, casi d compresi (fBL ha
+  `STRATA_PREFIX_DISK_MULTI=24 STRATA_CONV_DISK=10` + `STRATA_PROMPT_ENCODER=1`). I bracci con la config del Daily
+  (`--elastic`, adattamento) differiscono da A in modo variabile da corsa a corsa (B 11/12, B2 6/12, B3 5/12): è la
+  cache elastica, non le leve.
+- C (`STRATA_PREFILL_HELP=1`): nessun guadagno sui turni corti c/e (8,95 contro 8,94; 5,34 contro 5,31).
+- A2 è girato col `build-0143-daily` già promosso alle 05:06 a r2 (= a2111f8b, `STRATA_PREFIX_DISK_MULTI=24` nel JSON,
+  `STRATA_CONV_DISK` spento): il braccio «A» della coda legge exe e config del Daily al momento della corsa. Senza
+  `STRATA_PROMPT_ENCODER` (sta nel bat, che il banco non legge).
+
+### Il riavvio da 277 s non viene dalle conversazioni su disco
+
+Richiesta del 13/10: con `STRATA_CONV_DISK=10` il riavvio passa da ~67 a ~277 s «perché tutte le conversazioni vengono
+ricaricate all'avvio»; serviva un caricamento pigro. **Il caricamento è già pigro**, e il riavvio lento ha un'altra
+causa:
+
+1. **Codice** (`src/program/generate.cpp`, avvio del server): con `STRATA_PREFIX_DISK_MULTI` e `STRATA_CONV_DISK`
+   l'avvio legge due variabili e scrive due righe, senza aprire né elencare file. La cartella si elenca e il file si
+   legge solo quando una richiesta ha un confine di turno che la RAM non copre (`prefix_cache_keyed_paths`, poi la
+   stessa lettura del system turn). Nei log della vita 2 la prima riga `conversation disk cache: hit` arriva su
+   cc1_t5, la terza richiesta, non all'avvio.
+2. **Dove si perde il tempo**: nelle vite lente è il caricamento dell'arena degli esperti (39,97 GiB) a scendere da
+   0,91-0,94 a 0,19 / 0,22 GiB/s. Il resto dell'avvio è normale (B3: embedding 0,4 s, proiezioni 1,1 s). Il monitor
+   delle vite veloci mostra che l'arena legge da **PhysicalDrive1 = C:, NVMe Lexar EQ790** (il GGUF in
+   `C:\Users\imanu\Downloads`) a ~1 GB/s con la CPU quasi ferma. I file delle conversazioni stanno su
+   `D:\ds4_work\strata\lab_prefix`, che è il **SATA EMTEC X160**: un altro disco.
+3. **Frequenza nel lab**: su **1038** avvii con l'arena da 39,97 GiB nei log di `corse_2080ti\` (dal 1/10), **67 (6%)**
+   hanno caricato sotto 0,5 GiB/s, e 65 di questi **senza** `STRATA_CONV_DISK`. Uno è di stanotte, multi-chat
+   `mc2_m43b-pack3b-det` alle 05:41: 0,22 GiB/s, senza la leva. Con la leva: 2 lente su 7 vite 2; senza (fA fB0 A A2):
+   0 su 4. Sono numeri troppo piccoli per legare la leva al rallentamento, e il codice non tocca né C: né l'avvio.
+4. **Causa del caricamento lento: non identificata.** Le vite lente erano il 9° (B, 03:47) e il 4° (B3, 05:18) avvio
+   da 40 GB in pochi minuti. Ipotesi da verificare: l'NVMe C: che rallenta per temperatura (lettura SMART solo da
+   amministratore: `Get-StorageReliabilityCounter`), oppure il blocco in RAM di 33 GB (VirtualLock + working-set
+   minimum) che rientra nel tasso misurato. Non è Windows Search: `lab_prefix` non è indicizzata.
+
+Codice **non modificato**: un secondo meccanismo pigro sopra quello esistente non cambierebbe nulla. Proposta per il
+Daily r2 (decide l'owner, config e bat non toccati): rimettere `STRATA_CONV_DISK=10` porta la ripresa dopo un riavvio
+da 19,7 / 10,4 a 6,4 / 5,2 s, senza costo sull'avvio. Il riavvio lento (6% degli avvii) resta da capire a parte.
 
 ## Prossimo passo (esatto)
 
-1. Lanciare la coda, in una finestra libera (nessun `lab_locks\pause`, owner fuori dal PC):
-
-       cd C:\Users\imanu\source\repos\moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261006_due_schede
-       bash coda_ttft43.sh build-ttft43-a2111f8b "fA fB0 A B fBL C" > coda_ttft43.out 2>&1
-
-   ~7-8 min per braccio (due avvii da ~65 s + 12 richieste), ~45 min in tutto. Ogni braccio prende il lock da solo.
-   Se un'altra coda lo monopolizza, accodarsi dopo di lei.
-2. Testo: `ttft_fB0\results.json` → `same_text_as` deve essere tutto vero contro fA (port). Per fBL una differenza su
-   `cc1_t5` / `dsh1_t3` (caso d) è attesa solo se fA rilegge a chunk diversi; tutto il resto deve coincidere.
-3. Tabella: `python ttft_tabella.py A B C` (e `fA fB0 fBL`), da incollare qui con i numeri misurati.
-4. Controllare nei log del braccio B (`ttft_B\engine1.log`, `engine2.log`): `conversation disk cache: saved` dopo la pausa
-   di 12 s e dopo l'ultima richiesta; in vita 2 `conversation disk cache: hit` su cc1_t5 e dsh1_t3, `prefix disk cache:
-   restored` su cc3_t1 e dsh2_t1; righe `waited ... PLE rows` per decidere la leva 4.
-5. Poi, in ordine: leva 4 (cache PLE salvata) solo se le attese PLE restano sopra ~1 s; leva 5 (riscaldamento
-   all'avvio) solo se il primo TTFT dopo il riavvio mostra il costo della cattura dei grafi; `STRATA_PREFILL_HELP`
-   (braccio C, non bit per bit) per i turni corti c/e.
-6. Proposta per il Daily dopo le misure (non prima): `STRATA_PREFIX_DISK_MULTI=24`, `STRATA_CONV_DISK=10` nell'env del
-   JSON e `STRATA_PROMPT_ENCODER=1` nell'ambiente del server (il bat), se B batte A e il testo di fB0/fBL è uguale.
+1. Owner: decidere se riaccendere `STRATA_CONV_DISK=10` nell'env di `strata-0143-daily.json` (misure sopra).
+2. Avvio lento al 6%: da amministratore, leggere temperatura e `TemperatureMax` dell'NVMe C: prima e dopo una serie di
+   avvii consecutivi; in alternativa `monitor_avvio.py` su una serie di 8-10 avvii di fila, finché uno scende a
+   ~0,2 GiB/s, per vedere se cala la lettura di C: o se il tempo va nel blocco della memoria.
+3. Leva 4 (cache PLE salvata) solo se le attese PLE restano sopra ~1 s: oggi `waited 2584-4058 ms` solo sul primo
+   chunk dei prompt a freddo o con 12k+ nuovi (cc1_t1, dsh1_t1, cc2_t1, cc3_t1); nessuna attesa sui casi d.
 
 ## Penalità di ripetizione (controllo del 13/10, sola lettura)
 
@@ -127,3 +163,5 @@ col file sovrascritto da un altro client ~42 s; ripresa di 130k dopo un riavvio 
 `strata-vision.exe` del Daily). Test del server: test_prompt_encoder 7 OK, test_strata_tokenizer 11 OK, test_server
 304 OK. `prefix_cache_file_test` (chiavi in un passaggio) scritto, non eseguito: è sotto
 `STRATA_BUILD_CONVERSATION_TESTS`, che `build_lock.py` non accende. Compilato sì, installato no.
+
+Misure del 13/10 (sezione Misure) tutte con questa build: nessuna build nuova, il codice non è cambiato.
