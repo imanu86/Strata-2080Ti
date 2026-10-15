@@ -1632,6 +1632,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         // move into the combine, gate + up share one launch (all bitwise; resident combine path, 2-8 rows only)
         const WeightRef* w_sgi = lfuse_on(n) && g_lfuse_gate() ? v.get("ffn_gate_inp_shexp.weight") : nullptr;
         bool sg_ready = false;
+#if defined(STRATA_HIP_GFX906)
+        const bool generic_route_window = dec_batch;   // preserve gfx906's existing default for every supported geometry
+#else
+        static const bool coder_route_window_env = [] {
+            const char* v = std::getenv("STRATA_CODER_ROUTE_WINDOW");
+            return v != nullptr && std::atoi(v) != 0;
+        }();
+        const bool generic_route_window = dec_batch && n > 1 && NE == 256 && K == 10 && coder_route_window_env;
+#endif
         if (dec_batch && n > 1 && w_router != nullptr && native_router_enabled() && NE == 512 && K == 10) {
             try {
                 if (w_sgi != nullptr)
@@ -1643,15 +1652,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                           NE, n, cs);
                 native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs);
             } catch (const std::exception& e) { err = "verify router: " + std::string(e.what()); return false; }
-#if defined(STRATA_HIP_GFX906)
-        } else if (dec_batch) {
-            // gfx906: the Coder's 256-expert router (the native router is 512 x 10 only) for the whole window in one
-            // multi-column BF16 projection and one top-k, bitwise the per-token calls (route_window_parity); ~3 ms
-            // of a ~55 ms verify window on 2x MI50.  STRATA_ROUTE_PER_TOKEN=1: the per-token calls.
+        } else if (generic_route_window) {
+            // gfx906 keeps its existing default; elsewhere this exact Coder geometry is opt-in.  The projection and
+            // generic top-k are bitwise the per-token calls (route_window_parity).  STRATA_ROUTE_PER_TOKEN=1 rolls back.
             if (!moe_route_window(wt, g, l, K, ss.moe, mixed_ + tb * N, logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n,
                                   cs, err))
                 return false;
-#endif
         } else
         for (int t = tb; t < te; ++t) {
             MoEBuffers mb = ss.moe;
