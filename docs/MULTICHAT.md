@@ -87,6 +87,7 @@ Aggregato = token generati / wall (t/s); dec = decode aggregato dal primo token.
 | `m-pack3` | 18/10 21:38 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_PACK_PREFILL=3` | agents:4:P **17.7** (dec 20.2); agents:8:P **19.8** (dec 19.8) |
 | `n-ctrl` | 18/10 21:51 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | agents:4:P **15.3** (dec 16.0); agents:8:P **25.2** (dec 25.2) |
 | `r0-warm` | 19/10 00:46 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | agents:3:R **20.4** (dec 21.1); [agents:3:R: prefill 66% del wall, TTFT p50/p90 6.83/17.42 s, lettura 404 tok/s, righe/s in lettura None, CPU altri 67.4% **DISTURBATO**] |
+| `r1-ctrlA` | 19/10 00:55 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | solo:S **50.7** (dec 55.8, dec medio 61.5); agents:3:R **17.8** (dec 18.5); [agents:3:R: prefill 67% del wall, TTFT p50/p90 6.72/23.69 s, lettura 397 tok/s, righe/s in lettura None, CPU altri 66.6% **DISTURBATO**] |
 <!-- NOTTE:END -->
 
 # Multi-chat su 3060 + 2080 Ti (lab/multichat43)
