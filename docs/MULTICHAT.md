@@ -53,6 +53,30 @@ Archi contaminati (non usare): d-pack3 (errore di stampa unicode dell'harness, r
 e-bpipe (avvio 436 s, solo 29,5), g-copy (agents 16,6/16,1), f-pmtp2 (solo 26,4, same:2 37,1, diff:2 41,6). Rilanci in coda
 (`coda_mc45b.sh rerun`) con attesa di CPU libera e controllo b-g2cc ripetuto.
 
+<!-- NOTTE:BEGIN -->
+## Corse notturne 18-19/10 (aggiornate a ogni corsa da publish.py)
+
+Aggregato = token generati / wall (t/s); dec = decode aggregato dal primo token. Una corsa per braccio, finestra con attesa di CPU libera sotto il lock. Obiettivo dell'owner: 180 t/s con 3 agenti.
+
+| tag | ora | engine extra | env | scenari |
+|---|---|---|---|---|
+| `a-daily` | 18/10 17:25 | `config Daily` | `-` | solo:S **22.0** (dec 32.2, dec medio 64.5); same:2:S **62.2** (dec 63.3); diff:4:S **32.9** (dec 33.0); agents:4:P **18.2** (dec 25.2); agents:8:P **23.5** (dec 24.0) |
+| `b-g2cc` | 18/10 17:33 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | solo:S **46.3** (dec 51.2, dec medio 56.2); same:2:S **60.7** (dec 61.7); diff:4:S **74.8** (dec 75.5); agents:4:P **26.7** (dec 28.0); agents:8:P **28.7** (dec 28.6) |
+| `c-conc` | 18/10 18:22 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_PIPED_CONCURRENT=1` | solo:S **51.8** (dec 57.4, dec medio 63.5); cold:4:S **42.9** (dec 43.0); agents:4:P **28.6** (dec 30.4); agents:8:P **30.4** (dec 30.3) |
+| `e-bpipe` | 18/10 18:38 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_BATCH_PIPELINE=1` | solo:S **25.2** (dec 27.1, dec medio 29.5); same:4:S **29.4** (dec 29.6); diff:4:S **30.6** (dec 30.8) |
+| `g-copy` | 18/10 18:47 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_SLOT_COPY_DIRECT=1 STRATA_COPY_BATCHSYNC=1` | agents:4:P **16.6** (dec 17.3); agents:8:P **16.1** (dec 16.1) |
+| `f-pmtp2` | 18/10 18:53 | `--batch 2 --batch-mtp --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_PIPED_MTP=1` | solo:S **22.7** (dec 24.4, dec medio 26.4); same:2:S **37.1** (dec 38.0); diff:2:S **41.6** (dec 43.5) |
+| `f0-b2` | 18/10 19:26 | `--batch 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | solo:S **24.3** (dec 27.0, dec medio 29.1); same:2:S **30.7** (dec 31.1); diff:2:S **28.8** (dec 29.5) |
+| `h-b-ctrl` | 18/10 20:05 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | agents:4:P **11.3** (dec 11.8); agents:8:P **15.8** (dec 15.7) |
+| `i-pmtp2` | 18/10 20:34 | `--batch 2 --batch-mtp --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_PIPED_MTP=1` | solo:S **41.8** (dec 45.7, dec medio 50.2); same:2:S **51.6** (dec 52.5); diff:2:S **67.8** (dec 69.9) |
+| `i0-b2` | 18/10 20:37 | `--batch 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | solo:S **42.6** (dec 46.6, dec medio 51.5); same:2:S **50.6** (dec 51.3); diff:2:S **54.2** (dec 55.2) |
+| `j-pack3` | 18/10 20:49 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_PACK_PREFILL=3` | agents:4:P **15.7** (dec 18.8); agents:8:P **14.4** (dec 14.3) |
+| `k-ctrl` | 18/10 20:58 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | agents:4:P **19.7** (dec 20.7); agents:8:P **22.3** (dec 22.3) |
+| `l-bpipe` | 18/10 21:01 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_BATCH_PIPELINE=1` | solo:S **45.1** (dec 49.7, dec medio 55.0); same:4:S **61.9** (dec 62.5) |
+| `m-pack3` | 18/10 21:38 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `STRATA_PACK_PREFILL=3` | agents:4:P **17.7** (dec 20.2); agents:8:P **19.8** (dec 19.8) |
+| `n-ctrl` | 18/10 21:51 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | agents:4:P **15.3** (dec 16.0); agents:8:P **25.2** (dec 25.2) |
+<!-- NOTTE:END -->
+
 # Multi-chat su 3060 + 2080 Ti (lab/multichat43)
 
 Stato al 13/10, ripresa dopo la coda notturna. Obiettivo dell'owner: più chat (Claude Code / DSH, anche sotto-agenti della stessa chat madre)
