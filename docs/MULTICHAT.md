@@ -1,3 +1,58 @@
+# Multi-chat su upstream 0.1.45 (lab/multichat45) - stato 18/10
+
+Branch `lab/multichat45` da `lab/upsync-main` 09cba781 (upstream v0.1.45 + pila `stack/`). **Compilato si (sm_75+86), build
+`build-multichat45-e42d8af8` (sha256 5dc49fe8...), installato no, provato solo con `mc2.py` (sotto).** Le sezioni dopo questa
+(diagnosi del 13/10 su base 0.1.43) restano valide come storia; il codice del prefill impacchettato e' quello di
+`lab/multichat43` portato qui.
+
+## Uso reale (log del Daily 0.1.43, 13-17/10, solo conteggi)
+
+Il Daily gira **senza `--batch`**: il server serializza (una richiesta alla volta), il log non ha timestamp per richiesta
+(concorrenza e attese in coda non misurabili, dedotte). 1177 richieste (13 cancellate), prompt mediano 118k token (p90 158k).
+Prefill = 46% del tempo attivo (7,9 h contro 9,2 h di decode); riuso cache 79%; letture >10 s = 402. 265 richieste (23%)
+rileggono quasi tutto (~100k token, riusano solo il prefisso fisso da 9218): 6,3 h, l'83% del prefill, quasi tutte il 16/10
+(alternanza fra conversazioni con `--conversation-cache-slots 2` / 6144 MiB). Decode mediano 55 t/s (p10 34, p90 73).
+5 blocchi del watchdog a 240 s, 13 cancellazioni durante la lettura (988 s buttati). Tre colli: (1) cache conversazioni
+troppo piccola per contesti da 100k, (2) prefill senza coda ne' preemption (FIFO), (3) stalli/cancellazioni che perdono la cache.
+
+## Cosa e' gia' in 0.1.45 (opt-in, nessun codice da portare)
+
+`STRATA_PIPED_CONCURRENT=1` (#2326: la lettura gira su un thread mentre i gruppi decodificano), `STRATA_PIPED_READ_PIECE`
+(#2050), `STRATA_PIPE_BYIELD_NODRAIN`, `STRATA_ADMIT_SHORT_FIRST`, `STRATA_SLOT_COPY_DIRECT`/`COPY_BATCHSYNC`,
+`--conversation-cache-park-gain`, gruppi senza `--batch-mtp` (default), piu' di 8 slot. Il prestito di prefisso (#1164)
+c'e' ma `stages.empty()` lo spegne con lo split (da noi non agisce).
+
+## Portato su lab/multichat45 (tutto opt-in, default invariati)
+
+| cosa | origine | env |
+|---|---|---|
+| prefill impacchettato (+ drafter dei prompt impacchettati, K/V parcheggiato) | `lab/multichat43` a845d747, b6d8df2d, a6830a02, risolti 13 conflitti (admission `new=True`, `lend(...,exact)`, plan di `--prefill-pipe` escluso, `BYIELD` non scaricato) | `STRATA_PACK_PREFILL=N`, `STRATA_BATCH_PIPELINE=1` |
+| #2589 slot libero preso alla conversazione meno costosa da perdere | upstream PR aperta | `STRATA_SLOT_EXPIRE_S` |
+| #2384 checkpoint di turno che seguono la conversazione slot->solo->slot (solo generate.cpp; il server e' gia' #2518) | upstream PR aperta | - |
+| #2985 bozze MTP nei gruppi in pipeline, uno slot per gruppo | upstream PR aperta | `--batch 2 --batch-mtp`, `STRATA_PIPED_MTP=1` |
+
+Non portati: #1524 (rifiutata da upstream), #2738 (-22% misurato da terzi su 2080 Ti), spec208 (fork su 0.1.43, da riscrivere),
+prestito di prefisso per stadio (#1164 esteso: i sotto-agenti funzionano gia' con la cache a 16 posti, costo park+restore
+~0,3 s contro ~4 s di lettura).
+
+## Misure mc2.py (corse singole, brevi; M = misurato)
+
+Harness `corse_2080ti/20261018_multichat45/mc2.py` (copia di quello del 13/10), code `coda_mc45*.sh`, esiti `mc2_<tag>/res.json`.
+`G2` = `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16`. t/s aggregati; solo = decode medio.
+**Finestra pulita 17:16-18:22** (PC libero); dalle 18:22 altri processi dell'owner/agenti (node del Codex ~6 core, altri
+lock del lab) hanno rallentato tutto di 1,5-2x: gli archi di quella finestra non sono confrontabili.
+
+| braccio (exe) | solo | same:2 | diff:4 | cold:4 | agents:4 | agents:8 |
+|---|---:|---:|---:|---:|---:|---:|
+| a-daily: 0.1.45 puro, config Daily (upsmain) | 64,5 | 62,2 | 32,9 | - | 18,2 | 23,5 |
+| b-g2cc: G2 (upsmain, solo config) | 56,2 | 60,7 | **74,8** | - | 26,7 | 28,7 |
+| c-conc: G2 + `STRATA_PIPED_CONCURRENT=1` (m45) | 63,5 | - | - | 42,9 | **28,6** | **30,4** |
+
+In c-conc le letture da ~1,6k token girano sul thread con 80-190 righe decodificate nel frattempo (25-40 righe/s).
+Archi contaminati (non usare): d-pack3 (errore di stampa unicode dell'harness, rilancio con `PYTHONIOENCODING=utf-8`),
+e-bpipe (avvio 436 s, solo 29,5), g-copy (agents 16,6/16,1), f-pmtp2 (solo 26,4, same:2 37,1, diff:2 41,6). Rilanci in coda
+(`coda_mc45b.sh rerun`) con attesa di CPU libera e controllo b-g2cc ripetuto.
+
 # Multi-chat su 3060 + 2080 Ti (lab/multichat43)
 
 Stato al 13/10, ripresa dopo la coda notturna. Obiettivo dell'owner: più chat (Claude Code / DSH, anche sotto-agenti della stessa chat madre)
