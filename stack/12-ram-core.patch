@@ -1,0 +1,666 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Sun, 18 Oct 2026 16:07:20 +0200
+Subject: [PATCH] SONNET-STRATA-Porta su upstream 0.1.45 il nucleo fisso per
+ scheda senza copia RAM (STRATA_RAM_CORE=1, STRATA_RAM_CORE_SLOTS_DEV<n>)
+
+Patch 15 della pila (ora 12): conflitto solo nel contatore delle letture (upstream lo ha reso atomico).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/docs/RAM_CORE.md b/docs/RAM_CORE.md
+new file mode 100644
+index 00000000..a0d2a936
+--- /dev/null
++++ b/docs/RAM_CORE.md
+@@ -0,0 +1,114 @@
++# RAM_CORE: nucleo fisso in VRAM senza copia in RAM (`STRATA_RAM_CORE=1`)
++
++Branch `lab/core-ram` del fork `imanu86/Strata-2080Ti`, da `lab/upsync`. Opzione di laboratorio, spenta di default, solo
++`--serve` con l'arena residente. Obiettivo dell'owner: almeno 10 GB di RAM in meno senza perdere velocità, perché il PC
++non è un server dedicato.
++
++## L'idea
++
++L'arena in RAM (`ArenaExpertSource`, ~40 GiB) tiene tutti i 24.576 esperti, anche quelli che le due schede hanno già in
++VRAM. La dedup V5 (`lab/wip-0809`, `ram_dedup.*`) e quella di Fable (`lab/ram-dedup`) liberavano la RAM di *tutti* i
++residenti e la ricopiavano dalla VRAM (D2H) quando un esperto usciva. Nella misura V5 ha dato −17 GiB ma B 50,3/45,5 contro
++A 58,2/44,6 t/s: le copie di ritorno cadono proprio quando servono (scambi dell'adattamento, prestiti al prompt, shrink).
++
++Qui niente copie di ritorno. Su ogni scheda c'è un **nucleo fisso** di slot, i più bassi, che all'avvio il riempimento dal
++profilo (`--expert-profile`) assegna agli esperti più chiamati. Quel nucleo non cambia mai:
++
++- **adattamento**: nessuno dei due tier (il blocco `adapt` e quello asincrono `a_pick`) sceglie una vittima nel nucleo,
++  nemmeno con `STRATA_ELASTIC_CORE_ADAPT`/pipeline, che altrimenti rende scambiabile il core dell'elastica;
++- **prestiti alla prefill**: il prestito prende solo slot sopra il nucleo (`PfPart::rc_floor`, `el_lend_floor` per le
++  ripianificazioni della 3060);
++- **elastica**: lo shrink non scende sotto il nucleo e non ci sposta esperti della coda (`el_fixed`);
++- **K/V elastica** (`--kv-grow`): `kvg.floor` non scende sotto il nucleo;
++- comando `VRAM`: il restringimento manuale tiene almeno il nucleo.
++
++Poiché il nucleo non esce mai, la sua copia in RAM non serve: dopo l'avvio, prima della prima richiesta, le pagine intere
++dei loro blob vengono restituite (`VirtualUnlock` + `VirtualFree(MEM_DECOMMIT)`; su Linux `munlock` + `MADV_DONTNEED`). Lo
++spazio di indirizzi resta riservato, quindi `blob()` resta `base + offset`. Si restituiscono solo le pagine interne (dopo i
++primi 256 byte del blob e prima della pagina condivisa col successivo): una copia del vicino arrotondata a 256 B non tocca
++mai pagine tolte. Il minimo del working set, alzato dal lock dell'arena, viene abbassato di quanto restituito.
++
++La parte variabile (coda dell'elastica, parte prestabile, slot scambiabili) resta com'è, con la sua copia RAM.
++
++**Rete di sicurezza.** Se un percorso chiedesse comunque `blob()` di un esperto del nucleo, l'arena lo rilegge dal file del
++modello (experts.bin o le tre parti del GGUF nativo), lo rimette nella sua posizione e conta l'evento: `riletti` nel log.
++Deve restare 0; l'output resta comunque identico perché i byte riletti sono gli stessi.
++
++**Output.** Greedy identico bit per bit: cambia solo dove stanno i byte, non quali esperti girano in GPU. Un nucleo più
++grande del default sulla 2080 Ti cambia però *quali* esperti l'adattamento può scambiare, quindi da un confronto A/B senza
++banco forzato possono uscire testi diversi pur restando entrambi corretti.
++
++## Il nucleo per scheda
++
++| Scheda | Default | Variabile |
++|---|---|---|
++| CUDA0 (3060, stadio 0) | la parte del core elastico (`core N slots fixed`) che la prefill non prende in prestito: `min(el_core, primo slot prestato)` | `STRATA_RAM_CORE_SLOTS_DEV0=N` |
++| CUDA1 (2080 Ti, stadio 1) | 3500 slot (~6,1 GiB), comunque sotto il primo slot prestato | `STRATA_RAM_CORE_SLOTS_DEV1=N` |
++
++Con un valore esplicito il nucleo viene chiesto **prima** di pianificare il prestito: se supera la parte non prestata, il
++prestito si riduce (chunk più piccolo, prompt più lento). Sulla 3060 il valore esplicito non supera mai il core elastico,
++perché sopra la coda può restringersi. Con l'opzione accesa ma senza le condizioni (arena mappata, large pages, peer/remote
++expert, niente tabella di residenza) il log dice `strata ram core: NOT armed: <motivo>` e tutto resta come prima.
++
++**Il prefisso registrato.** Sotto WDDM con due schede i primi ~8 GiB dell'arena (10 layer: 0-9) sono registrati con
++`cudaHostRegister`; quelle pagine non si possono restituire e i loro esperti restano in RAM (`tenuti nel prefisso
++registrato` nel log). Riguarda solo la 3060: i suoi layer 10-15 si liberano, i layer 0-9 no.
++
++## Log
++
++All'avvio, dopo il riempimento e prima della prima richiesta:
++
++```
++strata ram core:   dev0: nucleo fisso slot [0, N) di S (N esperti, X GiB in VRAM); a senza copia RAM, b tenuti nel prefisso registrato (...)
++strata ram core:   dev1: nucleo fisso slot [0, M) di S1 (...)
++strata ram core:   pagine restituite in T ms; privata P0 -> P1 GiB, working set W0 -> W1 GiB
++strata ram core: dev0 a esperti (X GiB) senza copia RAM, dev1 c (Y GiB); arena da A a B GiB; riletti 0 (avvio; fuori posto 0; scambi dell'adattamento 0; privata ..., working set ...)
++```
++
++La stessa riga a fine richiesta (`fine richiesta`): `riletti` e `fuori posto` (esperti del nucleo non più nel loro slot)
++devono restare 0; `scambi dell'adattamento` sono gli scambi fatti dal blocco `adapt` dalla riga precedente.
++
++## Come si misura
++
++1. **RAM**: privata e working set di `strata.exe` dopo la richiesta di riscaldamento, A (senza) contro B (con
++   `STRATA_RAM_CORE=1`): `Get-Process strata | Select PrivateMemorySize64, WorkingSet64`, la colonna «Commit» del Task
++   Manager, e le righe `strata ram core:` (privata prima/dopo, arena da A a B). Obiettivo: ≥ 10 GB in meno.
++2. **Velocità**: B-A-B col banco forzato (`STRATA_FORCE_IDS` / `STRATA_FORCE_WINDOWS` dalla traccia di A): stessi token,
++   stesse finestre; si confrontano le righe DONE (ms di decode, t/s) e le `T <id>`, che devono essere identiche.
++3. **Cache**: `strata serve: decode expert cache hit rate` per richiesta, A contro B. Il nucleo toglie flessibilità
++   all'adattamento sulla 2080 Ti: è il primo numero da guardare se B rallenta.
++4. **Adattamento**: `scambi dell'adattamento` per richiesta nella riga `strata ram core`, contro A (in A la riga non c'è:
++   si confrontano hit rate e tempi; con `STRATA_RAM_CORE=1 STRATA_RAM_CORE_SLOTS_DEV0=0 STRATA_RAM_CORE_SLOTS_DEV1=0` si ha
++   lo stesso motore con il conteggio e nessun nucleo).
++5. `riletti 0` e `fuori posto 0` in ogni riga.
++
++## Stima del risparmio (configurazione del 7/10: 3060 ~3.800-4.600 slot da ~1,43 MiB, 2080 Ti 9.150 slot da ~1,78 MiB)
++
++- 2080 Ti, 3500 slot: ~6,1 GiB (tutti fuori dal prefisso registrato).
++- 3060: nucleo = core elastico non prestato, ~1.200-2.000 slot (2,8 GiB al massimo); se ne liberano solo i layer 10-15,
++  ~0,6-1,1 GiB.
++- Totale ai default: **~6,7-7,2 GiB (7,2-7,7 GB)**, sotto l'obiettivo.
++- Per arrivare a ≥ 10 GB: `STRATA_RAM_CORE_SLOTS_DEV1=5500` (~9,6 GiB sulla 2080 Ti: restano 3.650 slot che ruotano,
++  2.170 dei quali prestabili) → ~10,2-10,7 GiB in tutto. Il primo slot prestato della 2080 Ti è ~6.980, quindi il prestito
++  non cambia.
++
++## Rischi
++
++- **Meno flessibilità dell'adattamento**: gli esperti del nucleo non sono più vittime. Se una conversazione usa poco un
++  esperto caldo del profilo, il suo slot resta occupato. Sulla 3060 la pipeline rendeva scambiabile tutto il core elastico
++  (`STRATA_ELASTIC_CORE_ADAPT`): ora la parte non prestata non lo è più.
++- **Interazione coi prestiti**: un nucleo esplicito più grande della parte non prestata riduce il prestito e rallenta i
++  prompt lunghi (sulla 3060 il prestito del core aveva portato un prompt da 131k da 134 a ~85 s).
++- **Shrink elastico**: la 3060 non può scendere sotto `max(el_core, nucleo)`; con la sola coda come margine, sotto
++  pressione di VRAM la coda finisce prima.
++- **Percorsi sconosciuti**: un percorso che legge la RAM di un esperto residente senza passare da `blob()` (puntatore
++  calcolato a mano, alias device) leggerebbe pagine tolte. Oggi l'alias device esiste solo nel prefisso registrato, che non
++  si tocca; la rete di sicurezza copre `blob()`/`blob_stable()`.
++- **Prefisso registrato**: limita il risparmio sulla 3060. Spostare o ridurre la registrazione (`STRATA_ARENA_PIN_GIB`)
++  libererebbe di più, ma cambia la quota PCIe e le copie DMA dei prompt: da misurare a parte.
++
++## Stato
++
++Compilato sul ramo `lab/core-ram` (Release, sm_75+86, `build_lock.py`); non installato, non provato sulle schede. Prima
++verifica: una richiesta di riscaldamento con
++`STRATA_RAM_CORE=1` che deve mostrare `riletti 0`, `fuori posto 0` e righe `T <id>` identiche alla traccia di riferimento.
+diff --git a/include/strata/core/expert_source.hpp b/include/strata/core/expert_source.hpp
+index 4850b8b6..3e8e61dd 100644
+--- a/include/strata/core/expert_source.hpp
++++ b/include/strata/core/expert_source.hpp
+@@ -1050,7 +1050,7 @@ private:
+ // Phase 3's cache fills and the CPU/PCIe miss split - but registration is best-effort and reported, not assumed.
+ class ArenaExpertSource : public ExpertSource {
+ public:
+-    ArenaExpertSource() = default;
++    ArenaExpertSource();   // out of line: the STRATA_RAM_CORE state (rc_) is complete only in expert_source.cpp
+     ~ArenaExpertSource() override;
+     ArenaExpertSource(const ArenaExpertSource&) = delete;
+     ArenaExpertSource& operator=(const ArenaExpertSource&) = delete;
+@@ -1105,7 +1105,38 @@ public:
+     double load_read_seconds() const { return load_read_s_; }
+     double load_copy_seconds() const { return load_copy_s_; }
+ 
++    // ---- STRATA_RAM_CORE=1 (docs/RAM_CORE.md): the RAM copy of the experts of the caches' FIXED CORE goes away.
++    // The driver picks, per cache, a core of slots that never changes hands (no adaptive swap, no loan to the prompt
++    // path, no elastic shrink, no K/V growth), and hands each of their experts to `ram_core_drop` once: the whole
++    // pages inside its blob are decommitted (VirtualUnlock + VirtualFree MEM_DECOMMIT; munlock + MADV_DONTNEED).  The
++    // address range stays reserved, so `blob` is still base + offset.  Nothing copies those bytes back: a core expert
++    // never leaves VRAM.  If a path asks for one anyway, `blob` reads it again from the model file first and counts
++    // it (`ram_core_reread`, which must stay 0).  Never inside the CUDA-registered prefix (decommitting registered
++    // pages is not allowed: those experts keep their copy and are counted apart).
++    /// STRATA_RAM_CORE=1 asked for (off by default).
++    static bool ram_core_requested();
++    /// Arms the bookkeeping.  False with `err` when the arena cannot do it (not loaded, mapped read-only, large
++    /// pages, a shared file).
++    bool ram_core_arm(std::string& err);
++    bool ram_core_armed() const { return rc_ != nullptr; }
++    /// Gives back the RAM of (layer, expert).  Returns the bytes decommitted; 0 when kept (inside the registered
++    /// prefix: *registered set; already dropped; refused by the OS).
++    uint64_t ram_core_drop(int64_t layer, int64_t expert, bool* registered = nullptr);
++    /// After the drops: lowers the working-set minimum the arena lock raised by what was given back (best effort).
++    void ram_core_settle();
++    bool ram_core_dropped(int64_t layer, int64_t expert) const;
++    uint64_t ram_core_bytes() const;     ///< bytes decommitted now
++    int64_t ram_core_experts() const;    ///< experts without a RAM copy now
++    int64_t ram_core_reread() const;     ///< experts read again from the model file (must stay 0)
++    uint64_t arena_capacity() const { return arena_capacity_; }
++    uint64_t registered_bytes() const { return pinned_bytes_; }
++
+ private:
++    struct RamCore;
++    std::unique_ptr<RamCore> rc_;
++    bool rc_recover(int64_t layer, int64_t expert);   ///< `blob` of a dropped expert: the model file -> the arena
++    uint64_t arena_capacity_ = 0;
++    std::string experts_bin_;        ///< the pack's experts.bin when the arena was loaded from it (else empty: the GGUF)
+     void* arena_ = nullptr;          ///< the PinnedArena, owned
+     void* map_ = nullptr;            ///< STRATA_ARENA_MMAP: the arena file, mapped read-only (not the PinnedArena)
+     uint64_t map_bytes_ = 0;
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index d3fefeef..2bfff619 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -4578,6 +4578,164 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
+     return st;
+ }
+ 
++// ---- STRATA_RAM_CORE=1 (see the header and docs/RAM_CORE.md) ------------------------------------------------------
++struct ArenaExpertSource::RamCore {
++    std::unique_ptr<std::atomic<uint8_t>[]> dropped;   ///< per blob: 1 = its interior pages are decommitted
++    size_t n = 0;
++    std::mutex mu;                                       ///< drops and recoveries (never on a hot path)
++    std::atomic<uint64_t> bytes{0};
++    std::atomic<int64_t> experts{0}, reread{0};
++    uint64_t settled = 0;                                ///< bytes the working-set minimum was already lowered by
++};
++
++namespace {
++constexpr uint64_t kRcPage = 4096;
++/// The whole pages of the blob [off, off + bytes) that may be given back: past its first 256 bytes (a copy of the
++/// neighbour before it rounded up to 256 B, as a native slot is, may read into them) and before its end (the page
++/// it shares with the next blob stays).
++void rc_span(uint64_t off, uint64_t bytes, uint64_t& s, uint64_t& e) {
++    s = (off + 256 + kRcPage - 1) / kRcPage * kRcPage;
++    e = (off + bytes) / kRcPage * kRcPage;
++    if (e < s) e = s;
++}
++bool rc_read(const std::string& path, uint64_t at, uint64_t n, uint8_t* dst) {
++    FILE* f = std::fopen(path.c_str(), "rb");
++    if (f == nullptr) return false;
++    const bool ok = STRATA_FSEEK64(f, (int64_t) at) == 0 && std::fread(dst, 1, (size_t) n, f) == (size_t) n;
++    std::fclose(f);
++    return ok;
++}
++}  // namespace
++
++bool ArenaExpertSource::ram_core_requested() {
++    const char* v = std::getenv("STRATA_RAM_CORE");
++    return v != nullptr && v[0] == '1';
++}
++
++bool ArenaExpertSource::ram_core_arm(std::string& err) {
++    if (rc_) return true;
++    if (arena_ == nullptr || base_ == nullptr || blobs_ <= 0) { err = "the expert arena is not loaded"; return false; }
++    if (map_ != nullptr) { err = "the arena is a read-only file mapping (STRATA_ARENA_MMAP)"; return false; }
++    const PinnedArena* a = (const PinnedArena*) arena_;
++    if (a->backing == PageBacking::LargePages) {
++        err = "the arena is on large pages, which cannot be given back per expert (STRATA_NO_LARGEPAGES=1)";
++        return false;
++    }
++    if (a->backing != PageBacking::NormalPages) { err = "the arena is not ordinary anonymous memory"; return false; }
++    if (a->mapping_base != nullptr && a->mapping_base != a->base) { err = "the arena is a shared file (--shared-expert-arena)"; return false; }
++    if (((uintptr_t) base_) % kRcPage != 0) { err = "the arena is not page aligned"; return false; }
++    auto rc = std::make_unique<RamCore>();
++    rc->n = (size_t) blobs_;
++    rc->dropped.reset(new std::atomic<uint8_t>[rc->n]);
++    for (size_t i = 0; i < rc->n; ++i) rc->dropped[i].store(0, std::memory_order_relaxed);
++    rc_ = std::move(rc);
++    return true;
++}
++
++uint64_t ArenaExpertSource::ram_core_drop(int64_t layer, int64_t expert, bool* registered) {
++    if (registered != nullptr) *registered = false;
++    if (!rc_ || layer < 0 || expert < 0 || expert >= n_expert_) return 0;
++    const int64_t idx = layer * n_expert_ + expert;
++    if (idx >= blobs_) return 0;
++    const auto& lay = strata::kernels::cpu::expert_layout();
++    const uint64_t off = lay.blob_offset(layer, expert), bytes = lay.blob_bytes(layer);
++    if (off < pinned_bytes_) {   // inside the CUDA-registered prefix (one slice per layer): never decommitted
++        if (registered != nullptr) *registered = true;
++        return 0;
++    }
++    uint64_t s = 0, e = 0;
++    rc_span(off, bytes, s, e);
++    if (e <= s || e > arena_capacity_) return 0;
++    std::lock_guard<std::mutex> lk(rc_->mu);
++    if (rc_->dropped[(size_t) idx].load(std::memory_order_acquire) != 0) return 0;
++    uint8_t* p = const_cast<uint8_t*>(base_) + s;
++#if defined(_WIN32)
++    (void) VirtualUnlock(p, (SIZE_T) (e - s));   // ERROR_NOT_LOCKED where the lock stopped before: harmless
++    if (!VirtualFree(p, (SIZE_T) (e - s), MEM_DECOMMIT)) return 0;
++#else
++    (void) munlock(p, (size_t) (e - s));
++    if (madvise(p, (size_t) (e - s), MADV_DONTNEED) != 0) return 0;
++#endif
++    rc_->dropped[(size_t) idx].store(1, std::memory_order_release);
++    rc_->bytes.fetch_add(e - s, std::memory_order_relaxed);
++    rc_->experts.fetch_add(1, std::memory_order_relaxed);
++    return e - s;
++}
++
++void ArenaExpertSource::ram_core_settle() {
++#if defined(_WIN32)
++    if (!rc_) return;
++    std::lock_guard<std::mutex> lk(rc_->mu);
++    const uint64_t now = rc_->bytes.load(std::memory_order_relaxed);
++    if (now <= rc_->settled) return;
++    const uint64_t give = now - rc_->settled;
++    HANDLE self = GetCurrentProcess();
++    SIZE_T mn = 0, mx = 0;
++    DWORD fl = 0;
++    if (!GetProcessWorkingSetSizeEx(self, &mn, &mx, &fl) || (uint64_t) mn <= give + (256ull << 20)) return;
++    if (SetProcessWorkingSetSizeEx(self, (SIZE_T) ((uint64_t) mn - give), mx, fl)) rc_->settled = now;
++#endif
++}
++
++bool ArenaExpertSource::ram_core_dropped(int64_t layer, int64_t expert) const {
++    if (!rc_ || layer < 0 || expert < 0 || expert >= n_expert_) return false;
++    const int64_t idx = layer * n_expert_ + expert;
++    return idx < blobs_ && rc_->dropped[(size_t) idx].load(std::memory_order_acquire) != 0;
++}
++uint64_t ArenaExpertSource::ram_core_bytes() const { return rc_ ? rc_->bytes.load(std::memory_order_relaxed) : 0; }
++int64_t ArenaExpertSource::ram_core_experts() const { return rc_ ? rc_->experts.load(std::memory_order_relaxed) : 0; }
++int64_t ArenaExpertSource::ram_core_reread() const { return rc_ ? rc_->reread.load(std::memory_order_relaxed) : 0; }
++
++// A core expert's bytes were asked for although it never leaves VRAM: a path the core does not know of.  The pages
++// are committed again and filled from the model file (experts.bin, or the GGUF roles a native pack reads), so the
++// pointer `blob` returns holds the same bytes it always did; the event is counted and said.
++bool ArenaExpertSource::rc_recover(int64_t layer, int64_t expert) {
++    const int64_t idx = layer * n_expert_ + expert;
++    std::lock_guard<std::mutex> lk(rc_->mu);
++    if (rc_->dropped[(size_t) idx].load(std::memory_order_acquire) == 0) return true;   // another thread did it
++    const auto& lay = strata::kernels::cpu::expert_layout();
++    const uint64_t off = lay.blob_offset(layer, expert), bytes = lay.blob_bytes(layer);
++    uint64_t s = 0, e = 0;
++    rc_span(off, bytes, s, e);
++    uint8_t* p = const_cast<uint8_t*>(base_) + s;
++#if defined(_WIN32)
++    if (VirtualAlloc(p, (SIZE_T) (e - s), MEM_COMMIT, PAGE_READWRITE) != p) return false;
++#endif
++    std::vector<uint8_t> tmp((size_t) bytes);
++    bool ok = false;
++    if (!experts_bin_.empty()) {
++        ok = rc_read(experts_bin_, off, bytes, tmp.data());
++    } else if (!gguf_.empty() && lay.native && lay.gguf_off.size() >= (size_t) (3 * (layer + 1))) {
++        const auto& fm = lay.fmt[(size_t) layer];
++        const uint64_t blob = lay.bytes[(size_t) layer];
++        const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
++        const uint64_t at[3] = {0, fm.up_off, fm.down_off};
++        ok = blob <= bytes;
++        for (int r = 0; r < 3 && ok; ++r)
++            ok = rc_read(expert_gguf_file(gguf_, lay, layer, r), lay.gguf_off[(size_t) (3 * layer + r)] + (uint64_t) expert * per[r],
++                         per[r], tmp.data() + at[r]);
++    }
++    if (!ok) {
++        std::fprintf(stderr, "strata ram core: layer %lld expert %lld has no RAM copy and could NOT be read from the model file\n",
++                     (long long) layer, (long long) expert);
++        return false;
++    }
++    std::memcpy(p, tmp.data() + (s - off), (size_t) (e - s));
++#if defined(_WIN32)
++    (void) VirtualLock(p, (SIZE_T) (e - s));   // best effort, as the arena's own lock
++#else
++    (void) mlock(p, (size_t) (e - s));
++#endif
++    rc_->dropped[(size_t) idx].store(0, std::memory_order_release);
++    rc_->bytes.fetch_sub(e - s, std::memory_order_relaxed);
++    rc_->experts.fetch_sub(1, std::memory_order_relaxed);
++    const int64_t n = rc_->reread.fetch_add(1, std::memory_order_relaxed) + 1;
++    std::fprintf(stderr, "strata ram core: layer %lld expert %lld read again from the model file (no RAM copy; %lld so far, "
++                         "must be 0)\n", (long long) layer, (long long) expert, (long long) n);
++    return true;
++}
++
++ArenaExpertSource::ArenaExpertSource() = default;
+ ArenaExpertSource::~ArenaExpertSource() { close(); }
+ 
+ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads,
+@@ -4858,6 +5016,8 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
+     arena_ = a;
+     base_ = a->data();
+     pinned_bytes_ = a->registered_bytes;
++    arena_capacity_ = a->capacity;
++    experts_bin_ = from_gguf ? std::string() : path;   // STRATA_RAM_CORE: where a core expert would be read again from
+     // plan v0.3 P6: device aliases of the mapped registration, for the PCIe share of the misses
+     dev_slice_.clear();
+     slice_bytes_ = a->slice_bytes;
+@@ -4919,6 +5079,7 @@ void ArenaExpertSource::close() {
+     map_ = nullptr;
+     map_bytes_ = 0;
+     inputs_.clear();
++    rc_.reset();
+     if (arena_ != nullptr) {
+         delete (PinnedArena*) arena_;
+         arena_ = nullptr;
+@@ -4926,6 +5087,8 @@ void ArenaExpertSource::close() {
+     base_ = nullptr;
+     blobs_ = 0;
+     n_expert_ = 0;
++    arena_capacity_ = 0;
++    experts_bin_.clear();
+ }
+ 
+ void ArenaExpertSource::prefetch(int64_t layer, int64_t expert) {
+@@ -5008,6 +5171,9 @@ const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
+     const int64_t idx = layer * n_expert_ + expert;
+     if (idx < 0 || idx >= blobs_) return nullptr;
+     reads_.fetch_add(1, std::memory_order_relaxed);
++    // STRATA_RAM_CORE: a core expert has no RAM copy (it never leaves VRAM); asked for anyway, it is read from the
++    // model file first (counted).  One atomic load otherwise.
++    if (rc_ && rc_->dropped[(size_t) idx].load(std::memory_order_acquire) != 0 && !rc_recover(layer, expert)) return nullptr;
+     // Pointer arithmetic into resident memory.  No fault, no copy, no mapping - which is the entire point of
+     // this class over `FileExpertSource`.
+     return base_ + arena_off(layer, expert);
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index a7041bbc..1a6fcc7f 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -7427,7 +7427,8 @@ int main(int argc, char** argv) {
+     // fork (Daily 12a6f553): beside the pipeline the prompt path may borrow the core too - nothing decodes while a prompt
+     // is read, and the lent slots are refilled before the decode as the tail's are (with only the 1.5 GiB tail lent the
+     // 131k prompt read fell from ~85 s to 134 s)
+-    const int64_t el_lend_floor = pipe_elastic_env() ? 0 : el_core;
++    // (not const: STRATA_RAM_CORE raises it to CUDA0's fixed core in the serve path, so no later replan lends the core)
++    int64_t el_lend_floor = pipe_elastic_env() ? 0 : el_core;
+     // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
+     // or with --prefill auto the largest chunk whose buffers take at most kAutoLendPct % of the slots (a
+     // lent slot's expert is streamed during the prompt and refilled after it; measured on a 12 GB card, 32K Q2_0
+@@ -8158,6 +8159,7 @@ int main(int argc, char** argv) {
+             int32_t first_now = -1;        // where its buffers are laid out now
+             int64_t lent_chunk = 0;
+             std::vector<std::pair<int32_t, int32_t>> lent;
++            int64_t rc_floor = 0;          // STRATA_RAM_CORE: the fixed core's slots [0, rc_floor) are never lent
+         };
+         // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
+         // per layer), otherwise max_blob each.
+@@ -8183,6 +8185,45 @@ int main(int argc, char** argv) {
+         // keeps the pinned-share rule.  STRATA_SPLIT_RING=N: N slots on a split; 0: the pinned-share rule.
+         // (decided above, before the lend regions were sized: a no-op here unless the resident RAM mode skipped it)
+         decide_split_ring();
++        // ---- STRATA_RAM_CORE=1 (docs/RAM_CORE.md): per cache (0: CUDA0's, i: stages[i-1]'s) a FIXED CORE of its lowest
++        // slots - the profile's hottest experts, which the startup fill put there first - that never changes hands: no
++        // adaptive swap picks it (core_adapt or not), the prompt path never borrows it, the elastic tail never shrinks
++        // into it, the elastic K/V never takes it.  Its experts then need no RAM copy and the arena gives those pages
++        // back (rc_arm, before the first request).  rc_floor[ci]: the slots a loan must leave, asked for BEFORE the loan
++        // is planned (STRATA_RAM_CORE_SLOTS_DEV<n>), so the loan takes only what lies above; rc_core[ci]: the core
++        // itself, settled once the loans are (CUDA0's default: the part of the elastic core the prompt does not borrow).
++        bool rc_req = false, rc_auto0 = false;
++        std::vector<int64_t> rc_core(1 + stages.size(), 0), rc_floor(1 + stages.size(), 0);
++        auto rc_env = [](int dev, int64_t def) -> int64_t {
++            const std::string name = "STRATA_RAM_CORE_SLOTS_DEV" + std::to_string(dev);
++            const char* v = std::getenv(name.c_str());
++            return v != nullptr && v[0] != '\0' ? (int64_t) std::atoll(v) : def;
++        };
++        constexpr int64_t kRcDefault = 3500;   // ~6 GB of a 2080 Ti's 1.78 MB slots
++        if (strata::core::ArenaExpertSource::ram_core_requested()) {
++            std::string why;
++            if (srcp != &arena_src || !arena_src.mapped()) why = "the experts are not in the resident arena (--mmap-experts / file tier)";
++            else if (host_res.empty() || d_res == nullptr) why = "no residency table (a fillable --expert-cache with --expert-profile is needed)";
++            else if (peer.valid()) why = "a peer GPU's expert tier (--peer-device) is on";
++            else if (drive.d.remote_count > 0 || remote_opt) why = "remote experts are on";
++            else if (!arena_src.ram_core_arm(why)) {}
++            if (!why.empty()) {
++                std::fprintf(stderr, "strata ram core: NOT armed: %s\n", why.c_str());
++            } else {
++                rc_req = true;
++                const int64_t r0 = rc_env(0, -1);
++                rc_auto0 = r0 < 0;
++                if (!rc_auto0) {
++                    int64_t c = std::min<int64_t>(r0, std::max<int64_t>(0, xcache.slots() - 128));
++                    if (el_core > 0) c = std::min(c, el_core);   // above the elastic core the tail may shrink
++                    rc_floor[0] = c;
++                    el_lend_floor = std::max(el_lend_floor, c);
++                }
++                for (size_t i = 0; i < stages.size(); ++i)
++                    rc_floor[i + 1] = std::min<int64_t>(std::max<int64_t>(0, rc_env(stages[i]->dev, kRcDefault)),
++                                                        std::max<int64_t>(0, stages[i]->cache.slots() - 128));
++            }
++        }
+         std::vector<PfPart> pf_parts;
+         // a cache too small to lend the prompt path its buffers would make it allocate them on top - on a card
+         // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
+@@ -8191,6 +8232,7 @@ int main(int argc, char** argv) {
+             pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}});
+             for (auto& st : stages)
+                 pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});
++            for (size_t i = 0; i < pf_parts.size() && i < rc_floor.size(); ++i) pf_parts[i].rc_floor = rc_floor[i];
+             // The two tests plan_lend makes for CUDA0 alone, one participant at a time: a loan must leave the
+             // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
+             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
+@@ -8198,6 +8240,7 @@ int main(int argc, char** argv) {
+             auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
+                 const int64_t k = part_slots(p, c);
+                 if (p.cache == &xcache && k > xcache.slots() - el_lend_floor) return false;
++                if (k > p.cache->slots() - p.rc_floor) return false;   // STRATA_RAM_CORE: the fixed core is never lent
+                 if (k <= 0 || k + 128 > p.cache->slots()) return false;
+                 return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
+             };
+@@ -8234,6 +8277,7 @@ int main(int argc, char** argv) {
+                                                                   kAutoLendPct * p.cache->slots() / 100));
+                     // --elastic: the two-zone cache lends only its tail (fits_one refuses the core as well)
+                     if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_lend_floor));
++                    budget = std::min(budget, std::max<int64_t>(0, p.cache->slots() - p.rc_floor));   // STRATA_RAM_CORE
+                     const uint64_t avail = part_bytes(p, (int32_t) (p.cache->slots() - budget));
+                     const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
+                     room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
+@@ -8607,7 +8651,31 @@ int main(int argc, char** argv) {
+                 }
+             }
+         }
++        // STRATA_RAM_CORE: the loans are settled - each fixed core is what its floor asked for, never past its first
++        // lendable slot; CUDA0's default is the elastic core below the prompt path's loan (without the elastic cache,
++        // kRcDefault below it).  From here on el_lend_floor (CUDA0's replans) and rc_floor (the stages) keep it unlent.
++        if (rc_req) {
++            const int64_t first0 = !pf_parts.empty() && pf_parts[0].first >= 0 ? (int64_t) pf_parts[0].first : xcache.slots();
++            rc_core[0] = std::min<int64_t>(rc_auto0 ? (el_core > 0 ? el_core : kRcDefault) : rc_floor[0], first0);
++            rc_core[0] = std::max<int64_t>(0, std::min<int64_t>(rc_core[0], xcache.slots()));
++            el_lend_floor = std::max(el_lend_floor, rc_core[0]);
++            for (size_t i = 0; i < stages.size(); ++i) {
++                const bool lends = i + 1 < pf_parts.size() && pf_parts[i + 1].first >= 0;
++                const int64_t fi = lends ? (int64_t) pf_parts[i + 1].first : stages[i]->cache.slots();
++                rc_core[i + 1] = std::max<int64_t>(0, std::min(rc_floor[i + 1], fi));
++            }
++            for (size_t i = 0; i < pf_parts.size() && i < rc_core.size(); ++i) pf_parts[i].rc_floor = rc_core[i];
++        }
+         kvg_start(borrow != nullptr ? (int64_t) lend_first : xcache.slots());
++        if (rc_req) kvg.floor = std::max<int64_t>(kvg.floor, rc_core[0]);   // the elastic K/V never takes the core
++        // STRATA_RAM_CORE: whether the expert of layer l in slot `slot` (of the layer's own cache) is in a fixed core
++        auto rc_fixed = [&](int64_t l, int32_t slot) -> bool {
++            if (!rc_req || slot < 0) return false;
++            const size_t ci = multi_gpu ? (size_t) stage_of(l) : 0;
++            return ci < rc_core.size() && (int64_t) slot < rc_core[ci];
++        };
++        std::atomic<int64_t> rc_swaps{0};      // the adaptive tier's swaps (adapt() may run on the pipeline's thread)
++        int64_t rc_swaps0 = 0;                 // ... at the previous request-end line
+         // the penalty-history buffer: one row per verify-window row (`penalty_rows`), each the last
+         // `penalty_last_n` tokens that row's pick follows, -1 padded in front.  Allocated once at the cap for
+         // the widest window; a request without penalties gets a null buffer and takes the byte-for-byte
+@@ -10069,7 +10137,9 @@ int main(int argc, char** argv) {
+                     if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
+                     // --elastic: the core never leaves - unless core_adapt; beside the pipeline el_core counts CUDA0's
+                     // slots and a later stage's layers hold slots of their own cache
+-                    else if (r[e] >= el_core || core_adapt || (pipe_elastic_env() && multi_gpu && stage_of(l) != 0))
++                    // STRATA_RAM_CORE: a fixed core's expert is never a victim, core_adapt or not
++                    else if (!rc_fixed(l, r[e]) &&
++                             (r[e] >= el_core || core_adapt || (pipe_elastic_env() && multi_gpu && stage_of(l) != 0)))
+                         vict.emplace_back(u[e], e);
+                 }
+                 if (cand.empty() || vict.empty()) continue;
+@@ -10091,6 +10161,7 @@ int main(int argc, char** argv) {
+                 agate.has.assign((size_t) g.n_layers, 0);
+                 for (const Swap& s : swaps) agate.has[(size_t) s.layer] = 1;
+             }
++            rc_swaps.fetch_add((int64_t) swaps.size(), std::memory_order_relaxed);
+             // the copies back read the cache of the card that owns each layer (see resident_stage_swaps)
+             auto home_of = [&](int64_t layer) -> SwapHome {
+                 const int stn = multi_gpu ? stage_of(layer) : 0;
+@@ -10236,7 +10307,9 @@ int main(int argc, char** argv) {
+         static const bool el_trace = std::getenv("STRATA_ELASTIC_TRACE") != nullptr;
+         const int64_t el_step_max = 512ll << 20;   // at most this much per growth step (its copies are async)
+         const int64_t el_shrink_step = std::max<int64_t>(64ll << 20, (int64_t) o.elastic_shrink_step_mib << 20);
+-        const int64_t el_min_slots = std::max<int64_t>(256, el_core);   // the core is never shrunk
++        // the core is never shrunk (nor STRATA_RAM_CORE's fixed core, which lies inside it when the elastic core exists)
++        const int64_t el_fixed = std::max<int64_t>(el_core, rc_core[0]);
++        const int64_t el_min_slots = std::max<int64_t>(256, el_fixed);
+         const int64_t el_chunk_max = sp_chunk_max > 0 ? sp_chunk_max : o.prefill_chunk;
+         Clock::time_point el_last{};
+         Clock::time_point el_stable_since = Clock::now();
+@@ -10264,6 +10337,8 @@ int main(int argc, char** argv) {
+             int64_t c = el_chunk_max;
+             const int64_t k = plan_lend(c);
+             if (k <= 0 || c > el_chunk_max) return;   // nothing fits (not above el_min_slots): keep the plan
++            // STRATA_RAM_CORE: plan_lend kept its count above el_lend_floor; the participant's own count must too
++            if (xcache.slots() - part_slots(pf_parts[0], c) < el_lend_floor) return;
+             o.prefill_chunk = c;
+             // 0.1.30: the loan lives in the participant (CUDA0 is the first; the elastic cache is single-GPU)
+             pf_parts[0].first = (int32_t) (xcache.slots() - part_slots(pf_parts[0], c));
+@@ -10284,7 +10359,7 @@ int main(int argc, char** argv) {
+             for (int64_t l = 0; l < g.n_layers; ++l)
+                 for (int32_t ex = 0; ex < (int32_t) g.n_expert && el_layer(l); ++ex) {
+                     const size_t i = (size_t) (l * g.n_expert + ex);
+-                    if (host_res[i] < el_core) continue;   // not resident, or in the core (never displaced)
++                    if (host_res[i] < el_fixed) continue;   // not resident, or in the core (never displaced)
+                     const float u = have_usage ? drive.d.usage[i] : 0.0f;
+                     (host_res[i] >= n ? tail : keep)[(size_t) l].emplace_back(u, ex);
+                 }
+@@ -10604,7 +10679,7 @@ int main(int argc, char** argv) {
+                 const int32_t* r = a_res.data() + l * g.n_expert;
+                 for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {
+                     if (r[e] < 0) { if (u[e] >= 2.0f && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
+-                    else vict.emplace_back(u[e], e);
++                    else if (!rc_fixed(l, r[e])) vict.emplace_back(u[e], e);   // STRATA_RAM_CORE: the core stays
+                 }
+                 if (cand.empty() || vict.empty()) continue;
+                 std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
+@@ -11009,6 +11084,78 @@ int main(int argc, char** argv) {
+             std::fprintf(stderr, "strata trace: %s %lld %lld\n", what, a, b);
+             std::fflush(stderr);
+         };
++        // ---- STRATA_RAM_CORE: everything is laid out and nothing is lent - the fixed cores' RAM copies go now.  rc_slot_of:
++        // per residency index, the core slot its expert was given back in (-1: not in a core); every request's end checks
++        // the experts are still there (`fuori posto`, must be 0) and how many were read again from the file (must be 0).
++        std::vector<int32_t> rc_slot_of;
++        std::vector<int64_t> rc_n(rc_core.size(), 0), rc_kept_reg(rc_core.size(), 0);
++        std::vector<uint64_t> rc_bytes(rc_core.size(), 0);
++        auto rc_dev = [&](size_t ci) -> int { return ci == 0 ? 0 : stages[ci - 1]->dev; };
++        auto rc_log = [&](const char* when) {
++            if (!rc_req) return;
++            const double G = 1073741824.0;
++            int64_t misplaced = 0;
++            for (size_t i = 0; i < rc_slot_of.size(); ++i)
++                if (rc_slot_of[i] >= 0 && host_res[i] != rc_slot_of[i]) ++misplaced;
++            std::string per;
++            for (size_t ci = 0; ci < rc_core.size(); ++ci) {
++                char b[160];
++                if (ci == 0)
++                    std::snprintf(b, sizeof b, "dev%d %lld esperti (%.2f GiB) senza copia RAM", rc_dev(ci), (long long) rc_n[ci],
++                                  (double) rc_bytes[ci] / G);
++                else
++                    std::snprintf(b, sizeof b, ", dev%d %lld (%.2f GiB)", rc_dev(ci), (long long) rc_n[ci], (double) rc_bytes[ci] / G);
++                per += b;
++            }
++            const uint64_t cap = arena_src.arena_capacity();
++            const MemSample ms = mem_sample();
++            std::fprintf(stderr, "strata ram core: %s; arena da %.2f a %.2f GiB; riletti %lld (%s; fuori posto %lld; scambi "
++                                 "dell'adattamento %lld; privata %.2f GiB, working set %.2f GiB)\n", per.c_str(), (double) cap / G,
++                         (double) (cap - std::min(cap, arena_src.ram_core_bytes())) / G, (long long) arena_src.ram_core_reread(),
++                         when, (long long) misplaced, (long long) (rc_swaps.load() - rc_swaps0), (double) ms.commit_mib / 1024.0,
++                         (double) ms.rss_mib / 1024.0);
++            rc_swaps0 = rc_swaps.load();
++            std::fflush(stderr);
++        };
++        if (rc_req) {
++            const auto t0 = Clock::now();
++            const MemSample ms0 = mem_sample();
++            const auto& lay = strata::kernels::cpu::expert_layout();
++            rc_slot_of.assign(host_res.size(), -1);
++            std::vector<int64_t> held(rc_core.size(), 0);
++            for (size_t i = 0; i < host_res.size(); ++i) {
++                const int64_t l = (int64_t) i / g.n_expert;
++                if (!rc_fixed(l, host_res[i])) continue;
++                const size_t ci = multi_gpu ? (size_t) stage_of(l) : 0;
++                ++held[ci];
++                rc_slot_of[i] = host_res[i];
++                bool reg = false;
++                const uint64_t b = arena_src.ram_core_drop(l, (int64_t) i % g.n_expert, &reg);
++                if (b > 0) {
++                    ++rc_n[ci];
++                    rc_bytes[ci] += b;
++                } else if (reg) {
++                    ++rc_kept_reg[ci];
++                }
++            }
++            arena_src.ram_core_settle();
++            const MemSample ms1 = mem_sample();
++            for (size_t ci = 0; ci < rc_core.size(); ++ci) {
++                const strata::core::ExpertCache& c = ci == 0 ? xcache : stages[ci - 1]->cache;
++                std::fprintf(stderr, "strata ram core:   dev%d: nucleo fisso slot [0, %lld) di %lld (%lld esperti, %.2f GiB in "
++                                     "VRAM); %lld senza copia RAM, %lld tenuti nel prefisso registrato (%.2f GiB), mai "
++                                     "prestato, mai scambiato, mai ristretto\n", rc_dev(ci), (long long) rc_core[ci],
++                             (long long) c.slots(), (long long) held[ci],
++                             c.slot_offsets() != nullptr ? (double) c.slot_offsets()[rc_core[ci]] / 1073741824.0
++                                                         : (double) rc_core[ci] * (double) lay.max_blob / 1073741824.0,
++                             (long long) rc_n[ci], (long long) rc_kept_reg[ci],
++                             (double) arena_src.registered_bytes() / 1073741824.0);
++            }
++            std::fprintf(stderr, "strata ram core:   pagine restituite in %.0f ms; privata %.2f -> %.2f GiB, working set %.2f -> %.2f GiB\n",
++                         std::chrono::duration<double, std::milli>(Clock::now() - t0).count(), (double) ms0.commit_mib / 1024.0,
++                         (double) ms1.commit_mib / 1024.0, (double) ms0.rss_mib / 1024.0, (double) ms1.rss_mib / 1024.0);
++            rc_log("avvio");
++        }
+         {
+             // what is left once everything is allocated: under WDDM a GPU filled to the brim does not fail, it pages -
+             // and a page-in while the verify graph spins on a host flag stalls the request for good
+@@ -11252,8 +11399,8 @@ int main(int argc, char** argv) {
+             const int64_t want_free = (int64_t) reserve << 20, mapped = xcache.mapped_bytes();
+             const int64_t before = xcache.slots();
+             // what stays at least: the prompt path's smallest loan (256 tokens) and the 128 slots it must leave
+-            const int64_t floor_slots = std::min<int64_t>(xcache.full_slots(),
+-                128 + (pf_parts.empty() || pf_parts[0].first < 0 ? 0 : part_slots(pf_parts[0], 256)));
++            const int64_t floor_slots = std::max<int64_t>(rc_core[0], std::min<int64_t>(xcache.full_slots(),   // + STRATA_RAM_CORE
++                128 + (pf_parts.empty() || pf_parts[0].first < 0 ? 0 : part_slots(pf_parts[0], 256))));
+             std::string note;
+             if ((int64_t) free_b < want_free) {
+                 const int64_t floor_b = xcache.bytes_of(floor_slots);
+@@ -15736,6 +15883,7 @@ int main(int argc, char** argv) {
+                         (long long) req_offload, chain_txt, (long long) req_chunk,
+                         (long long) (sp.chain_experts_streamed() - streamed0));
+             std::fflush(stdout);
++            rc_log("fine richiesta");   // STRATA_RAM_CORE
+             if (admit_slot >= 0) {   // --batch: BADM <slot> <1 = continues in the batch windows | 0 = done>
+                 bool cont = !cancelled && produced_n == 1 && admit_max_new > 1 && std::strcmp(finish, "length") == 0 &&
+                             (int64_t) live.size() == p;

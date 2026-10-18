@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Sun, 18 Oct 2026 16:06:09 +0200
+Subject: [PATCH] SONNET-STRATA-Rimetti la diagnostica PLE di prefill e decode
+ (letture lente, gather del decode con STRATA_DECODE_TIMING)
+
+Patch 13 della pila (ora 10), ridotta: il tenere la PLE in lettura diretta con la sonda lenta e'
+gia' in upstream (62497bff, STRATA_PLE_AUTO_MMAP=1 per il passaggio a mmap); resta solo la diagnostica
+(media/massimo/letture oltre 100 ms, chunk che aspetta le righe, riga PLE del decode).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
+index 117b78aa..1e6b9d04 100644
+--- a/include/strata/core/verify.hpp
++++ b/include/strata/core/verify.hpp
+@@ -355,6 +355,8 @@ public:
+     bool pcie_balance_on() const { return bal_ != nullptr && m_bal_ != nullptr; }
+ 
+     double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0;
++    /// Fork (Daily 93af2041), STRATA_DECODE_TIMING: the PLE gather subset of ms_host (submit, wait, dequantization).
++    double ms_ple_gather = 0;
+     int64_t windows = 0;
+     /// STRATA_VERIFY_PROFILE=1 - GPU stage times of the windows since the last call (ms per
+     /// window), as one line; empty when off.
+diff --git a/include/strata/ngram/ple_reader.hpp b/include/strata/ngram/ple_reader.hpp
+index 2884817e..75a2aaef 100644
+--- a/include/strata/ngram/ple_reader.hpp
++++ b/include/strata/ngram/ple_reader.hpp
+@@ -36,6 +36,8 @@ struct ReaderStats {
+     double wait_us = 0;           ///< time `collect` spent blocked
+     double submit_us = 0;         ///< time spent inside the read submission call (non-zero = it blocks)
+     double read_us_sum = 0;       ///< sum of per-read latencies (issue to completion)
++    double read_us_max = 0;       ///< the slowest read (all of them, not only the percentile ring)
++    uint64_t slow_reads = 0;      ///< reads that took more than 100 ms
+     uint64_t late_injected = 0;   ///< reads delayed by fault injection
+     uint64_t keepalive_reads = 0; ///< pages read only to keep the SSD awake (not in `reads`, `bytes` or latencies)
+     double keepalive_us_max = 0;  ///< the slowest of them
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index ce30b0d3..593b013b 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -90,6 +90,7 @@ constexpr float EPS = 1e-6f;
+ using Clock = std::chrono::steady_clock;
+ double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
+ const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
++const bool g_ple_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;   // fork: Verifier::ms_ple_gather
+ inline bool g_lfuse() { static const bool on = [] { const char* v = std::getenv("STRATA_LFUSE"); return v != nullptr && v[0] == '1'; }(); return on; }
+ // STRATA_ROUTE_RESIDENT=<margin logits> (+ STRATA_ROUTE_RESIDENT_RANKS=lo-hi, default 6-9): residency-biased routing.
+ struct RouteResidentCfg;
+@@ -2770,6 +2771,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+             _mm_sfence();
+             *flag = 1;
+             ms_host += ms_since(tp);
++            if (g_ple_timing) ms_ple_gather += ms_since(tp);
+         } else {
+             *flag = 1;
+         }
+@@ -2867,6 +2869,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
+             std::atomic_thread_fence(std::memory_order_seq_cst);
+             _mm_sfence();
+             ms_host += ms_since(tp);
++            if (g_ple_timing) ms_ple_gather += ms_since(tp);
+         }
+         if (!(test_stall && k + 1 == steps)) *flag = want;
+         if (h_bal_ != nullptr) bal_p_[(size_t) ((k / G) * 2 + grp)] = ms_since(b);
+@@ -4064,6 +4067,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
+         std::atomic_thread_fence(std::memory_order_seq_cst);
+         _mm_sfence();
+         ms_host += ms_since(tp);
++        if (g_ple_timing) ms_ple_gather += ms_since(tp);
+         return true;
+     };
+     if (ar_on()) {   // the zero-doorbell graph never rings: it waits only for flag 1 (stage 0's PLE rows).
+diff --git a/src/kernels/ngram.cpp b/src/kernels/ngram.cpp
+index 2892e059..91135737 100644
+--- a/src/kernels/ngram.cpp
++++ b/src/kernels/ngram.cpp
+@@ -599,7 +599,7 @@ void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_del
+ std::string PleTable::io_report() const {
+     if (impl_->mode != PleIo::Direct || !impl_->reader.is_open()) return {};
+     const strata::ngram::ReaderStats s = impl_->reader.snapshot();
+-    char buf[400];
++    char buf[512];
+     int n = std::snprintf(buf, sizeof buf,
+                   "ple io: %llu rows, %.1f%% row-cache hits, %llu SSD reads (%.1f MB), read p50 %.0f us p99 %.0f us, "
+                   "blocked %.3f ms total (submit %.3f ms), cache %llu/%llu rows",
+@@ -607,6 +607,10 @@ std::string PleTable::io_report() const {
+                   (unsigned long long) s.reads, (double) s.bytes / 1e6, s.percentile(0.5), s.percentile(0.99),
+                   s.wait_us / 1000.0, s.submit_us / 1000.0, (unsigned long long) impl_->reader.cache_size(),
+                   (unsigned long long) impl_->reader.cache_capacity());
++    // p50/p99 cover only the last 65,536 reads; the mean, the maximum and the slow count cover all of them
++    if (s.reads > 0 && n > 0 && n < (int) sizeof buf)
++        n += std::snprintf(buf + n, sizeof buf - (size_t) n, ", read mean %.0f us max %.1f ms, %llu over 100 ms",
++                           s.read_us_sum / (double) s.reads, s.read_us_max / 1000.0, (unsigned long long) s.slow_reads);
+     if (s.keepalive_reads > 0 && n > 0 && n < (int) sizeof buf)
+         std::snprintf(buf + n, sizeof buf - (size_t) n, ", SSD kept awake by %llu reads (slowest %.1f ms)",
+                       (unsigned long long) s.keepalive_reads, s.keepalive_us_max / 1000.0);
+diff --git a/src/ngram/ple_reader.cpp b/src/ngram/ple_reader.cpp
+index 9d2a0505..0df35e47 100644
+--- a/src/ngram/ple_reader.cpp
++++ b/src/ngram/ple_reader.cpp
+@@ -141,6 +141,8 @@ struct PleReader::Impl {
+ 
+     void record_latency(double us) {
+         stats.read_us_sum += us;
++        stats.read_us_max = std::max(stats.read_us_max, us);
++        if (us > 100e3) ++stats.slow_reads;
+         if (stats.read_us.size() < LATENCY_RING) stats.read_us.push_back((float) us);
+         else stats.read_us[ring_pos++ % LATENCY_RING] = (float) us;
+     }
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 4f716460..8858d150 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -2630,7 +2630,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                 });
+             }
+             ple_buf ^= 1;
+-            stats_.ms_ple += ms_since(tp);
++            const double waited = ms_since(tp);
++            stats_.ms_ple += waited;
++            // a chunk that waited long for its rows: the SSD stalled (the read-ahead normally hides the reads)
++            if (waited > 1000.0)
++                std::fprintf(stderr, "strata prefill: the chunk at token %lld waited %.0f ms for its PLE rows\n",
++                             (long long) c0, waited);
+             return true;
+         };
+         for (int64_t t = 0; t < T; ++t) { prev[0] = prev[1]; prev[1] = (int32_t) tokens[c0 + t]; }
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 812825e8..a7041bbc 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -14380,12 +14380,15 @@ int main(int argc, char** argv) {
+             const Clock::time_point d0 = Clock::now();
+             // STRATA_DECODE_TIMING=1: where a request's decode time goes (one line per request)
+             static const bool dec_timing = std::getenv("STRATA_DECODE_TIMING") != nullptr;
++            // fork (Daily 93af2041): the PLE reader's cumulative counters before and after this request's decode
++            const std::string decode_io_before = dec_timing ? ple_table.io_report() : std::string{};
+             struct DecSnap {
+-                double wait, pool, host, plan, actq, jobs, run;
++                double wait, pool, host, ple, plan, actq, jobs, run;
+                 int64_t misses, entries, hits, pcie;
+             };
+             auto dec_snap = [&]() {
+-                return DecSnap{ver.ms_wait, ver.ms_pool, ver.ms_host, drive.d.ms_plan, drive.d.ms_actq, drive.d.ms_jobs,
++                return DecSnap{ver.ms_wait, ver.ms_pool, ver.ms_host, ver.ms_ple_gather,
++                               drive.d.ms_plan, drive.d.ms_actq, drive.d.ms_jobs,
+                                drive.d.ms_run, drive.d.multi_misses, drive.d.multi_entries, drive.d.cache_hits,
+                                drive.d.pcie_experts};
+             };
+@@ -15562,6 +15565,17 @@ int main(int argc, char** argv) {
+                     if (st == 0) std::fprintf(stderr, "strata decode GPU stages (ms/window):%s\n", pr.c_str());   // text as before
+                     else std::fprintf(stderr, "strata decode GPU stages, stage %d (ms/window):%s\n", st, pr.c_str());
+                 }
++                // fork (Daily 93af2041): the primary verifier's PLE gather (a subset of its host staging; with
++                // --pipeline-windows the second verifier's gathers are not in it)
++                const double ple_ms = d1.ple - ds0.ple;
++                std::fprintf(stderr, "strata decode PLE primary: gather %.3f ms total (%.3f ms/window), other staging %.3f ms/window\n",
++                             ple_ms, ple_ms / w, std::max(0.0, d1.host - ds0.host - ple_ms) / w);
++                // reader snapshots are cumulative: compare the before/after counters, not their percentiles
++                if (!decode_io_before.empty()) {
++                    std::fprintf(stderr, "strata decode PLE before: %s\n", decode_io_before.c_str());
++                    const std::string after = ple_table.io_report();
++                    if (!after.empty()) std::fprintf(stderr, "strata decode PLE after: %s\n", after.c_str());
++                }
+             }
+             if (drive.d.fs) std::fprintf(stderr, "strata serve: %s\n", drive.d.fs->report().c_str());
+             if (!cancelled) {
