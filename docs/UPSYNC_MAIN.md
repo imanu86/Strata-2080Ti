@@ -51,7 +51,7 @@ Poi ogni patch e' stata confrontata riga per riga (le righe aggiunte presenti ne
 | 11 | df-defaults | pulita | 09 |
 | 12 | side-mixer | **gia' in upstream** (PR #1889), tolta | - |
 | 13 | ple-direct | meta' in upstream (default diretto); resta la **diagnostica** | 10 |
-| 14 | prefill-sm75 | dequant 16 B in upstream; **hc16 non portato**; restano i default SIMT e TC_SM75 | 11 |
+| 14 | prefill-sm75 | dequant 16 B in upstream; restano i default SIMT e TC_SM75; **hc16 portato dopo come patch 18** (par. 8) | 11 |
 | 15 | ram-core | adattata (`reads_` ora atomico) | 12 |
 | 16 | qsa-rows | **gia' in upstream**, tolta | - |
 | 17 | expdec | **gia' in upstream**, tolta | - |
@@ -69,9 +69,10 @@ quelle di upstream. Non portati i neutri o peggiori di `lab/struct-a` (NODECUT, 
 
 1. **hc16 (le proiezioni dell'hyper-connection in FP16 sui tensor core, -19,5% del tempo GPU del prompt nel Daily).**
    Upstream ha un percorso proprio e piu' largo: `STRATA_BF16_TC=1` con `STRATA_XN_F16` (#655/#2091), sugli stessi punti di
-   chiamata (`xf16` in `Prefill::run_impl`). Due disegni sugli stessi punti non convivono, quindi non l'ho portato.
-   Conseguenza: sulla 0.1.45 il prompt della 2080 Ti **non ha hc16 di default**. Da misurare: tempo di prefill 131k e KL con
-   `STRATA_BF16_TC=1` nell'env del JSON. Il codice vecchio sta in `lab/expertdec` 794268e4.
+   chiamata (`xf16` in `Prefill::run_impl`). Il 18/10 non l'avevo portato; il 19/10 e' stato portato come leva opt-in
+   `STRATA_HC16_SM75=1` (patch 18, par. 8), con precedenza su BF16_TC nei suoi punti di chiamata. Sulla 0.1.45 il prompt
+   della 2080 Ti **non ha hc16 di default**: serve l'interruttore nell'env del JSON. Il codice vecchio sta in
+   `pr/prefill-hc16-sm75` 626d324c e `lab/expertdec` 794268e4.
 2. **SELECT_SIMT** resta acceso di default sotto sm_80 (come il Daily), contro il rifiuto upstream: e' una scelta del fork.
    Idem `STRATA_TC_SM75` acceso di default (e' bitwise). Il resto della serie Turing di upstream (`STRATA_SM75_PERF=1`) e'
    spento: sono kernel che il Daily 0.1.43 non aveva, da provare a parte.
@@ -102,7 +103,8 @@ quelle di upstream. Non portati i neutri o peggiori di `lab/struct-a` (NODECUT, 
 ## 5. Cosa resta
 
 - B-A-B (coordinatore): upsmain contro upstream puro, a parita' di env (STRATA_EXPDEC/QSA_ROWS/ATTN_DAILY/B6_MMVQ_ROWS/
-  SIDE_MIXER=2 sono ora quelli di upstream), poi contro il Daily r2. Con `STRATA_BF16_TC=1` come terzo braccio.
+  SIDE_MIXER=2 sono ora quelli di upstream), poi contro il Daily r2. Con `STRATA_BF16_TC=1` e `STRATA_HC16_SM75=1` come bracci
+  del prompt a 131k (il secondo non e' ancora misurato lungo: vedi par. 8).
 - Verificare con `--expert-cache 1500`, senza `--elastic`, `--adapt-every 0` che le leve restino bitwise.
 - Provare `--prompt-cache-file` + `STRATA_PREFIX_DISK_MULTI` con due client (prestito + disco).
 
@@ -155,7 +157,7 @@ Per il prossimo B-A-B: scartare e ripetere un braccio se nel suo `engine.log` lo
 
 Differenza persistente e vera (non e' L01): il **prompt da 131k** e' piu' lento del 10-12% su upsmain: 1463-1489 tok/s (sw-b1/b2, s45-r1,
 h1b) contro 1607-1701 del Daily (dly-warm, dly-a, h1a), cioe' 88-89 s contro 77-82 s. E' la mancanza di hc16 (punto dubbio 1 del
-paragrafo 3): il primo braccio da misurare e' `STRATA_BF16_TC=1`.
+paragrafo 3): bracci da misurare `STRATA_HC16_SM75=1` (par. 8) e `STRATA_BF16_TC=1`.
 
 ## 7. Interruttori nuovi di upstream 0.1.44 / 0.1.45 che possono valere per 2080 Ti + 3060 (da misurare, nessuno e' acceso nella pila)
 
@@ -190,7 +192,7 @@ Decode
 
 Prompt / TTFT
 - `STRATA_BF16_TC=1` (con `STRATA_XN_F16`, acceso se non =0): proiezioni BF16 (hyper-connection, router, indicizzatore...) in FP16 sui tensor
-  core; al posto del nostro hc16 non portato. Non bitwise. Dichiarato prompt +15-18% sulla 2080 Ti (Q2_0). Primo braccio da provare.
+  core; invece del nostro hc16 (ora patch 18, `STRATA_HC16_SM75=1`, par. 8; sui suoi punti hc16 vince). Non bitwise. Dichiarato prompt +15-18% sulla 2080 Ti (Q2_0). Primo braccio da provare.
 - `STRATA_PF_FUSED=1` + `STRATA_PF_FUSED_SM75=1`: esperti del prompt fusi in int8 (MMA m8n8k16 su Turing). Documentato per Q2_0; il ramo
   sm_75 esiste anche in `moe_fused_iq.cu`: da verificare se copre IQ3_XXS. Non bitwise.
 - `STRATA_PA_V2T=1` (attenzione del prompt v2 con staging in registri) e `STRATA_PROMPT_ATTN_Q4_TC`: Turing, non bitwise.
@@ -206,3 +208,34 @@ Batch / multi-chat (solo con `--batch`; nessuno e' di default; non cambiano cio'
   (server), `STRATA_BATCH_SELF_COMMIT=1`, `STRATA_QSA_SLOTS=1`, `STRATA_BATCH_ATTN_ROWS=1`, `STRATA_BATCH_GDN_GROUPS=1`,
   `STRATA_PIPE_BYIELD_NODRAIN=1`, `STRATA_PIPED_CONCURRENT=1` (prompt su un thread mentre gli slot decodificano), `STRATA_BATCH_MTP_SERIAL=1`.
   Misurati da upstream su 4x R9700 con 8-16 slot; per un solo utente non servono.
+
+## 8. hc16 portato come leva opt-in `STRATA_HC16_SM75=1` (patch 18, 18/10 sera)
+
+Commit `d9a26384`, build `build-upsmain-d9a26384` (strata.exe sha256 `ac37c4eac933ee2e3369ad64bdeccdbed939c4c06406493f1d2893b3ac843131`, sm_75+86,
+compilato con `build_lock.py` originale dopo la coda del coordinatore). **Compilato si, provato solo in breve (sotto), 131k non misurato.**
+
+- Cosa fa: sulla 2080 Ti le proiezioni dell'hyper-connection (down, up, inject) e `ssm_alpha/beta` del prompt vanno sui tensor core FP16. Il peso BF16
+  e' ricodificato in FP16 una matrice alla volta in un buffer di 6,55 MB (`hc16_w_to_f16`), le attivazioni sono l'immagine FP16 del valore FP32
+  (`f16img` 2 nei writer `gr_*`, `gr_silu` a 1). Il layer di draft resta BF16. Non e' bitwise. Solo sm_75, spento di default, fuori da `STRATA_SM75_PERF`.
+- Rispetto al codice 0.1.43 (`pr/prefill-hc16-sm75`): niente buffer `xn16h`/`lo16h` (il parametro `f16img` dei writer da bool a int, anche in
+  `sycl/.../kernels.dp.cpp`, non compilato); resta il solo buffer dei pesi, preso in `carve` e in `bytes_needed_impl` alla pari.
+  Le righe aggiunte a `generate.cpp` per la riserva della cache (6,55 MB) non sono state portate: il prezzo piatto di 160 MiB + 680 KiB/token le copre.
+- **Precedenza con `STRATA_BF16_TC=1`** (decisa qui): sui punti di chiamata di hc16 vince hc16 (xn16 scritto con la regola 2, mai come FP16-del-BF16 di
+  `XN_F16`; peso in staging al posto della conversione per chiamata). Tutte le altre GEMM BF16 (router, indicizzatore, layer di draft) seguono BF16_TC.
+  Con i due accesi il layer di draft resta quindi FP16 per BF16_TC (la perdita di accettazione di 27 punti misurata sul Daily e' di BF16_TC, non di hc16).
+  Spento con BF16X2, `STRATA_HC_REQ8` e matrici hc non BF16 residenti (errore esplicito).
+- Prova breve (banco forzato no, `bench.lock`, config DET come la coda del 18/10, `STRATA_PREFILL_TIMING=1`, prompt ~4k e ~16k token, 96 token a T=0,
+  `hc16_breve.py`, cartelle `DET-hc16-*`): nessun errore, testo coerente in tutti i bracci (stessa apertura "We need answer user's request ..." in tutti, poi
+  diverge di poco, come atteso per un percorso non bitwise).
+
+| braccio | fase "hc read" sulla 2080 Ti, 16k | prompt 4k | prompt 16k |
+|---|---|---|---|
+| senza (warm, `hc16b-off`) | 3264 ms | 10,6 s | 24,9 s |
+| `HC16_SM75=1` (`hc16-on`, subito dopo un avvio freddo) | 945 ms | 12,7 s | 28,9 s |
+| `BF16_TC=1` (`hc16b-tc`) | 973 ms | 9,0 s | 19,7 s |
+| `BF16_TC=1` + `HC16_SM75=1` (`hc16b-both`) | 831 ms | 9,6 s | 19,7 s |
+
+Lettura: la fase "hc read" (la sola che hc16 tocca) cala del 71% con hc16 come con BF16_TC (-2,3 s su 16k), cioe' il guadagno atteso c'e'. Il tempo totale
+del prompt corto e' dominato da altro (dequant degli esperti e attese sul disco: nel braccio `hc16-on` l'avvio era a freddo, 4k e 16k non sono alla pari), e
+BF16_TC guadagna di piu' perche' sposta anche le altre GEMM BF16. Il confronto di tempo-prompt a 131k contro BF16_TC (1506 -> 1753-1769 tok/s, +17%, dato del
+coordinatore) **non e' ancora fatto**: serve un braccio `STRATA_HC16_SM75=1` a 131k nella coda.

@@ -2,9 +2,9 @@
 
 The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata, one lever each, in the order they apply. Written for a two-card Windows box (RTX 2080 Ti 22 GB as stage 1, RTX 3060 12 GB as stage 0, `--layer-split 16 --trim-stage-weights --pipeline-windows 2`), but every lever is a plain switch and most are bitwise with the default path. The registry exists so that the next upstream version can be checked and re-based mechanically: run `check_anchors.py --check` on the new tag, read what moved, re-apply.
 
-Rebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-17) come from lab/struct-a, lab/ttft43 and lab/pipeline2.
+Rebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-18) come from lab/struct-a, lab/ttft43, lab/pipeline2 and the 0.1.43 Daily's hc16 (18).
 
-Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `d06429ee`. 17 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `d9a26384`. 18 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -45,13 +45,14 @@ Reference configuration environment (the fork's 0.1.43 Daily r2, config `strata-
 | 08 | [pipeline-architectds](#08-pipeline-architectds) | The two-window pipeline's profile from the Daily: the verified window is served first (front stage of A, last stage of A, then D and B one layer per pass), lookup beyond one window, theta 0.10; plus two log lines (rollback cost per window class, chain latency). | `STRATA_PIPELINE_ELASTIC` (on with two cards and `--pipeline-windows`; `=0`: upstream's theta 0.20 and D-A-B order) | fork (from the architectds lab branch) | never proposed | 0.1.42 without it: -4.6/-7.3/-7.8% against the Daily (speculative windows 133/600 instead of 164/600, stage host 0.50 -> 1.69 ms). With it and patch 11: +0.7% (parity). |
 | 09 | [df-defaults](#09-df-defaults) | `STRATA_DF_BRANCH` (mixer side branches in the window graph; CUDA on Windows) and `STRATA_DF_PLE` (PLE post-projections in one pass; CUDA) on by default, as in the Daily. | `STRATA_DF_BRANCH=0`, `STRATA_DF_PLE=0` turn them off (upstream: opt-in `=1`) | fork (defaults of PR #904's switches) | upstream merged #904 opt-in and keeps BRANCH off after a Linux stall (#905, never seen on Windows) | Daily measurements: BRANCH +2.4% at 131k, PLE +3.3% (bitwise). On 0.1.42 their absence was the main part of ~1.1 ms of GPU per window. |
 | 10 | [ple-diag](#10-ple-diag) | PLE diagnostics: prefill reads (mean / max / over 100 ms) and the chunk that waits more than a second for its rows; decode gather time (`STRATA_DECODE_TIMING`) and the reader counters before/after a request. | log lines; `STRATA_DECODE_TIMING=1` for the decode ones | fork (ex patch 13 of the 0.1.43 stack, diagnostics half) | Niko1221 on PR #2073: the diagnostics are welcome as a separate small PR; the direct-read default itself is upstream since 0.1.43.1 (STRATA_PLE_AUTO_MMAP=1 for the old switch) | diagnostics only; found the 1 259 rows/s probe and the 260 s -> 75 s prefill of a cold SATA SSD |
-| 11 | [prefill-sm75](#11-prefill-sm75) | The Daily's Turing prompt defaults: `STRATA_SELECT_SIMT` (FP32 tiled QSA block scores) on below sm_80, and the 16-byte dequant of the prompt projections (upstream's #2081) on for a 7.5 card. | `STRATA_SELECT_SIMT=0\|2`, `STRATA_TC_SM75=0` (sm_75 only) | fork (SIMT scores from PR #1091 konijiwa110, merged upstream opt-in; dequant from our PR #2081, merged upstream behind STRATA_SM75_PERF=1) | SIMT: PR #2080 (default on) declined (Niko1221, 17 Oct: changes the summation order, wants an independent sm_75 KL run); dequant 16 B: in 0.1.45 as `STRATA_TC_SM75` / `STRATA_SM75_PERF=1`. hc16 (FP16 tensor-core hyper-connection projections) NOT ported: 0.1.45 has the wider `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091) | 131k prefill 100 -> 75 s on the 2080 Ti stage with the 0.1.43 stack (SIMT -16%, hc16 -19.5% of GPU prompt time). On 0.1.45 the hc16 share has to be re-measured with STRATA_BF16_TC=1 (timing of the prompt and a KL against the default). |
+| 11 | [prefill-sm75](#11-prefill-sm75) | The Daily's Turing prompt defaults: `STRATA_SELECT_SIMT` (FP32 tiled QSA block scores) on below sm_80, and the 16-byte dequant of the prompt projections (upstream's #2081) on for a 7.5 card. | `STRATA_SELECT_SIMT=0\|2`, `STRATA_TC_SM75=0` (sm_75 only) | fork (SIMT scores from PR #1091 konijiwa110, merged upstream opt-in; dequant from our PR #2081, merged upstream behind STRATA_SM75_PERF=1) | SIMT: PR #2080 (default on) declined (Niko1221, 17 Oct: changes the summation order, wants an independent sm_75 KL run); dequant 16 B: in 0.1.45 as `STRATA_TC_SM75` / `STRATA_SM75_PERF=1`. hc16 (FP16 tensor-core hyper-connection projections) is patch 18, opt-in beside upstream's wider `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091) | 131k prefill 100 -> 75 s on the 2080 Ti stage with the 0.1.43 stack (SIMT -16%, hc16 -19.5% of GPU prompt time; hc16 is now patch 18 and off by default on 0.1.45). |
 | 12 | [ram-core](#12-ram-core) | A fixed core of expert slots per card, excluded from swaps, loans and shrink, whose RAM copy is given back (the resident arena no longer mirrors experts that never leave VRAM). | `STRATA_RAM_CORE=1` (off), `STRATA_RAM_CORE_SLOTS_DEV<n>=<slots>` | fork | never proposed | `STRATA_RAM_CORE_SLOTS_DEV1=5500`: arena 39.97 -> 29.62 GiB (-10.35), working set 48.7 -> 33.6 GB, t/s +0.1%, hit rate unchanged, 0 re-reads from file. Daily default since 12 Oct. |
 | 13 | [sa-bet](#13-sa-bet) | STRUCT-A: while the MTP chain runs, stage 0 serves the HEAD of the next window as a bet (`STRATA_SA_BET`, layers `_LAYERS`, widths `_MAXT`/`_MINT`); the forced chain is fed a step at a time and cut once B is decided (`STRATA_SA_CHAIN`, `_AHEAD`). | `STRATA_SA_BET=1`, `STRATA_SA_CHAIN=1` (off) | fork (lab/struct-a 075ce875) | never proposed | +2.5% against the 0.1.43 Daily on the 131k forced bench (SA_BET + SA_CHAIN, B-A-B, 12-13 Oct). Not re-measured on 0.1.45. |
 | 14 | [prefix-disk-multi](#14-prefix-disk-multi) | `STRATA_PREFIX_DISK_MULTI=<GiB>`: one file per prefix beside `--prompt-cache-file` (`<file>.<16 hex>`), least recently used out past the cap; the file is written on a thread (`STRATA_PREFIX_DISK_SYNC=1` inline). | `STRATA_PREFIX_DISK_MULTI=<GiB>` (off: the single file) | fork (lab/ttft43 c00a8463) | never proposed (depends on 05) | TTFT bench 13 Oct with #1852 (now upstream): alternating clients 38.2 / 32.5 -> 16.2 / 4.9 s; after a restart 20.2 / 10.3 -> 6.4 / 5.1 s (with STRATA_CONV_DISK). |
 | 15 | [ple-lookahead](#15-ple-lookahead) | The PLE rows of the first chunk of the next prompt part are read while the previous part finishes, and beside the prefix restore (`Prefill::set_ple_lookahead`, `ple_warm_now`). | `STRATA_PLE_LOOKAHEAD=0` turns it off (ON by default, direct PLE only) | fork (lab/ttft43 ea73f49e) | never proposed | part of the TTFT bench of patch 14 (about 0.7 s of file read hidden per restore). |
 | 16 | [conv-disk](#16-conv-disk) | `STRATA_CONV_DISK=<s>`: after a request, once the engine has been idle that long, the live conversation at its last turn boundary goes to a keyed file; a request looks for the longest saved boundary among its own. | `STRATA_CONV_DISK=<idle seconds>`, `STRATA_CONV_DISK_MIN` (4096) (off; needs `--prompt-cache-file` and `STRATA_PREFIX_DISK_MULTI`, no `--batch`) | fork (lab/ttft43 abd685c5) | never proposed | a 130k conversation restarts from its file instead of the system turn alone (65-80 s of prefill); 13 Oct: a restart took 277 s with it on, later shown not to come from CONV_DISK (TTFT43.md). |
 | 17 | [p2-flush-noswitch](#17-p2-flush-noswitch) | Pipeline polling without switching card: `STRATA_P2_FLUSH_NOSWITCH` (service, done and the chain read their mapped flags with no OnDevice), `STRATA_P2_FLUSH_US` (flush period), `STRATA_P2_SWITCH_STAT` (host time in the window launches), `STRATA_P2_SMEM` (config cache to shared). | `STRATA_P2_FLUSH_NOSWITCH=1`, `STRATA_P2_FLUSH_US=<us>`, `STRATA_P2_SWITCH_STAT=1`, `STRATA_P2_SMEM=1` (off) | fork (lab/pipeline2 f6a0b6b2; the polling idea from NTRYourWaifu's v7/v8) | never proposed | 13 Oct B-A-B (isolated bench): NOSWITCH removes ~8 100 card switches per request but the gain is below the spread; never promoted (docs/PIPELINE2.md par. 11). |
+| 18 | [hc16-sm75](#18-hc16-sm75) | The hyper-connection projections (down, up, inject) and ssm_alpha / ssm_beta of the prompt on FP16 tensor cores on an sm_75 card: each BF16 weight is re-encoded to FP16 once per call into a 6.55 MB staging buffer, the activations are written as the FP16 image of the FP32 value (`f16img` 2 in the `gr_*` writers, 1 in `gr_silu`). The draft layer stays BF16. | `STRATA_HC16_SM75=1` (off; sm_75 only, not part of `STRATA_SM75_PERF`) | fork (pr/prefill-hc16-sm75 626d324c, the 0.1.43 Daily's hc16, rewritten on 0.1.45's kernels) | never proposed. Overlaps upstream's `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091), which sends every BF16 GEMM through FP16 with per-call conversion buffers; hc16 is the narrow version (these call sites only, a 6.55 MB buffer allocated and priced with the prompt path, the draft layer untouched) | 0.1.43 Daily: -19.5% of the GPU prompt time on the 2080 Ti (131k prefill 100 -> 75 s together with SELECT_SIMT). Not bitwise (FP16 activations). On 0.1.45: see docs/UPSYNC_MAIN.md par. 8. |
 
 ## Retired
 
@@ -69,7 +70,6 @@ Levers that were in the stack and were dropped (code stays on the fork's lab bra
 | expdec (PR #2058) | Routed experts' gate/up in the verify window with the group's activations in shared memory and R rows per lane (the down behind `STRATA_EXPDEC_DOWN=1`), bitwise; `expdec_bench`. | gate/up kernel -11/-23% at T 1-4 on the 2080 Ti; engine B-A-B +1.1% (B +0.0/+2.1). Daily default since 12 Oct. The Q2_0 down with EXPDEC was ~10% slower in the engine: off by default. | 18 Oct 2026: in upstream 0.1.45 (f7eaf2de), opt-in `STRATA_EXPDEC=1`, gate/up only, the down behind `STRATA_EXPDEC_DOWN=1` as here; +0.5% on an RTX 3060, +1..5% on an A4000. PR #2058 still shows open. |
 | ple-direct (probe half) | The PLE table stays in direct I/O when the start-up probe measures the disk slow. | PLE on a cold SATA SSD: 131k prefill 260 s (mmap) -> 75 s (direct). | 18 Oct 2026: in upstream since 0.1.43.1 / 0.1.45 (62497bff): the slow probe warns and keeps direct, `STRATA_PLE_AUTO_MMAP=1` switches. The diagnostics half stays as patch 10. PR #2073 answered by Niko1221 as already contained. |
 | prompt-encoder (#1852) | The server tokenizes the prompt from the last shared prefix (`STRATA_PROMPT_ENCODER`, server side). | TTFT bench of 13 Oct, see patch 14. | 18 Oct 2026: in upstream 0.1.45 (f13a870d, Niko1221, from gputier's #1852), unconditional there; the Daily bat variable is harmless. |
-| hc16 | The hyper-connection projections and ssm_alpha/beta of the prompt on FP16 tensor cores (weights re-encoded once, FP16 activations; sm_75). | In the 0.1.43 Daily it removed 19.5% of the prompt GPU time. | 18 Oct 2026: not ported. 0.1.45 has its own, wider path (`STRATA_BF16_TC=1` with `STRATA_XN_F16`, #655/#2091) that overlaps the same call sites; two designs on one set of calls do not coexist. To decide after a prompt-time and KL A/B of STRATA_BF16_TC=1. Code: fork branches lab/expertdec 794268e4, lab/candidate2. |
 
 ## 01 elastic-cache
 
@@ -1115,8 +1115,8 @@ Insertion points (12):
 - **What**: The Daily's Turing prompt defaults: `STRATA_SELECT_SIMT` (FP32 tiled QSA block scores) on below sm_80, and the 16-byte dequant of the prompt projections (upstream's #2081) on for a 7.5 card.
 - **Switch (default)**: `STRATA_SELECT_SIMT=0|2`, `STRATA_TC_SM75=0` (sm_75 only)
 - **Origin**: fork (SIMT scores from PR #1091 konijiwa110, merged upstream opt-in; dequant from our PR #2081, merged upstream behind STRATA_SM75_PERF=1)
-- **Upstream**: SIMT: PR #2080 (default on) declined (Niko1221, 17 Oct: changes the summation order, wants an independent sm_75 KL run); dequant 16 B: in 0.1.45 as `STRATA_TC_SM75` / `STRATA_SM75_PERF=1`. hc16 (FP16 tensor-core hyper-connection projections) NOT ported: 0.1.45 has the wider `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091)
-- **Measured**: 131k prefill 100 -> 75 s on the 2080 Ti stage with the 0.1.43 stack (SIMT -16%, hc16 -19.5% of GPU prompt time). On 0.1.45 the hc16 share has to be re-measured with STRATA_BF16_TC=1 (timing of the prompt and a KL against the default).
+- **Upstream**: SIMT: PR #2080 (default on) declined (Niko1221, 17 Oct: changes the summation order, wants an independent sm_75 KL run); dequant 16 B: in 0.1.45 as `STRATA_TC_SM75` / `STRATA_SM75_PERF=1`. hc16 (FP16 tensor-core hyper-connection projections) is patch 18, opt-in beside upstream's wider `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091)
+- **Measured**: 131k prefill 100 -> 75 s on the 2080 Ti stage with the 0.1.43 stack (SIMT -16%, hc16 -19.5% of GPU prompt time; hc16 is now patch 18 and off by default on 0.1.45).
 - **Upstream defaults it changes**: SELECT_SIMT default on below sm_80; STRATA_TC_SM75 default on for a 7.5 card
 - **Docs**: docs/UPSYNC_MAIN.md
 - **Files**: `include/strata/core/tc_sm75.hpp`, `include/strata/kernels/qsa_select.hpp`, `src/kernels/cuda/qsa_select.cu`, `src/prefill/prefill.cpp`
@@ -1848,4 +1848,192 @@ Insertion points (15):
                                        (long long) sa_placed[2], (long long) sa_tails[2], (long long) sa_drops[2],
                                        (long long) sa_placed[3], (long long) sa_tails[3], (long long) sa_drops[3],
                                        (long long) sa_chains, (long long) sa_cut);
+  ```
+
+## 18 hc16-sm75
+
+`18-hc16-sm75.patch` — SONNET-STRATA-Porta su upstream 0.1.45 l'hc16 del prefill su sm_75 come leva opt-in (STRATA_HC16_SM75)
+
+- **What**: The hyper-connection projections (down, up, inject) and ssm_alpha / ssm_beta of the prompt on FP16 tensor cores on an sm_75 card: each BF16 weight is re-encoded to FP16 once per call into a 6.55 MB staging buffer, the activations are written as the FP16 image of the FP32 value (`f16img` 2 in the `gr_*` writers, 1 in `gr_silu`). The draft layer stays BF16.
+- **Switch (default)**: `STRATA_HC16_SM75=1` (off; sm_75 only, not part of `STRATA_SM75_PERF`)
+- **Origin**: fork (pr/prefill-hc16-sm75 626d324c, the 0.1.43 Daily's hc16, rewritten on 0.1.45's kernels)
+- **Upstream**: never proposed. Overlaps upstream's `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091), which sends every BF16 GEMM through FP16 with per-call conversion buffers; hc16 is the narrow version (these call sites only, a 6.55 MB buffer allocated and priced with the prompt path, the draft layer untouched)
+- **Measured**: 0.1.43 Daily: -19.5% of the GPU prompt time on the 2080 Ti (131k prefill 100 -> 75 s together with SELECT_SIMT). Not bitwise (FP16 activations). On 0.1.45: see docs/UPSYNC_MAIN.md par. 8.
+- **Notes**: Precedence with `STRATA_BF16_TC=1`: on hc16's call sites hc16 wins (xn16 is written by hc16's rule, not as BF16_TC's FP16-of-BF16 image, and the staged weight replaces BF16_TC's per-call conversion); every other BF16 GEMM (router, indexer, draft layer) follows BF16_TC. Off for BF16X2, `STRATA_HC_REQ8` and non-BF16 resident matrices (a clear error, not a silent fallback). `carve` and `bytes_needed_impl` take the buffer in step.
+- **Docs**: docs/UPSYNC_MAIN.md
+- **Files**: `include/strata/core/tc_sm75.hpp`, `include/strata/prefill/kernels.hpp`, `src/prefill/kernels.cu`, `src/prefill/prefill.cpp`, `sycl/src/prefill/kernels.dp.cpp`
+
+Insertion points (29):
+
+- `include/strata/core/tc_sm75.hpp` · `inline bool tc_sm75_enabled(int cc_major, int cc_minor) {` → [18-1](BLOCKS.md#18-1)
+  ```
+      return v == nullptr || std::atoi(v) != 0;
+  }
+  ```
+- `include/strata/prefill/kernels.hpp` · `namespace strata::prefill {` → [18-2](BLOCKS.md#18-2)
+  ```
+  
+  // ---- hyper-connection (n_embd 2560, hc 4, hc_lr 320)
+  /// xn[t, c*2560 + d] = R[t,c,d] * rsqrt(mean_d R[t,c,:]^2 + eps) * w_norm[c*2560 + d]; also its BF16 image.
+  ```
+- `include/strata/prefill/kernels.hpp` · `bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const` → [18-3](BLOCKS.md#18-3)
+  ```
+                float* mixed, uint16_t* mixed16, uint16_t* mixed_h, int64_t T, void* stream);
+  void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
+                        float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr,
+  ```
+- `include/strata/prefill/kernels.hpp` · `void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const in` → [18-4](BLOCKS.md#18-4)
+  ```
+  
+  /// fp32 -> fp16 bits and fp32 -> bf16, n elements (the two activation images of the prompt GEMMs).
+  void to_f16(const float* x, uint16_t* y, int64_t n, void* stream);
+  ```
+- `src/prefill/kernels.cu` · `__global__ void gr_norm_kernel(const float* __restrict__ R, const float* __restr` → [18-5](BLOCKS.md#18-5)
+  ```
+          const float v = r[d] * rs * w[c * N + d];
+          xn[row * N + d] = v;
+          const uint16_t h = act16(v);
+  ```
+- `src/prefill/kernels.cu` · `__global__ void gr_norm_rs_kernel(const float* __restrict__ R, const float* __re` → [18-6](BLOCKS.md#18-6)
+  ```
+      for (int d = threadIdx.x; d < N; d += blockDim.x) {
+          const float v = r[d] * rs * w[c * N + d];
+          const uint16_t h = act16(v);
+  ```
+- `src/prefill/kernels.cu` · `__global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict` → [18-7](BLOCKS.md#18-7)
+  ```
+      for (int d = threadIdx.x; d < N; d += 256, ++k) {
+          const float x = v[k] * rs * w[c * N + d];
+          const uint16_t h = act16(x);
+  ```
+- `src/prefill/kernels.cu` · `__global__ void __launch_bounds__(256) gr_write_cvec_norm_rs_kernel(` → [18-8](BLOCKS.md#18-8)
+  ```
+      for (int d = threadIdx.x; d < N; d += 256, ++k) {
+          const float y = x[k] * rs * w[c * N + d];
+          const uint16_t h = act16(y);
+  ```
+- `src/prefill/kernels.cu` · `__global__ void kv_append_kernel(const float* __restrict__ K, const float* __res` → [18-9](BLOCKS.md#18-9)
+  ```
+          if (threadIdx.x == 0) (is_v ? stage.v_scale : stage.k_scale)[row_id * 4 + g] = sb;
+      }
+  }
+  ```
+- `src/prefill/kernels.cu` · `bool f16_range_read(float& max_abs, unsigned long long& over, bool reset) {` → [18-10](BLOCKS.md#18-10)
+  ```
+  void to_f16(const float* x, uint16_t* y, int64_t n, void* stream) {
+      if (n <= 0) return;
+      to_f16_kernel<<<(unsigned) ((n + 255) / 256 < 4096 ? (n + 255) / 256 : 4096), 256, 0, (cudaStream_t) stream>>>(x, y, n);
+  ```
+- `src/prefill/kernels.cu` · `void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo` → [18-11](BLOCKS.md#18-11)
+  ```
+  }
+  
+  void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream,
+  ```
+- `src/prefill/kernels.cu` · `bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const` → [18-12](BLOCKS.md#18-12)
+  ```
+  #endif
+  }
+  void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
+  ```
+- `src/prefill/prefill.cpp` · `(file scope)` → [18-13](BLOCKS.md#18-13)
+  ```
+  #include "strata/platform/aux_cpus.hpp"
+  
+  #include "strata/core/layout.hpp"
+  ```
+- `src/prefill/prefill.cpp` · `inline bool hcd_exact() {` → [18-14](BLOCKS.md#18-14)
+  ```
+      return v;
+  }
+  inline bool hc_pad() { return pf_hcdown() || hcd_exact(); }
+  ```
+- `src/prefill/prefill.cpp` · `struct Prefill::Impl {` → [18-15](BLOCKS.md#18-15)
+  ```
+      uint16_t *mixed_bf = nullptr, *mixed_h = nullptr;
+      bool f16_io = false;   // HIP, STRATA_HIP_PROMPT_F16=1: this stage's 16-bit GEMMs run FP16 in and out (set in init)
+      bool xn_f16 = false;   // Turing, BF16 on FP16 tensor cores: xn16 written as the FP16 values the GEMM would convert
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::carve(size_t T, void* alloc) {` → [18-16](BLOCKS.md#18-16)
+  ```
+      m.gated = o.take<float>(T * D, ok); m.inj = o.take<float>(T * HC, ok);
+      m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
+      m.mixed_h = o.take<uint16_t>(T * N, ok);
+  ```
+- `src/prefill/prefill.cpp` · `uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se` → [18-17](BLOCKS.md#18-17)
+  ```
+      f(T * D); f(T * HC); f(T * N); o.take<uint16_t>(T * N, ok); o.take<uint16_t>(T * N, ok);
+      if (!emb_reuse_account()) f(T * N);   // bo: aliases emb in carve; still counted unless STRATA_EMB_REUSE_ACCOUNT=1
+      const bool f16_io = prompt_f16();   // the current device's mode (the stage's), as Prefill::init will decide it
+  ```
+- `src/prefill/prefill.cpp` · `bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y,` *(anchor ambiguous in the base file)* → [18-18](BLOCKS.md#18-18)
+  ```
+      return true;
+  }
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [18-19](BLOCKS.md#18-19)
+  ```
+                  }
+                  pt.mark(kPfHc, cs);
+                  // the xn16 token stride of this chunk (the writers of both halves and of the fused write-backs use it)
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [18-20](BLOCKS.md#18-20)
+  ```
+                      }
+                      hcd = true;
+                  }
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [18-21](BLOCKS.md#18-21)
+  ```
+                                             m.mixed, m.mixed_bf, m.mixed_h, T, m.cs);
+                      }
+                  }
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [18-22](BLOCKS.md#18-22)
+  ```
+                      float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+                      if (!native_proj(m.gemm, wqkv, m.mixed_h, m.qkv, T, v.name("attn_qkv.weight"), err)) return false;
+                      if (!native_proj(m.gemm, wg, m.mixed_h, m.z, T, v.name("attn_gate.weight"), err)) return false;
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [18-23](BLOCKS.md#18-23)
+  ```
+                          cudaMemcpyAsync(Rc, m.R, (size_t) T * D * 4, cudaMemcpyDeviceToDevice, m.cs);
+                          gr_write(Rc, m.bo, m.inj, HC, T, m.cs);
+                          strata::kernels::cvec_apply(Rc, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [18-24](BLOCKS.md#18-24)
+  ```
+                      } else
+                      gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,
+                                            strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs, m.xn16,
+  ```
+- `sycl/src/prefill/kernels.dp.cpp` · `void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream, uint16_t* ylo` → [18-25](BLOCKS.md#18-25)
+  ```
+  }
+  
+  void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream,
+  ```
+- `sycl/src/prefill/kernels.dp.cpp` · `void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t` → [18-26](BLOCKS.md#18-26)
+  ```
+      check("gr_norm");
+  }
+  void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream,
+  ```
+- `sycl/src/prefill/kernels.dp.cpp` · `bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const` → [18-27](BLOCKS.md#18-27)
+  ```
+  }
+  void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
+                        float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo, int64_t ldx,
+  ```
+- `sycl/src/prefill/kernels.dp.cpp` · `void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_l` → [18-28](BLOCKS.md#18-28)
+  ```
+  }
+  void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* v_l,
+                             const float* s_l, const int* on, int mode, const float* w_norm_next, float eps, float* rs,
+  ```
+- `sycl/src/prefill/kernels.dp.cpp` · `void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t` → [18-29](BLOCKS.md#18-29)
+  ```
+      }
+      check("gr_write_cvec_norm_rs");
+  }
   ```
