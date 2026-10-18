@@ -197,10 +197,27 @@ inline int64_t stream_all_min() {
 // STRATA_PREFILL_CPU_SHARE=0 turns it off: the output is then the 0.1.40.3 bytes.  g_share_default is set by
 // Prefill::arm_cpu_share(.., true) from the paths that qualify; the layer split, batch slots and HIP stay off.
 bool g_share_default = false;
+// STRATA_SHORTPF=1 (fork, opt-in): short reads on a layer split.  The CPU share is off by default there (arm_cpu_share
+// arms it only without stages); this asks for it at a FIXED share (STRATA_SHORTPF_SHARE, default 0.8), because the measured
+// `auto` calibrates too low on the Daily rig (docs/SHORTPF.md: 100-1000 new tokens -34..-31% TTFT at 0.8, -15..-18% at auto).
+// STRATA_PREFILL_CPU_SHARE, when set, wins.  Not bitwise (the CPU computes those experts), like the share itself.
+inline double shortpf_share() {
+    static const double v = [] {
+        const char* e = std::getenv("STRATA_SHORTPF");
+        if (e == nullptr || std::atoi(e) == 0) return -2.0;
+        const char* f = std::getenv("STRATA_SHORTPF_SHARE");
+        const double share = f != nullptr ? std::clamp(std::atof(f), 0.0, 1.0) : 0.8;
+        std::fprintf(stderr, "prefill: STRATA_SHORTPF=1: the CPU takes %.2f of the non-resident experts few tokens route to "
+                             "in short prompt chunks (STRATA_PREFILL_CPU_SHARE_MAX, default 3072; layer split too; "
+                             "not bitwise)\n", share);
+        return share;
+    }();
+    return v;
+}
 inline double cpu_share_explicit() {   // -2: the variable is not set; -1: measured
     static const double v = [] {
         const char* e = std::getenv("STRATA_PREFILL_CPU_SHARE");
-        if (e == nullptr) return -2.0;
+        if (e == nullptr) return shortpf_share();
         if (std::strcmp(e, "auto") == 0) return -1.0;
         return std::clamp(std::atof(e), 0.0, 1.0);
     }();
@@ -2941,7 +2958,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 std::fprintf(stderr, "strata pf-step: chunk from token %lld, layer %lld: %s took %.0f ms (%s / %s)\n",
                              (long long) p0, (long long) layer, what, ms, cudaGetErrorString(a), cudaGetErrorString(b));
         };
+        // STRATA_PREFILL_LAYER_TIMES=1 (diagnosis): the host clock at the start of every layer (a MoE layer syncs the
+        // stream mid-layer, so the gaps are real time); printed after the chunk's last layer
+        static const bool layer_times = std::getenv("STRATA_PREFILL_LAYER_TIMES") != nullptr;
+        std::vector<double> lt_ms;
+        const auto lt_t0 = Clock::now();
         for (int64_t l = LB; l < LE; ++l) {
+            if (layer_times) lt_ms.push_back(std::chrono::duration<double, std::milli>(Clock::now() - lt_t0).count());
             core::progress_beat();   // the serve watchdog: a prompt chunk of 8192 tokens is still moving
             if (l > LB) pf_step("reading the prompt (batched, step sync): the experts and the rest of layer", l - 1);
             core::progress_at("reading the prompt (batched): layer", l, p0);   // #251: a stall names layer and chunk
@@ -4659,6 +4682,17 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 if (steered && !cv_fused)   // --control-vector-scaled
                     strata::kernels::cvec_apply(m.R, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
             }
+        }
+        if (layer_times) {
+            lt_ms.push_back(std::chrono::duration<double, std::milli>(Clock::now() - lt_t0).count());
+            std::string ls;
+            char lb[32];
+            for (size_t i = 1; i < lt_ms.size(); ++i) {
+                std::snprintf(lb, sizeof lb, " %.0f", lt_ms[i] - lt_ms[i - 1]);
+                ls += lb;
+            }
+            std::fprintf(stderr, "strata prefill layers: %lld tokens, layers %lld-%lld, host ms per layer:%s\n",
+                         (long long) T, (long long) LB, (long long) LE - 1, ls.c_str());
         }
         if (!ple_land()) return false;   // a stage that ends before layer 1: the rows land anyway, the next gather starts
         if (issuer.joinable()) {

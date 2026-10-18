@@ -33,6 +33,12 @@ for arm in "$@"; do
     xtcpu) run xtcpu --force-sr 0 --env "STRATA_PREFILL_CPU_SHARE=auto STRATA_PREFILL_TIMING=1 STRATA_DBG_CPU_GATE=1" ;;
     fx0)   run fx0 --force-sr 0 --fixed ;;
     fxcpu) run fxcpu --force-sr 0 --fixed --env "STRATA_PREFILL_CPU_SHARE=auto" ;;
+    z0)    run z0 --force-sr 0 ;;
+    zs)    run zs --force-sr 0 --env "STRATA_SHORTPF=1" ;;
+    zs10)  run zs10 --force-sr 0 --env "STRATA_SHORTPF=1 STRATA_SHORTPF_SHARE=1.0" ;;
+    zlt)   run zlt --force-sr 0 --env "STRATA_SHORTPF=1 STRATA_PREFILL_LAYER_TIMES=1 STRATA_PREFILL_TIMING=1" ;;
+    fz0)   run fz0 --force-sr 0 --fixed ;;
+    fzs)   run fzs --force-sr 0 --fixed --env "STRATA_SHORTPF=1" ;;
     xhelp) run xhelp --force-sr 0 --env "STRATA_PREFILL_HELP=1" ;;
     xhelpsm) run xhelpsm --force-sr 0 --env "STRATA_PREFILL_HELP=1 STRATA_PREFILL_STREAM_MIN=256" ;;
     x0)    run x0 --force-sr 0 ;;                                                  # the prompt path, plain
