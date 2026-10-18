@@ -1850,9 +1850,17 @@ void MtpDrafter::chain_cut() {
 
 int MtpDrafter::chain_outputs_ready(std::string& err) {
     if (!chain_live_) return chain_n_;
-    const OnDevice on_device(device_);
+    // lab/pipeline2 0b (STRATA_P2_FLUSH_NOSWITCH=1): only event queries and mapped reads here: no device switch
+    const bool nosw = p2_flush_noswitch() && !p2_noswitch_refused();
+    if (nosw && p2_switch_stat()) p2_switch().noswitch.fetch_add(1, std::memory_order_relaxed);
+    const OnDevice on_device(nosw ? -1 : device_);
     while (steps_seen_ < std::min(chain_early_, chain_launched_)) {
-        const cudaError_t q = cudaEventQuery(ev_step_[steps_seen_]);
+        cudaError_t q = cudaEventQuery(ev_step_[steps_seen_]);
+        if (nosw && q != cudaSuccess && q != cudaErrorNotReady) {   // refused without the device: ask again under it
+            p2_noswitch_refuse(q);
+            const OnDevice again(device_);
+            q = cudaEventQuery(ev_step_[steps_seen_]);
+        }
         if (q == cudaErrorNotReady) break;
         if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
         chain_tok_[steps_seen_] = ((volatile int32_t*) h_out_)[steps_seen_];
@@ -1865,8 +1873,15 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
 int MtpDrafter::chain_poll(std::string& err) {
     if (!chain_live_) return 1;
     if (chain_launched_ < chain_n_) return 0;   // STRUCT-A: not whole yet (chain_extend or chain_cut first)
-    const OnDevice on_device(device_);
-    const cudaError_t q = cudaEventQuery(ev_chain_);
+    const bool nosw = p2_flush_noswitch() && !p2_noswitch_refused();   // lab/pipeline2 0b, as chain_outputs_ready
+    if (nosw && p2_switch_stat()) p2_switch().noswitch.fetch_add(1, std::memory_order_relaxed);
+    const OnDevice on_device(nosw ? -1 : device_);
+    cudaError_t q = cudaEventQuery(ev_chain_);
+    if (nosw && q != cudaSuccess && q != cudaErrorNotReady) {   // refused without the device: ask again under it
+        p2_noswitch_refuse(q);
+        const OnDevice again(device_);
+        q = cudaEventQuery(ev_chain_);
+    }
     if (q == cudaErrorNotReady) return 0;
     chain_live_ = false;
     if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }

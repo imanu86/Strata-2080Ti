@@ -15303,6 +15303,11 @@ int main(int argc, char** argv) {
                     return v != nullptr ? std::atoi(v) != 0 : pipe_elastic_env();
                 }();
                 const Clock::time_point pl_t0 = Clock::now();
+                if (strata::core::p2_switch_stat()) {   // lab/pipeline2 0b: count this decode's switches only
+                    auto& s0 = strata::core::p2_switch();
+                    s0.calls = 0; s0.ns = 0; s0.max_ns = 0; s0.slow = 0; s0.noswitch = 0; s0.refused = 0;
+                    for (int k = 0; k < 2; ++k) { s0.launches[k] = 0; s0.launch_ns[k] = 0; s0.launch_max_ns[k] = 0; }
+                }
                 for (int st = 0; st < 2; ++st)
                     for (int par = 0; par < 2; ++par) g_pl_diag.v[st][par] = PV[st][par];
                 strata::core::diag_pipeline_fn().store(&pl_diag_print);
@@ -15866,6 +15871,25 @@ int main(int argc, char** argv) {
                                      (long long) sa_placed[2], (long long) sa_tails[2], (long long) sa_drops[2],
                                      (long long) sa_placed[3], (long long) sa_tails[3], (long long) sa_drops[3],
                                      (long long) sa_chains, (long long) sa_cut);
+                    if (strata::core::p2_switch_stat()) {   // lab/pipeline2 0b: the host's device switches this request
+                        auto& s = strata::core::p2_switch();
+                        const long long c = s.calls.exchange(0), ns = s.ns.exchange(0), mx = s.max_ns.exchange(0),
+                                        sl = s.slow.exchange(0), nw = s.noswitch.exchange(0), rf = s.refused.exchange(0);
+                        const double nw_ = dec_windows > 0 ? (double) dec_windows : 1.0;
+                        std::fprintf(stderr, "strata pipeline2 switches: %lld device switches (%.1f per window), %.3f ms "
+                                             "host in them per window, longest %.3f ms, %lld over 0.1 ms; polls without "
+                                             "a switch %lld (%s), refused %lld\n",
+                                     c, c / nw_, ns / 1e6 / nw_, mx / 1e6, sl, nw,
+                                     strata::core::p2_flush_noswitch() ? "STRATA_P2_FLUSH_NOSWITCH=1" : "off", rf);
+                        for (int k = 0; k < 2; ++k) {   // tappa 1: host time in the window graphs' cudaGraphLaunch
+                            const long long n = s.launches[k].exchange(0), lns = s.launch_ns[k].exchange(0),
+                                            lmx = s.launch_max_ns[k].exchange(0);
+                            if (n > 0)
+                                std::fprintf(stderr, "strata pipeline2 launches: CUDA%d %lld window graph launches, %.3f ms "
+                                                     "host each in launch + submit (%.3f ms per window), longest %.3f ms\n",
+                                             k, n, lns / 1e6 / (double) n, lns / 1e6 / nw_, lmx / 1e6);
+                        }
+                    }
                     std::string cal;
                     char b[48];
                     for (int i = 0; i < 10; ++i)
