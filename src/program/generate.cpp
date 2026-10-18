@@ -338,6 +338,20 @@ static const char* pipe_dbg_env(const char* name) {
     return on ? std::getenv(name) : nullptr;
 }
 
+// fork (Daily dd8eba52 + 1541e340 + a0ebf745): the elastic cache of CUDA0's stage beside --pipeline-windows across GPUs.
+// With two cards and --pipeline-windows it is ON by default (main sets g_pipe_elastic_auto before the first call);
+// STRATA_PIPELINE_ELASTIC=0 turns it off, =1 forces it on.  Its tail moves only at a gap of stage 0 (see el_gap).
+static bool g_pipe_elastic_auto = false;
+static bool pipe_elastic_env() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_PIPELINE_ELASTIC");
+        if (v != nullptr && v[0] == '0') return false;
+        if (v != nullptr && v[0] == '1') return true;
+        return g_pipe_elastic_auto;
+    }();
+    return on;
+}
+
 // lab bench (deterministic work), STRATA_FORCE_IDS=<file>[;<file>...] (opt-in): the k-th generation request of the
 // process (GEN/GENI, counted from 0) generates exactly the token ids of the k-th file - int32 little-endian, or a text
 // list (decimal ids separated by spaces, commas, newlines, brackets) - whatever the target picks.  Requests past the
@@ -6104,8 +6118,22 @@ int main(int argc, char** argv) {
         // page back while the verify graph spun on a host flag never finished.  So the slots are zeroed and the
         // free figure read again; while it is short of the reserve the cache is reopened smaller.
         // STRATA_TEST_CACHE_FAIL=N: the first N opens fail as an out-of-commit cudaMalloc does (tests the retry)
-        if (o.elastic && (!o.serve || multi_gpu || o.resident_cpu_experts))
-            std::fprintf(stderr, "strata: elastic cache requires single-GPU serve without resident CPU complement; using fixed cache\n");
+        // fork: under a layer split only CUDA0's stage (the card with the display) is elastic; the later stages keep
+        // fixed caches.  Not with windows pipelined across the stages.
+        // upsync 0.1.42: a layer split with --batch now pipelines one group per stage by default, resolved after the
+        // check where --elastic is read: the same rule as there, on the resolved number
+        if (o.elastic && o.batch != 0 && o.batch_groups > 1) {
+            std::fprintf(stderr, "strata: elastic cache is not validated with --batch-groups; using fixed cache\n");
+            o.elastic = false;
+        }
+        // (fork: beside --pipeline-windows across the cards too, by default - see pipe_elastic_env; then the resident RAM
+        // mode keeps it as well: an expert that leaves the tail is computed by the CPU from the RAM copy, or read from
+        // the model files when the copy does not hold it)
+        g_pipe_elastic_auto = multi_gpu && o.pipeline_windows > 0;   // before the first pipe_elastic_env()
+        const bool el_split_ok = !multi_gpu || o.pipeline_windows == 0 || pipe_elastic_env();
+        const bool el_res_ok = !o.resident_cpu_experts || pipe_elastic_env();
+        if (o.elastic && (!o.serve || !el_split_ok || !el_res_ok))
+            std::fprintf(stderr, "strata: elastic cache requires serve, no --pipeline-windows across GPUs and no resident CPU complement; using fixed cache\n");
         int fake_fails = std::getenv("STRATA_TEST_CACHE_FAIL") ? std::atoi(std::getenv("STRATA_TEST_CACHE_FAIL")) : 0;
         int failed = 0;
         int zero_reads = 0;
@@ -6116,7 +6144,7 @@ int main(int argc, char** argv) {
                 --fake_fails;
                 err = "ExpertCache: cudaMalloc failed: out of memory (STRATA_TEST_CACHE_FAIL)";
             } else {
-                if (!sized_slots.empty() && o.elastic && o.serve && !multi_gpu && !o.resident_cpu_experts) {
+                if (!sized_slots.empty() && o.elastic && o.serve && el_split_ok && el_res_ok) {
                     // --elastic: the elastic arena reserves the whole card's address range; without VMM, the plain one
                     size_t fb = 0, tb = 0;
                     cudaMemGetInfo(&fb, &tb);
@@ -7365,15 +7393,27 @@ int main(int argc, char** argv) {
     // --elastic: the TWO-ZONE cache.  Slots [0, el_core) are the core - filled from the profile at startup, never
     // picked by the adaptive swaps to leave, never shrunk, never lent; the tail after it is the elastic zone.
     int64_t el_core = 0;
-    if (o.elastic && o.serve && xcache.elastic() && !multi_gpu && xcache.slot_offsets() != nullptr) {
+    if (o.elastic && o.serve && xcache.elastic() && (!multi_gpu || o.pipeline_windows == 0 || pipe_elastic_env()) &&
+        xcache.slot_offsets() != nullptr) {
         const uint64_t* off = xcache.slot_offsets();
         const int64_t S = xcache.slots();
+        // fork: beside the pipeline (pipe_elastic_env) the tail defaults to STRATA_PIPELINE_ELASTIC_TAIL_MIB (1536): only a
+        // small part of CUDA0's cache moves, the core stays mapped
+        const int64_t pe_tail = [] {
+            const char* v = std::getenv("STRATA_PIPELINE_ELASTIC_TAIL_MIB");
+            return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 1536;
+        }();
         const uint64_t tail = o.elastic_tail_mib >= 0 ? (uint64_t) o.elastic_tail_mib << 20
-                                                      : std::min<uint64_t>(6144ull << 20, off[S] / 2);
+                            : pipe_elastic_env() ? std::min<uint64_t>((uint64_t) pe_tail << 20, off[S] / 2)
+                                                 : std::min<uint64_t>(6144ull << 20, off[S] / 2);
         int64_t c = S;
         while (c > 0 && off[S] - off[c - 1] <= tail) --c;   // the smallest core whose tail fits in `tail`
         el_core = tail == 0 ? 0 : c;
     }
+    // fork (Daily 12a6f553): beside the pipeline the prompt path may borrow the core too - nothing decodes while a prompt
+    // is read, and the lent slots are refilled before the decode as the tail's are (with only the 1.5 GiB tail lent the
+    // 131k prompt read fell from ~85 s to 134 s)
+    const int64_t el_lend_floor = pipe_elastic_env() ? 0 : el_core;
     // The prompt path's chunk and the slots it borrows for its buffers: the requested chunk halved until it fits,
     // or with --prefill auto the largest chunk whose buffers take at most kAutoLendPct % of the slots (a
     // lent slot's expert is streamed during the prompt and refilled after it; measured on a 12 GB card, 32K Q2_0
@@ -7455,7 +7495,7 @@ int main(int argc, char** argv) {
     };
     auto plan_lend = [&](int64_t& chunk) -> int64_t {
         auto slots_for = lend_slots;
-        const int64_t tail_slots = xcache.slots() - el_core;   // --elastic: only the tail is lent (all of it without a core)
+        const int64_t tail_slots = xcache.slots() - el_lend_floor;   // --elastic: only the tail is lent (all of it without a core)
         // 0.1.39's list with its ring (also the size up to which a prompt keeps that ring under #583)
         auto old_rule = [&]() -> int64_t {
             strata::prefill::Prefill::set_ring_budget(0, 0);
@@ -8143,7 +8183,7 @@ int main(int argc, char** argv) {
             // (no split) this reduces to plan_lend exactly, so the single-GPU loan is unchanged from main.
             auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
                 const int64_t k = part_slots(p, c);
-                if (p.cache == &xcache && k > xcache.slots() - el_core) return false;
+                if (p.cache == &xcache && k > xcache.slots() - el_lend_floor) return false;
                 if (k <= 0 || k + 128 > p.cache->slots()) return false;
                 return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
             };
@@ -8179,7 +8219,7 @@ int main(int argc, char** argv) {
                     int64_t budget = std::max<int64_t>(0, std::min(p.cache->slots() - 128,
                                                                   kAutoLendPct * p.cache->slots() / 100));
                     // --elastic: the two-zone cache lends only its tail (fits_one refuses the core as well)
-                    if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_core));
+                    if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_lend_floor));
                     const uint64_t avail = part_bytes(p, (int32_t) (p.cache->slots() - budget));
                     const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
                     room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
@@ -8386,7 +8426,11 @@ int main(int argc, char** argv) {
         // the prompt path's own buffers (no loan) are not priced into them: with the whole arena pinned (#253) a
         // `--prefill auto` split could stop at start with "device buffers for a chunk of 2048 tokens do not fit".  A
         // chunk that does not fit is tried again one size smaller, down to 512 tokens (a smaller chunk only reads slower).
-        const int64_t sp_chunk_max = (o.elastic && xcache.elastic() && o.prefill_auto && borrow != nullptr) ? o.prefill_auto_max : 0;
+        // fork: the largest chunk the elastic cache may later lend CUDA0's prompt path.  Under a layer split the later
+        // stages' prompt paths are laid out for the start's chunk only, so the chunk may shrink but never grow past it
+        // (a growth to more than the start's 6656 failed a later stage's relayout: "a chunk of at most 6656")
+        const int64_t sp_chunk_max = (o.elastic && xcache.elastic() && o.prefill_auto && borrow != nullptr && !multi_gpu)
+                                         ? o.prefill_auto_max : 0;
         auto init_prompt_paths = [&]() -> int {   // 0: ready; 1: failed (err set); 2: failed with "do not fit"
             for (size_t i = 0; i < stages.size(); ++i) {
                 GpuStage& st = *stages[i];
@@ -9886,6 +9930,14 @@ int main(int argc, char** argv) {
         std::function<void()> adapt_fence;
         int64_t adapt_nswaps = 0;   // the blocking tier's swaps chosen, cumulative (the decode timing line's swaps/window)
         // the VRAM tier follows the conversation (the same rule as the speculative loop below)
+        // fork (Daily 8b9c342b, 1541e340): STRATA_ELASTIC_CORE_ADAPT=1, and beside the pipeline by default - the core keeps
+        // its size and mapping (never shrunk, never lent to the decode) but its experts are swap victims like the tail's
+        static const bool core_adapt = [] {
+            const char* v = std::getenv("STRATA_ELASTIC_CORE_ADAPT");
+            const bool on = (v != nullptr && v[0] == '1') || pipe_elastic_env();
+            if (on) std::fprintf(stderr, "strata serve: STRATA_ELASTIC_CORE_ADAPT: the core's experts are swappable\n");
+            return on;
+        }();
         auto adapt = [&]() -> bool {
             if (!pending.empty()) return true;   // the previous swaps are still in flight
             if (remote_opt && !remote_opt->adapt(drive.d.usage, host_res, pending, o.adapt_swaps, *srcp)) return false;
@@ -9899,7 +9951,10 @@ int main(int argc, char** argv) {
                 const int32_t* r = host_res.data() + l * g.n_expert;
                 for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {
                     if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
-                    else if (r[e] >= el_core) vict.emplace_back(u[e], e);   // --elastic: the core never leaves
+                    // --elastic: the core never leaves - unless core_adapt; beside the pipeline el_core counts CUDA0's
+                    // slots and a later stage's layers hold slots of their own cache
+                    else if (r[e] >= el_core || core_adapt || (pipe_elastic_env() && multi_gpu && stage_of(l) != 0))
+                        vict.emplace_back(u[e], e);
                 }
                 if (cand.empty() || vict.empty()) continue;
                 std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
@@ -10054,7 +10109,12 @@ int main(int argc, char** argv) {
         // that shrank too far lends a smaller chunk, the same rule as plan_lend).  Run only where nothing is in
         // flight: a request's start (nothing lent yet) and the decode's safe point (window, commit, draft and the
         // adaptive swaps all finished).
-        const bool el_on = o.elastic && xcache.elastic() && d_res != nullptr && !multi_gpu && !host_res.empty();
+        const bool el_on = o.elastic && xcache.elastic() && d_res != nullptr &&
+                           (!multi_gpu || o.pipeline_windows == 0 || pipe_elastic_env()) &&
+                           !host_res.empty();
+        // under a split host_res holds slot numbers of whichever cache owns the layer: the elastic cache is CUDA0's,
+        // so it shrinks and grows over the layers of the first stage only
+        auto el_layer = [&](int64_t l) { return !multi_gpu || stage_of(l) == 0; };
         const int64_t el_reserve = (int64_t) o.elastic_reserve_mib << 20;
         const int64_t el_hyst_min = 192ll << 20;   // growth only past the reserve plus max(this, the measured noise)
         static const bool el_trace = std::getenv("STRATA_ELASTIC_TRACE") != nullptr;
@@ -10072,6 +10132,7 @@ int main(int argc, char** argv) {
         Clock::time_point el_last_grow{}, el_last_shrink{};
         int el_backoff = 1;
         auto el_free = []() -> int64_t {
+            const strata::core::OnDevice on(0);   // the elastic cache's card (CUDA0)
             size_t f = 0, t = 0;
             return cudaMemGetInfo(&f, &t) == cudaSuccess ? (int64_t) f : -1;
         };
@@ -10101,7 +10162,7 @@ int main(int argc, char** argv) {
             const bool have_usage = !drive.d.usage.empty();
             std::vector<std::vector<std::pair<float, int32_t>>> keep((size_t) g.n_layers), tail((size_t) g.n_layers);
             for (int64_t l = 0; l < g.n_layers; ++l)
-                for (int32_t ex = 0; ex < (int32_t) g.n_expert; ++ex) {
+                for (int32_t ex = 0; ex < (int32_t) g.n_expert && el_layer(l); ++ex) {
                     const size_t i = (size_t) (l * g.n_expert + ex);
                     if (host_res[i] < el_core) continue;   // not resident, or in the core (never displaced)
                     const float u = have_usage ? drive.d.usage[i] : 0.0f;
@@ -10148,12 +10209,20 @@ int main(int argc, char** argv) {
         // GROW by at most `room` bytes: the missing experts the conversation routes most (usage >= 2, as the adaptive
         // tier's candidates), then the profile's order for what it has not asked for yet; filled on the refill
         // stream and published like the adaptive swaps (apply_pending), so the windows never wait for them
-        auto el_grow = [&](int64_t room, std::string& e) -> bool {
+        // fork (Daily 1541e340): the pipelined decode's growth, at a gap of stage 0 (no window of CUDA0 in flight): `el_fill`
+        // gets the fills (residency index, slot), published by the loop once `el_fill_ev` has passed; never a device-wide wait
+        std::vector<std::pair<int32_t, int32_t>> el_fill;
+        cudaEvent_t el_fill_ev = nullptr;
+        // the asynchronous tier's round (set where it is built): the elastic cache acts only between rounds
+        std::function<bool()> el_tier_busy;
+        bool el_hold_tier = false;   // no round of either tier starts while a growth's fills are unpublished
+        auto el_grow = [&](int64_t room, std::string& e, bool pipe_gap = false) -> bool {
             const auto& lay = strata::kernels::cpu::expert_layout();
             std::vector<std::pair<float, int32_t>> cand;
             if (!drive.d.usage.empty())
                 for (size_t i = 0; i < host_res.size(); ++i)
-                    if (host_res[i] < 0 && drive.d.usage[i] >= 2.0f) cand.emplace_back(drive.d.usage[i], (int32_t) i);
+                    if (host_res[i] < 0 && drive.d.usage[i] >= 2.0f && el_layer((int64_t) i / g.n_expert))
+                        cand.emplace_back(drive.d.usage[i], (int32_t) i);
             std::sort(cand.begin(), cand.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
             std::vector<char> chosen(host_res.size(), 0);
             std::vector<int32_t> pick;
@@ -10174,7 +10243,7 @@ int main(int argc, char** argv) {
             for (const auto& pr : profile) {
                 if (used + (int64_t) lay.max_blob > room) break;
                 const int32_t i = (int32_t) (pr.first * g.n_expert + pr.second);
-                if (host_res[(size_t) i] >= 0 || chosen[(size_t) i]) continue;
+                if (host_res[(size_t) i] >= 0 || chosen[(size_t) i] || !el_layer(pr.first)) continue;
                 if (!take(i)) break;
             }
             if (pick.empty()) return true;
@@ -10184,8 +10253,10 @@ int main(int argc, char** argv) {
                 e.clear();
                 return true;
             }
-            // under WDDM the free figure is only trustworthy once the pages are written: `grow` zeroed them
-            cudaDeviceSynchronize();
+            // under WDDM the free figure is only trustworthy once the pages are written: `grow` zeroed them (the
+            // pipelined decode: the legacy stream's memset only - the stages' streams hold windows and commits)
+            if (pipe_gap) cudaStreamSynchronize(nullptr);
+            else cudaDeviceSynchronize();
             if (el_free() < el_reserve) {
                 xcache.elastic_shrink(first, e);
                 std::fprintf(stderr, "strata elastic: growth undone, the VRAM was not really free\n");
@@ -10200,9 +10271,20 @@ int main(int argc, char** argv) {
                     e = "elastic cache: a fill copy failed";
                     return false;
                 }
-                pending.emplace_back(i, (int32_t) (first + (int64_t) j));
+                if (pipe_gap) el_fill.emplace_back(i, (int32_t) (first + (int64_t) j));
+                else pending.emplace_back(i, (int32_t) (first + (int64_t) j));
             }
-            cudaEventRecord(adapt_ev, adapt_stream);
+            if (pipe_gap) {
+                if (el_fill_ev == nullptr && cudaEventCreateWithFlags(&el_fill_ev, cudaEventDisableTiming) != cudaSuccess) {
+                    e = "elastic cache: event creation failed";
+                    return false;
+                }
+                cudaEventRecord(el_fill_ev, adapt_stream);
+                (void) cudaStreamQuery(adapt_stream);   // WDDM: submit now
+                el_hold_tier = true;
+            } else {
+                cudaEventRecord(adapt_ev, adapt_stream);
+            }
             // a bigger cache may lend a bigger chunk (the prompt reads faster)
             el_replan_lend();
             std::fprintf(stderr, "strata elastic: +%lld experts (%.0f MiB) -> %lld slots, %.2f GiB; %lld MiB free\n",
@@ -10213,12 +10295,16 @@ int main(int argc, char** argv) {
         // one step of the policy: shrink at once below the reserve; grow once the room has stayed for stable_ms.  At a
         // request's start it only shrinks: a growth's fills land asynchronously in the tail, and the prompt is about
         // to borrow the tail - the decode's safe point grows, and apply_pending publishes the fills before any lend
-        auto elastic_step = [&](bool request_start, std::string& e) -> bool {
+        // fork (Daily dd8eba52): with `defer` the step only decides - the same bookkeeping, no device work and no
+        // apply_pending - and leaves its action in *defer; the pipelined decode runs it at a gap of stage 0 (el_gap)
+        struct ElPlan { int kind = 0; int64_t arg = 0; };   // kind 1: shrink to `arg` slots; 2: grow by `arg` bytes
+        auto elastic_step = [&](bool request_start, std::string& e, ElPlan* defer = nullptr) -> bool {
             if (!el_on) return true;
+            if (el_tier_busy && el_tier_busy()) return true;   // between the asynchronous tier's rounds only
             const Clock::time_point t = Clock::now();
             if (!request_start && t - el_last < std::chrono::milliseconds(o.elastic_period_ms)) return true;
             el_last = t;
-            apply_pending(true);
+            if (defer == nullptr) apply_pending(true);
             const int64_t fr = el_free();
             if (fr < 0) return true;
             if (el_trace)
@@ -10244,6 +10330,7 @@ int main(int argc, char** argv) {
                     el_backoff = std::min(el_backoff * 2, 8);   // a shrink right after a growth: it grew too far
                 el_last_shrink = t;
                 el_seen.clear();
+                if (defer != nullptr) { *defer = ElPlan{1, n}; return true; }
                 return el_shrink(n, e);
             }
             if (el_last_shrink.time_since_epoch().count() != 0 && t - el_last_shrink > std::chrono::minutes(5))
@@ -10266,6 +10353,7 @@ int main(int argc, char** argv) {
             el_stable_since = t;
             el_last_grow = t;
             el_seen.clear();
+            if (defer != nullptr) { *defer = ElPlan{2, std::min(spare, el_step_max)}; return true; }
             return el_grow(std::min(spare, el_step_max), e);
         };
         if (el_on) {
@@ -10554,6 +10642,7 @@ int main(int argc, char** argv) {
                 switch (astate) {
                 case AState::Idle:
                     if (drain || a_win - a_last < (int64_t) o.adapt_every) return true;
+                    if (el_hold_tier) return true;   // fork: a growth of the elastic tail is being published
                     a_last = a_win;
                     ++a_rounds;
                     a_t0 = Clock::now();
@@ -10689,6 +10778,7 @@ int main(int argc, char** argv) {
         // --pipeline-windows 2: the loop has drained (nothing in flight on either card): what waits for a gap goes now,
         // and the round in flight goes on unfenced (a_pl_idle unset) from the next tick, the next request's drain.  The
         // job's work is the host's alone, so the wait for it ends.
+        if (ajob) el_tier_busy = [&]() { return astate != AState::Idle || !ajob->idle(); };
         auto a_pl_settle = [&]() {
             if (!ajob || !a_pl_idle) return;
             ajob->wait();
@@ -14117,6 +14207,13 @@ int main(int argc, char** argv) {
                 bool b_done = false;     // B has been made from the chain in flight
                 int chain_n = 0;
                 int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
+                // fork (Daily 1541e340): the elastic tail beside the windows, at the gaps of stage 0 (see el_gap)
+                int64_t pl_el_shrinks = 0, pl_el_grows = 0;
+                double pl_el_ms = 0.0;
+                static const int64_t pl_el_step = [] {   // a growth at a gap moves at most this much (MiB)
+                    const char* v = std::getenv("STRATA_PIPELINE_ELASTIC_STEP_MIB");
+                    return (int64_t) (v != nullptr ? std::max(64, std::atoi(v)) : 128) << 20;
+                }();
                 std::vector<int32_t> outp(8, 0);
                 bool ending = false;
                 A.T = 1;
@@ -14263,6 +14360,77 @@ int main(int argc, char** argv) {
                 // --adapt-async: the asynchronous tier beside the windows (see adapt_tick).  A stage is idle when neither
                 // of its verifiers has a window in flight (a commit or a snapshot copy waits on nothing of the host's)
                 if (ajob) a_pl_idle = [&](int st) { return !PV[st][0]->in_flight() && !PV[st][1]->in_flight(); };
+                // fork (Daily 1541e340): the elastic tail of CUDA0's cache beside the windows, without a drain.  Every CUDA
+                // call of it reaches CUDA0 at a GAP of stage 0 - neither of its verifiers has a window in flight (a commit
+                // or a snapshot copy waits on nothing of the host's) - so no driver call meets a window that spins on this
+                // thread, and every window planned before has completed.  Windows plan each layer from host_res when that
+                // layer is served, and the later stages never read CUDA0's slots.  So:
+                //   - SHRINK: the tail's experts leave host_res (the CPU computes them) and CUDA0's residency table is
+                //     rewritten, then the tail is unmapped - all at one gap;
+                //   - GROW: mapped, zeroed and filled at a gap (at most STRATA_PIPELINE_ELASTIC_STEP_MIB, 128), published
+                //     into host_res once the fills have landed: a window never sees a slot before its expert is there.
+                // The core is never remapped.  Either tier acts only between its rounds, and starts none while a growth
+                // is unpublished (el_hold_tier).  False (with err) when a step failed.
+                bool el_res_dirty = false;   // every residency table uploaded again once the loop has drained
+                auto el_gap = [&]() -> bool {
+                    if (!el_on || PV[0][0]->in_flight() || PV[0][1]->in_flight()) return true;
+                    if (!el_fill.empty()) {   // a growth's fills: published once landed
+                        const cudaError_t q = cudaEventQuery(el_fill_ev);
+                        if (q == cudaErrorNotReady) return true;
+                        if (q != cudaSuccess) { err = "elastic cache: a fill copy failed"; return false; }
+                        for (const auto& [i, slot] : el_fill) {
+                            host_res[(size_t) i] = slot;
+                            srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
+                        }
+                        el_fill.clear();
+                        el_hold_tier = false;
+                        el_res_dirty = true;
+                        const strata::core::OnDevice on(0);   // the elastic cache's card (CUDA0)
+                        if (res_put(d_res) != cudaSuccess) { err = "elastic cache: the residency table upload failed"; return false; }
+                        return true;
+                    }
+                    // between the tier's rounds only: the blocking one (its thread joined by pl_adapt, nothing pending or
+                    // waiting for its exchange fence), or the asynchronous one (el_tier_busy, inside elastic_step)
+                    if (!ajob && (pl_adapt_thr.joinable() || !pending.empty() || exch_wait)) return true;
+                    ElPlan plan;
+                    if (!elastic_step(false, err, &plan)) return false;
+                    if (plan.kind == 0) return true;
+                    const Clock::time_point t0 = Clock::now();
+                    const strata::core::OnDevice on(0);   // the elastic cache's card (CUDA0)
+                    if (plan.kind == 1) {
+                        const int64_t S = xcache.slots(), n = plan.arg;
+                        if (n >= S) return true;
+                        int dropped = 0;
+                        for (size_t i = 0; i < host_res.size(); ++i)
+                            if (host_res[i] >= n && el_layer((int64_t) i / g.n_expert)) {
+                                host_res[i] = strata::core::kNotResident;
+                                ++dropped;
+                            }
+                        std::atomic_thread_fence(std::memory_order_seq_cst);
+                        el_res_dirty = true;
+                        if (res_put(d_res) != cudaSuccess) { err = "elastic cache: the residency table upload failed"; return false; }
+                        if (!xcache.elastic_shrink(n, err)) return false;
+                        el_replan_lend();
+                        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                        std::fprintf(stderr, "strata elastic: -%lld slots at a gap of stage 0 (%d experts to the CPU) -> %lld "
+                                             "slots, %.2f GiB; %lld MiB free; %.2f ms\n", (long long) (S - n), dropped,
+                                     (long long) xcache.slots(), xcache.gib(), (long long) (el_free() >> 20), ms);
+                        ++pl_el_shrinks;
+                        pl_el_ms += ms;
+                    } else {
+                        const int64_t before = xcache.slots();
+                        if (!el_grow(std::min<int64_t>(plan.arg, pl_el_step), err, true)) return false;
+                        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                        if (xcache.slots() != before) {
+                            std::fprintf(stderr, "strata elastic: the growth above at a gap of stage 0 took %.2f ms (published "
+                                                 "once its fills land)\n", ms);
+                            ++pl_el_grows;
+                        }
+                        pl_el_ms += ms;
+                    }
+                    tre("EL", A.seq, plan.kind);
+                    return true;
+                };
                 double a_poll_ms = 0.0;
                 auto pl_adapt = [&]() -> bool {   // the blocking tier (--adapt-async 0)
                     if (pl_adapt_thr.joinable() && pl_adapt_done.load()) {
@@ -14272,7 +14440,7 @@ int main(int argc, char** argv) {
                     if (pl_adapt_thr.joinable()) return true;   // still adapting
                     pl_apply();
                     if (!drive.d.usage.empty() && o.adapt_every > 0 && (rounds % o.adapt_every) == 0 && pending.empty() &&
-                        !exch_wait) {
+                        !el_hold_tier && !exch_wait) {
                         pl_adapt_done = false;
                         pl_adapt_thr = std::thread([&] { strata::aux_cpus::pin_current_thread(); pl_adapt_ok = adapt(); pl_adapt_done = true; });
                     }
@@ -14371,6 +14539,7 @@ int main(int argc, char** argv) {
                         } else if (!err.empty()) return die(err);
                     }
                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
+                    if (!el_gap()) return die(err);   // fork: the elastic tail at a gap of stage 0
                     // ---- a wrong speculative window has stopped (it is launched on no further stage once doomed):
                     // every front stage it ran on back to the verified window's real commit
                     if (doomed && !D.fl) {
@@ -14485,6 +14654,7 @@ int main(int argc, char** argv) {
                         if (st == 0 && force_win != nullptr) force_window(A.p, A.tok[0], A.T, A.tok, S);   // lab bench replay
                         if (st == 0 && A.p + A.T > o.max_context) { ending = true; continue; }
                         if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
+                        if (st == 0 && !el_gap()) return die(err);   // fork: the elastic tail
                         if (!snap_take(st, A.seq)) return die("the GDN snapshot failed");
                         if (!VF(st, A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.fl = true;
@@ -14503,6 +14673,7 @@ int main(int argc, char** argv) {
                         if (st == 0 && force_win != nullptr) force_window(B.p, B.tok[0], B.T, B.tok, S);   // lab bench replay
                         if (st > 0 || (B.p_on >= theta && B.p + B.T <= o.max_context)) {
                             if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
+                            if (st == 0 && !el_gap()) return die(err);   // fork: the elastic tail
                             PlSnap& sn = pl_snaps[(size_t) st];
                             cudaStream_t cs = pl_stream[(size_t) st];
                             {
@@ -14664,6 +14835,20 @@ int main(int argc, char** argv) {
                 // unfenced (the INVARIANT at pl_drain: a checkpoint, a park, the serial loop and the next request find
                 // nothing pipelined in flight) at the next tick, the next request's drain
                 a_pl_settle();
+                if (!el_fill.empty()) {   // fork: nothing in flight - the growth's fills land and are published
+                    if (cudaEventSynchronize(el_fill_ev) != cudaSuccess) {
+                        std::printf("ERR elastic cache: a fill copy failed\n");
+                        return 1;
+                    }
+                    for (const auto& [i, slot] : el_fill) {
+                        host_res[(size_t) i] = slot;
+                        srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
+                    }
+                    el_fill.clear();
+                    el_hold_tier = false;
+                    el_res_dirty = true;
+                }
+                if (el_res_dirty) res_upload();
                 for (cudaEvent_t ev : fence_ev) if (ev) cudaEventDestroy(ev);
                 for (cudaEvent_t ev : exch_ev) if (ev) cudaEventDestroy(ev);
                 if (pl_trace_path != nullptr && !pl_trace.empty()) {
@@ -14689,6 +14874,10 @@ int main(int argc, char** argv) {
                                          "the path, %lld rolled back, %lld below the gate (theta %.2f)\n",
                                  (long long) dec_windows, pl_ms, avg(pl_ms, (double) dec_windows), (long long) pl_spec,
                                  (long long) pl_on, (long long) pl_undo, (long long) pl_gate, theta);
+                    if (el_on)
+                        std::fprintf(stderr, "strata pipeline: elastic tail beside the windows: %lld shrinks, %lld growths at "
+                                             "gaps of stage 0, %.1f ms on the loop's thread\n",
+                                     (long long) pl_el_shrinks, (long long) pl_el_grows, pl_el_ms);
                     std::fprintf(stderr, "strata pipeline classes: fresh %.0f windows %.2f ms %.2f tok | speculative %.0f "
                                          "windows %.2f ms %.2f tok | forced-chain disagreements %lld, chain late %lld\n",
                                  cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
