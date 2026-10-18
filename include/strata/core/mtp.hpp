@@ -138,7 +138,13 @@ public:
     /// own pick, and step j (1 <= j <= n_force) takes force[j - 1] as its input token instead of output j - 1.
     /// `n_early`: an event after each of the first `n_early` outputs (chain_outputs_ready).
     bool chain_launch(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
-                      int n_early, std::string& err);
+                      int n_early, std::string& err, int n_now = 0);
+    /// STRUCT-A (STRATA_SA_CHAIN, opt-in): a chain launched with `n_now` > 0 queues only its first `n_now` outputs;
+    /// `chain_extend` queues more (up to `n_out`), `chain_cut` gives up the rest (the chain ends with the outputs
+    /// queued so far).  A chain not extended to `n_out` nor cut stays live: the caller does one or the other.
+    bool chain_extend(int want, std::string& err);
+    void chain_cut();
+    int chain_queued() const { return chain_launched_; }
     /// 1: every output is in chain_tok()/chain_prob(); 0: still running; -1: an error.
     int chain_poll(std::string& err);
     /// How many of the chain's first outputs (up to `n_early`; all of them once the chain is done) have landed in
@@ -233,6 +239,7 @@ private:
     cudaEvent_t ev_chain_ = nullptr;
     cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs
     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
+    int chain_launched_ = 0;   ///< STRUCT-A: the outputs queued so far (chain_n_ once the chain is whole or cut)
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
     int64_t n_vocab_ = 0;

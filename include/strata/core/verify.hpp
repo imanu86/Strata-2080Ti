@@ -308,6 +308,27 @@ public:
     /// The commit without a host sync; `ss.ple_prev` advances now (host side).  A second call for the same window
     /// (after its state was restored) replays it with another count.
     bool pl_commit_async(int n_keep, std::string& err);
+    // ---- STRUCT-A (lab, STRATA_SA_BET, opt-in; docs/STRUCT_A.md): a pipelined window's HEAD - its inputs and its
+    // first `c` layers, all GDN layers before the stage's first QSA layer - launched as a bet before its rows are
+    // decided, then either its TAIL (the remaining layers and the hand-off: head + tail are the window `pl_launch`
+    // runs, the same kernels in the same order) or the head thrown away.  A pipelined window leaves the GDN state to
+    // the commit and writes no K/V in those layers; the PLE history it advances in place is saved before the head and
+    // restored by `pl_drop_head`.  Stage 0 of a split only (`lb_` == 0 is not required, but the head must hold no QSA).
+    /// Capture the head and tail graphs for T = 1 .. `max_t` with `c` head layers (clamped to the GDN layers before the
+    /// first QSA one; nothing in flight).  False with `err` when it cannot (the caller turns the bet off).
+    bool sa_prepare(int c, int max_t, std::string& err);
+    bool sa_ready(int T) const { return sa_c_ > 0 && T >= 1 && T <= sa_max_t_ && exec_head_[T] && exec_tail_[T]; }
+    int sa_layers() const { return sa_c_; }
+    /// Stage and launch window (T, tokens, pos0)'s head; `service` then serves its `c` layers and stops there.
+    bool pl_launch_head(int T, const int32_t* tokens, int64_t pos0, std::string& err);
+    bool sa_head_live() const { return fl_active_ && sa_head_; }
+    /// Every head layer served and the head graph done (the head can then be thrown away).
+    bool pl_head_done(std::string& err);
+    /// The bet confirmed: the window goes on from its head (its tail launched; `service` / `done` as after pl_launch).
+    bool pl_launch_tail(std::string& err);
+    /// After `pl_head_done`: the PLE history restored (queued on the stage's stream), nothing in flight.
+    bool pl_drop_head(std::string& err);
+
     /// Fold another verifier's counters and GPU profile into this one's (the two verifiers of one stage report once).
     void absorb_stats(Verifier& o);
     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
@@ -431,6 +452,16 @@ private:
     bool fl_active_ = false, fl_prof_ = false, fl_ple_ = false, commit_live_ = false, pl_prestaged_ = false;
     int fl_T_ = 0;
     int64_t fl_k_ = 0, fl_total_ = 0;
+    // STRUCT-A (STRATA_SA_BET): the head / tail graphs, the layers `service` may serve (a head's: sa_c_ * groups; else
+    // all), the head's completion, the PLE history saved before it; record_window's layer range (-1: the stage's)
+    cudaGraphExec_t exec_head_[9] = {}, exec_tail_[9] = {};
+    cudaEvent_t ev_head_ = nullptr;
+    int sa_c_ = 0, sa_max_t_ = 0;
+    int64_t fl_cap_ = 0;
+    bool sa_head_ = false;
+    float* sa_hist_ = nullptr;
+    int64_t sa_hist_n_ = 0;
+    int64_t rec_from_ = -1, rec_to_ = -1;
     double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;
     int32_t pl_prev_[2] = {-1, -1};
     std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served

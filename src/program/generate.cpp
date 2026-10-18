@@ -1305,6 +1305,25 @@ void drive_pool_split(void* user, const float* x_f, const int32_t* ids, int64_t 
     drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);
 }
 
+/// STRUCT-A (STRATA_SA_BET, docs/STRUCT_A.md): the pool of a head bet's layers - the stage's split pool without counting
+/// the routes in the adaptive tier's usage (`ExpertDispatch::no_usage`); the bet counts them once it is confirmed, so a
+/// thrown-away bet leaves the counts as they were
+struct SaBetPool {
+    SplitDrive* sd = nullptr;
+    int64_t n_expert = 0;
+    std::vector<int64_t> routes;   ///< layer * n_expert + id, as the dispatch counts them
+};
+void sa_bet_pool(void* user, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k, float* out, int64_t layer) {
+    SaBetPool* b = (SaBetPool*) user;
+    strata::core::ExpertDispatch& d = b->sd->base->d;
+    d.no_usage = true;
+    drive_pool_split(b->sd, x_f, ids, n_tok, k, out, layer);
+    d.no_usage = false;
+    if (!d.usage.empty() && !d.failed)
+        for (int64_t i = 0; i < n_tok * k; ++i)
+            if (ids[i] >= 0 && ids[i] < b->n_expert) b->routes.push_back(layer * b->n_expert + ids[i]);
+}
+
 /// Layer split across GPUs: a later stage on its own device, with its own copy of the dense weights, a session, an
 /// expert cache for its layers, a verify window and a prompt path; the last one also holds the head (the drafter
 /// lives on its device too).
@@ -14941,6 +14960,63 @@ int main(int argc, char** argv) {
                 bool early_used = false;
                 bool b_done = false;     // B has been made from the chain in flight
                 int chain_n = 0;
+                // ---- STRUCT-A (docs/STRUCT_A.md), opt-in.  STRATA_SA_BET=1: a fresh window's HEAD (its first
+                // STRATA_SA_BET_LAYERS GDN layers, default 2) goes to stage 0 as a bet while the drafter's chain still
+                // decides its rows - first [x] (T = 1), then [x, d1] once d1 clears spec_min_p, up to T =
+                // STRATA_SA_BET_MAXT (2); where A launches today the bet's tail runs if A is the bet, else the head is
+                // thrown away (Verifier::pl_drop_head).  STRATA_SA_CHAIN=1: the forced chain (after an on-path verdict)
+                // queued a step at a time (STRATA_SA_CHAIN_AHEAD more, default 0) and cut once B is decided.
+                static const int sa_bet_c = [] {
+                    const char* v = std::getenv("STRATA_SA_BET");
+                    if (v == nullptr || std::atoi(v) == 0) return 0;
+                    const char* c = std::getenv("STRATA_SA_BET_LAYERS");
+                    return c != nullptr ? std::max(1, std::atoi(c)) : 2;
+                }();
+                static const int sa_bet_maxt = [] {
+                    const char* v = std::getenv("STRATA_SA_BET_MAXT");
+                    return v != nullptr ? std::max(1, std::min(3, std::atoi(v))) : 2;
+                }();
+                // STRATA_SA_BET_MINT (2): the smallest bet.  After a rollback (most fresh windows) stage 0 replays the
+                // commit until about when the chain decides T = 1, so a T = 1 head gains nothing there and, lost, holds
+                // stage 0 when the T = 2 bet should start (docs/STRUCT_A.md, 5)
+                static const int sa_bet_mint = [] {
+                    const char* v = std::getenv("STRATA_SA_BET_MINT");
+                    return v != nullptr ? std::max(1, std::min(3, std::atoi(v))) : 2;
+                }();
+                static const bool sa_chain = [] { const char* v = std::getenv("STRATA_SA_CHAIN"); return v != nullptr && std::atoi(v) != 0; }();
+                static const int sa_chain_ahead = [] {
+                    const char* v = std::getenv("STRATA_SA_CHAIN_AHEAD");
+                    return v != nullptr ? std::max(0, std::atoi(v)) : 0;
+                }();
+                static bool sa_bet_failed = false;   // the head graphs could not be made: the bet stays off
+                bool sa_bet_on = sa_bet_c > 0 && !sa_bet_failed && pl_nf == 1 && req_spec_min_p > 0.0;
+                if (sa_bet_on)
+                    for (int par = 0; par < 2 && sa_bet_on; ++par) {
+                        strata::core::Verifier& v = stage_ver_p(0, par);
+                        if (v.sa_ready(1)) continue;
+                        const strata::core::OnDevice on(v.device());
+                        std::string e2;
+                        if (!v.sa_prepare(sa_bet_c, std::min(sa_bet_maxt, S_mtp - 1), e2)) {
+                            std::fprintf(stderr, "strata struct-a: STRATA_SA_BET off: %s\n", e2.c_str());
+                            sa_bet_failed = true;
+                            sa_bet_on = false;
+                        } else if (par == 1)
+                            std::fprintf(stderr, "strata struct-a: STRATA_SA_BET: heads of %d layers on CUDA%d, bets T=%d..%d\n",
+                                         v.sa_layers(), v.device(), sa_bet_mint, std::min(sa_bet_maxt, S_mtp - 1));
+                    }
+                struct SaBet {
+                    bool live = false, dead = false;   // dead: known lost, served on empty plans until its head is done
+                    int T = 0, seq = -1;
+                    int64_t p = 0;
+                    int32_t tok[8] = {};
+                };
+                SaBet bet;
+                SaBetPool sa_pool;
+                sa_pool.n_expert = g.n_expert;
+                int64_t sa_want = -1, sa_forced = -1;   // the fresh window a bet is for; A's forced rows read (once per A)
+                int64_t sa_snapped = -1;                // the window whose GDN snapshot a bet took
+                int sa_last_T = 0;                      // the last bet's size for sa_want
+                int64_t sa_placed[4] = {}, sa_tails[4] = {}, sa_drops[4] = {}, sa_chains = 0, sa_cut = 0;
                 int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
                 double pl_chain_t0 = 0.0, pl_chain_ms[2] = {0, 0}, pl_chain_n[2] = {0, 0};   // fork: chain -> B latency
                 // fork (Daily 1541e340): the elastic tail beside the windows, at the gaps of stage 0 (see el_gap)
@@ -15307,6 +15383,40 @@ int main(int argc, char** argv) {
                     return v == nullptr || std::atoi(v) != 0;
                 }();
                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
+                // STRUCT-A: A's head launched as a bet of size T (its rows: A's row 0 and the chain's first T - 1 drafts),
+                // with the gap work and the GDN snapshot A's launch on stage 0 does (nothing commits on stage 0 before
+                // A's launch, so the snapshot is the same)
+                auto sa_place = [&](int T) -> bool {
+                    bet = SaBet{};
+                    bet.T = T;
+                    bet.seq = A.seq;
+                    bet.p = A.p;
+                    bet.tok[0] = A.tok[0];
+                    for (int i = 1; i < T; ++i) bet.tok[i] = mtp.chain_tok()[i - 1];
+                    if (ajob) a_gap(0);
+                    if (!el_gap()) return false;
+                    if (sa_snapped != A.seq && !snap_take(0, A.seq)) { err = "the GDN snapshot failed"; return false; }
+                    sa_snapped = A.seq;
+                    if (!VF(0, A).pl_launch_head(T, bet.tok, bet.p, err)) return false;
+                    bet.live = true;
+                    sa_pool.routes.clear();
+                    sa_last_T = T;
+                    ++sa_placed[T];
+                    tre("SH", A.seq, T);
+                    return true;
+                };
+                // a lost bet thrown away once its head is done: 1 thrown away (or no bet), 0 its head still runs, -1 error
+                auto sa_try_drop = [&]() -> int {
+                    if (!bet.live) return 1;
+                    strata::core::Verifier& v = stage_ver_p(0, bet.seq & 1);
+                    if (!v.pl_head_done(err)) return err.empty() ? 0 : -1;
+                    if (!v.pl_drop_head(err)) return -1;
+                    sa_pool.routes.clear();   // never counted (sa_bet_pool)
+                    bet.live = false;
+                    ++sa_drops[bet.T];
+                    tre("SX", bet.seq, bet.T);
+                    return 1;
+                };
                 while (true) {
                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
                     g_pl_diag.a_seq.store(A.seq, std::memory_order_relaxed);
@@ -15343,6 +15453,11 @@ int main(int argc, char** argv) {
                         } else if (!err.empty()) return die(err);
                     }
                     if (pl_yield && ((doomed && !pump0(D)) || !pump0(B, A.s1 && !A.s1_done ? 1 : 0))) return die(err);
+                    if (bet.live) {   // STRUCT-A: the head bet's layers (a lost one on empty plans)
+                        sa_pool.sd = PSD[bet.seq & 1];
+                        if (stage_ver_p(0, bet.seq & 1).service(bet.dead ? nullptr : &sa_bet_pool, &sa_pool, err) < 0)
+                            return die(err);
+                    }
                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
                     if (!el_gap()) return die(err);   // fork: the elastic tail at a gap of stage 0
                     // ---- a wrong speculative window has stopped (it is launched on no further stage once doomed):
@@ -15368,6 +15483,12 @@ int main(int argc, char** argv) {
                         tre("U", undo_w.seq, undo_keep);
                     }
                     if (ending) {
+                        if (bet.live) {   // STRUCT-A: no head left in flight (a drain cannot finish it)
+                            bet.dead = true;
+                            const int d = sa_try_drop();
+                            if (d < 0) return die(err);
+                            if (d == 0) continue;
+                        }
                         if (!doomed) break;
                         continue;
                     }
@@ -15377,6 +15498,10 @@ int main(int argc, char** argv) {
                     if (chain_kind != 0) {
                         const int k_ready = mtp.chain_outputs_ready(err);
                         if (k_ready < 0) return die(err);
+                        // STRUCT-A: a bet of size T is lost once the output after its rows clears spec_min_p (A is bigger)
+                        if (bet.live && !bet.dead && chain_kind == 2 && k_ready >= bet.T &&
+                            mtp.chain_prob()[bet.T - 1] >= (float) req_spec_min_p)
+                            bet.dead = true;
                         if (chain_kind == 2 && !early_used) {
                             // A's size is decided by its first outputs: a draft below spec_min_p ends it (the serial
                             // loop's rule), so A goes to stage 0 as soon as that is known, not after all S_mtp - 1
@@ -15454,17 +15579,69 @@ int main(int argc, char** argv) {
                                                          "outputs)\n", chain_kind, (long long) A.p, A.T, B.T, B.p_on, k);
                             }
                         }
+                        // STRUCT-A (STRATA_SA_CHAIN): the forced chain one step past what is seen, cut once B is decided
+                        if (r != 1 && chain_kind == 1 && sa_chain && mtp.chain_live()) {
+                            if (b_done) {
+                                sa_cut += chain_n - mtp.chain_queued();
+                                mtp.chain_cut();
+                            } else if (!mtp.chain_extend(k_ready + 1 + sa_chain_ahead, err))
+                                return die(err);
+                        }
                         if (r == 1) chain_kind = 0;
+                    }
+                    // ---- STRUCT-A: a lost bet thrown away once its head is done; then a bet on the next size (the first
+                    // one, T = 1, as soon as the fresh A exists and stage 0 is free)
+                    if (bet.live && bet.dead) {
+                        if (sa_try_drop() < 0) return die(err);
+                    }
+                    if (sa_bet_on && !bet.live && A.seq == sa_want && chain_kind == 2 && !early_used && !A.ready && !A.fl &&
+                        A.fr == 0 && !doomed && !VF(0, A).in_flight()) {
+                        const int k = mtp.chain_outputs_ready(err);
+                        if (k < 0) return die(err);
+                        int T = std::max(sa_last_T + 1, sa_bet_mint);   // the smallest size A can still have and is bet on
+                        while (k >= T && mtp.chain_prob()[T - 1] >= (float) req_spec_min_p) ++T;
+                        if (T > std::min(sa_bet_maxt, S_mtp - 1) || A.p + T > o.max_context) {
+                            sa_want = -1;   // no bet left for this window
+                        } else if (k >= T - 1) {   // its rows are out (else: wait for them)
+                            bool ok = true;
+                            for (int j = 0; ok && j < T - 1; ++j) ok = mtp.chain_prob()[j] >= (float) req_spec_min_p;
+                            if (!ok) sa_want = -1;   // A is smaller (and decided by now)
+                            else if (!sa_place(T)) return die(err);
+                        }
                     }
                     // ---- the front stages: A on its next one (never while a wrong window still holds a front stage's
                     // state)
                     if (A.ready && !A.fl && A.fr < pl_nf && !doomed) {
                         const int st = A.fr;
-                        if (st == 0 && force_win != nullptr) force_window(A.p, A.tok[0], A.T, A.tok, S);   // lab bench replay
+                        if (st == 0 && force_win != nullptr && sa_forced != A.seq)   // lab bench replay
+                            force_window(A.p, A.tok[0], A.T, A.tok, S);
+                        if (st == 0) sa_forced = A.seq;   // STRUCT-A: read once, even when a head below makes A wait
+                        if (st == 0 && bet.live) {   // STRUCT-A: A is the bet - its tail; else the head is thrown away
+                            const bool match = !bet.dead && bet.seq == A.seq && bet.T == A.T && bet.p == A.p &&
+                                               std::equal(bet.tok, bet.tok + bet.T, A.tok);
+                            if (match) {
+                                if (!VF(0, A).pl_launch_tail(err)) return die(err);
+                                if (!sa_pool.routes.empty() && !drive.d.usage.empty())   // the bet's routes, counted now
+                                    for (const int64_t i : sa_pool.routes) drive.d.usage[(size_t) i] += 1.0f;
+                                sa_pool.routes.clear();
+                                bet.live = false;
+                                ++sa_tails[bet.T];
+                                A.fl = true;
+                                A.launched = true;
+                                tre("ST", A.seq, A.T);
+                                tre("L0", A.seq, A.T, st);
+                                continue;
+                            }
+                            bet.dead = true;
+                            const int d = sa_try_drop();
+                            if (d < 0) return die(err);
+                            if (d == 0) continue;   // its head still runs: A launches behind it at a later pass
+                        }
                         if (st == 0 && A.p + A.T > o.max_context) { ending = true; continue; }
                         if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
                         if (st == 0 && !el_gap()) return die(err);   // fork: the elastic tail
-                        if (!snap_take(st, A.seq)) return die("the GDN snapshot failed");
+                        // STRUCT-A: a thrown-away bet took this snapshot already (a head leaves the GDN state alone)
+                        if (!(st == 0 && sa_snapped == A.seq) && !snap_take(st, A.seq)) return die("the GDN snapshot failed");
                         if (!VF(st, A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
                         A.fl = true;
                         if (st == 0) A.launched = true;
@@ -15525,6 +15702,10 @@ int main(int argc, char** argv) {
                     // the drafter must be idle before the next chain.  The chain needs nothing from the host, so this
                     // wait is bounded even with B (made from its first outputs) in flight on stage 0; in practice the
                     // chain ended long before a verdict that needs a whole stage-1 window.
+                    if (sa_chain && chain_kind != 0 && mtp.chain_live()) {   // STRUCT-A: a chain fed a step at a time ends here
+                        sa_cut += chain_n - mtp.chain_queued();
+                        mtp.chain_cut();
+                    }
                     while (chain_kind != 0 && mtp.chain_live())
                         if (mtp.chain_poll(err) < 0) return die(err);
                     if (chain_kind != 0 && !B.launched && !B.made) B = PW{};
@@ -15592,7 +15773,11 @@ int main(int argc, char** argv) {
                         // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
                         mtp.set_source_R(V1(A).final_R(0));
                         chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
-                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
+                        // STRUCT-A (STRATA_SA_CHAIN): only the outputs B's size needs first - B's row 0 and one draft
+                        // past the forced ones - then a step at a time from the loop
+                        const int sa_now = sa_chain ? std::min(chain_n, B.T + 1 + sa_chain_ahead) : 0;
+                        if (sa_chain) ++sa_chains;
+                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err, sa_now))
                             return die(err);
                         chain_kind = 1;
                         tre("CL", A.seq, 1);
@@ -15636,6 +15821,10 @@ int main(int argc, char** argv) {
                             nA.p = A.p + a + 1;
                             nA.tok[0] = outp[(size_t) a];
                             A = nA;
+                            if (sa_bet_on) {   // STRUCT-A: this fresh window's head may go to stage 0 as a bet
+                                sa_want = A.seq;
+                                sa_last_T = 0;
+                            }
                         }
                     }
                     // --adapt-async: the verdict's tick, once the drafter's chain is launched (off its critical path)
@@ -15680,6 +15869,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR an adaptive refill failed\n");
                     return 1;
                 }
+                if (mtp.chain_live()) mtp.chain_cut();   // STRUCT-A: a chain fed a step at a time ends with what it has
                 while (mtp.chain_live() && mtp.chain_poll(err) == 0) {}
                 mtp.set_source_R(ver.final_R_all());   // the serial loop's rows again
                 const double pl_ms = std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count();
@@ -15721,6 +15911,13 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata pipeline: drafter on CUDA%d: %.3f ms of host time per chain launch (%.3f ms of it "
                                          "staging the source rows, %lld times so far)\n", mtp.device(),
                                  avg(mtp.ms_draft, (double) mtp.rounds), avg(mtp.ms_src, (double) mtp.n_src), (long long) mtp.n_src);
+                    if (sa_bet_on || sa_chain)   // STRUCT-A
+                        std::fprintf(stderr, "strata struct-a: head bets (placed/tail/dropped) T1 %lld/%lld/%lld, T2 %lld/%lld/%lld, "
+                                             "T3 %lld/%lld/%lld; forced chains fed a step at a time %lld, outputs not run %lld\n",
+                                     (long long) sa_placed[1], (long long) sa_tails[1], (long long) sa_drops[1],
+                                     (long long) sa_placed[2], (long long) sa_tails[2], (long long) sa_drops[2],
+                                     (long long) sa_placed[3], (long long) sa_tails[3], (long long) sa_drops[3],
+                                     (long long) sa_chains, (long long) sa_cut);
                     std::string cal;
                     char b[48];
                     for (int i = 0; i < 10; ++i)
