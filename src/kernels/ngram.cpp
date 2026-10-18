@@ -702,6 +702,16 @@ bool PleTable::gather_raw_iq4nl(const uint32_t* rows, size_t n_tokens, uint8_t* 
     return true;
 }
 
+bool PleTable::warm_rows(const uint32_t* rows, size_t n_tokens, std::string& err) {
+    const size_t n = n_tokens * (size_t) PLE_N_HEADS;
+    if (n == 0 || impl_->mode != PleIo::Direct || !impl_->reader.is_open() || !impl_->reader.threaded() ||
+        impl_->reader.cache_capacity() < 2 * (uint64_t) n)
+        return false;
+    std::vector<uint8_t> raw(n * impl_->rb);
+    const auto ticket = impl_->reader.issue(rows, n, raw.data());
+    return impl_->reader.collect(ticket, err);
+}
+
 void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_delay_us(us); }
 
 std::string PleTable::io_report() const {

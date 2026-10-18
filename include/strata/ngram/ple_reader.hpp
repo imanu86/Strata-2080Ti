@@ -93,6 +93,9 @@ public:
     void reset_stats();
     uint64_t cache_capacity() const;
     uint64_t cache_size() const;
+    /// True when a worker thread owns the reads (`open` with io_thread): `issue`/`collect` may then be called
+    /// from several threads (fork, TTFT: PleTable::warm_rows).
+    bool threaded() const;
 
 private:
     struct Impl;
