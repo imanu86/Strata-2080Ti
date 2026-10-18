@@ -2650,6 +2650,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         return ss.ple.table->gather_batch(m.ple_rows[buf].data(), (size_t) T, m.ple_emb_host[buf], e);
     };
     std::string ple_next_err;
+    struct AheadOnce {   // fork (TTFT): a lookahead belongs to the run after this one only
+        std::vector<int64_t>& v;
+        ~AheadOnce() { v.clear(); }
+    } ahead_once{ple_ahead_};
     std::future<bool> ple_next;             // declared after everything it reads: an early return waits for it
     int ple_buf = 0;
 
@@ -2765,8 +2769,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
         // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
         if (ple_on && !ple_next.valid())
-            ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
+            ple_next = std::async(std::launch::async, [this, &ple_gather, &ple_next_err, c0, b = ple_buf] {
                 strata::aux_cpus::pin_current_thread();
+                ple_warm_wait();   // fork (TTFT): rows a lookahead is still reading land in the row cache first
                 return ple_gather(c0, b, ple_next_err);
             });
         bool ple_pending = ple_on;
@@ -2798,6 +2803,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     strata::aux_cpus::pin_current_thread();
                     return ple_gather(c1, b, ple_next_err);
                 });
+            } else if (!ple_ahead_.empty()) {
+                // fork (TTFT): this run's last rows are here and the SSD is idle: the next run's first chunk now
+                ple_warm_launch(ple_ahead_.data(), (int64_t) ple_ahead_.size(), ple_ahead_prev_[0], ple_ahead_prev_[1]);
+                ple_ahead_.clear();
             }
             ple_buf ^= 1;
             const double waited = ms_since(tp);
@@ -5056,6 +5065,58 @@ bool Prefill::reserve_uploads(int64_t T) {
     }
     if (next_ != nullptr) ok = next_->reserve_uploads(T) && ok;
     return ok;
+}
+
+// fork (TTFT): STRATA_PLE_LOOKAHEAD=0 turns set_ple_lookahead / ple_warm_now off
+namespace {
+bool ple_lookahead_on() {
+    static const bool on = [] {
+        const char* e = std::getenv("STRATA_PLE_LOOKAHEAD");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return on;
+}
+constexpr int64_t kPleWarmMaxTokens = 8192;   // a chunk of the auto prefill at most: what the first gather asks for
+}  // namespace
+
+void Prefill::ple_warm_wait() {
+    if (ple_warm_.valid()) (void) ple_warm_.get();   // a failed warm only means the gather reads the rows itself
+}
+
+void Prefill::ple_warm_launch(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1) {
+    if (!ple_lookahead_on() || impl_ == nullptr || impl_->ss == nullptr || tokens == nullptr || n <= 0) return;
+    core::SessionState& ss = *impl_->ss;
+    if (!ss.ple.ready() || !(stage_lb_ <= 1 && 1 < stage_le_) || ss.ple.table->mode() != kernels::PleIo::Direct) return;
+    ple_warm_wait();   // one at a time
+    const int64_t T = std::min<int64_t>(n, kPleWarmMaxTokens);
+    std::vector<int32_t> toks((size_t) T);
+    for (int64_t t = 0; t < T; ++t) toks[(size_t) t] = (int32_t) tokens[t];
+    ple_warm_ = std::async(std::launch::async, [table = ss.ple.table, consts = &ss.ple.consts, toks = std::move(toks),
+                                                prev0, prev1]() -> bool {
+        strata::aux_cpus::pin_current_thread();
+        // the rows exactly as the prefill's ple_gather hashes them: each token after the two before it
+        std::vector<uint32_t> rows(toks.size() * (size_t) strata::kernels::PLE_N_HEADS);
+        int32_t pv[2] = {prev0, prev1};
+        for (size_t t = 0; t < toks.size(); ++t) {
+            strata::kernels::ngram_rows(&toks[t], pv, 1, *consts, rows.data() + t * strata::kernels::PLE_N_HEADS);
+            pv[0] = pv[1];
+            pv[1] = toks[t];
+        }
+        std::string e;
+        return table->warm_rows(rows.data(), toks.size(), e);
+    });
+}
+
+void Prefill::set_ple_lookahead(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1) {
+    ple_ahead_.clear();
+    if (!ple_lookahead_on() || tokens == nullptr || n <= 0) return;
+    ple_ahead_.assign(tokens, tokens + std::min<int64_t>(n, kPleWarmMaxTokens));
+    ple_ahead_prev_[0] = prev0;
+    ple_ahead_prev_[1] = prev1;
+}
+
+void Prefill::ple_warm_now(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1) {
+    ple_warm_launch(tokens, n, prev0, prev1);
 }
 
 bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
