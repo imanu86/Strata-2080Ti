@@ -594,6 +594,18 @@ int main() {
     check(ka.parent_path() == base.parent_path() &&
               ka.filename().string().size() == base.filename().string().size() + 17,
           "keyed path is <base>.<16 hex>");
+    {   // STRATA_CONV_DISK: every prefix of one prompt in one pass, the same names
+      const std::vector<int32_t> ids = {5, 6, 7, 8, 9, 10};
+      const auto many = prefix_cache_keyed_paths(base, ids, {1, 3, 5});
+      check(many.size() == 3 &&
+                many[0] == prefix_cache_keyed_path(base, {5}, 6) &&
+                many[1] == prefix_cache_keyed_path(base, {5, 6, 7}, 8) &&
+                many[2] == prefix_cache_keyed_path(base, {5, 6, 7, 8, 9}, 10),
+            "one-pass keys equal the single keys");
+      check(prefix_cache_keyed_paths(base, ids, {3, 1}).size() == 1 &&
+                prefix_cache_keyed_paths(base, ids, {6}).empty(),
+            "out of order or out of range positions stop the pass");
+    }
     auto put = [](const fs::path &p, size_t bytes) {
       std::ofstream f(p, std::ios::binary);
       const std::string data(bytes, 'x');
