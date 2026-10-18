@@ -187,6 +187,12 @@ public:
     /// as ONE reader request - page dedupe and sort across the whole batch, the reader's full queue depth.  Not
     /// while a single-token `issue` is pending.  The mapped mode gathers row by row.
     bool gather_batch(const uint32_t* rows, size_t n_tokens, float* out, std::string& err);
+    /// Fork (TTFT): read the rows of `n_tokens` tokens into the reader's row cache and nothing else, so a later
+    /// gather_batch of them is served from RAM (the same bytes: the cache holds what the file holds).  Only in Direct
+    /// mode with the reader's I/O thread, where it may run on another thread beside every other call (it issues and
+    /// collects its own reader ticket, nothing of this object's state); returns false having done nothing otherwise,
+    /// or when the row cache is too small to keep them.
+    bool warm_rows(const uint32_t* rows, size_t n_tokens, std::string& err);
 
     /// Fault injection (Direct mode): every row read completes no earlier than `us` after issue.
     void set_injected_delay_us(double us);
