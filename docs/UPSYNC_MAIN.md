@@ -93,7 +93,7 @@ quelle di upstream. Non portati i neutri o peggiori di `lab/struct-a` (NODECUT, 
   La compilazione non usa la GPU, `bench.lock` non e' stato preso.
 - `build-upsmain-d06429ee`: strata.exe sha256 `fd8890197bf294c259bdb7917689b2b8ca572d113ab8a5ccf75f5b98eff48a12`.
 - `build-upstream-477ac13c` (upstream puro, sorgenti esportati con `git archive` in `Strata-wt\upstream-src-477ac13c`, senza
-  worktree): strata.exe sha256 `PURE_SHA`.
+  worktree): strata.exe sha256 `bfda01a9707f5b946388bf9befa7cd5438b38387539c60a3feb7dedceb7440ad`.
 - `strata-vision.exe` e' copiato dal Daily (sha256 93441f40...): `tools/vision` cambia di una riga fra 0.1.43 e 0.1.45 e non
   e' stato ricompilato (e' un progetto a parte).
 - Cartelle: `...\corse_2080ti\20261004_routed_keep\build-upsmain-d06429ee\` e `...\build-upstream-477ac13c\`, con
