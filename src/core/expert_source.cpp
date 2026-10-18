@@ -4578,6 +4578,164 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
     return st;
 }
 
+// ---- STRATA_RAM_CORE=1 (see the header and docs/RAM_CORE.md) ------------------------------------------------------
+struct ArenaExpertSource::RamCore {
+    std::unique_ptr<std::atomic<uint8_t>[]> dropped;   ///< per blob: 1 = its interior pages are decommitted
+    size_t n = 0;
+    std::mutex mu;                                       ///< drops and recoveries (never on a hot path)
+    std::atomic<uint64_t> bytes{0};
+    std::atomic<int64_t> experts{0}, reread{0};
+    uint64_t settled = 0;                                ///< bytes the working-set minimum was already lowered by
+};
+
+namespace {
+constexpr uint64_t kRcPage = 4096;
+/// The whole pages of the blob [off, off + bytes) that may be given back: past its first 256 bytes (a copy of the
+/// neighbour before it rounded up to 256 B, as a native slot is, may read into them) and before its end (the page
+/// it shares with the next blob stays).
+void rc_span(uint64_t off, uint64_t bytes, uint64_t& s, uint64_t& e) {
+    s = (off + 256 + kRcPage - 1) / kRcPage * kRcPage;
+    e = (off + bytes) / kRcPage * kRcPage;
+    if (e < s) e = s;
+}
+bool rc_read(const std::string& path, uint64_t at, uint64_t n, uint8_t* dst) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (f == nullptr) return false;
+    const bool ok = STRATA_FSEEK64(f, (int64_t) at) == 0 && std::fread(dst, 1, (size_t) n, f) == (size_t) n;
+    std::fclose(f);
+    return ok;
+}
+}  // namespace
+
+bool ArenaExpertSource::ram_core_requested() {
+    const char* v = std::getenv("STRATA_RAM_CORE");
+    return v != nullptr && v[0] == '1';
+}
+
+bool ArenaExpertSource::ram_core_arm(std::string& err) {
+    if (rc_) return true;
+    if (arena_ == nullptr || base_ == nullptr || blobs_ <= 0) { err = "the expert arena is not loaded"; return false; }
+    if (map_ != nullptr) { err = "the arena is a read-only file mapping (STRATA_ARENA_MMAP)"; return false; }
+    const PinnedArena* a = (const PinnedArena*) arena_;
+    if (a->backing == PageBacking::LargePages) {
+        err = "the arena is on large pages, which cannot be given back per expert (STRATA_NO_LARGEPAGES=1)";
+        return false;
+    }
+    if (a->backing != PageBacking::NormalPages) { err = "the arena is not ordinary anonymous memory"; return false; }
+    if (a->mapping_base != nullptr && a->mapping_base != a->base) { err = "the arena is a shared file (--shared-expert-arena)"; return false; }
+    if (((uintptr_t) base_) % kRcPage != 0) { err = "the arena is not page aligned"; return false; }
+    auto rc = std::make_unique<RamCore>();
+    rc->n = (size_t) blobs_;
+    rc->dropped.reset(new std::atomic<uint8_t>[rc->n]);
+    for (size_t i = 0; i < rc->n; ++i) rc->dropped[i].store(0, std::memory_order_relaxed);
+    rc_ = std::move(rc);
+    return true;
+}
+
+uint64_t ArenaExpertSource::ram_core_drop(int64_t layer, int64_t expert, bool* registered) {
+    if (registered != nullptr) *registered = false;
+    if (!rc_ || layer < 0 || expert < 0 || expert >= n_expert_) return 0;
+    const int64_t idx = layer * n_expert_ + expert;
+    if (idx >= blobs_) return 0;
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    const uint64_t off = lay.blob_offset(layer, expert), bytes = lay.blob_bytes(layer);
+    if (off < pinned_bytes_) {   // inside the CUDA-registered prefix (one slice per layer): never decommitted
+        if (registered != nullptr) *registered = true;
+        return 0;
+    }
+    uint64_t s = 0, e = 0;
+    rc_span(off, bytes, s, e);
+    if (e <= s || e > arena_capacity_) return 0;
+    std::lock_guard<std::mutex> lk(rc_->mu);
+    if (rc_->dropped[(size_t) idx].load(std::memory_order_acquire) != 0) return 0;
+    uint8_t* p = const_cast<uint8_t*>(base_) + s;
+#if defined(_WIN32)
+    (void) VirtualUnlock(p, (SIZE_T) (e - s));   // ERROR_NOT_LOCKED where the lock stopped before: harmless
+    if (!VirtualFree(p, (SIZE_T) (e - s), MEM_DECOMMIT)) return 0;
+#else
+    (void) munlock(p, (size_t) (e - s));
+    if (madvise(p, (size_t) (e - s), MADV_DONTNEED) != 0) return 0;
+#endif
+    rc_->dropped[(size_t) idx].store(1, std::memory_order_release);
+    rc_->bytes.fetch_add(e - s, std::memory_order_relaxed);
+    rc_->experts.fetch_add(1, std::memory_order_relaxed);
+    return e - s;
+}
+
+void ArenaExpertSource::ram_core_settle() {
+#if defined(_WIN32)
+    if (!rc_) return;
+    std::lock_guard<std::mutex> lk(rc_->mu);
+    const uint64_t now = rc_->bytes.load(std::memory_order_relaxed);
+    if (now <= rc_->settled) return;
+    const uint64_t give = now - rc_->settled;
+    HANDLE self = GetCurrentProcess();
+    SIZE_T mn = 0, mx = 0;
+    DWORD fl = 0;
+    if (!GetProcessWorkingSetSizeEx(self, &mn, &mx, &fl) || (uint64_t) mn <= give + (256ull << 20)) return;
+    if (SetProcessWorkingSetSizeEx(self, (SIZE_T) ((uint64_t) mn - give), mx, fl)) rc_->settled = now;
+#endif
+}
+
+bool ArenaExpertSource::ram_core_dropped(int64_t layer, int64_t expert) const {
+    if (!rc_ || layer < 0 || expert < 0 || expert >= n_expert_) return false;
+    const int64_t idx = layer * n_expert_ + expert;
+    return idx < blobs_ && rc_->dropped[(size_t) idx].load(std::memory_order_acquire) != 0;
+}
+uint64_t ArenaExpertSource::ram_core_bytes() const { return rc_ ? rc_->bytes.load(std::memory_order_relaxed) : 0; }
+int64_t ArenaExpertSource::ram_core_experts() const { return rc_ ? rc_->experts.load(std::memory_order_relaxed) : 0; }
+int64_t ArenaExpertSource::ram_core_reread() const { return rc_ ? rc_->reread.load(std::memory_order_relaxed) : 0; }
+
+// A core expert's bytes were asked for although it never leaves VRAM: a path the core does not know of.  The pages
+// are committed again and filled from the model file (experts.bin, or the GGUF roles a native pack reads), so the
+// pointer `blob` returns holds the same bytes it always did; the event is counted and said.
+bool ArenaExpertSource::rc_recover(int64_t layer, int64_t expert) {
+    const int64_t idx = layer * n_expert_ + expert;
+    std::lock_guard<std::mutex> lk(rc_->mu);
+    if (rc_->dropped[(size_t) idx].load(std::memory_order_acquire) == 0) return true;   // another thread did it
+    const auto& lay = strata::kernels::cpu::expert_layout();
+    const uint64_t off = lay.blob_offset(layer, expert), bytes = lay.blob_bytes(layer);
+    uint64_t s = 0, e = 0;
+    rc_span(off, bytes, s, e);
+    uint8_t* p = const_cast<uint8_t*>(base_) + s;
+#if defined(_WIN32)
+    if (VirtualAlloc(p, (SIZE_T) (e - s), MEM_COMMIT, PAGE_READWRITE) != p) return false;
+#endif
+    std::vector<uint8_t> tmp((size_t) bytes);
+    bool ok = false;
+    if (!experts_bin_.empty()) {
+        ok = rc_read(experts_bin_, off, bytes, tmp.data());
+    } else if (!gguf_.empty() && lay.native && lay.gguf_off.size() >= (size_t) (3 * (layer + 1))) {
+        const auto& fm = lay.fmt[(size_t) layer];
+        const uint64_t blob = lay.bytes[(size_t) layer];
+        const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
+        const uint64_t at[3] = {0, fm.up_off, fm.down_off};
+        ok = blob <= bytes;
+        for (int r = 0; r < 3 && ok; ++r)
+            ok = rc_read(expert_gguf_file(gguf_, lay, layer, r), lay.gguf_off[(size_t) (3 * layer + r)] + (uint64_t) expert * per[r],
+                         per[r], tmp.data() + at[r]);
+    }
+    if (!ok) {
+        std::fprintf(stderr, "strata ram core: layer %lld expert %lld has no RAM copy and could NOT be read from the model file\n",
+                     (long long) layer, (long long) expert);
+        return false;
+    }
+    std::memcpy(p, tmp.data() + (s - off), (size_t) (e - s));
+#if defined(_WIN32)
+    (void) VirtualLock(p, (SIZE_T) (e - s));   // best effort, as the arena's own lock
+#else
+    (void) mlock(p, (size_t) (e - s));
+#endif
+    rc_->dropped[(size_t) idx].store(0, std::memory_order_release);
+    rc_->bytes.fetch_sub(e - s, std::memory_order_relaxed);
+    rc_->experts.fetch_sub(1, std::memory_order_relaxed);
+    const int64_t n = rc_->reread.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::fprintf(stderr, "strata ram core: layer %lld expert %lld read again from the model file (no RAM copy; %lld so far, "
+                         "must be 0)\n", (long long) layer, (long long) expert, (long long) n);
+    return true;
+}
+
+ArenaExpertSource::ArenaExpertSource() = default;
 ArenaExpertSource::~ArenaExpertSource() { close(); }
 
 bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads,
@@ -4858,6 +5016,8 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     arena_ = a;
     base_ = a->data();
     pinned_bytes_ = a->registered_bytes;
+    arena_capacity_ = a->capacity;
+    experts_bin_ = from_gguf ? std::string() : path;   // STRATA_RAM_CORE: where a core expert would be read again from
     // plan v0.3 P6: device aliases of the mapped registration, for the PCIe share of the misses
     dev_slice_.clear();
     slice_bytes_ = a->slice_bytes;
@@ -4919,6 +5079,7 @@ void ArenaExpertSource::close() {
     map_ = nullptr;
     map_bytes_ = 0;
     inputs_.clear();
+    rc_.reset();
     if (arena_ != nullptr) {
         delete (PinnedArena*) arena_;
         arena_ = nullptr;
@@ -4926,6 +5087,8 @@ void ArenaExpertSource::close() {
     base_ = nullptr;
     blobs_ = 0;
     n_expert_ = 0;
+    arena_capacity_ = 0;
+    experts_bin_.clear();
 }
 
 void ArenaExpertSource::prefetch(int64_t layer, int64_t expert) {
@@ -5008,6 +5171,9 @@ const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
     const int64_t idx = layer * n_expert_ + expert;
     if (idx < 0 || idx >= blobs_) return nullptr;
     reads_.fetch_add(1, std::memory_order_relaxed);
+    // STRATA_RAM_CORE: a core expert has no RAM copy (it never leaves VRAM); asked for anyway, it is read from the
+    // model file first (counted).  One atomic load otherwise.
+    if (rc_ && rc_->dropped[(size_t) idx].load(std::memory_order_acquire) != 0 && !rc_recover(layer, expert)) return nullptr;
     // Pointer arithmetic into resident memory.  No fault, no copy, no mapping - which is the entire point of
     // this class over `FileExpertSource`.
     return base_ + arena_off(layer, expert);
