@@ -5,6 +5,17 @@ Branch `lab/multichat45` da `lab/upsync-main` 09cba781 (upstream v0.1.45 + pila 
 (diagnosi del 13/10 su base 0.1.43) restano valide come storia; il codice del prefill impacchettato e' quello di
 `lab/multichat43` portato qui.
 
+## Stato della coda notturna (19/10 00:05)
+
+Dalle 22:14 il `bench.lock` e' tenuto da una serie di `run_long.py` di un altro agente (`DET-x24-pf-*`, arm da 3000 s uno dopo l'altro,
+lo stesso file di lock): la mia coda resta in attesa (`o-conc`, poi `coda_mc45r.sh notte`: r0-warm, r1-ctrlA, r2-cfg1, r3-conc, r4-kv16, r5-piece,
+r6-help, r7-ctrlM, r8-pack3, r9-pack3+conc, r10-bpipe, r11/r12-pmtp2 vs b2, r13-bf16tc, r14-sm75perf, r16-ctrlB). Parte da sola quando il lock si libera e
+ogni arm rigenera la tabella qui sopra (`publish.py`, commit e push). Lo scenario `agents:3:R` (banco agenti reale: prefisso 32k + storia 0-70k,
+tool result 1-5k token, risposta 100-400, pausa 1-3 s, 6 turni; prefill share, TTFT p50/p90, righe/s in lettura, carico CPU altrui con flag
+DISTURBATO) e' in `corse_2080ti/20261018_multichat45/mc2.py` (patch_R.py), provato solo come costruzione dei contesti, non ancora con il motore.
+Misure valide finora: tabella sopra (finestra pulita 17:16-18:22) e `i-pmtp2`/`i0-b2`/`l-bpipe` (carico CPU 6-16%): PIPED_MTP vs gruppi senza MTP
+`same:2` 51,6 / 50,6, `diff:2` 67,8 / 54,2, solo 50,2 / 51,5; BATCH_PIPELINE solo 55,0 (nessun recupero della chat singola).
+
 ## Uso reale (log del Daily 0.1.43, 13-17/10, solo conteggi)
 
 Il Daily gira **senza `--batch`**: il server serializza (una richiesta alla volta), il log non ha timestamp per richiesta
