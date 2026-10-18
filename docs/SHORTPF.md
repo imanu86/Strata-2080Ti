@@ -2,8 +2,8 @@
 
 Branch `lab/shortpf` da `lab/upsync-main` d9a26384 (upstream v0.1.45 + pila). Base misurata: `build-upsmain-d06429ee`
 (sha256 fd889019...). Config: Daily 0.1.43 (JSON letto, non toccato) con `--elastic`, `--expert-cache auto`, due schede
-(2080 Ti = CUDA0, 3060 = CUDA1), `--layer-split 16`, `--pipeline-windows 2`, MTP. Stato: **compilato la base si, la leva no,
-provato solo la base.** Dati parziali (18/10, 20:35): la leva non e' ancora scritta.
+(2080 Ti = CUDA0, 3060 = CUDA1), `--layer-split 16`, `--pipeline-windows 2`, MTP. Stato: **compilato si (sm_75+86), installato no, provato sul banco a due schede (config Daily), non nel Daily.**
+Build della leva: `build-shortpf-660c7229`.
 
 ## 1. Come si misura
 
@@ -51,7 +51,7 @@ Tempo GPU di una corsa per stadio (ms) e quota delle fasi maggiori. Lo stadio 0 
 - "dequant" = da dopo l'attesa della copia fino al GEMM: il gather degli esperti nel layout MMQ **e** l'attesa dell'host che
   alimenta l'anello (arena non bloccata: solo 8 GiB sono pinned su ~40). E' il 40-48% fino a ~1k token: e' lo streaming PCIe degli
   esperti non residenti (~50% degli esperti per scheda), non una vera dequantizzazione.
-- **Stadio 1: ~190-230 ms di "hc read" fissi, anche con 6 token** (stadio 0: 7 ms). Causa non ancora trovata.
+- **Stadio 1: ~190-230 ms di "hc read" anche con 6 token** (stadio 0: 7 ms): e' il costo per layer, vedi §6.
 - La coda da 6 token (intestazione dell'assistente) costa 460 ms sul percorso del prompt; con `--short-read >= 6` va in finestre.
 - Dopo il pezzo: draft MTP 5-60 ms fino a 1k token, 183 ms a 3k, 505 ms a 8k (poco).
 
@@ -82,9 +82,55 @@ Tra parentesi la differenza dal controllo `x0`.
   lungo non e' stata misurata.
 - Residuo nello stadio 1: "hc read" ~160-170 ms fissi anche con 6 token (con la quota CPU e' il 32-59% della corsa).
 
-## 5. Prossimi passi
+## 5. La leva: `STRATA_SHORTPF=1` (build `build-shortpf-660c7229`, sha256 220fabe3...)
 
-1. Build `build-shortpf-<sha>` con `STRATA_PREFILL_LAYER_TIMES=1` (tempo host per layer) per trovare i ~200 ms di "hc read" dello
-   stadio 1 e il costo per layer del percorso a pezzi piccoli.
-2. Arm alternati: `STREAM_MIN` 128/256 (+HELP), CPU share, MTP batch; poi la leva con env proprio.
-3. Verifica del testo a cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`) prima/dopo.
+Codice (`src/prefill/prefill.cpp`, ~20 righe): con `STRATA_SHORTPF=1` e `STRATA_PREFILL_CPU_SHARE` non impostata, la quota CPU del
+prompt resta armata anche sulla divisione a strati (dove di default e' spenta) a quota **fissa 0,8** (`STRATA_SHORTPF_SHARE`
+la cambia). `STRATA_PREFILL_CPU_SHARE=<x>` esplicito vince. Senza l'env il comportamento e' quello della base (a cache fissa
+due corse base/shortpf hanno lo stesso testo nella stessa misura del rumore: 13 risposte su 17 uguali, prefisso comune 0,88).
+Onesta': la meccanica (la CPU calcola gli esperti non residenti a pochi token) **e' quella gia' in upstream**
+(`STRATA_PREFILL_CPU_SHARE`); il guadagno viene dall'averla accesa sulla divisione a strati e dal valore fisso 0,8 al posto
+dell'`auto`, che calibra troppo basso. Altro codice: `STRATA_PREFILL_LAYER_TIMES=1` (diagnosi: ms host per layer).
+
+Prima/dopo, stessa build, controllo nella stessa sessione (`--short-read 0`, config Daily con `--elastic`; 4 ripetizioni, 2 a 3000,
+1 a 8000), TTFT mediano in s:
+
+| nuovi token | base (`--short-read 0`) | `STRATA_SHORTPF=1` | differenza | a cache fissa: base | a cache fissa: SHORTPF |
+|---|---|---|---|---|---|
+| ~120 | 1,55 | **1,23** | -21% | 1,70 | 1,17 (-31%) |
+| ~320 | 2,18 | **1,66** | -24% | 2,31 | 1,60 (-31%) |
+| ~1030 | 3,68 | **2,90** | -21% | 3,73 | 2,84 (-24%) |
+| ~3050 | 6,61 | 6,03 | -9% | 6,37 | 5,87 (-8%) |
+| ~8100 | 14,02 | 12,66 | -10% | 11,44 | 11,23 (-2%) |
+
+Quota 1,0 = 0,8 (1,22 / 1,66 / 2,86 / 6,12). Finestre di decode (§2, `--short-read 1024`): 1,06 a ~120 e 2,79 a ~320 token.
+
+**`--short-read` consigliato: 256 senza la leva, 128 con la leva** (con `STRATA_SHORTPF=1` il percorso del prompt a ~120 token,
+1,23 s, e' alla pari delle finestre, 1,06 s; a ~320 vince di 1,1 s). Il `--short-read 64` di oggi lascia il percorso del prompt
+(1,55-1,87 s) dove le finestre fanno 0,8-1,3 s.
+
+**Testo: NON identico.** A cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`) base contro SHORTPF:
+5 risposte su 17 identiche (prefisso comune medio 0,69), contro 13 su 17 (0,88) fra due corse della base. Sono riassunti liberi
+da 32 token a temperatura 0, ma e' una variazione numerica reale (la CPU calcola quegli esperti): coerente con il KL ~0,004
+che upstream dichiara per la quota CPU. **KL sul testo lungo non misurata**: serve prima di accenderlo nel Daily.
+
+## 6. Dove va il resto del tempo (`STRATA_PREFILL_LAYER_TIMES`, con la leva accesa)
+
+- Il costo fisso non e' un blocco unico: e' **per layer**. Con 6 token lo stadio 0 spende 4 ms a layer (16 layer = 64 ms), lo
+  stadio 1 8 ms a layer (32 layer = 270 ms); il "hc read" fisso di ~160-200 ms dello stadio 1 in §3 e' la stessa cosa (la
+  coda di sincronizzazioni dell'host per layer, attribuita alla fase che la precede), non un'inizializzazione.
+- A 305 token con la leva: ~24 ms a layer su entrambi gli stadi (CPU e PCIe), cioe' 0,4 s + 0,75 s.
+- A 1000+ token il layer 1 dello stadio 0 spende 220-410 ms in piu': **l'attesa delle righe PLE dall'SSD** (la lettura parte a
+  inizio corsa e c'e' un solo layer per coprirla); nei log lunghi "waited N ms for its PLE rows" 1,1 s a 3k, 2,3 s a 8k. Idea non
+  fatta: lanciare la lettura PLE alla ricezione dei token, prima del ripristino del checkpoint (~50-100 ms di sovrapposizione).
+- Provati e scartati: `STRATA_PREFILL_STREAM_MIN=256` (+40% a 320), `HELP=1` con `STREAM_MIN=256` (+30%). Pipeline fra i due stadi
+  su piu' pezzi: stima a tavolino -5%, non costruita (lo stadio 1 e' il collo, 3060 con 32 layer). MTP in batch: il draft dopo
+  il pezzo costa 5-60 ms fino a 1k token, 183 a 3k: non vale.
+
+## 7. Limiti
+
+Rumore alto sulla macchina condivisa (CPU spesso al 100% per processi di altri agenti; motore a priorita' alta nel banco;
+la prima corsa a priorita' normale e' stata scartata). La quota CPU dipende da CPU libera: con la CPU saturata da altro il
+guadagno puo' ridursi (non misurato). Il banco usa conversazioni sintetiche (testo di codice), non le richieste reali di Claude Code.
+`--short-read 64/256/1024` come vite separate non misurati: confronto sulle due strade alternate nella stessa vita (e' tutto
+cio' che l'opzione cambia). Non provato nel Daily.
