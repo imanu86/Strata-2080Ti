@@ -12,14 +12,20 @@
 //
 // 0.1.45: the Turing paths are opt-in (nobody here has an sm_75 card to confirm them): STRATA_SM75_PERF=1
 // (sm75_series.hpp) turns them on, STRATA_TC_SM75=0 / 1 forces this one off / on (still only on a 7.5 card).
+// Fork (RTX 2080 Ti, the Daily): this one (the 16-byte dequant of the prompt projections, bitwise) is on by default on a
+// 7.5 card, as before 0.1.45; STRATA_TC_SM75=0 turns it off.
 #pragma once
 
 #include "strata/core/sm75_series.hpp"
 
+#include <cstdlib>
+
 namespace strata::core {
 
 inline bool tc_sm75_enabled(int cc_major, int cc_minor) {
-    return strata::sm75_switch("STRATA_TC_SM75", cc_major, cc_minor);   // 7.5 and only 7.5 - never another SM model
+    if (!strata::is_sm75(cc_major, cc_minor)) return false;   // 7.5 and only 7.5 - never another SM model
+    const char* v = std::getenv("STRATA_TC_SM75");
+    return v == nullptr || std::atoi(v) != 0;
 }
 
 }  // namespace strata::core
