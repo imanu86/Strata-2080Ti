@@ -88,6 +88,7 @@ Aggregato = token generati / wall (t/s); dec = decode aggregato dal primo token.
 | `n-ctrl` | 18/10 21:51 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | agents:4:P **15.3** (dec 16.0); agents:8:P **25.2** (dec 25.2) |
 | `r0-warm` | 19/10 00:46 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | agents:3:R **20.4** (dec 21.1); [agents:3:R: prefill 66% del wall, TTFT p50/p90 6.83/17.42 s, lettura 404 tok/s, righe/s in lettura None, CPU altri 67.4% **DISTURBATO**] |
 | `r1-ctrlA` | 19/10 00:55 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16` | `-` | solo:S **50.7** (dec 55.8, dec medio 61.5); agents:3:R **17.8** (dec 18.5); [agents:3:R: prefill 67% del wall, TTFT p50/p90 6.72/23.69 s, lettura 397 tok/s, righe/s in lettura None, CPU altri 66.6% **DISTURBATO**] |
+| `r2-cfg1` | 19/10 01:02 | `--batch 4 --batch-groups 2 --conversation-cache-mib 28672 --conversation-cache-slots 16 --short-read 256` | `STRATA_PIPED_CONCURRENT=1 STRATA_PREFILL_CPU_SHARE=auto STRATA_SLOT_EXPIRE_S=300` | solo:S **52.3** (dec 57.1, dec medio 62.4); agents:3:R **21.6** (dec 22.6); [agents:3:R: prefill 78% del wall, TTFT p50/p90 8.61/29.98 s, lettura 325 tok/s, righe/s in lettura 18.7, CPU altri 52.1% **DISTURBATO**] |
 <!-- NOTTE:END -->
 
 # Multi-chat su 3060 + 2080 Ti (lab/multichat43)
