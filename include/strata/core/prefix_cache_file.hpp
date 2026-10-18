@@ -71,6 +71,13 @@ bool prefix_cache_read(const std::filesystem::path &path,
 std::filesystem::path prefix_cache_keyed_path(
     const std::filesystem::path &base, const std::vector<int32_t> &prefix,
     int32_t next_token);
+// The same names for several prefixes of one prompt in one pass (fork, STRATA_CONV_DISK): for each position a
+// in `at` (ascending, each < ids.size()) the keyed path of ids[0, a) with the frontier ids[a].  The result is
+// shorter than `at` when a position is out of order or out of range.
+std::vector<std::filesystem::path>
+prefix_cache_keyed_paths(const std::filesystem::path &base,
+                         const std::vector<int32_t> &ids,
+                         const std::vector<int64_t> &at);
 // The keyed files of `base` (its own directory, `<base filename>.` + 16 hex
 // digits; temporary files excluded), with their sizes and write times.
 struct PrefixCacheEntry {
