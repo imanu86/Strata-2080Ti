@@ -579,6 +579,9 @@ struct ExpertDispatch {
     /// whose routed ids all look resident there publishes no activation (doorbell_publish_res) - counted
     const int32_t* dres_check = nullptr;
     int64_t stale_x = 0;
+    /// STRUCT-A (STRATA_SA_BET): the call serves a head bet - its routes are not counted in `usage` (the caller
+    /// counts them once the bet is confirmed)
+    bool no_usage = false;
     int64_t multi_misses = 0;      ///< distinct (layer, expert) pairs the CPU computed in verify windows
     int64_t multi_entries = 0;     ///< routed (token, expert) entries the CPU served in verify windows
     /// Multi-GPU: the second GPU's tier.  Its experts are computed there instead of on the CPU (kind 2).

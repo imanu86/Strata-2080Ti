@@ -1769,7 +1769,7 @@ bool MtpDrafter::prepare_chain(std::string& err) {
 }
 
 bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force,
-                              int n_out, int n_early, std::string& err) {
+                              int n_out, int n_early, std::string& err, int n_now) {
     const OnDevice on_device(device_);
     if (chain_live_) { err = "mtp: a chain is already in flight"; return false; }
     if (!force_on_ || ev_chain_ == nullptr) { err = "mtp: chains need prepare_chain"; return false; }
@@ -1802,9 +1802,11 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
     chain_early_ = std::max(0, std::min(n_early, n_out));
+    // STRUCT-A: n_now > 0 queues the first n_now outputs only (chain_extend / chain_cut do the rest)
+    const int n_q = n_now > 0 ? std::min(n_now, n_out) : n_out;
     bool ok = cudaGraphLaunch(round_exec_[T], cs_) == cudaSuccess;
     if (ok && chain_early_ >= 1) ok = cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
-    for (int j = 1; ok && j < n_out; ++j) {
+    for (int j = 1; ok && j < n_q; ++j) {
         ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
         if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
     }
@@ -1816,15 +1818,40 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     steps_seen_ = 0;
     chain_live_ = true;
     chain_n_ = n_out;
+    chain_launched_ = n_q;
     ms_draft += ms_since(t0);
     ++rounds;
     return true;
 }
 
+bool MtpDrafter::chain_extend(int want, std::string& err) {
+    if (!chain_live_ || want <= chain_launched_ || chain_launched_ >= chain_n_) return true;
+    const OnDevice on_device(device_);
+    const int to = std::min(want, chain_n_);
+    bool ok = true;
+    for (int j = chain_launched_; ok && j < to; ++j) {
+        ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
+        if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
+    }
+    if (!ok || cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {   // the chain's end moves with its last step
+        err = std::string("mtp chain: ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
+    (void) cudaStreamQuery(cs_);
+    chain_launched_ = to;
+    return true;
+}
+
+void MtpDrafter::chain_cut() {
+    if (!chain_live_) return;
+    chain_n_ = chain_launched_;
+    chain_early_ = std::min(chain_early_, chain_launched_);
+}
+
 int MtpDrafter::chain_outputs_ready(std::string& err) {
     if (!chain_live_) return chain_n_;
     const OnDevice on_device(device_);
-    while (steps_seen_ < chain_early_) {
+    while (steps_seen_ < std::min(chain_early_, chain_launched_)) {
         const cudaError_t q = cudaEventQuery(ev_step_[steps_seen_]);
         if (q == cudaErrorNotReady) break;
         if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
@@ -1837,6 +1864,7 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
 
 int MtpDrafter::chain_poll(std::string& err) {
     if (!chain_live_) return 1;
+    if (chain_launched_ < chain_n_) return 0;   // STRUCT-A: not whole yet (chain_extend or chain_cut first)
     const OnDevice on_device(device_);
     const cudaError_t q = cudaEventQuery(ev_chain_);
     if (q == cudaErrorNotReady) return 0;
