@@ -170,6 +170,23 @@ public:
     /// first, -1 for none) and is advanced to the last two of these.
     bool run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err);
 
+    /// STRATA_PACK_PREFILL (opt-in, docs/MULTICHAT.md): one segment of a packed prompt read - another session's
+    /// positions [pos0, pos0 + n) read in the same chunks as the others, so the experts a chunk loads and dequantizes
+    /// serve every segment once.  `ss[k]`: the segment's session on stage k of a layer split (k = 0 on one GPU);
+    /// null = that stage's own session (the one `init` got).  `prev`: the two tokens before pos0, oldest first.
+    struct PackSeg {
+        const int64_t* tokens = nullptr;
+        int64_t n = 0, pos0 = 0;
+        int32_t prev[2] = {-1, -1};
+        std::vector<core::SessionState*> ss;
+    };
+    /// The segments' rows concatenated in order and read in chunks: hyper-connections, projections and experts on the
+    /// whole chunk, the per-session parts (PLE history, GDN recurrence and conv, K/V append, indexer, selection,
+    /// attention) per segment on its own session at its own positions.  `on_chunk` and `on_stage_chunk` see only the
+    /// rows of the segment whose session is the stage's own (at most one such segment, it must come first); every
+    /// segment's `ple_prev` is advanced.  No picture rows (`embd_rows` must be null), no STRATA_KV_PREFETCH.
+    bool run_packed(const std::vector<PackSeg>& segs, std::string& err);
+
     const PrefillStats& stats() const { return stats_; }
 
     /// Fork (TTFT): the PLE rows of the NEXT run's first tokens (`tokens`, `n` of them, `prev0`/`prev1` the two before
@@ -274,6 +291,17 @@ private:
     /// on its device) when it copies the chunk in pieces without a host wait; null with the one-copy hand-off
     const void* hand_ev_ = nullptr;
     int hand_pieces_ = 0;
+    // run_packed: the packed read's rows (shared by every stage of the chain while it runs), this stage's index in
+    // PackSeg::ss and the packed row of this run's first token (a later stage runs one chunk at a time)
+    struct Pack {
+        std::vector<PackSeg> segs;
+        std::vector<int64_t> tokens;     ///< every segment's tokens, concatenated
+        std::vector<int32_t> row_seg;    ///< each packed row's segment
+        std::vector<int64_t> row_pos;    ///< ... and its position in that segment's session
+    };
+    const Pack* pack_ = nullptr;
+    int pack_stage_ = 0;
+    int64_t pack_base_ = 0;
 
     std::string next_err_;
     std::future<bool> next_run_;
