@@ -14252,7 +14252,7 @@ int main(int argc, char** argv) {
                     const char* v = std::getenv("STRATA_PACK_CHUNK");
                     return v != nullptr ? std::max<int64_t>(0, std::atoll(v)) : (int64_t) 0;
                 }();
-                if (!lend(pk_chunk > 0 ? std::min(total, pk_chunk) : total, e)) return false;
+                if (!lend(pk_chunk > 0 ? std::min(total, pk_chunk) : total, e, 0)) return false;
                 const auto tr0 = Clock::now();
                 auto& last_sp = stages.empty() ? sp : stages.back()->sp;
                 // run_packed drains all stage workers before returning, including failure paths. Do not leave a
