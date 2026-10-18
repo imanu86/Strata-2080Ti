@@ -28,4 +28,13 @@ inline bool tc_sm75_enabled(int cc_major, int cc_minor) {
     return v == nullptr || std::atoi(v) != 0;
 }
 
+/// Fork (hc16): the hyper-connection projections and ssm_alpha / ssm_beta of the prompt on FP16 tensor cores, with their
+/// own small staged weight - opt-in, STRATA_HC16_SM75=1, and only on a 7.5 card (STRATA_EMULATE_CC=75 counts).  Not part
+/// of STRATA_SM75_PERF (it is not bitwise).  Beside STRATA_BF16_TC=1 it wins on those call sites, see prefill.cpp.
+inline bool hc16_sm75_enabled(int cc_major, int cc_minor) {
+    if (!strata::is_sm75(cc_major, cc_minor)) return false;
+    const char* v = std::getenv("STRATA_HC16_SM75");
+    return v != nullptr && std::atoi(v) != 0;
+}
+
 }  // namespace strata::core
