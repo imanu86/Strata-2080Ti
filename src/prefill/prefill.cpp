@@ -14,6 +14,7 @@
 #include "strata/platform/aux_cpus.hpp"
 
 #include "strata/core/layout.hpp"
+#include "strata/core/tc_sm75.hpp"
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/native_qsa.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
@@ -458,6 +459,31 @@ inline bool hcd_exact() {
     return v;
 }
 inline bool hc_pad() { return pf_hcdown() || hcd_exact(); }
+
+/// Fork hc16 (STRATA_HC16_SM75=1, sm_75 only): is the FP16 tensor-core path of the hyper-connection projections (down, up,
+/// inject) and of ssm_alpha / ssm_beta on for the device this prompt runs on?  Cached per thread and device: a mixed-device
+/// layer split must not inherit the first card's capability.
+bool hc16_dev() {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) { cudaGetLastError(); return false; }
+    static thread_local int cached_device = -1;
+    static thread_local bool on = false;
+    if (cached_device != dev) {
+        int major = 0, minor = 0;
+        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        on = core::hc16_sm75_enabled(major, minor);
+        cached_device = dev;
+    }
+    return on;
+}
+/// hc16 owns a staging buffer for one re-encoded weight (the largest is hc_down: 4 * 2560 * 320 elements, 6.55 MB).
+/// BF16X2's low parts (an explicit accuracy option) keep the BF16 path.  `carve` and `bytes_needed_impl` both ask this.
+inline bool hc16_alloc(bool f16_io) { return hc16_dev() && !bf16x2_hc(f16_io); }
+constexpr int64_t HC16_W_ELEMS = HC * N * LR;
 inline bool cvec_fuse() {
     static const bool v = [] { const char* e = std::getenv("STRATA_CVEC_FUSE"); return e && e[0] == '1'; }();
     return v;
@@ -874,6 +900,7 @@ struct Prefill::Impl {
     uint16_t *mixed_bf = nullptr, *mixed_h = nullptr;
     bool f16_io = false;   // HIP, STRATA_HIP_PROMPT_F16=1: this stage's 16-bit GEMMs run FP16 in and out (set in init)
     bool xn_f16 = false;   // Turing, BF16 on FP16 tensor cores: xn16 written as the FP16 values the GEMM would convert
+    uint16_t* hc16_w = nullptr;   // fork hc16 (sm_75): staging for one BF16 weight re-encoded as FP16 (HC16_W_ELEMS)
     uint16_t *xn16_lo = nullptr, *lo16_lo = nullptr, *mixed_bf_lo = nullptr;   // bf16x2(): the BF16 GEMMs' low parts
     float* bo = nullptr;
     // GDN
@@ -1424,6 +1451,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     m.gated = o.take<float>(T * D, ok); m.inj = o.take<float>(T * HC, ok);
     m.mixed = o.take<float>(T * N, ok); m.mixed_bf = o.take<uint16_t>(T * N, ok);
     m.mixed_h = o.take<uint16_t>(T * N, ok);
+    m.hc16_w = hc16_alloc(m.f16_io) ? o.take<uint16_t>((size_t) HC16_W_ELEMS, ok) : nullptr;
     // Embedding rows are dead after gr_broadcast on m.cs; subsequent half outputs use the same stream.
     m.bo = m.emb;
     if (bf16x2_hc(m.f16_io)) { m.xn16_lo = o.take<uint16_t>(T * D, ok); m.lo16_lo = o.take<uint16_t>(T * LR, ok); }
@@ -2175,6 +2203,9 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
     f(T * D); f(T * HC); f(T * N); o.take<uint16_t>(T * N, ok); o.take<uint16_t>(T * N, ok);
     if (!emb_reuse_account()) f(T * N);   // bo: aliases emb in carve; still counted unless STRATA_EMB_REUSE_ACCOUNT=1
     const bool f16_io = prompt_f16();   // the current device's mode (the stage's), as Prefill::init will decide it
+    // fork hc16: the weight staging `carve` takes after mixed_h.  THIS MUST STAY IN STEP WITH `carve`: the region is sized
+    // from this list, and a missing entry is not a smaller buffer but an allocation past the end of the arena.
+    if (hc16_alloc(f16_io)) o.take<uint16_t>((size_t) HC16_W_ELEMS, ok);
     if (bf16x2_hc(f16_io)) { o.take<uint16_t>(T * D, ok); o.take<uint16_t>(T * LR, ok); }
     if (bf16x2(f16_io)) o.take<uint16_t>(T * N, ok);
     o.take<int32_t>(T * strata::kernels::kStepCount, ok);
@@ -2280,6 +2311,29 @@ bool bf16_proj(Gemm& gm, const core::WeightRef* w, const uint16_t* X, float* Y, 
     }
     gm.bf16(X, wb, Y, T, w->ne1 > 0 ? w->ne1 : 1, w->ne0, ldy, 0.0f, ldx, x_f16);
     if (X_lo) gm.bf16(X_lo, wb, Y, T, w->ne1 > 0 ? w->ne1 : 1, w->ne0, ldy, 1.0f);
+    return true;
+}
+
+/// hc16 can take this weight: a plain resident BF16 matrix that fits the staging buffer
+inline bool hc16_weight_ok(const core::WeightRef* w) {
+    return w->kind == core::WeightKind::Bf16InF32 && w->data && w->q8_scale == nullptr &&
+           w->ne0 * (w->ne1 > 0 ? w->ne1 : 1) <= HC16_W_ELEMS;
+}
+/// Fork hc16 (sm_75): a projection whose weight is a resident BF16 matrix, re-encoded as FP16 into `w16` (one matrix at a
+/// time, HC16_W_ELEMS at most) and multiplied on the FP16 tensor cores against `X16`, an FP16 image of the activations.
+/// The re-encoding is value-preserving - a speed path, not a precision one - and shares the compute stream with the GEMM,
+/// so the staging buffer cannot be overwritten while cuBLAS still reads it.
+bool f16_proj_staged(Gemm& gm, const core::WeightRef* w, const uint16_t* X16, uint16_t* w16, float* Y, int64_t T,
+                     const std::string& name, std::string& err, int64_t ldy, void* stream) {
+    if (w->kind != core::WeightKind::Bf16InF32 || !w->data || w->q8_scale != nullptr || w16 == nullptr) {
+        err = "prefill: " + name + " is not a resident BF16 tensor (STRATA_HC16_SM75 needs plain BF16 hyper-connection "
+              "projections; it is off with STRATA_HC_REQ8 / Q8_0 ones, unset it)";
+        return false;
+    }
+    const int64_t Nn = w->ne1 > 0 ? w->ne1 : 1, Kk = w->ne0;
+    if (Nn * Kk > HC16_W_ELEMS) { err = "prefill: " + name + " is larger than the STRATA_HC16_SM75 staging buffer"; return false; }
+    hc16_w_to_f16((const uint16_t*) w->data, w16, Kk * Nn, stream);
+    gm.f16(X16, w16, Y, T, Nn, Kk, ldy);
     return true;
 }
 
@@ -2967,11 +3021,19 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 }
                 pt.mark(kPfHc, cs);
                 // the xn16 token stride of this chunk (the writers of both halves and of the fused write-backs use it)
-                const int64_t ldx = hc_pad() && T >= std::max<int64_t>(pf_switch_min_t(), 64) && !gr_unfused() &&
+                // fork hc16 (STRATA_HC16_SM75=1, sm_75): xn16 and lo16 hold the FP16 images of the FP32 values and the
+                // hyper-connection projections run staged on the FP16 tensor cores.  PRECEDENCE with STRATA_BF16_TC=1: hc16
+                // wins on its call sites (down / up / inject here, ssm_alpha / beta below): xn16 is then written by hc16's
+                // rule (xn_img 2), never by BF16_TC's FP16-of-BF16 one (xf16 off), and the staged weight replaces BF16_TC's
+                // per-call conversion.  Every other BF16 GEMM (router, indexer, the draft layer) keeps what BF16_TC says.
+                // hc16 keeps xn16 unpadded (ldx = D), so STRATA_PF_HCDOWN / STRATA_HCD_EXACT / STRATA_HC_UPMIX stay off.
+                const bool hc16 = m.hc16_w != nullptr;
+                const int64_t ldx = !hc16 && hc_pad() && T >= std::max<int64_t>(pf_switch_min_t(), 64) && !gr_unfused() &&
                                             !m.xn16_lo ? D + XN_PAD : D;
-                const bool xf16 = m.xn_f16 && !m.xn16_lo && ldx == D;   // xn16 holds FP16 (its writers and readers below)
-                if (gr_unfused()) gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs, m.xn16_lo, xf16);
-                else if (!normed) gr_norm_rs(m.R, (const float*) wn->data, EPS, m.grs, m.xn16, T, m.cs, m.xn16_lo, ldx, xf16);
+                const bool xf16 = !hc16 && m.xn_f16 && !m.xn16_lo && ldx == D;   // xn16 holds FP16 (its writers and readers below)
+                const int xn_img = hc16 ? 2 : xf16 ? 1 : 0;   // the f16img mode of the gr_* writers (kernels.hpp)
+                if (gr_unfused()) gr_norm(m.R, (const float*) wn->data, EPS, m.xn, m.xn16, T, m.cs, m.xn16_lo, xn_img);
+                else if (!normed) gr_norm_rs(m.R, (const float*) wn->data, EPS, m.grs, m.xn16, T, m.cs, m.xn16_lo, ldx, xn_img);
                 normed = false;
                 bool hcd = false;
                 bool hdown = false;
@@ -2988,10 +3050,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     }
                     hcd = true;
                 }
-                if (!hcd && !hdown && !bf16_proj(m.gemm, wd, m.xn16, m.lo, T, sd, err, 0, m.xn16_lo, ldx != D ? ldx : 0, m.cs, xf16)) return false;
-                gr_silu(m.lo, m.lo16, T, m.cs, m.lo16_lo);
+                if (hc16) {
+                    if (!f16_proj_staged(m.gemm, wd, m.xn16, m.hc16_w, m.lo, T, sd, err, 0, m.cs)) return false;
+                } else if (!hcd && !hdown && !bf16_proj(m.gemm, wd, m.xn16, m.lo, T, sd, err, 0, m.xn16_lo, ldx != D ? ldx : 0, m.cs, xf16)) return false;
+                gr_silu(m.lo, m.lo16, T, m.cs, m.lo16_lo, hc16 ? 1 : 0);
                 bool upmixed = false;
-                if (wu->q8_scale == nullptr && hc_upmix() && T >= std::max(pf_switch_min_t(), hc_upmix_min_t()) && !gr_unfused() && !m.lo16_lo && !m.mixed_bf_lo &&
+                if (!hc16 && wu->q8_scale == nullptr && hc_upmix() && T >= std::max(pf_switch_min_t(), hc_upmix_min_t()) && !gr_unfused() && !m.lo16_lo && !m.mixed_bf_lo &&
                     wu->kind == core::WeightKind::Bf16InF32 && wu->data && wu->ne0 == LR && wu->ne1 == D) {
                     static int checks = [] { const char* e = std::getenv("STRATA_HC_UPMIX_CHECK"); return e ? std::atoi(e) : 0; }();
                     if (checks > 0) {   // the default pair first, kept for the comparison
@@ -3017,8 +3081,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                            m.mixed, m.mixed_bf, m.mixed_h, T, m.cs);
                     }
                 }
-                if (!upmixed && !bf16_proj(m.gemm, wu, m.lo16, m.gated, T, su, err, 0, m.lo16_lo, 0, m.cs)) return false;
-                if (!hcd && !bf16_proj(m.gemm, wi, m.xn16, m.inj, T, si, err, 0, m.xn16_lo, ldx != D ? ldx : 0, m.cs, xf16)) return false;
+                if (hc16) {
+                    if (!f16_proj_staged(m.gemm, wu, m.lo16, m.hc16_w, m.gated, T, su, err, 0, m.cs)) return false;
+                } else if (!upmixed && !bf16_proj(m.gemm, wu, m.lo16, m.gated, T, su, err, 0, m.lo16_lo, 0, m.cs)) return false;
+                if (hc16) {
+                    if (!f16_proj_staged(m.gemm, wi, m.xn16, m.hc16_w, m.inj, T, si, err, 0, m.cs)) return false;
+                } else if (!hcd && !bf16_proj(m.gemm, wi, m.xn16, m.inj, T, si, err, 0, m.xn16_lo, ldx != D ? ldx : 0, m.cs, xf16)) return false;
                 if (upmixed) {
                 } else if (gr_unfused()) {
                     gr_mix(m.xn, m.gated, m.mixed, m.mixed_bf, T, m.cs, m.mixed_h, m.mixed_bf_lo);
@@ -3044,8 +3112,14 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
                     if (!native_proj(m.gemm, wqkv, m.mixed_h, m.qkv, T, v.name("attn_qkv.weight"), err)) return false;
                     if (!native_proj(m.gemm, wg, m.mixed_h, m.z, T, v.name("attn_gate.weight"), err)) return false;
-                    if (!bf16_proj(m.gemm, wa, m.mixed_bf, m.ab, T, v.name("ssm_alpha.weight"), err, 2 * HV, m.mixed_bf_lo)) return false;
-                    if (!bf16_proj(m.gemm, wb, m.mixed_bf, m.ab + HV, T, v.name("ssm_beta.weight"), err, 2 * HV, m.mixed_bf_lo)) return false;
+                    // fork hc16: these two are BF16 GEMMs too (FFMA on Turing) and `mixed_h` is already the FP16 image of
+                    // their input, so they take the same staged tensor-core path
+                    if (hc16 && hc16_weight_ok(wa)) {
+                        if (!f16_proj_staged(m.gemm, wa, m.mixed_h, m.hc16_w, m.ab, T, v.name("ssm_alpha.weight"), err, 2 * HV, m.cs)) return false;
+                    } else if (!bf16_proj(m.gemm, wa, m.mixed_bf, m.ab, T, v.name("ssm_alpha.weight"), err, 2 * HV, m.mixed_bf_lo)) return false;
+                    if (hc16 && hc16_weight_ok(wb)) {
+                        if (!f16_proj_staged(m.gemm, wb, m.mixed_h, m.hc16_w, m.ab + HV, T, v.name("ssm_beta.weight"), err, 2 * HV, m.cs)) return false;
+                    } else if (!bf16_proj(m.gemm, wb, m.mixed_bf, m.ab + HV, T, v.name("ssm_beta.weight"), err, 2 * HV, m.mixed_bf_lo)) return false;
                     pt.mark(kPfGdnConv, cs);   // "gdn" is the projections in; the rest on their own lines
                     gdn_gates(m.ab, (const float*) wdt->data, (const float*) wsa->data, m.gate, m.beta, T, m.cs);
                     gdn_conv(conv, m.qkv, (const float*) wc->data, m.hbuf, T, EPS, m.cs);
@@ -4551,10 +4625,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         cudaMemcpyAsync(Rc, m.R, (size_t) T * D * 4, cudaMemcpyDeviceToDevice, m.cs);
                         gr_write(Rc, m.bo, m.inj, HC, T, m.cs);
                         strata::kernels::cvec_apply(Rc, l, T, D, nullptr, 0, nullptr, 0, false, m.cs);
-                        gr_norm_rs(Rc, (const float*) wnn->data, EPS, rc, xc, T, m.cs, nullptr, D, xf16);
+                        gr_norm_rs(Rc, (const float*) wnn->data, EPS, rc, xc, T, m.cs, nullptr, D, xn_img);
                         gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,
                                               strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs,
-                                              m.xn16, T, m.cs, m.xn16_lo, ldx, xf16);
+                                              m.xn16, T, m.cs, m.xn16_lo, ldx, xn_img);
                         std::vector<float> a((size_t) T * D), b((size_t) T * D), ra((size_t) T * HC), rb((size_t) T * HC);
                         std::vector<uint16_t> xa((size_t) T * D), xb((size_t) T * D);
                         cudaMemcpyAsync(a.data(), m.R, a.size() * 4, cudaMemcpyDeviceToHost, m.cs);
@@ -4573,11 +4647,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     } else
                     gr_write_cvec_norm_rs(m.R, m.bo, m.inj, HC, cv_dir + l * N, cv_s + l, cv_on,
                                           strata::kernels::cvec().mode, (const float*) wnn->data, EPS, m.grs, m.xn16,
-                                          T, m.cs, m.xn16_lo, ldx, xf16);
+                                          T, m.cs, m.xn16_lo, ldx, xn_img);
                     normed = true;
                 } else if (wnn) {
                     gr_write_norm_rs(m.R, m.bo, m.inj, HC, (const float*) wnn->data, EPS, m.grs, m.xn16, T, m.cs,
-                                     m.xn16_lo, ldx, xf16);
+                                     m.xn16_lo, ldx, xn_img);
                     normed = true;
                 } else {
                     gr_write(m.R, m.bo, m.inj, HC, T, m.cs);
