@@ -546,5 +546,6 @@ void PleReader::reset_stats() {
 }
 uint64_t PleReader::cache_capacity() const { return impl_->cache.sets * WAYS; }
 uint64_t PleReader::cache_size() const { return impl_->cache.used; }
+bool PleReader::threaded() const { return impl_->threaded; }
 
 }  // namespace strata::ngram
