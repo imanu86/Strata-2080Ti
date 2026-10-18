@@ -12,6 +12,7 @@ if [ -n "$NOLOCK" ]; then LOCKCMD="bash $D/nolock.sh"; else LOCKCMD="python $D/b
 S=$(dirname "$(readlink -f "$0")")
 run() {
   local tag=$1; shift
+  while [ -e $D/shortpf_$P-$tag.runlog ]; do tag=${tag}b; done
   echo "== $P-$tag $(date +%H:%M)"
   $LOCKCMD DET-shortpf-$P-$tag -- $PY -B $S/shortpf_bench.py --tag $P-$tag --exe $B/strata.exe --serve $B/source/serve "$@" > $D/shortpf_$P-$tag.runlog 2>&1
   echo "$P-$tag rc=$? $(date +%H:%M)"
@@ -27,7 +28,13 @@ for arm in "$@"; do
     xsm128) run xsm128 --force-sr 0 --env "STRATA_PREFILL_STREAM_MIN=128" ;;
     xcpusm) run xcpusm --force-sr 0 --env "STRATA_PREFILL_CPU_SHARE=auto STRATA_PREFILL_STREAM_MIN=256" ;;
     xlt)   run xlt --force-sr 0 --env "STRATA_PREFILL_LAYER_TIMES=1 STRATA_PREFILL_TIMING=1" ;;
+    xcpu06) run xcpu06 --force-sr 0 --env "STRATA_PREFILL_CPU_SHARE=0.6" ;;
+    xcpu08) run xcpu08 --force-sr 0 --env "STRATA_PREFILL_CPU_SHARE=0.8" ;;
+    xtcpu) run xtcpu --force-sr 0 --env "STRATA_PREFILL_CPU_SHARE=auto STRATA_PREFILL_TIMING=1 STRATA_DBG_CPU_GATE=1" ;;
+    fx0)   run fx0 --force-sr 0 --fixed ;;
+    fxcpu) run fxcpu --force-sr 0 --fixed --env "STRATA_PREFILL_CPU_SHARE=auto" ;;
     xhelp) run xhelp --force-sr 0 --env "STRATA_PREFILL_HELP=1" ;;
+    xhelpsm) run xhelpsm --force-sr 0 --env "STRATA_PREFILL_HELP=1 STRATA_PREFILL_STREAM_MIN=256" ;;
     x0)    run x0 --force-sr 0 ;;                                                  # the prompt path, plain
     x*)    echo "arm $arm: add it to the case" ;;
     fixed-sr64) run fixed-sr64 --plan sizes --fixed ;;

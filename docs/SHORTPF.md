@@ -55,17 +55,32 @@ Tempo GPU di una corsa per stadio (ms) e quota delle fasi maggiori. Lo stadio 0 
 - La coda da 6 token (intestazione dell'assistente) costa 460 ms sul percorso del prompt; con `--short-read >= 6` va in finestre.
 - Dopo il pezzo: draft MTP 5-60 ms fino a 1k token, 183 ms a 3k, 505 ms a 8k (poco).
 
-## 4. Leve a costo zero provate (env, `--short-read 0`, stessa vita)
+## 4. Leve a costo zero provate (solo env, percorso del prompt `--short-read 0`, build upsmain, config Daily con `--elastic`)
 
-| leva | ~120 | ~320 | ~1030 | ~3050 |
-|---|---|---|---|---|
-| base | 1,74 | 2,55 | 4,50 | 7,73 |
-| `STRATA_PREFILL_CPU_SHARE=auto` | 1,84 (n=4) | 2,61 | **3,98** (3,70-4,00) | 7,63 |
+TTFT mediano in s (4 ripetizioni da ~100/300/1000, 2 da 3000, 1 da 8000; macchina meno carica che in §2: controllo rifatto).
+Tra parentesi la differenza dal controllo `x0`.
 
-La quota CPU e' spenta di default sulla divisione a strati (`arm_cpu_share` la arma solo senza stadi); con `auto` abbassa a 3000 il
-limite del percorso a "anello per esperti" e prende alla CPU gli esperti a pochi token: -12% a ~1k, neutra altrove. Da
-rimisurare con un controllo alternato (il rumore e' ~10%). Non ancora provati: `STRATA_SPLIT_MTP_BATCH=1`,
-`STRATA_PREFILL_HELP=1`, `STRATA_PREFILL_STREAM_MIN` piu' basso (l'HELP e l'anello a ordine fisso partono solo da 1024 token).
+| braccio | ~120 | ~320 | ~1030 | ~3050 | ~8100 |
+|---|---|---|---|---|---|
+| controllo x0 | 1,87 | 2,66 | 4,26 | 7,63 | 14,47 |
+| `STRATA_PREFILL_CPU_SHARE=auto` | 1,58 (-15%) | 2,12 (-20%) | 3,48 (-18%) | 7,03 (-8%) | 14,39 |
+| `STRATA_PREFILL_CPU_SHARE=0.6` | 1,35 (-28%) | 1,77 (-33%) | 2,98 (-30%) | 6,09 (-20%) | 12,66 |
+| `STRATA_PREFILL_CPU_SHARE=0.8` | **1,23 (-34%)** | **1,67 (-37%)** | **2,95 (-31%)** | **6,07 (-20%)** | 12,67 (-12%) |
+| `STRATA_PREFILL_STREAM_MIN=256` | 1,95 | 3,72 (+40%) | 4,56 | 7,66 | 14,44 |
+| `HELP=1` + `STREAM_MIN=256` | 1,96 | 3,45 (+30%) | 4,34 | 8,01 | 15,77 |
+
+- **La quota CPU e' la leva.** E' spenta di default sulla divisione a strati (`arm_cpu_share` la arma solo senza stadi): con
+  `STRATA_PREFILL_CPU_SHARE=<f>` la CPU (inattiva durante il prompt) calcola gli esperti non residenti a pochi token invece di
+  farli passare dal PCIe. Il `auto` misurato sta troppo basso (calibra una quota ~0,3-0,4); fissa 0,8 e' meglio di 0,6; con
+  `TIMING` + share lo stadio 0 scende da 395 a 296 ms (113 token) e da 764 a 421 ms (306 token); lo stadio 1 da 685 a 523 ms e
+  da 1357 a 771 ms. Il limite alto del percorso (3072 token) viene da `STRATA_PREFILL_CPU_SHARE_MAX`.
+- `STREAM_MIN` piu' basso peggiora (lo streaming a ordine fisso non conviene sotto 1024); `HELP` non aiuta nei pezzi piccoli.
+- **Non e' bitwise.** A cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, `--short-read` via finestre o
+  percorso) due corse del controllo hanno lo stesso testo in 13 risposte su 17 (le 4 diverse sono tutte nella seconda
+  conversazione); controllo contro quota CPU: 4 su 17 uguali. Le risposte sono riassunti liberi da 32 token a temperatura 0:
+  una variazione numerica di ~0,004 di KL (la nota di upstream sulla quota CPU) basta a cambiare le parole. La KL sul testo
+  lungo non e' stata misurata.
+- Residuo nello stadio 1: "hc read" ~160-170 ms fissi anche con 6 token (con la quota CPU e' il 32-59% della corsa).
 
 ## 5. Prossimi passi
 
