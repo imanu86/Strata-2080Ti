@@ -896,8 +896,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     {   // STRATA_DF_BRANCH=1 (opt-in): the mixer's side branches.  Off by default: on Linux (open modules, GSP) a
         // stage's window with the branches stopped inside its graph when an NVML query (nvidia-smi) came between
         // requests (2x RTX 3090 and 2x RTX 2080 Ti, #905); never seen on Windows.  0 / unset: one stream, as before
+        // Fork (lab/upsync): on by default with CUDA on Windows, as in the Daily (be4cf1c, +2.4% at 131k on the two
+        // cards); STRATA_DF_BRANCH=0 turns it off.  Linux and HIP keep upstream's opt-in.
         const char* v = std::getenv("STRATA_DF_BRANCH");
+#if defined(_WIN32) && !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
+        df_branch_ = v == nullptr || std::atoi(v) != 0;
+#else
         df_branch_ = v != nullptr && std::atoi(v) != 0;
+#endif
         if (df_branch_ && df_fork_ == nullptr) {
             bool okb = cudaEventCreateWithFlags(&df_fork_, cudaEventDisableTiming) == cudaSuccess;
             for (int i = 0; i < 2 && okb; ++i)
@@ -1177,9 +1183,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             // below (the norms divide at run time as its norms do; the history advances token by token), which also
             // writes the commit's history snapshots.  Scratch: layer 0's expert rows, combined by now, and the
             // hyper-connection read's `lo_`, which the read below rewrites.
+            // Fork (lab/upsync): on by default with CUDA, as in the Daily (be4cf1c, +3.3% at 131k on the two cards);
+            // STRATA_DF_PLE=0 turns it off.  HIP keeps upstream's opt-in.
             static const bool ple_post_env = [] {
                 const char* e = std::getenv("STRATA_DF_PLE");
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
+                return e == nullptr || std::atoi(e) != 0;
+#else
                 return e != nullptr && std::atoi(e) != 0;
+#endif
             }();
             const bool ple_post = ple_batch_kv && ple_post_env && !batch_rec_;
             // #783 PR-g (stuchapin909): the window's residual writes in one launch (STRATA_NO_MULTI_GR=1: per token)
