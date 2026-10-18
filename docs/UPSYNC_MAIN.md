@@ -105,3 +105,104 @@ quelle di upstream. Non portati i neutri o peggiori di `lab/struct-a` (NODECUT, 
   SIDE_MIXER=2 sono ora quelli di upstream), poi contro il Daily r2. Con `STRATA_BF16_TC=1` come terzo braccio.
 - Verificare con `--expert-cache 1500`, senza `--elastic`, `--adapt-every 0` che le leve restino bitwise.
 - Provare `--prompt-cache-file` + `STRATA_PREFIX_DISK_MULTI` con due client (prestito + disco).
+
+## 6. La regressione di L01 nel B-A-B del 18/10 (Daily r2 contro upsmain): non e' nel codice (19/10, misurato)
+
+Dato di partenza (`DET-x22-dly-*`): L01 69,9 -> 65,5 / 66,6 t/s, "per-layer host" 3,17 -> 5,45 / 5,14 ms, e in piu' "stage" 0,29 ->
+1,92 / 2,06 ms. Lo stage e' lo staging di finestra, PLE compresa: nei due bracci B il "PLE primary" sale a 0,81-1,02 ms/finestra di
+gather e 1,04-1,11 di altro staging (Daily: 0,11 e 0,18). Il tempo e' **attesa sul lettore PLE**: fra "PLE before" e "PLE after" del
+decode di L01 il "blocked" vale 961 / 1034 ms nei due B (Daily 108 / 115 ms), a parita' di letture SSD (18,1k contro 18,1k) e di righe.
+Cioe' ogni lettura e' costata di piu', non ce ne sono di piu'. Il costo cade sulle finestre "fresh" (dopo un rollback, righe non
+prefetchate): classe fresh 34,5 ms contro 31,9; le speculative sono uguali (21,0 contro 20,5). L02 e' pari (64,9 / 64,7 contro 65,4).
+
+**Non e' riproducibile.** Stessa build `build-upsmain-d06429ee`, stesso exe (sha uguale), stessa env e stessi argomenti dei due B
+(plan.json identici tranne il percorso della traccia): `DET-x22-sw-b1/b2` (16:30, 16:37) 69,6 / 68,2 t/s con stage 0,29 / 0,32; e tre
+corse nuove di oggi (bench.lock, banco forzato 131k, `DET-s45-*`):
+
+| corsa | exe | L01 t/s | L01 host | L01 stage | L01 PLE blocked | L02 t/s |
+|---|---|---|---|---|---|---|
+| dly-warm / dly-a / s45-h1a | Daily r2 | 69,6 / 69,9 / 67,1 | 3,27 / 3,17 / 3,91 | 0,28 / 0,29 / 0,28 | 108 / 115 / - ms | 63,7 / 65,4 / 63,5 |
+| sw-b1 / sw-b2 | upsmain | 69,6 / 68,2 | 3,57 / 3,96 | 0,29 / 0,32 | 112 / 122 ms | 65,3 / 63,8 |
+| **dly-b1 / dly-b2** | upsmain | **65,5 / 66,6** | 5,45 / 5,14 | **1,92 / 2,06** | **961 / 1034 ms** | 64,9 / 64,7 |
+| s45-r1 | upsmain | 69,7 | 3,67 | 0,27 | 103 ms | 64,7 |
+| s45-h1b (subito dopo il Daily h1a) | upsmain | 67,7 | 3,22 | 0,27 | - | 64,5 |
+
+Media L01: Daily 68,9; upsmain senza i due bracci anomali 68,8 (con: 67,9). L02: Daily 64,2; upsmain 64,7. **A parita' di condizioni
+upsmain e' pari al Daily r2** (±1%, dentro il rumore fra sessioni, che su questo banco arriva a 4-5% come mostrano le due sw-b contro
+le due dly-b). L'ordine "Daily poi upsmain" non e' la causa (h1a -> h1b nessuna penale). Il banco ha colpito solo l'L01 dei due B.
+
+Cosa ho escluso leggendo il codice 0.1.43 -> 0.1.45 (579 commit) sul cammino di decode di questa config:
+- pool CPU / esperti CPU: `pool.cpp` (UMWAIT opt-in, `--host-core sibling`), `native_expert.cpp` (NVFP4, EXACT1 opt-in),
+  `iq_avx2_rows.inl` (solo righe nuove sotto `gu_ggml_one`): nessun cambio di default per IQ3_XXS. CPU 5,2-5,8 contro 4,7 ms e CPU
+  experts 1,18-1,28 contro 1,14-1,21 per layer-finestra vengono dalla cache piu' piccola (ultimo punto), non dal kernel.
+- PLE: l'unico cambio e' in `ngram.cpp` (#2622: `gather_batch` riusa chiavi prefetchate riordinate; `a2de7446`: `std::recursive_mutex`
+  su `PleTable`). Il lettore (`ple_reader.cpp`) e' identico. Il mutex e' preso anche da `prefetch_rows` (drafter, stage 0) e da
+  `gather_batch` (che lo tiene mentre aspetta l'SSD): una contesa fra catena di draft e finestra e' possibile, ma e' un'ipotesi non
+  misurata e non spiega perche' sw-b / s45-r1 / h1b, uguali, non la mostrano.
+- `session.cpp`, `generate.cpp`, `verify.cpp`: i cambi sono Metal, batch, `--host-core sibling`; la riga di timing e' la stessa.
+- Dimensione della cache expert: `expert cache N slots` parte da una lettura NVML della VRAM libera che oscilla (3214-3313 su upsmain,
+  3238-3377 sul Daily, 3098 in s45-r1); non e' un difetto di 0.1.45. Un 2-3% di slot in meno = 4-8% di esperti CPU in piu', e' la sola
+  differenza persistente dell'host (+0,3-0,5 ms su L01) e sta dentro il rumore.
+
+Causa: **disturbo esterno e transitorio sulla lettura PLE dell'L01 dei due bracci B** (ipotesi sul meccanismo, non provata: in dly-b1 c'era
+una lettura estranea da 28 MB/s su `PhysicalDrive1` dalle 16:42:03, in dly-a un 63 MB/s per ~3 minuti che ha portato il caricamento
+dell'arena del Daily a 0,17 GiB/s; il decode di dly-b1 e dly-b2 e' caduto alle 16:42:40 e alle 16:52:20, a 10 minuti esatti: un lavoro
+periodico di altri agenti o di sistema e' compatibile, ma non l'ho trovato fra le attivita' pianificate di Windows). Nessuna correzione
+al motore: **non ho cambiato codice, la build resta `build-upsmain-d06429ee`** (strata.exe sha256 `fd8890197bf2...`).
+
+Per il prossimo B-A-B: scartare e ripetere un braccio se nel suo `engine.log` lo "stage" di L01 supera 0,6 ms o il "blocked" PLE fra
+"before" e "after" del decode supera ~300 ms; `bab_verdict.py` dovrebbe stamparli accanto ai t/s, cosi' un braccio disturbato si vede subito.
+
+Differenza persistente e vera (non e' L01): il **prompt da 131k** e' piu' lento del 10-12% su upsmain: 1463-1489 tok/s (sw-b1/b2, s45-r1,
+h1b) contro 1607-1701 del Daily (dly-warm, dly-a, h1a), cioe' 88-89 s contro 77-82 s. E' la mancanza di hc16 (punto dubbio 1 del
+paragrafo 3): il primo braccio da misurare e' `STRATA_BF16_TC=1`.
+
+## 7. Interruttori nuovi di upstream 0.1.44 / 0.1.45 che possono valere per 2080 Ti + 3060 (da misurare, nessuno e' acceso nella pila)
+
+Config di riferimento: 2 schede (CUDA0 3060 sm_86 strati 0-15, CUDA1 2080 Ti sm_75 strati 16-47), `--pipeline-windows 2`, MTP `--spec 4`,
+KV int8, pack IQ3_XXS, PLE diretta, CPU solo AVX-2, Windows/WDDM. Tutti sono variabili d'ambiente. Letti dal codice e dai documenti di
+upstream; nessuno provato qui.
+
+Decode
+- `STRATA_SM75_PERF=1`: accende in blocco i kernel Turing bitwise di upstream, **solo su CUDA1** (sm_75; la 3060 non cambia). Contiene
+  `STRATA_SM75_IL` (tabella matvec interleaved per piccoli batch), `STRATA_SM75_EXP` (layout esperti mode 4), `STRATA_GR_UP75` e
+  `STRATA_GR_DOWN_TG` (lettura hyper-connection), `STRATA_SCORES_HALVE` e `STRATA_TOPK_SPLIT` (selezione QSA in decode),
+  `STRATA_ATTN_V3` (attenzione di decode su pool INT8), `STRATA_TOPK_SAMPLE`, `STRATA_SCORES_THREAD`, `STRATA_PA_V1_PREFETCH` (prompt),
+  `STRATA_TC_SM75` (gia' acceso dalla pila), `STRATA_Q2_WARP` (solo Q2_0, inerte con IQ3_XXS). Dichiarato: decode +5-6% a 4K-32K, prompt
+  a profondita' fino a +30%, tutto bitwise. Ogni sigla vince su SM75_PERF in entrambe le direzioni (=0/=1).
+  **Attenzione**: l'env del Daily ha `STRATA_MMVQ_IL=0`, che spegne il percorso interleaved su tutte le schede (`g_mmvq_il()` in `verify.cpp`
+  gata la copia interleaved delle attivazioni, e `STRATA_QIL` con lei): da come leggo il codice `SM75_IL` e `STRATA_QIL` (di default su
+  Turing, +0,5-1%) restano inerti, non provato. Un secondo braccio sensato e' `STRATA_SM75_PERF=1` senza
+  `STRATA_MMVQ_IL=0` (ma cosi' cambia anche la 3060, dove l'IL e' di default acceso: servono le due schede nel conto).
+- `STRATA_MTP_STAGE0=1`: con `--pipeline-windows` il layer di draft sta sulla **prima** scheda (3060) invece che sull'ultima, e la catena di
+  draft non divide piu' la 2080 Ti con la sua finestra (upstream, 2x R9700: +21% decode). Serve `draft_vocab.bin` nella dir MTP (c'e' in
+  `rt_it48k`). Costo: ~840 MiB di VRAM in meno sulla 3060 (circa 580 slot di cache). Su CUDA e' spento di default e il log lo segnala.
+- `STRATA_QSA_SPLIT_ATTN=1` (#1888, sm_80+, KV int8): attenzione di decode divisa su piu' blocchi sul percorso mma int8; solo 3060.
+  Dichiarato +2,8% / +3,5%; non bitwise (KL 0,0016 contro un pavimento di 0,0012).
+- `STRATA_HC_REQ8=1` (#1262): proiezioni hyper-connection in int8 con una scala per 32: meno VRAM, piu' slot di cache. Dichiarato decode
+  -0,2 / +2,2%, KL 0,0018, non bitwise.
+- `STRATA_CPU_IQ_ALL_EXACT1=1` (#1415 #1544): righe esperto a 1 token in AVX-2 con l'ordine float di ggml (bitwise) al posto del `vec_dot` di
+  ggml; solo CPU senza AVX-512 e **non con `STRATA_IQ_MT_MIN=1`** (che il banco imposta): da provare senza quella.
+- `STRATA_POOL_UMWAIT=<cicli>` (con `_C02`, `_ESC`): i worker del pool aspettano con UMWAIT invece di girare a vuoto (CPU con WAITPKG, build
+  MSVC); risparmia energia, rischio di latenza di risveglio. Probabilmente neutro con `STRATA_POOL_SPIN_US=100`.
+- Non si applicano a questo assetto: `STRATA_PIN_BY_NEED=1` (arena su una GPU), `STRATA_PCIE_BALANCE=1` (una GPU, senza `--batch`),
+  `STRATA_SPLIT_OVERLAP=1` (spento accanto a `--pipeline-windows`), `STRATA_VERIFY_ASYNC_LAUNCH=1` (non per le finestre in pipeline).
+
+Prompt / TTFT
+- `STRATA_BF16_TC=1` (con `STRATA_XN_F16`, acceso se non =0): proiezioni BF16 (hyper-connection, router, indicizzatore...) in FP16 sui tensor
+  core; al posto del nostro hc16 non portato. Non bitwise. Dichiarato prompt +15-18% sulla 2080 Ti (Q2_0). Primo braccio da provare.
+- `STRATA_PF_FUSED=1` + `STRATA_PF_FUSED_SM75=1`: esperti del prompt fusi in int8 (MMA m8n8k16 su Turing). Documentato per Q2_0; il ramo
+  sm_75 esiste anche in `moe_fused_iq.cu`: da verificare se copre IQ3_XXS. Non bitwise.
+- `STRATA_PA_V2T=1` (attenzione del prompt v2 con staging in registri) e `STRATA_PROMPT_ATTN_Q4_TC`: Turing, non bitwise.
+  `STRATA_PROMPT_ATTN_IMMA=1` (sm_80+, KV int8, solo 3060): prompt +2,5%, rounding-level.
+- `STRATA_HANDOFF_PIPE=P` (P 2-16) e `--prefill-pipe 1` / `STRATA_PREFILL_PIPE=1`: passaggio dei chunk di prompt fra le due schede in P pezzi
+  su un thread persistente / geometria dei chunk per la pipeline; opt-in, il secondo tocca l'arrotondamento.
+- `STRATA_REFILL_PARTS=1`: riempie gli slot presi in prestito dal prompt direttamente dalla mappa del GGUF (-0,1-0,3 s a fine prompt).
+
+Batch / multi-chat (solo con `--batch`; nessuno e' di default; non cambiano cio' che si calcola)
+- `STRATA_SLOT_COPY_DIRECT=1` + `STRATA_SLOT_COPY_BATCHSYNC=1` (ammissione/ripresa di uno slot device-to-device), `STRATA_SLOT_CKPT_MOVE=1`
+  e `STRATA_CKPT_POOL=1` / `STRATA_CKPT_THREADS=1` (checkpoint senza copia / in parallelo), `STRATA_ADMIT_MERGE_FIRST=1` (ultimo pezzo di
+  prompt e primo token in una finestra, solo con tutti gli esperti residenti: il banco DET lo vuole spento), `STRATA_ADMIT_SHORT_FIRST=N`
+  (server), `STRATA_BATCH_SELF_COMMIT=1`, `STRATA_QSA_SLOTS=1`, `STRATA_BATCH_ATTN_ROWS=1`, `STRATA_BATCH_GDN_GROUPS=1`,
+  `STRATA_PIPE_BYIELD_NODRAIN=1`, `STRATA_PIPED_CONCURRENT=1` (prompt su un thread mentre gli slot decodificano), `STRATA_BATCH_MTP_SERIAL=1`.
+  Misurati da upstream su 4x R9700 con 8-16 slot; per un solo utente non servono.
