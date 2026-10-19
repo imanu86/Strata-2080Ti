@@ -4375,7 +4375,9 @@ int main(int argc, char** argv) {
     // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
     const bool mtp_first = [&] {
-        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || o.batch != 0) return false;
+        // (STRATA_BATCH_DYNAMIC: the single chat as without --batch - its drafter on the first card, as upstream #3095
+        // does with STRATA_PW_WITH_BATCH; no slot drafter exists there, --batch-mtp is refused)
+        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || (o.batch != 0 && !g_batch_dyn)) return false;
         const char* e = std::getenv("STRATA_MTP_STAGE0");
         if (e != nullptr) return std::atoi(e) != 0;   // 0 keeps the drafter on the last card, 1 asks for the first
         return mtp_first_default_on();
