@@ -437,9 +437,15 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     bool prio = false;
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // (HIP, Metal: the default priority)
     static const bool hi_prio = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr || std::atoi(v) != 0; }();
+    // lab/overlap 1.3 (STRATA_OV_CHAIN_PRIO=1): the chain's stream at the DEFAULT priority instead of the highest.  On
+    // a forced (kind 1) chain the chain shares this card with stage 1's window and takes it 0.6-7.5 ms (PIPELINE2.md),
+    // while stage 0 has a few ms of margin before its B is due.  Unset / 0: the highest priority, exactly as before.
+    static const bool ov_chain_hi = [] { const char* v = std::getenv("STRATA_OV_CHAIN_PRIO"); return v == nullptr || std::atoi(v) == 0; }();
     int prio_lo = 0, prio_hi = 0;
-    if (force_on_ && hi_prio && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
+    if (force_on_ && hi_prio && ov_chain_hi && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
         prio = cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_hi) == cudaSuccess;
+    else if (force_on_ && hi_prio && !ov_chain_hi)
+        std::fprintf(stderr, "strata mtp: STRATA_OV_CHAIN_PRIO=1: the chain's stream runs at the default priority\n");
     cudaGetLastError();
 #endif
 #if defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
