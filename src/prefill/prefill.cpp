@@ -3527,7 +3527,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
                     {   // QWEN3.8 16/10/2026 STRATA_PF_ROUTE_PRIOR=lambda: the push toward resident experts in short chunks
                         static const float pf_prior = [] { const char* v = std::getenv("STRATA_PF_ROUTE_PRIOR"); return v ? (float) std::atof(v) : 0.0f; }();
-                        static int32_t* d_res_row = nullptr;
+                        static int32_t* d_res_rows[16] = {};   // per device (a layer split has two)
+                        int32_t*& d_res_row = d_res_rows[m.device >= 0 && m.device < 16 ? m.device : 0];
                         if (pf_prior > 0.0f && !stream_all && m.host_res != nullptr && m.cache != nullptr && m.g->n_expert == 512 && m.g->n_expert_used == 10) {
                             if (d_res_row == nullptr && cudaMalloc((void**) &d_res_row, 512 * sizeof(int32_t)) != cudaSuccess) d_res_row = nullptr;
                             if (d_res_row != nullptr) {
@@ -3994,8 +3995,14 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         n_order = order.size();
                         if (!on_pf.empty()) {   // QWEN3.8 PF_DIRETTO v2: the resident experts on the decode's grouped kernel
                             constexpr int64_t CH = 1024;
-                            static void* d_buf = nullptr;
-                            static size_t sc_bytes = 0, xq_bytes = 0, xs_bytes = 0;
+                            // one scratch per device: a layer split runs this on two GPUs (the single static of the PR
+                            // was allocated on the first stage's card and read by the second: illegal memory access)
+                            struct PfDirBuf { void* p = nullptr; size_t sc = 0, xq = 0, xs = 0; };
+                            static PfDirBuf pf_bufs[16];
+                            PfDirBuf& pfb = pf_bufs[m.device >= 0 && m.device < 16 ? m.device : 0];
+                            void*& d_buf = pfb.p;
+                            size_t &sc_bytes = pfb.sc, &xq_bytes = pfb.xq, &xs_bytes = pfb.xs;
+                            const strata::core::OnDevice on_pfdir(m.device);
                             const strata::kernels::cpu::ExpertLayout& lay2 = strata::kernels::cpu::expert_layout();
                             const bool nat = lay2.native;
                             const size_t xq_need = nat ? (size_t) T * (size_t) (N / 32) * 36 : (size_t) T * (size_t) (N / 32) * 34;
