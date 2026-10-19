@@ -1,13 +1,13 @@
 {
   "title": "Strata-2080Ti patch stack",
-  "intro": "The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata, one lever each, in the order they apply. Written for a two-card Windows box (RTX 2080 Ti 22 GB as stage 1, RTX 3060 12 GB as stage 0, `--layer-split 16 --trim-stage-weights --pipeline-windows 2`), but every lever is a plain switch and most are bitwise with the default path. The registry exists so that the next upstream version can be checked and re-based mechanically: run `check_anchors.py --check` on the new tag, read what moved, re-apply.\n\nRebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-17) come from lab/struct-a, lab/ttft43 and lab/pipeline2.\n\nPatches 18-20 (19 Oct 2026, branch `lab/multichat45b`) are upstream pull requests ported opt-in on top of the multi-chat branch: #3095 (`STRATA_PW_WITH_BATCH`), #3104 (`STRATA_PF_FUSED_NATIVE_SM75`) and #2774 (`STRATA_PF_DIRETTO`). Their `.patch` files are the clean ports onto the stack head of patch 17 (d06429ee), so they apply with `git am` on `lab/upsync-main`; the commits named in the table are the ones on `lab/multichat45b`, where #3095 is merged with `STRATA_BATCH_PIPELINE` and `STRATA_PIPED_MTP` (three conflicts in `generate.cpp`). The upstream pull request #3085 is not carried (#3104 does the same with another gate); the sibnick fork's batched gather (97b83332) is not carried because 0.1.45 already groups the gather of the short prefill walk (653f0113, `STRATA_PREFILL_GROUP_GATHER`).",
+  "intro": "The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata, one lever each, in the order they apply. Written for a two-card Windows box (RTX 2080 Ti 22 GB as stage 1, RTX 3060 12 GB as stage 0, `--layer-split 16 --trim-stage-weights --pipeline-windows 2`), but every lever is a plain switch and most are bitwise with the default path. The registry exists so that the next upstream version can be checked and re-based mechanically: run `check_anchors.py --check` on the new tag, read what moved, re-apply.\n\nRebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-17) come from lab/struct-a, lab/ttft43 and lab/pipeline2.\n\nPatches 18-20 (19 Oct 2026, branch `lab/multichat45b`) are upstream pull requests ported opt-in on top of the multi-chat branch: #3095 (`STRATA_PW_WITH_BATCH`), #3104 (`STRATA_PF_FUSED_NATIVE_SM75`) and #2774 (`STRATA_PF_DIRETTO`). Their `.patch` files are the clean ports onto the stack head of patch 17 (d06429ee), so they apply with `git am` on `lab/upsync-main`; the commits named in the table are the ones on `lab/multichat45b`, where #3095 is merged with `STRATA_BATCH_PIPELINE` and `STRATA_PIPED_MTP` (three conflicts in `generate.cpp`). The upstream pull request #3085 is not carried (#3104 does the same with another gate); the sibnick fork's batched gather (97b83332) is not carried because 0.1.45 already groups the gather of the short prefill walk (653f0113, `STRATA_PREFILL_GROUP_GATHER`).\n\nPatch 21 (19 Oct 2026, branch `lab/passata-unica` from `lab/multichat45b`) makes the packed prefill of the multi-chat branch run beside the concurrent read (`STRATA_PACK_CONCURRENT`); it depends on the pack commits of that branch, which are not entries of this stack.",
   "forced_defaults": "Upstream defaults that this stack or its reference configuration changes, so that a run on the stack behaves like the fork's Daily:\n\n| default in upstream 0.1.45 | here | by |\n|---|---|---|\n| `STRATA_SELECT_SIMT` opt-in (QSA block scores below sm_80 on the warp kernel) | **on** below sm_80, `=0` turns it off, `=2` larger tiles | patch 11 |\n| `STRATA_TC_SM75` / `STRATA_SM75_PERF` opt-in (the bitwise Turing series, 16-byte dequant) | `STRATA_TC_SM75` **on** for a 7.5 card, `=0` off; the rest of the series stays behind `STRATA_SM75_PERF=1` | patch 11 |\n| `STRATA_DF_BRANCH`, `STRATA_DF_PLE` opt-in (PR #904's graph branches / PLE post-ops) | **on** with CUDA (BRANCH: on Windows), `=0` turns them off; BRANCH yields to `STRATA_SIDE_MIXER` | patch 09 |\n| `STRATA_PLE_LOOKAHEAD` (not in upstream) | **on**, `=0` off; direct PLE only | patch 15 |\n| `STRATA_PIPELINE_ELASTIC` (not in upstream) | **on** with two cards and `--pipeline-windows`: theta 0.10, verified window served first; `=0` gives upstream's theta 0.20 and D-A-B order | patch 08 |\n| `STRATA_ROUTE_TAIL_SKIP=7` (off from 90% cached experts, #1884) | unchanged in code; the reference config sets `=0` (-1.6% with it at 96-98% hit) | config |\n| `STRATA_MMVQ_IL` on (interleaved dense GEMV where the card's table has a cell) | unchanged in code; the reference config sets `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1` | config |\n| `STRATA_NAN_GUARD` on (#1892) | unchanged (cost < 0.2%, bitwise otherwise); `=0` turns it off | - |\n\nReference configuration environment (the fork's 0.1.43 Daily r2, config `strata-0143-daily.json`): `STRATA_VRAM_FREE=device STRATA_ROUTE_TAIL_SKIP=0 STRATA_ATTN_DAILY=1 STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1 STRATA_MTP_SHARED_BRANCH=0 STRATA_SIDE_MIXER=2 STRATA_RAM_CORE=1 STRATA_RAM_CORE_SLOTS_DEV1=5500 STRATA_EXPDEC=1 STRATA_QSA_ROWS=1 STRATA_SA_BET=1 STRATA_SA_CHAIN=1 STRATA_PREFIX_DISK_MULTI=24`, options `--elastic --prompt-cache-tail --prompt-cache-every 16384 --prompt-cache-file <file> --layer-split 16 --trim-stage-weights --pipeline-windows 2 --vram-reserve-later-mib 384 --host-core last`. On 0.1.45 these variables mean the same, except that `STRATA_ATTN_DAILY`, `STRATA_B6_MMVQ_ROWS`, `STRATA_SIDE_MIXER`, `STRATA_EXPDEC`, `STRATA_QSA_ROWS` are now upstream's own. The same JSON also sets `STRATA_NODECUT=1 STRATA_TOPK_GRID=1 STRATA_B6_HEAD_MINB=6 STRATA_CONV_DISK=10`: the first three are lab levers of lab/struct-a that are NOT in this stack (neutral on the bench), they are ignored by a 0.1.45 build.",
   "base": {
     "repo": "Niko1221/Strata",
     "tag": "v0.1.45",
     "commit": "477ac13cbe8e582c20484871ce459d20d82df09d"
   },
-  "stack_head": "ecaad9074db6a547346f295d767cf17858fceeb6",
+  "stack_head": "4ee62d0919c3bdb2165132be1b1f53fc3acf3cd2",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -3848,6 +3848,146 @@
         "src/prefill/prefill.cpp"
       ],
       "notes": "Follow-up on lab/multichat45b: ecaad907 (one scratch per device); folded into this patch. The PR has the path on by default; here STRATA_PF_DIRETTO=1 is needed."
+    },
+    {
+      "id": "21",
+      "name": "pack-concurrent",
+      "summary": "The packed prefill (STRATA_PACK_PREFILL: the prompts sent ahead by waiting requests read with this one in the same chunks, the experts streamed once for all of them) also beside STRATA_PIPED_CONCURRENT: the prefixes go into the pack slots on the host thread with nothing in flight, Prefill::run_packed runs on the read's thread while the slot groups keep decoding, the pack slots' checkpoints are taken after the drain. Without it the concurrent read returned before pk_read and never packed.",
+      "switch": "`STRATA_PACK_CONCURRENT=1` (off), with `STRATA_PACK_PREFILL=N` and `STRATA_PIPED_CONCURRENT=1`; a packed read takes no BYIELD",
+      "origin": "fork (lab/passata-unica, docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md in moe-aggressive-commit)",
+      "upstream_status": "never proposed; 0.2.0-beta (upstream/main f57c0adc) still reads admissions one at a time and has no multi-sequence prefill",
+      "measured": "Compiled and run 19 Oct: see docs/MULTICHAT.md (passata unica) - to be filled from the letture_concorrenti bench (4 readers of 2-4k on 40-100k cached + 2 writers, B-A-B) and the replay.",
+      "depends_on": "STRATA_PACK_PREFILL / Prefill::run_packed (lab/multichat43 -> lab/multichat45, not an entry of this stack: it is carried on the multi-chat branch) and STRATA_PIPED_CONCURRENT (#2326, in 0.1.45)",
+      "notes": "pk_read is now pk_prepare + Prefill::run_packed + pk_finish; the path without the switch is the three in a row (behaviour unchanged).",
+      "docs": "docs/MULTICHAT.md",
+      "patch": "21-pack-concurrent.patch",
+      "commit": "4ee62d0919c3bdb2165132be1b1f53fc3acf3cd2",
+      "title": "FABLE-PASSATA-Pacco di lettura sul thread concorrente (STRATA_PACK_CONCURRENT, opt-in)",
+      "anchors": [
+        {
+          "block": "21-1",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            // STRATA_PACK_PREFILL (docs/MULTICHAT.md): the prompts of waiting requests (BHINT) are read with this one, in the",
+            "            // same chunks, each into a pack slot from its longest cached prefix (a parked conversation, or a checkpoint of",
+            "            // this prompt below a0) up to its last turn boundary, where it gets the checkpoint its own read would take."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "21-2",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : (int64_t) 128;",
+            "                }();",
+            "                auto same = [](int32_t x, int64_t y) { return (int64_t) x == y; };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "21-3",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    plans.push_back(std::move(pl));",
+            "                }",
+            "                if (plans.empty()) return true;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "21-4",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        pl.L = 0;",
+            "                    }",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "21-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    sg.prev[1] = (int32_t) pl.h[(size_t) pl.m - 1];",
+            "                    for (size_t k = 0; k < pack_ss.size(); ++k) sg.ss.push_back(pack_ss[k][pl.slot].get());",
+            "                    segs.push_back(sg);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "21-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    for (int64_t t = 0; t < T; ++t) q.nxt.push_back((int32_t) pl.h[(size_t) (p0 + t + 1)]);",
+            "                    return true;",
+            "                };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "21-7",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    q.used = ++pk_clock;",
+            "                    ++kept;",
+            "                }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "21-8",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    return true;",
+            "                }();",
+            "                if (piped && pr_conc && req_imgs.empty()) {   // (with no slot decoding it only watches for a BYIELD)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "21-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        bool read_ok = true;",
+            "                        std::string read_err;",
+            "                        in_prompt_read = true;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "21-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        reader.join();   // (a failed window leaves the read to finish: it is not stopped mid-run)",
+            "                        sp.stop_at_chunk = nullptr;",
+            "                        in_prompt_read = false;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        }
+      ],
+      "files": [
+        "src/program/generate.cpp"
+      ]
     }
   ],
   "retired": [

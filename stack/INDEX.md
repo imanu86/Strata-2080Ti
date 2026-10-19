@@ -6,7 +6,9 @@ Rebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `doc
 
 Patches 18-20 (19 Oct 2026, branch `lab/multichat45b`) are upstream pull requests ported opt-in on top of the multi-chat branch: #3095 (`STRATA_PW_WITH_BATCH`), #3104 (`STRATA_PF_FUSED_NATIVE_SM75`) and #2774 (`STRATA_PF_DIRETTO`). Their `.patch` files are the clean ports onto the stack head of patch 17 (d06429ee), so they apply with `git am` on `lab/upsync-main`; the commits named in the table are the ones on `lab/multichat45b`, where #3095 is merged with `STRATA_BATCH_PIPELINE` and `STRATA_PIPED_MTP` (three conflicts in `generate.cpp`). The upstream pull request #3085 is not carried (#3104 does the same with another gate); the sibnick fork's batched gather (97b83332) is not carried because 0.1.45 already groups the gather of the short prefill walk (653f0113, `STRATA_PREFILL_GROUP_GATHER`).
 
-Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `ecaad907`. 20 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Patch 21 (19 Oct 2026, branch `lab/passata-unica` from `lab/multichat45b`) makes the packed prefill of the multi-chat branch run beside the concurrent read (`STRATA_PACK_CONCURRENT`); it depends on the pack commits of that branch, which are not entries of this stack.
+
+Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `4ee62d09`. 21 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -57,6 +59,7 @@ Reference configuration environment (the fork's 0.1.43 Daily r2, config `strata-
 | 18 | [pw-with-batch](#18-pw-with-batch) | `--pipeline-windows` stays on for the solo path (one request alone) beside `--batch`, and the drafter stays on the first stage's card (`mtp_first`); the slot drafters of `--batch-mtp` follow it. Batch windows still run without the pipeline. | `STRATA_PW_WITH_BATCH=1` (off: `--batch` turns the pipeline off, as upstream) | upstream PR #3095 (18 Oct, +23/-5) | PR #3095 open, no maintainer answer yet; not in 0.1.45. Earlier precedent: fork noon-at-cgn d84da294. | Compiled and run 19 Oct (build 99fa6bd8, 2x solo:S with `--batch 4 --batch-groups 2`, 384 tokens, same reserves in both arms, A-P-A-P): decode 57.3 / 56.5 / 57.5 / 56.1 with the lever against 56.0 / 56.8 / 54.8 / 54.5 without (+2.4% mean), reserve 2300 MiB; the lever needs the larger reserve (the drafter, 837 MiB, and the windows, 234 MiB, move onto the 3060: with 1905 MiB the first request stalled for 240 s with 0 MiB free). It does NOT recover the single chat: the same config with reserve 1905 and no lever gives 60.8 (one run), the Daily without --batch 64.5. Installed no. |
 | 19 | [pf-fused-native-sm75](#19-pf-fused-native-sm75) | The fused int8 prompt experts for the native i-quant packs (gate/up IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS; down Q2_0 or IQ4_NL) also on sm_75 (Turing), with the qualified 128-row shape. Pairs not covered stay on MMQ. Changes the bits of the prompt (rounding). | `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` (off). `STRATA_PF_FUSED=1` also switches on the existing sm_86 native path of the first stage. | upstream PR #3104 (rebased from #1581; supersedes #3085, the same idea with another gate) | PR #3104 open (and #3085); in 0.1.45 `STRATA_PF_FUSED_SM75` only covers the Q2_0 pack, so on our IQ3_XXS pack it did nothing | Compiled and run 19 Oct (build ecaad907, fixed `--expert-cache 1500`, 3 prompts of ~300 and ~3000 tokens): TTFT median 1.83 s (control 1.77-1.84) at ~300 tokens and 6.55 s (control 5.72-5.89) at ~3000, i.e. +11% slower on the long prompts; first-token logits against the control KL 3e-5..6e-4, inside the control-to-control spread (1e-4..1.3e-3, the bench is not deterministic). The 300-token texts differ from a control as often as two controls differ. No gain on this pack and card pair; kept opt-in. Installed no. |
 | 20 | [pf-diretto](#20-pf-diretto) | Short prompt chunks (below `stream_all_min`): resident experts used by at most `STRATA_PF_DIRETTO_MAX` rows (8) leave MMQ's list and run on the decode's grouped kernel (`native_expert_grouped` for native packs) straight from the compressed blob; also `STRATA_PF_ROUTE_PRIOR=lambda` (router push toward resident experts, off). Changes the bits of short prompts. | `STRATA_PF_DIRETTO=1`, `STRATA_PF_DIRETTO_MAX=<rows>` (off here; the PR has it on), `STRATA_PF_ROUTE_PRIOR=<lambda>` (off) | upstream PR #2774 (apatassini); default turned to opt-in in this fork | PR #2774 open; not in 0.1.45 | Compiled and run 19 Oct (build ecaad907): needed a fix (the PR's scratch was one static, allocated on the first stage's card and read by the second: stall at layer 16, then an illegal memory access); with one scratch per device it runs. TTFT median 1.81 s at ~300 tokens (control 1.77-1.84) and 5.81 s at ~3000 (control 5.72-5.89): no gain. Logits: bitwise equal to the control on the prompts above stream_all_min, KL 8e-5..1e-3 on the three ~300-token ones (the control-to-control spread is of the same size). Installed no. |
+| 21 | [pack-concurrent](#21-pack-concurrent) | The packed prefill (STRATA_PACK_PREFILL: the prompts sent ahead by waiting requests read with this one in the same chunks, the experts streamed once for all of them) also beside STRATA_PIPED_CONCURRENT: the prefixes go into the pack slots on the host thread with nothing in flight, Prefill::run_packed runs on the read's thread while the slot groups keep decoding, the pack slots' checkpoints are taken after the drain. Without it the concurrent read returned before pk_read and never packed. | `STRATA_PACK_CONCURRENT=1` (off), with `STRATA_PACK_PREFILL=N` and `STRATA_PIPED_CONCURRENT=1`; a packed read takes no BYIELD | fork (lab/passata-unica, docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md in moe-aggressive-commit) | never proposed; 0.2.0-beta (upstream/main f57c0adc) still reads admissions one at a time and has no multi-sequence prefill | Compiled and run 19 Oct: see docs/MULTICHAT.md (passata unica) - to be filled from the letture_concorrenti bench (4 readers of 2-4k on 40-100k cached + 2 writers, B-A-B) and the replay. |
 
 ## Retired
 
@@ -2051,4 +2054,81 @@ Insertion points (7):
                               }
                           }
                           n_order = order.size();
+  ```
+
+## 21 pack-concurrent
+
+`21-pack-concurrent.patch` — FABLE-PASSATA-Pacco di lettura sul thread concorrente (STRATA_PACK_CONCURRENT, opt-in)
+
+- **What**: The packed prefill (STRATA_PACK_PREFILL: the prompts sent ahead by waiting requests read with this one in the same chunks, the experts streamed once for all of them) also beside STRATA_PIPED_CONCURRENT: the prefixes go into the pack slots on the host thread with nothing in flight, Prefill::run_packed runs on the read's thread while the slot groups keep decoding, the pack slots' checkpoints are taken after the drain. Without it the concurrent read returned before pk_read and never packed.
+- **Switch (default)**: `STRATA_PACK_CONCURRENT=1` (off), with `STRATA_PACK_PREFILL=N` and `STRATA_PIPED_CONCURRENT=1`; a packed read takes no BYIELD
+- **Origin**: fork (lab/passata-unica, docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md in moe-aggressive-commit)
+- **Upstream**: never proposed; 0.2.0-beta (upstream/main f57c0adc) still reads admissions one at a time and has no multi-sequence prefill
+- **Measured**: Compiled and run 19 Oct: see docs/MULTICHAT.md (passata unica) - to be filled from the letture_concorrenti bench (4 readers of 2-4k on 40-100k cached + 2 writers, B-A-B) and the replay.
+- **Depends on**: STRATA_PACK_PREFILL / Prefill::run_packed (lab/multichat43 -> lab/multichat45, not an entry of this stack: it is carried on the multi-chat branch) and STRATA_PIPED_CONCURRENT (#2326, in 0.1.45)
+- **Notes**: pk_read is now pk_prepare + Prefill::run_packed + pk_finish; the path without the switch is the three in a row (behaviour unchanged).
+- **Docs**: docs/MULTICHAT.md
+- **Files**: `src/program/generate.cpp`
+
+Insertion points (10):
+
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-1](BLOCKS.md#21-1)
+  ```
+              // STRATA_PACK_PREFILL (docs/MULTICHAT.md): the prompts of waiting requests (BHINT) are read with this one, in the
+              // same chunks, each into a pack slot from its longest cached prefix (a parked conversation, or a checkpoint of
+              // this prompt below a0) up to its last turn boundary, where it gets the checkpoint its own read would take.
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-2](BLOCKS.md#21-2)
+  ```
+                      return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : (int64_t) 128;
+                  }();
+                  auto same = [](int32_t x, int64_t y) { return (int64_t) x == y; };
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-3](BLOCKS.md#21-3)
+  ```
+                      plans.push_back(std::move(pl));
+                  }
+                  if (plans.empty()) return true;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-4](BLOCKS.md#21-4)
+  ```
+                          pl.L = 0;
+                      }
+                  }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-5](BLOCKS.md#21-5)
+  ```
+                      sg.prev[1] = (int32_t) pl.h[(size_t) pl.m - 1];
+                      for (size_t k = 0; k < pack_ss.size(); ++k) sg.ss.push_back(pack_ss[k][pl.slot].get());
+                      segs.push_back(sg);
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-6](BLOCKS.md#21-6)
+  ```
+                      for (int64_t t = 0; t < T; ++t) q.nxt.push_back((int32_t) pl.h[(size_t) (p0 + t + 1)]);
+                      return true;
+                  };
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-7](BLOCKS.md#21-7)
+  ```
+                      q.used = ++pk_clock;
+                      ++kept;
+                  }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-8](BLOCKS.md#21-8)
+  ```
+                      return true;
+                  }();
+                  if (piped && pr_conc && req_imgs.empty()) {   // (with no slot decoding it only watches for a BYIELD)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-9](BLOCKS.md#21-9)
+  ```
+                          bool read_ok = true;
+                          std::string read_err;
+                          in_prompt_read = true;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-10](BLOCKS.md#21-10)
+  ```
+                          reader.join();   // (a failed window leaves the read to finish: it is not stopped mid-run)
+                          sp.stop_at_chunk = nullptr;
+                          in_prompt_read = false;
   ```

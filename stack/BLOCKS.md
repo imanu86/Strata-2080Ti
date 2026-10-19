@@ -8606,3 +8606,437 @@ Block (hunk 7 of `src/prefill/prefill.cpp` in the patch, 84 lines):
 +                                sc_bytes = (s1 + 255) & ~(size_t) 255;
 ... 60 more lines: see 20-pf-diretto.patch
 ```
+
+## 21 pack-concurrent
+
+`21-pack-concurrent.patch` — FABLE-PASSATA-Pacco di lettura sul thread concorrente (STRATA_PACK_CONCURRENT, opt-in)
+
+### 21-1
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            // STRATA_PACK_PREFILL (docs/MULTICHAT.md): the prompts of waiting requests (BHINT) are read with this one, in the
+            // same chunks, each into a pack slot from its longest cached prefix (a parked conversation, or a checkpoint of
+            // this prompt below a0) up to its last turn boundary, where it gets the checkpoint its own read would take.
+```
+Block (hunk 1 of `src/program/generate.cpp` in the patch, 38 lines):
+```diff
+             // STRATA_PACK_PREFILL (docs/MULTICHAT.md): the prompts of waiting requests (BHINT) are read with this one, in the
+             // same chunks, each into a pack slot from its longest cached prefix (a parked conversation, or a checkpoint of
+             // this prompt below a0) up to its last turn boundary, where it gets the checkpoint its own read would take.
+-            // `packed` false: nothing to pack, the caller reads alone.
+-            auto pk_read = [&](int64_t a0, int64_t b0, std::string& e, bool& packed) -> bool {
+-                packed = false;
++            // In three parts, so that beside STRATA_PIPED_CONCURRENT (STRATA_PACK_CONCURRENT=1, read_part) the prefixes are
++            // restored on this thread with nothing in flight, Prefill::run_packed runs on the read's thread while the slots
++            // decode, and the checkpoints are taken here once the pipeline is drained: pk_prepare, run_packed, pk_finish.
++            // pk_read is the three in a row (a read with no slot decoding, as before).
++            struct PkPlan {
++                size_t slot = 0;
++                std::vector<int64_t> h;
++                int64_t m = 0, L = 0;
++                int src = 0;                       // 1: parked conversation pi, 2: checkpoint mc of this prompt
++                size_t pi = 0;
++                const ConvCheckpoint* mc = nullptr;
++            };
++            struct PkRun {
++                bool active = false;               // prompts sent ahead are in `segs`: run_packed them, then pk_finish
++                std::vector<PkPlan> plans;
++                std::vector<strata::prefill::Prefill::PackSeg> segs;   // [0]: this prompt's own segment
++                std::vector<size_t> seg_plan;      // segment i -> its plan's index (segment 0: none)
++                int64_t extra = 0;
++                std::string what;
++                double prep_ms = 0.0;
++                Clock::time_point t_run{};
++            } pk_run;
++            // a pack slot whose prefix did not restore, or whose read did not end well, holds nothing
++            auto pk_drop_uncached = [&]() {
++                for (const PkPlan& pl : pk_run.plans) if (!pks[pl.slot].cached) pks[pl.slot] = PkSlot{};
++            };
++            auto pk_prepare = [&](int64_t a0, int64_t b0, std::string& e) -> bool {
++                PkRun& r = pk_run;
++                r = PkRun{};
+                 if (pks.empty() || !req_imgs.empty() || !want_cvec || o.prompt_cache <= 0 || o.turn_token < 0 ||
+                     sp.embd_rows != nullptr)
+                     return true;
+```
+
+### 21-2
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : (int64_t) 128;
+                }();
+                auto same = [](int32_t x, int64_t y) { return (int64_t) x == y; };
+```
+Block (hunk 2 of `src/program/generate.cpp` in the patch, 21 lines):
+```diff
+                     return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : (int64_t) 128;
+                 }();
+                 auto same = [](int32_t x, int64_t y) { return (int64_t) x == y; };
+-                struct Plan {
+-                    size_t slot = 0;
+-                    std::vector<int64_t> h;
+-                    int64_t m = 0, L = 0;
+-                    int src = 0;                       // 1: parked conversation pi, 2: checkpoint mc of this prompt
+-                    size_t pi = 0;
+-                    const ConvCheckpoint* mc = nullptr;
+-                };
+-                std::vector<Plan> plans;
++                std::vector<PkPlan>& plans = r.plans;
+                 std::vector<bool> taken(pks.size(), false);
+                 const auto tp0 = Clock::now();
+                 while (!pk_hints.empty() && plans.size() < pks.size()) {
+-                    Plan pl;
++                    PkPlan pl;
+                     pl.h = std::move(pk_hints.front());
+                     pk_hints.pop_front();
+                     const std::vector<int64_t>& h = pl.h;
+```
+
+### 21-3
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    plans.push_back(std::move(pl));
+                }
+                if (plans.empty()) return true;
+```
+Block (hunk 3 of `src/program/generate.cpp` in the patch, 16 lines):
+```diff
+                     plans.push_back(std::move(pl));
+                 }
+                 if (plans.empty()) return true;
+-                struct DropUncached {
+-                    std::vector<PkSlot>& slots;
+-                    const std::vector<Plan>& plans;
+-                    ~DropUncached() {
+-                        for (const Plan& pl : plans) if (!slots[pl.slot].cached) slots[pl.slot] = PkSlot{};
+-                    }
+-                } drop_uncached{pks, plans};
+                 // the prefixes into the pack slots, on every stage (what a slot held before is dropped)
+-                for (Plan& pl : plans) {
++                for (PkPlan& pl : plans) {
+                     PkSlot& q = pks[pl.slot];
+                     q = PkSlot{};
+                     bool ok = true;
+```
+
+### 21-4
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                        pl.L = 0;
+                    }
+                }
+```
+Block (hunk 4 of `src/program/generate.cpp` in the patch, 22 lines):
+```diff
+                         pl.L = 0;
+                     }
+                 }
+-                std::vector<strata::prefill::Prefill::PackSeg> segs(1);
++                std::vector<strata::prefill::Prefill::PackSeg>& segs = r.segs;
++                segs.resize(1);
+                 segs[0].tokens = ids.data() + a0;
+                 segs[0].n = b0 - a0;
+                 segs[0].pos0 = a0;
+                 segs[0].prev[0] = ss.ple_prev[0];
+                 segs[0].prev[1] = ss.ple_prev[1];
+-                int64_t total = b0 - a0, extra = 0;
+-                std::string what;
+-                std::vector<Plan*> seg_plans(1, nullptr);
+-                for (Plan& pl : plans) {
++                int64_t total = b0 - a0;
++                r.seg_plan.assign(1, SIZE_MAX);
++                for (size_t pi = 0; pi < plans.size(); ++pi) {
++                    const PkPlan& pl = plans[pi];
+                     if (pl.L <= 0) continue;
+                     strata::prefill::Prefill::PackSeg sg;
+                     sg.tokens = pl.h.data() + pl.m;
+```
+
+### 21-5
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    sg.prev[1] = (int32_t) pl.h[(size_t) pl.m - 1];
+                    for (size_t k = 0; k < pack_ss.size(); ++k) sg.ss.push_back(pack_ss[k][pl.slot].get());
+                    segs.push_back(sg);
+```
+Block (hunk 5 of `src/program/generate.cpp` in the patch, 55 lines):
+```diff
+                     sg.prev[1] = (int32_t) pl.h[(size_t) pl.m - 1];
+                     for (size_t k = 0; k < pack_ss.size(); ++k) sg.ss.push_back(pack_ss[k][pl.slot].get());
+                     segs.push_back(sg);
+-                    seg_plans.push_back(&pl);
++                    r.seg_plan.push_back(pi);
+                     total += sg.n;
+-                    extra += sg.n;
+-                    what += " " + std::to_string((long long) sg.n) + (pl.src == 1 ? "@parked:" : "@checkpoint:") +
+-                            std::to_string((long long) pl.m);
++                    r.extra += sg.n;
++                    r.what += " " + std::to_string((long long) sg.n) + (pl.src == 1 ? "@parked:" : "@checkpoint:") +
++                              std::to_string((long long) pl.m);
++                }
++                if (segs.size() == 1) {   // no prefix restored: the slots taken hold nothing
++                    pk_drop_uncached();
++                    r = PkRun{};
++                    return true;
+                 }
+-                if (segs.size() == 1) return true;
+-                const double prep_ms = std::chrono::duration<double, std::milli>(Clock::now() - tp0).count();
++                r.prep_ms = std::chrono::duration<double, std::milli>(Clock::now() - tp0).count();
+                 // STRATA_PACK_CHUNK=N: the packed read in chunks of about N tokens (0, default: as one read of `total`),
+                 // so a large pack runs its chunks through the two stages as a pipeline
+                 static const int64_t pk_chunk = [] {
+                     const char* v = std::getenv("STRATA_PACK_CHUNK");
+                     return v != nullptr ? std::max<int64_t>(0, std::atoll(v)) : (int64_t) 0;
+                 }();
+-                if (!lend(pk_chunk > 0 ? std::min(total, pk_chunk) : total, e, 0)) return false;
+-                const auto tr0 = Clock::now();
++                if (!lend(pk_chunk > 0 ? std::min(total, pk_chunk) : total, e, 0)) {
++                    pk_drop_uncached();
++                    r = PkRun{};
++                    return false;
++                }
+                 auto& last_sp = stages.empty() ? sp : stages.back()->sp;
+-                // run_packed drains all stage workers before returning, including failure paths. Do not leave a
+-                // callback referencing this request installed for the next request or for an ordinary prefill.
+-                struct ClearPackRows {
+-                    strata::prefill::Prefill& sp;
+-                    ~ClearPackRows() { sp.on_pack_rows = nullptr; }
+-                } clear_pack_rows{last_sp};
++                // (pk_finish clears it on every path: it must not outlive this request's read, nor reach an ordinary one)
+                 if (use_mtp) last_sp.on_pack_rows = [&](int seg, const float* R, int64_t T, int64_t p0,
+                                                         int64_t width, std::string& ce) -> bool {
+-                    if (seg <= 0 || (size_t) seg >= seg_plans.size()) { ce = "pack draft: bad segment"; return false; }
+-                    const Plan& pl = *seg_plans[(size_t) seg];
++                    const PkRun& rr = pk_run;
++                    if (seg <= 0 || (size_t) seg >= rr.seg_plan.size() || rr.seg_plan[(size_t) seg] >= rr.plans.size()) {
++                        ce = "pack draft: bad segment";
++                        return false;
++                    }
++                    const PkPlan& pl = rr.plans[rr.seg_plan[(size_t) seg]];
+                     PkSlot& q = pks[pl.slot];
+                     if (!strata::program::pack_prefill::next_chunk(pl.m, pl.L, q.row_floats, q.rows.size(), p0, T, width)) {
+                         ce = "pack draft: missing or out-of-order residual rows";
+```
+
+### 21-6
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    for (int64_t t = 0; t < T; ++t) q.nxt.push_back((int32_t) pl.h[(size_t) (p0 + t + 1)]);
+                    return true;
+                };
+```
+Block (hunk 6 of `src/program/generate.cpp` in the patch, 51 lines):
+```diff
+                     for (int64_t t = 0; t < T; ++t) q.nxt.push_back((int32_t) pl.h[(size_t) (p0 + t + 1)]);
+                     return true;
+                 };
+-                if (!sp.run_packed(segs, e)) return false;
+-                packed = true;
+-                const double run_ms = std::chrono::duration<double, std::milli>(Clock::now() - tr0).count();
+-                // each one's state at its boundary: the checkpoint its own read would take there, and its tokens
++                r.t_run = Clock::now();
++                r.active = true;
++                return true;
++            };
++            // after run_packed (ok: every segment read; this thread, nothing in flight): each prompt's state at its boundary -
++            // the checkpoint its own read would take there - and its tokens.  `own`: this prompt's tokens, for the log line.
++            auto pk_finish = [&](bool ok, int64_t own) {
++                PkRun& r = pk_run;
++                auto& last_sp = stages.empty() ? sp : stages.back()->sp;
++                last_sp.on_pack_rows = nullptr;
++                if (!r.active) return;
++                r.active = false;
++                const double run_ms = std::chrono::duration<double, std::milli>(Clock::now() - r.t_run).count();
+                 int kept = 0;
+-                for (const Plan& pl : plans) {
+-                    if (pl.L <= 0) continue;
++                for (const PkPlan& pl : r.plans) {
++                    if (!ok || pl.L <= 0) continue;
+                     ConvCheckpoint c;
+                     c.ids.resize((size_t) pl.L);
+                     for (int64_t i = 0; i < pl.L; ++i) c.ids[(size_t) i] = (int32_t) pl.h[(size_t) i];
+-                    bool ok = true;
+-                    for (size_t k = 0; ok && k < pack_ss.size(); ++k) {
++                    bool cok = true;
++                    for (size_t k = 0; cok && k < pack_ss.size(); ++k) {
+                         const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+-                        ok = cudaDeviceSynchronize() == cudaSuccess;
+-                        if (ok && k == 0) ok = checkpoint_save(c, *pack_ss[0][pl.slot], g);
+-                        else if (ok) {
++                        cok = cudaDeviceSynchronize() == cudaSuccess;
++                        if (cok && k == 0) cok = checkpoint_save(c, *pack_ss[0][pl.slot], g);
++                        else if (cok) {
+                             ConvCheckpoint part;
+                             part.ids = c.ids;
+-                            ok = checkpoint_save(part, *pack_ss[k][pl.slot], g);
++                            cok = checkpoint_save(part, *pack_ss[k][pl.slot], g);
+                             c.stage_parts.push_back(std::move(part));
+                         }
+                     }
+-                    if (!ok) continue;
++                    if (!cok) continue;
+                     PkSlot& q = pks[pl.slot];
+                     if (use_mtp && (!q.has_draft || q.nxt.size() != (size_t) (pl.L - pl.m) ||
+                         q.rows.size() != q.nxt.size() * (size_t) q.row_floats)) continue;
+```
+
+### 21-7
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    q.used = ++pk_clock;
+                    ++kept;
+                }
+```
+Block (hunk 7 of `src/program/generate.cpp` in the patch, 25 lines):
+```diff
+                     q.used = ++pk_clock;
+                     ++kept;
+                 }
+-                std::fprintf(stderr, "strata pack: %lld tokens of this prompt read with %d prompt%s sent ahead (%lld tokens:%s) "
+-                                     "in %.0f ms, their prefixes restored in %.0f ms\n", (long long) (b0 - a0), kept,
+-                             kept == 1 ? "" : "s", (long long) extra, what.c_str(), run_ms, prep_ms);
++                pk_drop_uncached();
++                if (ok)
++                    std::fprintf(stderr, "strata pack: %lld tokens of this prompt read with %d prompt%s sent ahead (%lld tokens:%s) "
++                                         "in %.0f ms, their prefixes restored in %.0f ms\n", (long long) own, kept,
++                                 kept == 1 ? "" : "s", (long long) r.extra, r.what.c_str(), run_ms, r.prep_ms);
++                r = PkRun{};
++            };
++            // `packed` false: nothing to pack, the caller reads alone.
++            auto pk_read = [&](int64_t a0, int64_t b0, std::string& e, bool& packed) -> bool {
++                packed = false;
++                if (!pk_prepare(a0, b0, e)) return false;
++                if (!pk_run.active) return true;
++                const bool ok = sp.run_packed(pk_run.segs, e);
++                pk_finish(ok, b0 - a0);
++                if (!ok) return false;
++                packed = true;
+                 return true;
+             };
+             // STRATA_PACK_PREFILL: prompts sent ahead are waiting (the queued lines are taken in first)
+```
+
+### 21-8
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    return true;
+                }();
+                if (piped && pr_conc && req_imgs.empty()) {   // (with no slot decoding it only watches for a BYIELD)
+```
+Block (hunk 8 of `src/program/generate.cpp` in the patch, 26 lines):
+```diff
+                     return true;
+                 }();
+                 if (piped && pr_conc && req_imgs.empty()) {   // (with no slot decoding it only watches for a BYIELD)
++                    // STRATA_PACK_CONCURRENT=1 (opt-in, with STRATA_PACK_PREFILL; docs/MULTICHAT.md): the prompts sent ahead
++                    // are read with this one on the read's thread too, their prefixes restored here first and their
++                    // checkpoints taken after the drain below (pk_prepare / pk_finish; this thread, nothing in flight).
++                    // Not a planned segment (as pk_read), and a packed read takes no BYIELD (the stop would land in the
++                    // packed row stream, not in this prompt's segment): it is "not taken", as a read that ended first.
++                    static const bool pack_conc = [] {
++                        const char* v = std::getenv("STRATA_PACK_CONCURRENT");
++                        return v != nullptr && std::atoi(v) != 0;
++                    }();
++                    if (pack_conc && !pks.empty() && !planned && !pk_prepare(a0, b0, e)) return false;
++                    const bool pk_on = pk_run.active;
++                    const int64_t Cc = pk_on ? std::max<int64_t>(sp.chunk(), 1) : C;   // (the pack's loan may relayout)
+                     // the drafter's prompt pass captures its graphs and grows its records at first use, and the
+                     // prompt path's pinned upload slots grow at their first larger upload: done here, with nothing in
+                     // flight (on the reader's thread a capture, an allocation or a free takes the driver's lock and
+                     // can wait for the device, #31)
+-                    if (use_mtp && !mtp.reserve_prefill(C, e)) return false;
+-                    if (!sp.reserve_uploads(C))
++                    if (use_mtp && !mtp.reserve_prefill(Cc, e)) return false;
++                    if (!sp.reserve_uploads(Cc))
+                         std::fprintf(stderr, "strata batch: the prompt path's pinned upload slots could not be "
+                                              "reserved (they grow at first use)\n");
+                     // where the read's thread and the doorbell thread run: on Linux a thread inherits its creator's
+```
+
+### 21-9
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                        bool read_ok = true;
+                        std::string read_err;
+                        in_prompt_read = true;
+```
+Block (hunk 9 of `src/program/generate.cpp` in the patch, 20 lines):
+```diff
+                         bool read_ok = true;
+                         std::string read_err;
+                         in_prompt_read = true;
+-                        sp.stop_at_chunk = [&] { return want_yield.load(std::memory_order_acquire) >= 0; };
++                        if (pk_on) sp.stop_at_chunk = nullptr;
++                        else sp.stop_at_chunk = [&] { return want_yield.load(std::memory_order_acquire) >= 0; };
+                         std::thread reader([&] {
+                             conc_thread_cpus();
+                             try {   // (an exception leaving a std::thread ends the process: a failed read instead)
+-                                if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
+-                                read_ok = sp.run(ids.data() + q0, b0 - q0, q0, read_err);
++                                if (pk_on) {
++                                    read_ok = sp.run_packed(pk_run.segs, read_err);
++                                } else {
++                                    if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
++                                    read_ok = sp.run(ids.data() + q0, b0 - q0, q0, read_err);
++                                }
+                             } catch (const std::exception& x) {
+                                 read_ok = false;
+                                 read_err = std::string("the prompt read failed: ") + x.what();
+```
+
+### 21-10
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                        reader.join();   // (a failed window leaves the read to finish: it is not stopped mid-run)
+                        sp.stop_at_chunk = nullptr;
+                        in_prompt_read = false;
+```
+Block (hunk 10 of `src/program/generate.cpp` in the patch, 16 lines):
+```diff
+                         reader.join();   // (a failed window leaves the read to finish: it is not stopped mid-run)
+                         sp.stop_at_chunk = nullptr;
+                         in_prompt_read = false;
+-                        if (!pump_ok || !pipe_drain()) {
++                        const bool drained = pump_ok && pipe_drain();
++                        if (pk_on) pk_finish(read_ok && drained, b0 - a0);   // (the pack slots' checkpoints, here)
++                        if (!drained) {
+                             batch_fatal = true;
+                             e = "a pipelined batch window failed";
+                             return false;
+                         }
+-                        const int64_t q = read_ok && sp.stopped_at() >= 0 ? q0 + sp.stopped_at() : b0;
++                        const int64_t q = !pk_on && read_ok && sp.stopped_at() >= 0 ? q0 + sp.stopped_at() : b0;
+                         const double read_ms = std::chrono::duration<double, std::milli>(Clock::now() - tc).count();
+                         std::string per;
+                         for (int k = 0; k < n_pipe; ++k) {
+```
