@@ -9439,12 +9439,12 @@ int main(int argc, char** argv) {
             const char* v = std::getenv("STRATA_CONV_DISK_MIN");
             return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : int64_t(4096);
         }();
-        // (STRATA_BATCH_DYNAMIC: on in the single-chat mode, off in the agent mode - the switch sets it)
+        // (STRATA_BATCH_DYNAMIC: on in both modes, STRATA_BATCH_DYN_CONV_DISK=0 turns it off with the agents)
         bool conv_disk_on = conv_disk_idle_s > 0.0 && prefix_disk_enabled && prefix_multi_cap > 0 && (o.batch <= 0 || g_batch_dyn);
         const bool conv_disk_cfg = conv_disk_on;
         if (conv_disk_idle_s > 0.0)
             std::fprintf(stderr, "strata serve: conversation disk cache: %s\n",
-                         conv_disk_on && g_batch_dyn ? "on in the single-chat mode (STRATA_BATCH_DYNAMIC; off while the agents run)"
+                         conv_disk_on && g_batch_dyn ? "on (STRATA_BATCH_DYNAMIC: in both modes, saved only when no slot decodes)"
                          : conv_disk_on ? "on (the live conversation at its last turn boundary after the idle time)"
                                       : "off (needs --prompt-cache-file, STRATA_PREFIX_DISK_MULTI and no --batch)");
         int64_t conv_pending_len = -1;   // the last request's turn boundary, saved at the next idle
@@ -12012,8 +12012,13 @@ int main(int argc, char** argv) {
             bdyn_agent = true;
             bdyn_last = Clock::now();
             ++bdyn_enters;
-            conv_disk_on = false;
-            conv_pending_len = -1;
+            // the conversation disk cache stays on with the agents (owner, 19/10: the shared prefix is never read again);
+            // its idle save runs only when no slot decodes.  STRATA_BATCH_DYN_CONV_DISK=0 turns it off in the agent mode.
+            static const bool conv_keep = [] { const char* v = std::getenv("STRATA_BATCH_DYN_CONV_DISK"); return v == nullptr || v[0] != '0'; }();
+            if (!conv_keep) {
+                conv_disk_on = false;
+                conv_pending_len = -1;
+            }
             // RAM: the floor the parked conversations keep, raised now - the oldest go until it holds
             const int64_t ram0 = ram_avail_mib();
             o.conversation_cache_min_free_mib = std::max(bdyn_floor0, bdyn_ram_floor);
