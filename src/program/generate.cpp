@@ -14966,6 +14966,12 @@ int main(int argc, char** argv) {
                 int sa_last_T = 0;                      // the last bet's size for sa_want
                 int64_t sa_placed[4] = {}, sa_tails[4] = {}, sa_drops[4] = {}, sa_chains = 0, sa_cut = 0;
                 int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
+                // lab/overlap 1.2 (STRATA_OV_TOP2_STAT=1, a diagnostic): on the windows accepted whole, whether the
+                // drafter's runner-up at the bonus position is the token the model really produced -- the share a tree
+                // draft's second branch could recover.  Counted per request, printed with STRATA_DECODE_TIMING.
+                static const bool ov_top2 = strata::core::MtpDrafter::ov_top2_stat();
+                int64_t ov_n = 0, ov_t1 = 0, ov_t2 = 0, ov_t3 = 0, ov_no2 = 0;
+                double ov_p2 = 0.0;   // the runner-up's probability, summed over the counted windows
                 double pl_chain_t0 = 0.0, pl_chain_ms[2] = {0, 0}, pl_chain_n[2] = {0, 0};   // fork: chain -> B latency
                 // fork (Daily 1541e340): the elastic tail beside the windows, at the gaps of stage 0 (see el_gap)
                 int64_t pl_el_shrinks = 0, pl_el_grows = 0;
@@ -15670,6 +15676,21 @@ int main(int argc, char** argv) {
                     for (int i = 0; i <= a; ++i) consumed.push_back(A.tok[i]);
                     draft_offered += A.T - 1;
                     draft_accepted += a;
+                    // lab/overlap 1.2 (STRATA_OV_TOP2_STAT=1, diagnostic only): A went out whole, so outp[A.T-1] is the
+                    // bonus and oc[A.T-1] is the chain's guess for that same position (the row 0 a B made from it would
+                    // carry).  bonus == top-1: today's B is right there; == top-2: a second branch would have caught it.
+                    if (ov_top2 && !A.sfx && !A.lookup && a == A.T - 1) {
+                        const int idx = A.T - 1;   // the chain's output index of the bonus position
+                        if (idx < chain_n && idx < mtp.chain_queued()) {
+                            const int32_t bonus = outp[(size_t) idx];
+                            const int32_t second = mtp.chain_top2(idx);
+                            ++ov_n;
+                            if (mtp.chain_tok()[idx] == bonus) ++ov_t1;
+                            else if (second >= 0 && second == bonus) ++ov_t2;
+                            else { ++ov_t3; if (second < 0) ++ov_no2; }
+                            ov_p2 += (double) mtp.chain_top2_prob(idx);
+                        }
+                    }
                     ++rounds;
                     if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
                     ++dec_windows;
@@ -15861,6 +15882,11 @@ int main(int argc, char** argv) {
                                  cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
                                  avg(cls_ms[1], cls_n[1]), avg(cls_tok[1], cls_n[1]), (long long) pl_disagree,
                                  (long long) pl_late);
+                    if (ov_top2)   // lab/overlap 1.2: the bonus position under the chain, on the whole-accepted windows
+                        std::fprintf(stderr, "strata overlap top2: bonus=top1 %lld, bonus=top2 %lld, altro %lld su %lld "
+                                             "(runner-up non letto %lld, sua probabilita media %.3f)\n",
+                                     (long long) ov_t1, (long long) ov_t2, (long long) ov_t3, (long long) ov_n,
+                                     (long long) ov_no2, ov_n > 0 ? ov_p2 / (double) ov_n : 0.0);
                     std::fprintf(stderr, "strata pipeline: drafter on CUDA%d: %.3f ms of host time per chain launch (%.3f ms of it "
                                          "staging the source rows, %lld times so far)\n", mtp.device(),
                                  avg(mtp.ms_draft, (double) mtp.rounds), avg(mtp.ms_src, (double) mtp.n_src), (long long) mtp.n_src);

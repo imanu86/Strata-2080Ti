@@ -154,6 +154,12 @@ public:
     bool chain_live() const { return chain_live_; }
     const int32_t* chain_tok() const { return chain_tok_; }
     const float* chain_prob() const { return chain_prob_; }
+    /// lab/overlap 1.2 (`STRATA_OV_TOP2_STAT=1`, a diagnostic, opt-in and slow): the chain step's runner-up under the
+    /// draft head and its probability -- what a tree draft's second branch would have to hit.  Each step's logits are
+    /// copied to the host inside its own graph; -1 / 0 when the switch is off or the step has no second token.
+    static bool ov_top2_stat();
+    int32_t chain_top2(int j) const { return j >= 0 && j < 8 ? chain_top2_[j] : -1; }
+    float chain_top2_prob(int j) const { return j >= 0 && j < 8 ? chain_top2_prob_[j] : 0.0f; }
 
     double ms_draft = 0, ms_prefill = 0;
     double ms_src = 0;      ///< the host time spent staging the source rows (a cross-card copy when the drafter is on another card)
@@ -242,6 +248,16 @@ private:
     int chain_launched_ = 0;   ///< STRUCT-A: the outputs queued so far (chain_n_ once the chain is whole or cut)
     int32_t chain_tok_[8] = {};
     float chain_prob_[8] = {};
+    // STRATA_OV_TOP2_STAT (lab/overlap 1.2): slot j holds the round's / step j's draft logits, brought to the host by a
+    // copy node inside that graph, and chain_top2_[j] is their runner-up.
+    float* h_lg2_ = nullptr;
+    float* m_lg2_ = nullptr;
+    bool ov_top2_live_ = false;   ///< the staging exists and its copy nodes captured (set in bind)
+    int32_t chain_top2_[8] = {};
+    float chain_top2_prob_[8] = {};
+    void ov_top2_alloc();                                        ///< bind: before any graph is captured
+    bool ov_top2_capture(int j, cudaStream_t cs);                ///< inside a capture: row 0's logits into slot j
+    void ov_top2_scan(int j);                                    ///< after the step's outputs land: its runner-up
     int64_t n_vocab_ = 0;
     uint64_t vram_ = 0;
     cudaStream_t cs_ = nullptr;

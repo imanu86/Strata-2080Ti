@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -162,7 +163,7 @@ MtpDrafter::~MtpDrafter() {
     if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
     if (ev_chain_) cudaEventDestroy(ev_chain_);
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
-    void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
+    void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_, h_lg2_};
     for (void* h : hosts) if (h) cudaFreeHost(h);
 }
 
@@ -543,6 +544,66 @@ void MtpDrafter::record_top2(int j) {
     top2_[(size_t) j] = b2 < 0 ? -1 : dhead_ != nullptr ? dvocab_host_[(size_t) b2] : (int32_t) b2;
 }
 
+// ---- lab/overlap 1.2: STRATA_OV_TOP2_STAT=1 (a diagnostic, opt-in, slow -- nothing here is on any measured path).
+// A chain step's draft logits (the row `row_top_prob` took its top-1 and its probability from) also come to the host,
+// so a window's verdict can ask what the drafter's runner-up was at the bonus position: the token a tree draft's
+// second branch would have to hit.  Off: no pinned staging, no copy node, the round and step graphs are the old ones.
+bool MtpDrafter::ov_top2_stat() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_OV_TOP2_STAT"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+
+// bind, before any graph is captured: a captured graph either holds its copy node or does not, and that cannot change
+// later.  max_t_ rows of the draft head's logits (40525 tokens on this fork's model, ~1.3 MB pinned).
+void MtpDrafter::ov_top2_alloc() {
+    const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
+    if (!ov_top2_stat() || h_lg2_ != nullptr || nv <= 0 || max_t_ <= 0) return;
+    if (!mapped((size_t) max_t_ * (size_t) nv * sizeof(float), (void**) &h_lg2_, (void**) &m_lg2_)) {
+        h_lg2_ = m_lg2_ = nullptr;
+        std::fprintf(stderr, "strata mtp: STRATA_OV_TOP2_STAT stays off: the draft logits' staging does not fit\n");
+    } else
+        ov_top2_live_ = true;
+}
+
+// Inside a capture: the graph's logits (record_rest runs on row 0) into slot j -- j 0 for a round, j for step j.
+// A pinned-host memcpy node: capturable, and it lands before the event recorded after the graph's launch.
+bool MtpDrafter::ov_top2_capture(int j, cudaStream_t cs) {
+    if (!ov_top2_live_ || h_lg2_ == nullptr || j < 0 || j >= max_t_) return true;
+    const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
+    if (cudaMemcpyAsync(h_lg2_ + (int64_t) j * nv, head_logits_, (size_t) nv * sizeof(float), cudaMemcpyDeviceToHost,
+                        cs) != cudaSuccess) {   // a diagnostic never breaks a graph: it stops reporting instead
+        cudaGetLastError();
+        ov_top2_live_ = false;
+        std::fprintf(stderr, "strata mtp: STRATA_OV_TOP2_STAT stays off: its copy node does not capture\n");
+    }
+    return true;
+}
+
+// Slot j read once its step's outputs landed: the runner-up and its probability under a softmax over the same row
+// (what row_top_prob's own `probs` are).  Two passes over nv floats: a diagnostic path, never the measured one.
+void MtpDrafter::ov_top2_scan(int j) {
+    if (j < 0 || j >= 8) return;
+    chain_top2_[j] = -1;
+    chain_top2_prob_[j] = 0.0f;
+    if (!ov_top2_live_ || h_lg2_ == nullptr || j >= max_t_) return;
+    const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
+    const float* lg = h_lg2_ + (int64_t) j * nv;
+    int64_t b1 = -1, b2 = -1;
+    for (int64_t i = 0; i < nv; ++i) {
+        const float v = lg[i];
+        if (v != v) continue;   // NaN never picked (as argmax_rows)
+        if (b1 < 0 || v > lg[b1]) { b2 = b1; b1 = i; }
+        else if (b2 < 0 || v > lg[b2]) b2 = i;
+    }
+    if (b1 < 0 || b2 < 0) return;
+    const double mx = lg[b1];
+    double sum = 0.0;
+    for (int64_t i = 0; i < nv; ++i)
+        if (lg[i] == lg[i]) sum += std::exp((double) lg[i] - mx);   // a NaN row cell joins neither sum
+    chain_top2_prob_[j] = sum > 0.0 ? (float) (std::exp((double) lg[b2] - mx) / sum) : 0.0f;
+    chain_top2_[j] = dhead_ != nullptr ? dvocab_host_[(size_t) b2] : (int32_t) b2;
+}
+
 uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const {
     uint64_t bytes = head_logits_ ? 0 : (uint64_t) max_t_ * (uint64_t) n_vocab * sizeof(float);
     if (dhead_ == nullptr && owns_draft_head_ && !full_head_env()) {
@@ -748,6 +809,7 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                                                   "MTP draft head");
         }
     }
+    ov_top2_alloc();   // STRATA_OV_TOP2_STAT: the staging exists before any round/step graph is captured
     if (coupled_draft_env() && cparams_ == nullptr && !setup_coupled(err)) return false;
     return true;
 }
@@ -1312,6 +1374,7 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
         coupled_j_ = 0;
         ok = record_rest(ra, cs_, err);
         coupled_rec_ = false;
+        if (ok) ok = ov_top2_capture(0, cs_);   // STRATA_OV_TOP2_STAT: this round's logits (output 0) to the host
     }
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
     if (ok) g_mp.stamp(16, cs_);
@@ -1343,6 +1406,7 @@ bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
     g_mp.base = j < kMpGraphs ? j : -1;
     bool ok = record_forward(1, row, cs_, err);
     coupled_rec_ = false;
+    if (ok) ok = ov_top2_capture(j, cs_);   // STRATA_OV_TOP2_STAT: step j's logits (output j) to the host
     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
     if (ok) g_mp.stamp(16, cs_);
     g_mp.base = -1;
@@ -1871,6 +1935,7 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
         if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
         chain_tok_[steps_seen_] = ((volatile int32_t*) h_out_)[steps_seen_];
         chain_prob_[steps_seen_] = ((volatile float*) h_prob_)[steps_seen_];
+        ov_top2_scan(steps_seen_);   // STRATA_OV_TOP2_STAT: its runner-up too (slot steps_seen_ is written by then)
         ++steps_seen_;
     }
     return steps_seen_;
@@ -1894,8 +1959,9 @@ int MtpDrafter::chain_poll(std::string& err) {
     for (int j = 0; j < chain_n_; ++j) {
         chain_tok_[j] = ((volatile int32_t*) h_out_)[j];
         chain_prob_[j] = ((volatile float*) h_prob_)[j];
+        ov_top2_scan(j);   // STRATA_OV_TOP2_STAT: the runner-up of each step (diagnostic only)
     }
-    for (int j = chain_n_; j < 8; ++j) { chain_tok_[j] = 0; chain_prob_[j] = 0.0f; }
+    for (int j = chain_n_; j < 8; ++j) { chain_tok_[j] = 0; chain_prob_[j] = 0.0f; chain_top2_[j] = -1; chain_top2_prob_[j] = 0.0f; }
     return 1;
 }
 
