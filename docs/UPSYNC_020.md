@@ -5,7 +5,7 @@ infrastruttura: CI, bot del tracker, README, bundle del Monitor). Fra `v0.1.45` 
 +220k righe: quasi tutto app, Terminale, packaging; il motore e' toccato in pochi file). La versione del motore resta
 "0.1.45.3" (`CMakeLists.txt`). Il modello e' `docs/UPSYNC_MAIN.md` (giro precedente, 0.1.45).
 
-Stato: vedi il paragrafo 6 (compilato / provato / misurato) - l'ultimo aggiornamento e' in fondo.
+**Stato (19/10 19:35, fermato dall'owner per i token): patch portate si (18 di 18, committate e pushate), compilato no, installato no, provato no, misurato no.** La build non e' partita: la coda dei lock (`build.lock`/`bench.lock`) era tenuta dagli agenti batch-dyn e banco-bisezione e la mia attesa non ha mai ottenuto il turno. Fatti: punti 1, 2 e 5 del compito; restano 3 (build) e 4 (banco). Nessun lock tenuto, nessun processo mio in vita.
 
 ## 1. Esito per patch (18 di 18 applicate, nessuna ritirata)
 
@@ -97,13 +97,69 @@ progetto in app, Terminale e motore.
 
 ## 3. Le nostre PR upstream dopo il reset del 19/10
 
-Vedi il paragrafo 7 (lista per l'owner). Niente e' stato riaperto o commentato.
+Vedi il paragrafo 6.
 
-## 4. Build
+## 4. Build (DA FARE) e prossimi passi per l'agente locale
 
-Da compilare con `build_lock.py` (sm_75+86, CUDA 12.6, MSBuild/Ninja di VS 2022, 4 job, priorita' bassa), cartelle in
-`...\corse_2080ti\20261004_routed_keep\build-upsync020-<sha>\`. Il Daily dell'owner e' acceso (porta 8100): `build_lock.py` originale aspetta che non giri
-nessun `strata.exe`, quindi uso una copia identica senza quel controllo (come in UPSYNC_MAIN par. 4); aspetta pero' il proprio turno su `bench.lock`
-e `build.lock`.
+Stato git: `lab/upsync-020` = upstream/main f57c0adc + 18 commit di patch (uno per leva, `SONNET-UPSYNC-Porta su 0.2.0 ...`) + commit di `stack/`
+(`python stack/check_anchors.py --verify-docs` = ok) + questo doc. Pushato su `origin/lab/upsync-020`. Worktree: `C:\Users\imanu\source\repos\Strata-wt\upsync-020`.
+Conflitti aperti: nessuno (la 01 e' risolta). Se la build trova errori di compilazione, correggerli con un `git commit --fixup=<sha della patch>` e poi
+`GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash upstream/main` (branch non ancora usato da altri), cosi' che `--build` ricrei 18 patch; poi
+`python stack/check_anchors.py --build . --range upstream/main..HEAD` e `--verify-docs`. Rischi da guardare alla compilazione: i blocchi 3-way di 05 e 12
+(`expert_source.cpp/.hpp`, 732 righe cambiate in upstream), 13 (`verify.cpp`), 17 (`mtp.cpp`, `verify.cpp`), 18 (kernel `gr_*` toccati da upstream).
 
-(Paragrafi 5-7: misure e liste, aggiunti a fine giro.)
+1. **Build** (sm_75+86, 4 job, priorita' bassa; non usa la GPU). `build_lock.py` originale
+   (`moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261006_due_schede\build_lock.py`) aspetta che nessun `strata.exe` giri; il Daily
+   dell'owner e' acceso, quindi usare una copia senza quel controllo (togliere `and not engine_running()` dalle due condizioni dell'attesa; come in
+   UPSYNC_MAIN par. 4). Comando: `python -u build_lock_noeng.py C:\Users\imanu\source\repos\Strata-wt\upsync-020 --jobs 4` (aspetta `bench.lock`
+   libero e prende `build.lock`; cartella di build `upsync-020\build-sm7586`). Poi copiare in
+   `...\corse_2080ti\20261004_routed_keep\build-upsync020-<sha>\`: `strata.exe`, `strata-vision.exe` (da `D:\ds4_work\strata\Strata\build-0143-daily`;
+   `tools/vision` cambia di 77 righe fra 0.1.45 e 0.2.0: per un confronto esatto ricompilarlo), `source\serve`, `source\tools` (come
+   `build-upsmain-d9a26384`), piu' `build.json` con lo sha256 dell'exe.
+2. **Config** (copie, mai modificare i JSON del Daily), in una cartella tua (es. `20261019_upsync020`), da
+   `D:\ds4_work\strata\Strata\strata-0143-daily.json` (gia' senza `--batch`):
+   - `exe` e `vision.exe` -> la nuova build; env tolte le inerti `STRATA_NODECUT`, `STRATA_TOPK_GRID`, `STRATA_B6_HEAD_MINB`;
+   - **braccio A** "0.2.0+pila": env del Daily + `STRATA_HC16_SM75=1` (e' l'hc16 del Daily; su 0.2.0 e' opt-in);
+   - **braccio C** "0.2.0+pila + sm_86 a mano": A + `STRATA_ADAPT_NOWAIT=1`, `STRATA_ADAPT_LAG=2`, `STRATA_CPU_IQ_ALL_EXACT1=1` (mai con
+     `STRATA_IQ_MT_MIN=1`), `STRATA_GR_UP75=1`, `STRATA_GU_SWIGLU=1` (SIDE_MIXER=2, ATTN_DAILY, QSA_ROWS, B6_MMVQ_ROWS sono gia' nel Daily). Dichiarato
+     +10,2% decode su 3060 da sola, bitwise; sulla 2080 Ti non misurato: verificare anche che i token restino identici ad A.
+   - eventuale braccio con `STRATA_BF16_TC=1` al posto di HC16 (prompt a 131k: UPSYNC_MAIN par. 8).
+   - Non rieseguire il setup automatico (puo' riscrivere la config); lanciare il runner con `STRATA_NO_PRESET=1` nell'ambiente.
+3. **Banco** (GPU solo sotto `bench.lock`, mai priorita' alta, niente corsa se esiste `lab_locks\pause`; annotare se Jump e' connesso: il runner scrive
+   `ambiente.txt`): `python ...\20261019_banco_comunita\community_bench.py <tag> <config.json assoluto> <build dir assoluta>`; ordine B-A-B
+   (Daily 0.1.43 r2 con `D:\ds4_work\strata\Strata\strata-0143-daily.json` e build `D:\ds4_work\strata\Strata\build-0143-daily`, poi A, poi
+   Daily), poi C. Riferimento: `RISULTATI.md` della stessa cartella (Daily 0.1.43 r2, mediane prompt/decode: 4K 701/75,9; 32K 1439/70,4;
+   128K 1720/75,3; 0.1.45 senza batch 663/67,0; 1282/66,4; 1519/69,2). Ogni corsa dura ~7 minuti.
+4. **Qualita'**: confrontare i `tokens-*-raw.json` fra Daily e A/C (stesso prompt, greedy, 256 token: dove il testo diverge e se resta coerente) e le righe
+   `drafts accepted a of b` dell'`engine.log` (accettazione bozze). Per C anche l'identita' dei token con A. Nel log cercare `prefill plan: chunk N, ring M kept`
+   (planner) e la riga di `pin_budget` all'avvio.
+5. Se la build fallisce o il banco mostra un calo: bisezione per patch sulla pila (`stack/NN-*.patch`).
+
+## 5. Misure
+
+Nessuna (vedi il paragrafo 4).
+
+## 6. Le nostre PR upstream dopo il reset del 19/10 (lista per l'owner; niente riaperto ne' commentato)
+
+Condizioni di riapertura (commento di Niko del 19/10): rebase su `main` e verifiche rifatte su 0.2.0-beta; titolo con prefisso `[Engine]`, `[GUI]`,
+`[TUI]`, `[Benchmark]`, `[Docs]` o `[Other]`; template compilato (Problem and result, Related discussion, Approach, Validation Passed/Failed/Not run,
+Limits); commento `/reopen`. Le prestazioni vanno misurate prima/dopo sulla stessa macchina; un cambio di default richiede accordo sullo scopo. Tutte le
+nostre PR aperte hanno il titolo senza prefisso e risultano in conflitto.
+
+| PR | stato | in 0.2.0? | raccomandazione |
+|---|---|---|---|
+| #1419 banco forzato | chiusa | no | lasciare chiusa (strumento da banco, resta nel fork) |
+| #1417 stima prestito | chiusa | no | lasciare chiusa (ha senso solo con i buffer Turing) |
+| #1117 `--elastic` | chiusa | no (c'e' solo `--vram-elastic`) | lasciare chiusa; se si vuole, prima un issue per lo scopo, poi un PR piu' piccolo (solo arena VMM) |
+| #2058 EXPDEC | aperta | si, opt-in | lasciare; valore residuo: A/B su 2080 Ti in 0.2.0 per chiedere il default |
+| #2059 QSA_ROWS | aperta | si, opt-in | lasciare, come #2058 |
+| #2073 PLE diretta + diagnostica | aperta | meta' (il default diretto si) | **aggiornare**: rebase tenendo solo la diagnostica (`ms_ple_gather`, `read_us_max`/`slow_reads`, avviso sul chunk fermo = patch 10), titolo `[Engine] ...`, template |
+| #2075 ATTN_DAILY | aperta | si, opt-in | lasciare; seguire la risposta di Niko (confronto `=0`/`=1` sul binario 0.2.0 offerto da lui) |
+| #2077 `--prompt-cache-file` | aperta | no | lasciare ferma finche' Niko non sceglie il design su disco (#1090); poi rebase con guard Metal (build Metal rotta, segnalata da Qiuzan2001) |
+| #2080 SELECT_SIMT default | aperta | no (opt-in `=1` o `=2`) | ritirare, salvo produrre KL sm_75 indipendente, needle check e nota Volta/Pascal |
+| #2081 dequant 16 B sm_75 | aperta | si (`STRATA_TC_SM75`, `SM75_PERF`) | **aggiornare**: sostituire con un commento di evidenza, A/B isolato su 2080 Ti in 0.2.0 (solo `STRATA_TC_SM75` 1 contro 0, almeno 10 coppie) |
+| #1418 MMVQ righe riusate | chiusa | si, in main con credito | niente |
+
+Altre PR nostre chiuse prima del reset (non riesaminate): #1110, #1063 (fix MTP `--batch-mtp`), #1030 (poi #1117), #614, #512.
+Priorita' suggerita: un solo set di A/B sulla 2080 Ti su 0.2.0 con un binario e coppie interleaved per `STRATA_TC_SM75`, EXPDEC, QSA_ROWS, ATTN_DAILY,
+da postare sui thread esistenti (Niko non ha una Turing: e' l'unica cosa che puo' spostare un default); poi #2073 solo-diagnostica; poi #2080.
