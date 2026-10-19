@@ -8673,3 +8673,413 @@ Block (hunk 5 of `sycl/src/prefill/kernels.dp.cpp` in the patch, 8 lines):
          auto exp_props = sycl::ext::oneapi::experimental::properties{
              sycl::ext::oneapi::experimental::use_root_sync};
 ```
+
+## 19 ov-chain-prio
+
+`19-ov-chain-prio.patch` — QWEN-OVERLAP-Priorita normale della stream della catena kind 1 (STRATA_OV_CHAIN_PRIO=1) La stream del drafter prende oggi la priorita massima quando la catena e' accesa (catena forzata kind 1, --pipeline-windows 2): la 2080 Ti gira la catena insieme alla finestra dello stadio 1 e gli porta via 0,6-7,5 ms a seconda di T (docs/PIPELINE2.md). Con STRATA_OV_CHAIN_PRIO=1 la stream e' creata con cudaStreamCreateWithFlags, cioe' alla priorita di default: la catena arriva piu' tardi e lo stadio 0 ha ~5 ms di margine prima che B sia dovuto.
+
+### 19-1
+
+`src/core/mtp.cpp` · bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
+
+Anchor:
+```
+    bool prio = false;
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // (HIP, Metal: the default priority)
+    static const bool hi_prio = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr || std::atoi(v) != 0; }();
+```
+Block (hunk 1 of `src/core/mtp.cpp` in the patch, 16 lines):
+```diff
+     bool prio = false;
+ #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // (HIP, Metal: the default priority)
+     static const bool hi_prio = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr || std::atoi(v) != 0; }();
++    // lab/overlap 1.3 (STRATA_OV_CHAIN_PRIO=1): the chain's stream at the DEFAULT priority instead of the highest.  On
++    // a forced (kind 1) chain the chain shares this card with stage 1's window and takes it 0.6-7.5 ms (PIPELINE2.md),
++    // while stage 0 has a few ms of margin before its B is due.  Unset / 0: the highest priority, exactly as before.
++    static const bool ov_chain_hi = [] { const char* v = std::getenv("STRATA_OV_CHAIN_PRIO"); return v == nullptr || std::atoi(v) == 0; }();
+     int prio_lo = 0, prio_hi = 0;
+-    if (force_on_ && hi_prio && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
++    if (force_on_ && hi_prio && ov_chain_hi && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
+         prio = cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_hi) == cudaSuccess;
++    else if (force_on_ && hi_prio && !ov_chain_hi)
++        std::fprintf(stderr, "strata mtp: STRATA_OV_CHAIN_PRIO=1: the chain's stream runs at the default priority\n");
+     cudaGetLastError();
+ #endif
+ #if defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
+```
+
+## 20 ov-top2-stat
+
+`20-ov-top2-stat.patch` — QWEN-OVERLAP-Diagnostica top-2 della catena sul token bonus (STRATA_OV_TOP2_STAT=1) Il verdetto della finestra A, quando A esce intera, confronta il token bonus vero (outp[A.T-1]) con il guess top-1 della catena per quella stessa posizione (oc[A.T-1], la riga 0 che un B fatto da li porterebbe) e con il secondo token piu' probabile della testa di draft. N2/(N2+N3) e' la quota che una seconda ipotesi recovererebbe: sotto 0,20 la B ad albero e' chiusa, sopra 0,30 e' un lavoro da 8-12 giorni (PIANO_GLOBALE 2026-10-19 par. 1.2).
+
+### 20-1
+
+`include/strata/core/mtp.hpp` · public:
+
+Anchor:
+```
+    bool chain_live() const { return chain_live_; }
+    const int32_t* chain_tok() const { return chain_tok_; }
+    const float* chain_prob() const { return chain_prob_; }
+```
+Block (hunk 1 of `include/strata/core/mtp.hpp` in the patch, 12 lines):
+```diff
+     bool chain_live() const { return chain_live_; }
+     const int32_t* chain_tok() const { return chain_tok_; }
+     const float* chain_prob() const { return chain_prob_; }
++    /// lab/overlap 1.2 (`STRATA_OV_TOP2_STAT=1`, a diagnostic, opt-in and slow): the chain step's runner-up under the
++    /// draft head and its probability -- what a tree draft's second branch would have to hit.  Each step's logits are
++    /// copied to the host inside its own graph; -1 / 0 when the switch is off or the step has no second token.
++    static bool ov_top2_stat();
++    int32_t chain_top2(int j) const { return j >= 0 && j < 8 ? chain_top2_[j] : -1; }
++    float chain_top2_prob(int j) const { return j >= 0 && j < 8 ? chain_top2_prob_[j] : 0.0f; }
+
+     double ms_draft = 0, ms_prefill = 0;
+     double ms_src = 0;      ///< the host time spent staging the source rows (a cross-card copy when the drafter is on another card)
+```
+
+### 20-2
+
+`include/strata/core/mtp.hpp` · private:
+
+Anchor:
+```
+    int chain_launched_ = 0;   ///< STRUCT-A: the outputs queued so far (chain_n_ once the chain is whole or cut)
+    int32_t chain_tok_[8] = {};
+    float chain_prob_[8] = {};
+```
+Block (hunk 2 of `include/strata/core/mtp.hpp` in the patch, 16 lines):
+```diff
+     int chain_launched_ = 0;   ///< STRUCT-A: the outputs queued so far (chain_n_ once the chain is whole or cut)
+     int32_t chain_tok_[8] = {};
+     float chain_prob_[8] = {};
++    // STRATA_OV_TOP2_STAT (lab/overlap 1.2): slot j holds the round's / step j's draft logits, brought to the host by a
++    // copy node inside that graph, and chain_top2_[j] is their runner-up.
++    float* h_lg2_ = nullptr;
++    float* m_lg2_ = nullptr;
++    bool ov_top2_live_ = false;   ///< the staging exists and its copy nodes captured (set in bind)
++    int32_t chain_top2_[8] = {};
++    float chain_top2_prob_[8] = {};
++    void ov_top2_alloc();                                        ///< bind: before any graph is captured
++    bool ov_top2_capture(int j, cudaStream_t cs);                ///< inside a capture: row 0's logits into slot j
++    void ov_top2_scan(int j);                                    ///< after the step's outputs land: its runner-up
+     int64_t n_vocab_ = 0;
+     uint64_t vram_ = 0;
+     cudaStream_t cs_ = nullptr;
+```
+
+### 20-3
+
+`src/core/mtp.cpp` · (file scope)
+
+Anchor:
+```
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+```
+Block (hunk 1 of `src/core/mtp.cpp` in the patch, 7 lines):
+```diff
+ #include <algorithm>
+ #include <atomic>
+ #include <chrono>
++#include <cmath>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+```
+
+### 20-4
+
+`src/core/mtp.cpp` · MtpDrafter::~MtpDrafter() {
+
+Anchor:
+```
+    if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
+    if (ev_chain_) cudaEventDestroy(ev_chain_);
+    for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
+```
+Block (hunk 2 of `src/core/mtp.cpp` in the patch, 8 lines):
+```diff
+     if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
+     if (ev_chain_) cudaEventDestroy(ev_chain_);
+     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
+-    void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_};
++    void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_, h_lg2_};
+     for (void* h : hosts) if (h) cudaFreeHost(h);
+ }
+
+```
+
+### 20-5
+
+`src/core/mtp.cpp` · void MtpDrafter::record_top2(int j) {
+
+Anchor:
+```
+    top2_[(size_t) j] = b2 < 0 ? -1 : dhead_ != nullptr ? dvocab_host_[(size_t) b2] : (int32_t) b2;
+}
+```
+Block (hunk 3 of `src/core/mtp.cpp` in the patch, 66 lines):
+```diff
+     top2_[(size_t) j] = b2 < 0 ? -1 : dhead_ != nullptr ? dvocab_host_[(size_t) b2] : (int32_t) b2;
+ }
+
++// ---- lab/overlap 1.2: STRATA_OV_TOP2_STAT=1 (a diagnostic, opt-in, slow -- nothing here is on any measured path).
++// A chain step's draft logits (the row `row_top_prob` took its top-1 and its probability from) also come to the host,
++// so a window's verdict can ask what the drafter's runner-up was at the bonus position: the token a tree draft's
++// second branch would have to hit.  Off: no pinned staging, no copy node, the round and step graphs are the old ones.
++bool MtpDrafter::ov_top2_stat() {
++    static const bool on = [] { const char* v = std::getenv("STRATA_OV_TOP2_STAT"); return v != nullptr && std::atoi(v) != 0; }();
++    return on;
++}
++
++// bind, before any graph is captured: a captured graph either holds its copy node or does not, and that cannot change
++// later.  max_t_ rows of the draft head's logits (40525 tokens on this fork's model, ~1.3 MB pinned).
++void MtpDrafter::ov_top2_alloc() {
++    const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
++    if (!ov_top2_stat() || h_lg2_ != nullptr || nv <= 0 || max_t_ <= 0) return;
++    if (!mapped((size_t) max_t_ * (size_t) nv * sizeof(float), (void**) &h_lg2_, (void**) &m_lg2_)) {
++        h_lg2_ = m_lg2_ = nullptr;
++        std::fprintf(stderr, "strata mtp: STRATA_OV_TOP2_STAT stays off: the draft logits' staging does not fit\n");
++    } else
++        ov_top2_live_ = true;
++}
++
++// Inside a capture: the graph's logits (record_rest runs on row 0) into slot j -- j 0 for a round, j for step j.
++// A pinned-host memcpy node: capturable, and it lands before the event recorded after the graph's launch.
++bool MtpDrafter::ov_top2_capture(int j, cudaStream_t cs) {
++    if (!ov_top2_live_ || h_lg2_ == nullptr || j < 0 || j >= max_t_) return true;
++    const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
++    if (cudaMemcpyAsync(h_lg2_ + (int64_t) j * nv, head_logits_, (size_t) nv * sizeof(float), cudaMemcpyDeviceToHost,
++                        cs) != cudaSuccess) {   // a diagnostic never breaks a graph: it stops reporting instead
++        cudaGetLastError();
++        ov_top2_live_ = false;
++        std::fprintf(stderr, "strata mtp: STRATA_OV_TOP2_STAT stays off: its copy node does not capture\n");
++    }
++    return true;
++}
++
++// Slot j read once its step's outputs landed: the runner-up and its probability under a softmax over the same row
++// (what row_top_prob's own `probs` are).  Two passes over nv floats: a diagnostic path, never the measured one.
++void MtpDrafter::ov_top2_scan(int j) {
++    if (j < 0 || j >= 8) return;
++    chain_top2_[j] = -1;
++    chain_top2_prob_[j] = 0.0f;
++    if (!ov_top2_live_ || h_lg2_ == nullptr || j >= max_t_) return;
++    const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
++    const float* lg = h_lg2_ + (int64_t) j * nv;
++    int64_t b1 = -1, b2 = -1;
++    for (int64_t i = 0; i < nv; ++i) {
++        const float v = lg[i];
++        if (v != v) continue;   // NaN never picked (as argmax_rows)
++        if (b1 < 0 || v > lg[b1]) { b2 = b1; b1 = i; }
++        else if (b2 < 0 || v > lg[b2]) b2 = i;
++    }
++    if (b1 < 0 || b2 < 0) return;
++    const double mx = lg[b1];
++    double sum = 0.0;
++    for (int64_t i = 0; i < nv; ++i)
++        if (lg[i] == lg[i]) sum += std::exp((double) lg[i] - mx);   // a NaN row cell joins neither sum
++    chain_top2_prob_[j] = sum > 0.0 ? (float) (std::exp((double) lg[b2] - mx) / sum) : 0.0f;
++    chain_top2_[j] = dhead_ != nullptr ? dvocab_host_[(size_t) b2] : (int32_t) b2;
++}
++
+ uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const {
+     uint64_t bytes = head_logits_ ? 0 : (uint64_t) max_t_ * (uint64_t) n_vocab * sizeof(float);
+     if (dhead_ == nullptr && owns_draft_head_ && !full_head_env()) {
+```
+
+### 20-6
+
+`src/core/mtp.cpp` · bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
+
+Anchor:
+```
+                                                  "MTP draft head");
+        }
+    }
+```
+Block (hunk 4 of `src/core/mtp.cpp` in the patch, 7 lines):
+```diff
+                                                   "MTP draft head");
+         }
+     }
++    ov_top2_alloc();   // STRATA_OV_TOP2_STAT: the staging exists before any round/step graph is captured
+     if (coupled_draft_env() && cparams_ == nullptr && !setup_coupled(err)) return false;
+     return true;
+ }
+```
+
+### 20-7
+
+`src/core/mtp.cpp` · bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
+
+Anchor:
+```
+        coupled_j_ = 0;
+        ok = record_rest(ra, cs_, err);
+        coupled_rec_ = false;
+```
+Block (hunk 5 of `src/core/mtp.cpp` in the patch, 7 lines):
+```diff
+         coupled_j_ = 0;
+         ok = record_rest(ra, cs_, err);
+         coupled_rec_ = false;
++        if (ok) ok = ov_top2_capture(0, cs_);   // STRATA_OV_TOP2_STAT: this round's logits (output 0) to the host
+     }
+     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
+     if (ok) g_mp.stamp(16, cs_);
+```
+
+### 20-8
+
+`src/core/mtp.cpp` · bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
+
+Anchor:
+```
+    g_mp.base = j < kMpGraphs ? j : -1;
+    bool ok = record_forward(1, row, cs_, err);
+    coupled_rec_ = false;
+```
+Block (hunk 6 of `src/core/mtp.cpp` in the patch, 7 lines):
+```diff
+     g_mp.base = j < kMpGraphs ? j : -1;
+     bool ok = record_forward(1, row, cs_, err);
+     coupled_rec_ = false;
++    if (ok) ok = ov_top2_capture(j, cs_);   // STRATA_OV_TOP2_STAT: step j's logits (output j) to the host
+     if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
+     if (ok) g_mp.stamp(16, cs_);
+     g_mp.base = -1;
+```
+
+### 20-9
+
+`src/core/mtp.cpp` · int MtpDrafter::chain_outputs_ready(std::string& err) {
+
+Anchor:
+```
+        if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
+        chain_tok_[steps_seen_] = ((volatile int32_t*) h_out_)[steps_seen_];
+        chain_prob_[steps_seen_] = ((volatile float*) h_prob_)[steps_seen_];
+```
+Block (hunk 7 of `src/core/mtp.cpp` in the patch, 7 lines):
+```diff
+         if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
+         chain_tok_[steps_seen_] = ((volatile int32_t*) h_out_)[steps_seen_];
+         chain_prob_[steps_seen_] = ((volatile float*) h_prob_)[steps_seen_];
++        ov_top2_scan(steps_seen_);   // STRATA_OV_TOP2_STAT: its runner-up too (slot steps_seen_ is written by then)
+         ++steps_seen_;
+     }
+     return steps_seen_;
+```
+
+### 20-10
+
+`src/core/mtp.cpp` · int MtpDrafter::chain_poll(std::string& err) {
+
+Anchor:
+```
+    for (int j = 0; j < chain_n_; ++j) {
+        chain_tok_[j] = ((volatile int32_t*) h_out_)[j];
+        chain_prob_[j] = ((volatile float*) h_prob_)[j];
+```
+Block (hunk 8 of `src/core/mtp.cpp` in the patch, 10 lines):
+```diff
+     for (int j = 0; j < chain_n_; ++j) {
+         chain_tok_[j] = ((volatile int32_t*) h_out_)[j];
+         chain_prob_[j] = ((volatile float*) h_prob_)[j];
++        ov_top2_scan(j);   // STRATA_OV_TOP2_STAT: the runner-up of each step (diagnostic only)
+     }
+-    for (int j = chain_n_; j < 8; ++j) { chain_tok_[j] = 0; chain_prob_[j] = 0.0f; }
++    for (int j = chain_n_; j < 8; ++j) { chain_tok_[j] = 0; chain_prob_[j] = 0.0f; chain_top2_[j] = -1; chain_top2_prob_[j] = 0.0f; }
+     return 1;
+ }
+
+```
+
+### 20-11
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                int sa_last_T = 0;                      // the last bet's size for sa_want
+                int64_t sa_placed[4] = {}, sa_tails[4] = {}, sa_drops[4] = {}, sa_chains = 0, sa_cut = 0;
+                int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
+```
+Block (hunk 1 of `src/program/generate.cpp` in the patch, 12 lines):
+```diff
+                 int sa_last_T = 0;                      // the last bet's size for sa_want
+                 int64_t sa_placed[4] = {}, sa_tails[4] = {}, sa_drops[4] = {}, sa_chains = 0, sa_cut = 0;
+                 int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
++                // lab/overlap 1.2 (STRATA_OV_TOP2_STAT=1, a diagnostic): on the windows accepted whole, whether the
++                // drafter's runner-up at the bonus position is the token the model really produced -- the share a tree
++                // draft's second branch could recover.  Counted per request, printed with STRATA_DECODE_TIMING.
++                static const bool ov_top2 = strata::core::MtpDrafter::ov_top2_stat();
++                int64_t ov_n = 0, ov_t1 = 0, ov_t2 = 0, ov_t3 = 0, ov_no2 = 0;
++                double ov_p2 = 0.0;   // the runner-up's probability, summed over the counted windows
+                 double pl_chain_t0 = 0.0, pl_chain_ms[2] = {0, 0}, pl_chain_n[2] = {0, 0};   // fork: chain -> B latency
+                 // fork (Daily 1541e340): the elastic tail beside the windows, at the gaps of stage 0 (see el_gap)
+                 int64_t pl_el_shrinks = 0, pl_el_grows = 0;
+```
+
+### 20-12
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    for (int i = 0; i <= a; ++i) consumed.push_back(A.tok[i]);
+                    draft_offered += A.T - 1;
+                    draft_accepted += a;
+```
+Block (hunk 2 of `src/program/generate.cpp` in the patch, 21 lines):
+```diff
+                     for (int i = 0; i <= a; ++i) consumed.push_back(A.tok[i]);
+                     draft_offered += A.T - 1;
+                     draft_accepted += a;
++                    // lab/overlap 1.2 (STRATA_OV_TOP2_STAT=1, diagnostic only): A went out whole, so outp[A.T-1] is the
++                    // bonus and oc[A.T-1] is the chain's guess for that same position (the row 0 a B made from it would
++                    // carry).  bonus == top-1: today's B is right there; == top-2: a second branch would have caught it.
++                    if (ov_top2 && !A.sfx && !A.lookup && a == A.T - 1) {
++                        const int idx = A.T - 1;   // the chain's output index of the bonus position
++                        if (idx < chain_n && idx < mtp.chain_queued()) {
++                            const int32_t bonus = outp[(size_t) idx];
++                            const int32_t second = mtp.chain_top2(idx);
++                            ++ov_n;
++                            if (mtp.chain_tok()[idx] == bonus) ++ov_t1;
++                            else if (second >= 0 && second == bonus) ++ov_t2;
++                            else { ++ov_t3; if (second < 0) ++ov_no2; }
++                            ov_p2 += (double) mtp.chain_top2_prob(idx);
++                        }
++                    }
+                     ++rounds;
+                     if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);
+                     ++dec_windows;
+```
+
+### 20-13
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                                 cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
+                                 avg(cls_ms[1], cls_n[1]), avg(cls_tok[1], cls_n[1]), (long long) pl_disagree,
+                                 (long long) pl_late);
+```
+Block (hunk 3 of `src/program/generate.cpp` in the patch, 11 lines):
+```diff
+                                  cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],
+                                  avg(cls_ms[1], cls_n[1]), avg(cls_tok[1], cls_n[1]), (long long) pl_disagree,
+                                  (long long) pl_late);
++                    if (ov_top2)   // lab/overlap 1.2: the bonus position under the chain, on the whole-accepted windows
++                        std::fprintf(stderr, "strata overlap top2: bonus=top1 %lld, bonus=top2 %lld, altro %lld su %lld "
++                                             "(runner-up non letto %lld, sua probabilita media %.3f)\n",
++                                     (long long) ov_t1, (long long) ov_t2, (long long) ov_t3, (long long) ov_n,
++                                     (long long) ov_no2, ov_n > 0 ? ov_p2 / (double) ov_n : 0.0);
+                     std::fprintf(stderr, "strata pipeline: drafter on CUDA%d: %.3f ms of host time per chain launch (%.3f ms of it "
+                                          "staging the source rows, %lld times so far)\n", mtp.device(),
+                                  avg(mtp.ms_draft, (double) mtp.rounds), avg(mtp.ms_src, (double) mtp.n_src), (long long) mtp.n_src);
+```

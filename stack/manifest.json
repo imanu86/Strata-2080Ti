@@ -1,13 +1,13 @@
 {
   "title": "Strata-2080Ti patch stack",
-  "intro": "The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata, one lever each, in the order they apply. Written for a two-card Windows box (RTX 2080 Ti 22 GB as stage 1, RTX 3060 12 GB as stage 0, `--layer-split 16 --trim-stage-weights --pipeline-windows 2`), but every lever is a plain switch and most are bitwise with the default path. The registry exists so that the next upstream version can be checked and re-based mechanically: run `check_anchors.py --check` on the new tag, read what moved, re-apply.\n\nRebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-18) come from lab/struct-a, lab/ttft43, lab/pipeline2 and the 0.1.43 Daily's hc16 (18).",
+  "intro": "The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata, one lever each, in the order they apply. Written for a two-card Windows box (RTX 2080 Ti 22 GB as stage 1, RTX 3060 12 GB as stage 0, `--layer-split 16 --trim-stage-weights --pipeline-windows 2`), but every lever is a plain switch and most are bitwise with the default path. The registry exists so that the next upstream version can be checked and re-based mechanically: run `check_anchors.py --check` on the new tag, read what moved, re-apply.\n\nRebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-18) come from lab/struct-a, lab/ttft43, lab/pipeline2 and the 0.1.43 Daily's hc16 (18). The two levers 19-20 come from lab/overlap (19 Oct 2026): the chain's priority beside stage 1, and the runner-up diagnostic behind a tree draft (docs/OVERLAP.md).",
   "forced_defaults": "Upstream defaults that this stack or its reference configuration changes, so that a run on the stack behaves like the fork's Daily:\n\n| default in upstream 0.1.45 | here | by |\n|---|---|---|\n| `STRATA_SELECT_SIMT` opt-in (QSA block scores below sm_80 on the warp kernel) | **on** below sm_80, `=0` turns it off, `=2` larger tiles | patch 11 |\n| `STRATA_TC_SM75` / `STRATA_SM75_PERF` opt-in (the bitwise Turing series, 16-byte dequant) | `STRATA_TC_SM75` **on** for a 7.5 card, `=0` off; the rest of the series stays behind `STRATA_SM75_PERF=1` | patch 11 |\n| `STRATA_DF_BRANCH`, `STRATA_DF_PLE` opt-in (PR #904's graph branches / PLE post-ops) | **on** with CUDA (BRANCH: on Windows), `=0` turns them off; BRANCH yields to `STRATA_SIDE_MIXER` | patch 09 |\n| `STRATA_PLE_LOOKAHEAD` (not in upstream) | **on**, `=0` off; direct PLE only | patch 15 |\n| `STRATA_PIPELINE_ELASTIC` (not in upstream) | **on** with two cards and `--pipeline-windows`: theta 0.10, verified window served first; `=0` gives upstream's theta 0.20 and D-A-B order | patch 08 |\n| `STRATA_ROUTE_TAIL_SKIP=7` (off from 90% cached experts, #1884) | unchanged in code; the reference config sets `=0` (-1.6% with it at 96-98% hit) | config |\n| `STRATA_MMVQ_IL` on (interleaved dense GEMV where the card's table has a cell) | unchanged in code; the reference config sets `STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1` | config |\n| `STRATA_NAN_GUARD` on (#1892) | unchanged (cost < 0.2%, bitwise otherwise); `=0` turns it off | - |\n\nReference configuration environment (the fork's 0.1.43 Daily r2, config `strata-0143-daily.json`): `STRATA_VRAM_FREE=device STRATA_ROUTE_TAIL_SKIP=0 STRATA_ATTN_DAILY=1 STRATA_MMVQ_IL=0 STRATA_B6_MMVQ_ROWS=1 STRATA_MTP_SHARED_BRANCH=0 STRATA_SIDE_MIXER=2 STRATA_RAM_CORE=1 STRATA_RAM_CORE_SLOTS_DEV1=5500 STRATA_EXPDEC=1 STRATA_QSA_ROWS=1 STRATA_SA_BET=1 STRATA_SA_CHAIN=1 STRATA_PREFIX_DISK_MULTI=24`, options `--elastic --prompt-cache-tail --prompt-cache-every 16384 --prompt-cache-file <file> --layer-split 16 --trim-stage-weights --pipeline-windows 2 --vram-reserve-later-mib 384 --host-core last`. On 0.1.45 these variables mean the same, except that `STRATA_ATTN_DAILY`, `STRATA_B6_MMVQ_ROWS`, `STRATA_SIDE_MIXER`, `STRATA_EXPDEC`, `STRATA_QSA_ROWS` are now upstream's own. The same JSON also sets `STRATA_NODECUT=1 STRATA_TOPK_GRID=1 STRATA_B6_HEAD_MINB=6 STRATA_CONV_DISK=10`: the first three are lab levers of lab/struct-a that are NOT in this stack (neutral on the bench), they are ignored by a 0.1.45 build.",
   "base": {
     "repo": "Niko1221/Strata",
     "tag": "v0.1.45",
     "commit": "477ac13cbe8e582c20484871ce459d20d82df09d"
   },
-  "stack_head": "d9a26384af8122b4945fb02191136d812ac094cb",
+  "stack_head": "6caf8fe5b02707012ee5aac4ae36ea00794b5306",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -3849,6 +3849,211 @@
         "src/prefill/kernels.cu",
         "src/prefill/prefill.cpp",
         "sycl/src/prefill/kernels.dp.cpp"
+      ]
+    },
+    {
+      "id": "19",
+      "name": "ov-chain-prio",
+      "summary": "The draft chain's stream at the default priority instead of the highest: `STRATA_OV_CHAIN_PRIO=1` creates it with `cudaStreamCreateWithFlags`, so a forced (kind 1) chain no longer preempts the window stage 1 is running beside it.",
+      "switch": "`STRATA_OV_CHAIN_PRIO=1` (unset / `=0`: the highest priority, exactly as today)",
+      "origin": "fork (lab/overlap 19 Oct 2026, from the chain-vs-stage-1 contention measured in docs/PIPELINE2.md)",
+      "upstream_status": "never proposed",
+      "measured": "not measured yet - the B-A-B on the forced bench and the `strata pipeline classes` lines are still to run. What it targets is measured: a kind-1 chain takes 0,6-7,5 ms from stage 1.",
+      "docs": "docs/OVERLAP.md",
+      "patch": "19-ov-chain-prio.patch",
+      "commit": "3d8b61ce3684c2f3a8781c3fd533248ab2699f6f",
+      "title": "QWEN-OVERLAP-Priorita normale della stream della catena kind 1 (STRATA_OV_CHAIN_PRIO=1) La stream del drafter prende oggi la priorita massima quando la catena e' accesa (catena forzata kind 1, --pipeline-windows 2): la 2080 Ti gira la catena insieme alla finestra dello stadio 1 e gli porta via 0,6-7,5 ms a seconda di T (docs/PIPELINE2.md). Con STRATA_OV_CHAIN_PRIO=1 la stream e' creata con cudaStreamCreateWithFlags, cioe' alla priorita di default: la catena arriva piu' tardi e lo stadio 0 ha ~5 ms di margine prima che B sia dovuto.",
+      "anchors": [
+        {
+          "block": "19-1",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session",
+          "anchor": [
+            "    bool prio = false;",
+            "#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // (HIP, Metal: the default priority)",
+            "    static const bool hi_prio = [] { const char* v = std::getenv(\"STRATA_MTP_PRIORITY\"); return v == nullptr || std::atoi(v) != 0; }();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        }
+      ],
+      "files": [
+        "src/core/mtp.cpp"
+      ]
+    },
+    {
+      "id": "20",
+      "name": "ov-top2-stat",
+      "summary": "Diagnostic for a tree draft: `STRATA_OV_TOP2_STAT=1` brings every chain step's draft logits to the host (a memcpy node inside that step's own graph) and, for each window accepted whole, reports whether the model's bonus token was the chain's top-1 at that position, its runner-up, or neither.",
+      "switch": "`STRATA_OV_TOP2_STAT=1` (off); the line prints with `STRATA_DECODE_TIMING`: `strata overlap top2: bonus=top1 N1, bonus=top2 N2, altro N3 su N`",
+      "origin": "fork (lab/overlap 19 Oct 2026)",
+      "upstream_status": "never proposed.  Upstream's `STRATA_MTP_TOP2` counts runner-up hits on the serial loop's windows only, and its `record_top2` is never called anywhere in the tree (cuda or sycl), so its counter reads -1; this one covers the pipelined loop.",
+      "measured": "not measured yet - one DET arm with the same build reads N2/(N2+N3), the share a second branch would recover (below 0,20 the tree draft is closed here). Off: no pinned staging, no node in the round/step graphs, same tokens.",
+      "docs": "docs/OVERLAP.md",
+      "patch": "20-ov-top2-stat.patch",
+      "commit": "b2c2aefd5d07ff93a105a4ae408929a2ddf86471",
+      "title": "QWEN-OVERLAP-Diagnostica top-2 della catena sul token bonus (STRATA_OV_TOP2_STAT=1) Il verdetto della finestra A, quando A esce intera, confronta il token bonus vero (outp[A.T-1]) con il guess top-1 della catena per quella stessa posizione (oc[A.T-1], la riga 0 che un B fatto da li porterebbe) e con il secondo token piu' probabile della testa di draft. N2/(N2+N3) e' la quota che una seconda ipotesi recovererebbe: sotto 0,20 la B ad albero e' chiusa, sopra 0,30 e' un lavoro da 8-12 giorni (PIANO_GLOBALE 2026-10-19 par. 1.2).",
+      "anchors": [
+        {
+          "block": "20-1",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    bool chain_live() const { return chain_live_; }",
+            "    const int32_t* chain_tok() const { return chain_tok_; }",
+            "    const float* chain_prob() const { return chain_prob_; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "20-2",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "private:",
+          "anchor": [
+            "    int chain_launched_ = 0;   ///< STRUCT-A: the outputs queued so far (chain_n_ once the chain is whole or cut)",
+            "    int32_t chain_tok_[8] = {};",
+            "    float chain_prob_[8] = {};"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "20-3",
+          "file": "src/core/mtp.cpp",
+          "symbol": "(file scope)",
+          "anchor": [
+            "#include <algorithm>",
+            "#include <atomic>",
+            "#include <chrono>"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "20-4",
+          "file": "src/core/mtp.cpp",
+          "symbol": "MtpDrafter::~MtpDrafter() {",
+          "anchor": [
+            "    if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);",
+            "    if (ev_chain_) cudaEventDestroy(ev_chain_);",
+            "    for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "20-5",
+          "file": "src/core/mtp.cpp",
+          "symbol": "void MtpDrafter::record_top2(int j) {",
+          "anchor": [
+            "    top2_[(size_t) j] = b2 < 0 ? -1 : dhead_ != nullptr ? dvocab_host_[(size_t) b2] : (int32_t) b2;",
+            "}"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "20-6",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float",
+          "anchor": [
+            "                                                  \"MTP draft head\");",
+            "        }",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "20-7",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {",
+          "anchor": [
+            "        coupled_j_ = 0;",
+            "        ok = record_rest(ra, cs_, err);",
+            "        coupled_rec_ = false;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "20-8",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {",
+          "anchor": [
+            "    g_mp.base = j < kMpGraphs ? j : -1;",
+            "    bool ok = record_forward(1, row, cs_, err);",
+            "    coupled_rec_ = false;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "20-9",
+          "file": "src/core/mtp.cpp",
+          "symbol": "int MtpDrafter::chain_outputs_ready(std::string& err) {",
+          "anchor": [
+            "        if (q != cudaSuccess) { err = std::string(\"mtp chain: \") + cudaGetErrorString(q); return -1; }",
+            "        chain_tok_[steps_seen_] = ((volatile int32_t*) h_out_)[steps_seen_];",
+            "        chain_prob_[steps_seen_] = ((volatile float*) h_prob_)[steps_seen_];"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "20-10",
+          "file": "src/core/mtp.cpp",
+          "symbol": "int MtpDrafter::chain_poll(std::string& err) {",
+          "anchor": [
+            "    for (int j = 0; j < chain_n_; ++j) {",
+            "        chain_tok_[j] = ((volatile int32_t*) h_out_)[j];",
+            "        chain_prob_[j] = ((volatile float*) h_prob_)[j];"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "20-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                int sa_last_T = 0;                      // the last bet's size for sa_want",
+            "                int64_t sa_placed[4] = {}, sa_tails[4] = {}, sa_drops[4] = {}, sa_chains = 0, sa_cut = 0;",
+            "                int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "20-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    for (int i = 0; i <= a; ++i) consumed.push_back(A.tok[i]);",
+            "                    draft_offered += A.T - 1;",
+            "                    draft_accepted += a;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "20-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                 cls_n[0], avg(cls_ms[0], cls_n[0]), avg(cls_tok[0], cls_n[0]), cls_n[1],",
+            "                                 avg(cls_ms[1], cls_n[1]), avg(cls_tok[1], cls_n[1]), (long long) pl_disagree,",
+            "                                 (long long) pl_late);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        }
+      ],
+      "files": [
+        "include/strata/core/mtp.hpp",
+        "src/core/mtp.cpp",
+        "src/program/generate.cpp"
       ]
     }
   ],
