@@ -1,0 +1,901 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Sun, 18 Oct 2026 16:07:46 +0200
+Subject: [PATCH] SONNET-UPSYNC-Porta su 0.2.0 STRUCT-A SA_BET e SA_CHAIN
+ (patch 13)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/docs/STRUCT_A.md b/docs/STRUCT_A.md
+new file mode 100644
+index 00000000..4bedb2ca
+--- /dev/null
++++ b/docs/STRUCT_A.md
+@@ -0,0 +1,155 @@
++# STRUCT-A: la 3060 al lavoro mentre gira la catena MTP
++
++Branch `lab/struct-a` del fork `imanu86/Strata-2080Ti`, da `lab/speed4` (`63a94046`: v0.1.43 + la pila + le leve
++speed). Configurazione: 3060 = stadio 0 (CUDA0 con `CUDA_VISIBLE_DEVICES=1,0`, layer 0-15), 2080 Ti = stadio 1 (layer
++16-47, testa, catena MTP), `--pipeline-windows 2 --spec 4 --spec-min-p 0.5`. Tutto opt-in (`STRATA_SA_*`); senza
++variabili il motore lancia gli stessi grafi nello stesso ordine di `lab/speed4`.
++
++Convenzione: **M** = misurato (traccia della pipeline o log del motore), **S** = stimato.
++
++## 1. Quanto pesa la catena sul percorso critico
++
++Fonti: `STRATA_PIPELINE_TRACE` della corsa pulita `DET-cp-clean` (1834 verdetti, banco forzato, L01+L02 a 131k; build
++`persist-954f24c`, stessa struttura della pipeline di oggi), script `structa_trace.py` (scratchpad della sessione,
++ricostruibile: per ogni verdetto `V` legge `CL`/`CE`/`L0`/`F0`/`L1`/`F1` della finestra dopo); classi e catena dai log di
++`DET-x16-split-a` (build `speed4-311b6fda`, la base di oggi). Tempi puliti, non nsys: la traccia nsys gonfia di 2-3 volte
++l'host (HOSTGAP), per questo i «~4,8 ms fra sampler e stadio 0» della traccia nsys qui diventano ~2,3.
++
++**Finestre fresche (73%).** Dal verdetto al lancio dello stadio 0 della finestra dopo (M, mediane):
++
++| tratto | ms | cosa |
++|---|---|---|
++| `V`→`CL` | 0,36 | verdetto, commit, lancio della catena (host) |
++| `CL`→`CE`, T=1 (42% delle fresche) | 0,85 | round + 1 uscita: la prima bozza sotto `spec-min-p` decide T=1 |
++| `CL`→`CE`, T=2 (28%) | 1,79 | 2 uscite |
++| `CL`→`CE`, T≥3 (30%) | 2,72 | 3 uscite (un passo = 0,93 ms) |
++| `CE`→`L0` | 0,07 | lancio dello stadio 0 |
++| **`V`→`L0`, media** | **2,20** | la 3060 è ferma |
++
++Poi stadio 0 (T=1 7,93 · T=2 10,0 · T=3 12,2 · T=4 14,4 ms), `F0`→`L1` 0,17, stadio 1 (T=1 13,1 · T=2 15,5 · T=3 18,2 ·
++T=4 21,7), `F1`→`V` 0,12 (M). Sulla media delle finestre: 2,2 × 0,73 = **1,6 ms a finestra** di catena + host prima
++dello stadio 0 (S da M).
++
++**Finestre speculative (27%).** La catena «forzata» (tipo 1) parte al verdetto sulla stessa 2080 Ti dello stadio 1. Lo
++stadio 1 di una speculativa dura più di quello di una fresca allo stesso T (M): **+2,5 / +3,1 / +3,8 / +4,8 ms** a T = 1
++/ 2 / 3 / 4, cioè ~70% della lunghezza della catena (round + `B.T + 2` passi da 0,93 ms): la catena ruba la scheda allo
++stadio 1. Sulla media: ~3,1 × 0,27 = **0,85 ms a finestra** (S da M).
++
++**Totale catena sul percorso critico: ~2,4 ms a finestra (~9%).** È il tetto di tutto quello che si fa sulla catena; la
++parte che la 3060 può prendere è più piccola (§2).
++
++## 2. Le tre strade proposte, e perché due non vanno
++
++**a. Stadio 0 a pezzi sulle bozze man mano che escono (finestra più corta o allungabile).** No. Lo stadio 0 legge i pesi
++una volta per finestra qualunque sia T (layer della 3060: ~0,50 ms a T=1, +0,13 ms a riga, M): passare le righe in due
++volte rilegge i pesi (T=1 + T=3 = 20 ms contro 14,4 per T=4). Accorciare A e passare le righe in più a B costa invece un
++**passaggio in più sullo stadio 1** (~13 ms fissi): da un caso reale (T=3 naturale) 33,8 ms per tre token diventano
++27,1 + ~18,5. Le righe non si spezzano: la finestra deve partire con tutte le sue righe.
++
++**b. MTP sulla 3060 (prova del 7/10, `docs/sm75/mtp-device-20261007.json`, −9/−12%).** Il json lo dice in una riga:
++«stage1/speculative windows get faster while stage0/fresh windows get slower; the latter dominate». Il perché, coi
++numeri del §1:
++- nelle **fresche** (73%) la catena è in serie con lo stadio 0 in ogni caso; sulla 3060 un passo costa ~1,5-1,7× (360
++  contro 616 GB/s) e i residui devono passare dalla 2080 Ti per la memoria pinned: il tratto `V`→`L0` si allunga;
++- sempre nelle fresche, il resto della catena (le bozze di B, ~4 ms) oggi gira sulla 2080 Ti **ferma** (aspetta lo
++  stadio 0): sulla 3060 gira **dentro** lo stadio 0 di A e lo allunga. Tempo gratis trasformato in tempo critico;
++- la 3060 ospita i pesi e il K/V del drafter (gli esperti del layer MTP sono ~0,9 GB): ~500-700 slot di cache in meno
++  allo stadio 0, più esperti sulla CPU in ogni finestra;
++- nelle speculative guadagna i ~3 ms del §1, ma solo sul 27% delle finestre, e la B che ne esce è in ritardo.
++Un drafter doppio (catena forzata sulla 3060, catena fresca sulla 2080 Ti) terrebbe solo il guadagno, ma serve un secondo
++K/V del drafter allineato a ogni catena e ~1 GB di 3060: non lo faccio.
++
++**c. Lanciare lo stadio 0 su un'ipotesi prima che la catena finisca, scartando il lavoro se è sbagliata.** Sì, ma solo
++per la **testa** della finestra. Una finestra intera sbagliata non si annulla (un grafo lanciato va finito: 5-8 ms di
++3060) e scrive K/V e indicizzatore QSA. I primi layer dello stadio 0 (0-2) sono invece GDN: una finestra della pipeline
++non tocca lo stato GDN (lo fa il commit: `set_always_publish`), non scrive K/V; l'unico stato che muove è la storia PLE
++del layer 1 (`ss.ple.hist`, avanzata in place e poi riscritta dal commit), che si salva e si ripristina con una copia di
++pochi KB. Quindi la testa (layer 0..c-1, c ≤ 2 di default) si può lanciare **in scommessa** e buttare a costo ~zero.
++
++## 3. Il disegno
++
++### 3a. `STRATA_SA_BET=1`: la scommessa sulla testa dello stadio 0 (la 3060 al lavoro durante la catena)
++
++- Lo stadio 0 ha, per T = 1..`STRATA_SA_BET_MAXT` (2), due grafi in più catturati da `record_window` su un intervallo di
++  layer: **testa** = ingressi + layer `[0, c)`, **coda** = layer `[c, 16)` + hand-off. Stessi kernel, stesso stream,
++  stesso ordine dei doorbell: testa + coda = la finestra di sempre (`STRATA_SA_BET_LAYERS` = c, default 2, limitato ai
++  layer GDN prima del primo QSA dello stadio).
++- **Scommessa 1**: al verdetto che apre una finestra fresca (la catena tipo 2 appena lanciata, eventuale undo di D fatto),
++  la 3060 parte subito con la testa di A' = `[x]` (T=1: x è la correzione del target, nota al verdetto). L'host serve i c
++  layer della testa come una finestra normale (esperti CPU compresi) e si ferma lì.
++- **Scommessa 2**: quando la prima uscita della catena ha probabilità ≥ `spec-min-p` (quindi T ≥ 2) la testa 1 è persa:
++  finita, si butta; parte la testa di `[x, d1]` (T=2).
++- **Verifica** nel punto dove oggi parte lo stadio 0 di A (A pronto, dopo `force_window` del banco): se la scommessa ha
++  lo stesso T, la stessa posizione e gli stessi token di A, si lancia solo la **coda** (la finestra continua dal layer
++  c); altrimenti si aspetta la fine della testa (servita a piani vuoti), si ripristina la storia PLE, si stornano dal
++  contatore d'uso del tier gli id contati dalla testa, e A parte normale.
++- Bit per bit: una finestra confermata fa gli stessi kernel sugli stessi dati nello stesso ordine; una testa buttata non
++  lascia stato (GDN intatto, nessun K/V, storia PLE ripristinata, `drive.d.usage` stornato esattamente: incrementi di
++  1.0 in float). Il testo greedy deve restare identico.
++
++Stima (S, dalla traccia del §1; testa di 2 layer, scommessa lanciata a `V`+0,45):
++
++| T di A' (quota delle fresche) | oggi: fine stadio 0 | con la scommessa | guadagno |
++|---|---|---|---|
++| 1 (42%) | V+1,29+7,93 = V+9,2 | testa da V+0,45, coda alla decisione (V+1,28) dietro la testa: ~V+8,4 | **−0,8 ms** |
++| 2 (28%) | V+2,21+10,0 = V+12,2 | testa 1 buttata a V+1,45, testa 2 fino a V+2,75, coda: ~V+11,5 | **−0,7 ms** |
++| ≥3 (30%) | — | la testa 2 è finita prima della decisione (V+3,1): nessun ritardo | 0 |
++
++**−0,53 ms per finestra fresca, −0,39 ms a finestra in media (~1,5%)**. La 3060 lavora in ~1,1 ms dei 2,2 di attesa.
++
++### 3b. `STRATA_SA_CHAIN=1`: la catena forzata a passi, senza passi buttati (meno catena dentro lo stadio 1)
++
++`chain_launch` oggi accoda **tutti** i passi (fino a 7) al lancio, anche quelli che servono solo se le bozze restano
++sopra `spec-min-p`. Nella catena forzata (tipo 1, finestre speculative) le uscite dopo la decisione di B non le legge
++nessuno, ma girano sulla 2080 Ti dentro lo stadio 1. Con la leva la catena tipo 1 lancia il round e un passo alla volta:
++il ciclo aggiunge il passo successivo quando vede l'uscita prima, e smette appena B è deciso. La catena tipo 2 (fresca,
++latenza critica, gira sulla 2080 Ti ferma) resta accodata tutta come oggi.
++
++Stima (S): uscite buttate per catena forzata = 3 − B.T per B.T ≤ 2 → ~1,1 passi (distribuzione dei T della traccia) =
++~1,0 ms di catena, ~0,7 ms di stadio 1 per finestra speculativa → **−0,2 ms a finestra (~0,8%)**. Costo: la catena forzata
++arriva a B ~0,1-0,3 ms più tardi (latenza dell'host fra un passo e l'altro), dentro il margine di B (stadio 0 di B +
++catena ~14 ms contro ~16-19 di stadio 1). Bit per bit: B è deciso sulle stesse uscite; le uscite tolte scrivevano solo
++celle K/V del drafter oltre la bozza, che il round successivo riscrive prima di leggerle.
++
++### 3c. Somma attesa
++
++−0,6 ms a finestra (~2,3%) se le due si sommano: L02 ~68 → ~69,5, L01 ~75 → ~76,5 t/s (S). Non porta a 80 da sola: la
++catena vale ~2,4 ms a finestra in tutto, e la parte che la 3060 può fare al suo posto è la testa della finestra.
++
++## 4. Misura
++
++- Correttezza: L02 corto (64 token) a cache fissa (`--expert-cache 1500`, senza `--elastic`), `L02.txt` identico fra
++  spento, `STRATA_SA_BET=1`, `STRATA_SA_CHAIN=1` ed entrambe.
++- Per finestra: `strata pipeline classes` (fresh deve scendere di ~0,5 ms con BET; spec di ~0,7 con CHAIN), `the chain
++  from its launch to B: forced` (sale di poco con CHAIN), e la riga nuova `strata struct-a:` (scommesse, confermate per T,
++  buttate, passi di catena risparmiati).
++- Traccia della pipeline: eventi nuovi `SH` (testa lanciata, x0 = T), `ST` (coda lanciata), `SX` (testa buttata).
++
++## 5. Cosa ha detto la prima misura: la 3060 dopo il verdetto non è ferma
++
++Build `build-structa-7c1a7aca` (scommesse da T=1), L02 256 token a cache fissa, una corsa per braccio, PC carico
++(prefill 78-436 s: i tempi assoluti valgono poco, le differenze dentro la stessa classe sì). Script `structa_undo.py`
++(scratchpad): finestre fresche divise per «il verdetto prima ha fatto l'undo di una B sbagliata» (evento `U`).
++
++| finestre fresche T=1, `V`→fine stadio 0 (M, mediane) | `off` | `STRATA_SA_BET=1` (coda confermata) |
++|---|---|---|
++| senza undo (~10% delle fresche) | 12,16 ms (n 6) | **10,24 ms (n 5)** |
++| con undo (~90%) | 10,76 ms (n 33) | 11,02 ms (n 39) |
++
++- **Dove la 3060 è davvero ferma, la testa rende** (−1,9 ms, campione piccolo).
++- **Dopo un rollback non lo è.** L'undo della B sbagliata (ripristino dello snapshot GDN da 39 MB + commit di A
++  rigiocato, `U` a V+0,45) occupa lo stadio 0 fino a ~V+1,2 (dedotto: coda lanciata a V+1,17, fine stadio 0 a V+11,0 =
++  uno stadio 0 intero dopo ~V+1,2). È proprio quando la catena decide T=1: la testa T=1 non ha spazio.
++- **La testa T=1 persa costa**: occupa lo stadio 0 quando servirebbe la testa T=2 e ritarda le finestre T=2 (`V`→`L0`
++  2,70 contro 2,17 ms, mediane), e su 12 scommesse T=2 solo 3 sono partite in tempo.
++
++Correzione (`build-structa-<sha>` successiva): **niente scommesse T=1 di default** (`STRATA_SA_BET_MINT=2`; `=1` le
++riaccende). La scommessa T=2 (`[x, d1]`) parte alla prima uscita della catena con `d1` ≥ `spec-min-p` (~V+1,2, quando
++l'undo ha finito) e guadagna fino alla decisione di T=2 (~V+2,15): ~0,9 ms sulle fresche T=2 (S); persa (T ≥ 3) finisce
++prima della decisione di T ≥ 3 (~V+3,1) e non ritarda nulla. Stima rivista: ~−0,27 ms per finestra fresca, **~−0,2 ms a
++finestra (~0,8%)**, sotto la risoluzione del B-A-B (±2%).
++
++## Stato
++
++Disegno e stima: §1-4. Prima misura e correzione: §5. Codice: `3e309ed7` (leve), `7c1a7aca` (servizio della testa sul suo
++evento: senza, «layer 1 never rang» se l'host passava prima che la testa suonasse; niente secondo snapshot GDN).
+diff --git a/include/strata/core/expert_source.hpp b/include/strata/core/expert_source.hpp
+index 30a5ad99..87a2708f 100644
+--- a/include/strata/core/expert_source.hpp
++++ b/include/strata/core/expert_source.hpp
+@@ -630,6 +630,9 @@ struct ExpertDispatch {
+     /// whose routed ids all look resident there publishes no activation (doorbell_publish_res) - counted
+     const int32_t* dres_check = nullptr;
+     int64_t stale_x = 0;
++    /// STRUCT-A (STRATA_SA_BET): the call serves a head bet - its routes are not counted in `usage` (the caller
++    /// counts them once the bet is confirmed)
++    bool no_usage = false;
+     int64_t multi_misses = 0;      ///< distinct (layer, expert) pairs the CPU computed in verify windows
+     int64_t multi_entries = 0;     ///< routed (token, expert) entries the CPU served in verify windows
+     /// Multi-GPU: the second GPU's tier.  Its experts are computed there instead of on the CPU (kind 2).
+diff --git a/include/strata/core/mtp.hpp b/include/strata/core/mtp.hpp
+index fdb7c080..8c683590 100644
+--- a/include/strata/core/mtp.hpp
++++ b/include/strata/core/mtp.hpp
+@@ -138,7 +138,13 @@ public:
+     /// own pick, and step j (1 <= j <= n_force) takes force[j - 1] as its input token instead of output j - 1.
+     /// `n_early`: an event after each of the first `n_early` outputs (chain_outputs_ready).
+     bool chain_launch(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force, int n_out,
+-                      int n_early, std::string& err);
++                      int n_early, std::string& err, int n_now = 0);
++    /// STRUCT-A (STRATA_SA_CHAIN, opt-in): a chain launched with `n_now` > 0 queues only its first `n_now` outputs;
++    /// `chain_extend` queues more (up to `n_out`), `chain_cut` gives up the rest (the chain ends with the outputs
++    /// queued so far).  A chain not extended to `n_out` nor cut stays live: the caller does one or the other.
++    bool chain_extend(int want, std::string& err);
++    void chain_cut();
++    int chain_queued() const { return chain_launched_; }
+     /// 1: every output is in chain_tok()/chain_prob(); 0: still running; -1: an error.
+     int chain_poll(std::string& err);
+     /// How many of the chain's first outputs (up to `n_early`; all of them once the chain is done) have landed in
+@@ -233,6 +239,7 @@ private:
+     cudaEvent_t ev_chain_ = nullptr;
+     cudaEvent_t ev_step_[8] = {};                       ///< after each of the first n_early outputs
+     int steps_seen_ = 0, chain_n_ = 0, chain_early_ = 0;
++    int chain_launched_ = 0;   ///< STRUCT-A: the outputs queued so far (chain_n_ once the chain is whole or cut)
+     int32_t chain_tok_[8] = {};
+     float chain_prob_[8] = {};
+     int64_t n_vocab_ = 0;
+diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
+index ffb814dc..99cbff5e 100644
+--- a/include/strata/core/verify.hpp
++++ b/include/strata/core/verify.hpp
+@@ -308,6 +308,27 @@ public:
+     /// The commit without a host sync; `ss.ple_prev` advances now (host side).  A second call for the same window
+     /// (after its state was restored) replays it with another count.
+     bool pl_commit_async(int n_keep, std::string& err);
++    // ---- STRUCT-A (lab, STRATA_SA_BET, opt-in; docs/STRUCT_A.md): a pipelined window's HEAD - its inputs and its
++    // first `c` layers, all GDN layers before the stage's first QSA layer - launched as a bet before its rows are
++    // decided, then either its TAIL (the remaining layers and the hand-off: head + tail are the window `pl_launch`
++    // runs, the same kernels in the same order) or the head thrown away.  A pipelined window leaves the GDN state to
++    // the commit and writes no K/V in those layers; the PLE history it advances in place is saved before the head and
++    // restored by `pl_drop_head`.  Stage 0 of a split only (`lb_` == 0 is not required, but the head must hold no QSA).
++    /// Capture the head and tail graphs for T = 1 .. `max_t` with `c` head layers (clamped to the GDN layers before the
++    /// first QSA one; nothing in flight).  False with `err` when it cannot (the caller turns the bet off).
++    bool sa_prepare(int c, int max_t, std::string& err);
++    bool sa_ready(int T) const { return sa_c_ > 0 && T >= 1 && T <= sa_max_t_ && exec_head_[T] && exec_tail_[T]; }
++    int sa_layers() const { return sa_c_; }
++    /// Stage and launch window (T, tokens, pos0)'s head; `service` then serves its `c` layers and stops there.
++    bool pl_launch_head(int T, const int32_t* tokens, int64_t pos0, std::string& err);
++    bool sa_head_live() const { return fl_active_ && sa_head_; }
++    /// Every head layer served and the head graph done (the head can then be thrown away).
++    bool pl_head_done(std::string& err);
++    /// The bet confirmed: the window goes on from its head (its tail launched; `service` / `done` as after pl_launch).
++    bool pl_launch_tail(std::string& err);
++    /// After `pl_head_done`: the PLE history restored (queued on the stage's stream), nothing in flight.
++    bool pl_drop_head(std::string& err);
++
+     /// Fold another verifier's counters and GPU profile into this one's (the two verifiers of one stage report once).
+     void absorb_stats(Verifier& o);
+     /// The watchdog's line for a pipelined verifier: in flight, layers served, the GPU's ring and flags, its events.
+@@ -431,6 +452,16 @@ private:
+     bool fl_active_ = false, fl_prof_ = false, fl_ple_ = false, commit_live_ = false, pl_prestaged_ = false;
+     int fl_T_ = 0;
+     int64_t fl_k_ = 0, fl_total_ = 0;
++    // STRUCT-A (STRATA_SA_BET): the head / tail graphs, the layers `service` may serve (a head's: sa_c_ * groups; else
++    // all), the head's completion, the PLE history saved before it; record_window's layer range (-1: the stage's)
++    cudaGraphExec_t exec_head_[9] = {}, exec_tail_[9] = {};
++    cudaEvent_t ev_head_ = nullptr;
++    int sa_c_ = 0, sa_max_t_ = 0;
++    int64_t fl_cap_ = 0;
++    bool sa_head_ = false;
++    float* sa_hist_ = nullptr;
++    int64_t sa_hist_n_ = 0;
++    int64_t rec_from_ = -1, rec_to_ = -1;
+     double fl_since_ms_ = 0, fl_flush_ms_ = 0, fl_launch_ms_ = 0;
+     int32_t pl_prev_[2] = {-1, -1};
+     std::vector<uint32_t> pl_ple_rows_;   ///< the window's PLE rows (T x PLE_N_HEADS), gathered when layer 0 is served
+diff --git a/src/core/expert_source.cpp b/src/core/expert_source.cpp
+index 59559c0a..f0784115 100644
+--- a/src/core/expert_source.cpp
++++ b/src/core/expert_source.cpp
+@@ -4390,7 +4390,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
+     pt("begin");
+     d.src->begin_layer(d.layers, ids, n_tok * k);
+     pt("begun");
+-    if (!d.usage.empty())
++    if (!d.usage.empty() && !d.no_usage)   // STRUCT-A: a head bet's routes are counted when it is confirmed
+         for (int64_t i = 0; i < n_tok * k; ++i)
+             if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
+     // ---- plan v0.3 P6: the GPU's share, decided and published FIRST so the GPU starts while the CPU works.
+diff --git a/src/core/mtp.cpp b/src/core/mtp.cpp
+index c229a8ea..11d147de 100644
+--- a/src/core/mtp.cpp
++++ b/src/core/mtp.cpp
+@@ -1770,7 +1770,7 @@ bool MtpDrafter::prepare_chain(std::string& err) {
+ }
+ 
+ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, const int32_t* force, int n_force,
+-                              int n_out, int n_early, std::string& err) {
++                              int n_out, int n_early, std::string& err, int n_now) {
+     const OnDevice on_device(device_);
+     if (chain_live_) { err = "mtp: a chain is already in flight"; return false; }
+     if (!force_on_ || ev_chain_ == nullptr) { err = "mtp: chains need prepare_chain"; return false; }
+@@ -1803,9 +1803,11 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
+     std::atomic_thread_fence(std::memory_order_seq_cst);
+     if (!stage_source_R(T, err)) return false;
+     chain_early_ = std::max(0, std::min(n_early, n_out));
++    // STRUCT-A: n_now > 0 queues the first n_now outputs only (chain_extend / chain_cut do the rest)
++    const int n_q = n_now > 0 ? std::min(n_now, n_out) : n_out;
+     bool ok = cudaGraphLaunch(round_exec_[T], cs_) == cudaSuccess;
+     if (ok && chain_early_ >= 1) ok = cudaEventRecord(ev_step_[0], cs_) == cudaSuccess;
+-    for (int j = 1; ok && j < n_out; ++j) {
++    for (int j = 1; ok && j < n_q; ++j) {
+         ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
+         if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
+     }
+@@ -1817,15 +1819,40 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
+     steps_seen_ = 0;
+     chain_live_ = true;
+     chain_n_ = n_out;
++    chain_launched_ = n_q;
+     ms_draft += ms_since(t0);
+     ++rounds;
+     return true;
+ }
+ 
++bool MtpDrafter::chain_extend(int want, std::string& err) {
++    if (!chain_live_ || want <= chain_launched_ || chain_launched_ >= chain_n_) return true;
++    const OnDevice on_device(device_);
++    const int to = std::min(want, chain_n_);
++    bool ok = true;
++    for (int j = chain_launched_; ok && j < to; ++j) {
++        ok = cudaGraphLaunch(step_exec_[j], cs_) == cudaSuccess;
++        if (ok && j < chain_early_) ok = cudaEventRecord(ev_step_[j], cs_) == cudaSuccess;
++    }
++    if (!ok || cudaEventRecord(ev_chain_, cs_) != cudaSuccess) {   // the chain's end moves with its last step
++        err = std::string("mtp chain: ") + cudaGetErrorString(cudaGetLastError());
++        return false;
++    }
++    (void) cudaStreamQuery(cs_);
++    chain_launched_ = to;
++    return true;
++}
++
++void MtpDrafter::chain_cut() {
++    if (!chain_live_) return;
++    chain_n_ = chain_launched_;
++    chain_early_ = std::min(chain_early_, chain_launched_);
++}
++
+ int MtpDrafter::chain_outputs_ready(std::string& err) {
+     if (!chain_live_) return chain_n_;
+     const OnDevice on_device(device_);
+-    while (steps_seen_ < chain_early_) {
++    while (steps_seen_ < std::min(chain_early_, chain_launched_)) {
+         const cudaError_t q = cudaEventQuery(ev_step_[steps_seen_]);
+         if (q == cudaErrorNotReady) break;
+         if (q != cudaSuccess) { err = std::string("mtp chain: ") + cudaGetErrorString(q); return -1; }
+@@ -1838,6 +1865,7 @@ int MtpDrafter::chain_outputs_ready(std::string& err) {
+ 
+ int MtpDrafter::chain_poll(std::string& err) {
+     if (!chain_live_) return 1;
++    if (chain_launched_ < chain_n_) return 0;   // STRUCT-A: not whole yet (chain_extend or chain_cut first)
+     const OnDevice on_device(device_);
+     const cudaError_t q = cudaEventQuery(ev_chain_);
+     if (q == cudaErrorNotReady) return 0;
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index 9cdab37d..7d22f513 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -599,6 +599,11 @@ Verifier::~Verifier() {
+         if (e) cudaGraphExecDestroy(e);
+     for (auto& e : exec_nr_)
+         if (e) cudaGraphExecDestroy(e);
++    for (auto* set : {exec_head_, exec_tail_})   // STRUCT-A
++        for (int T = 0; T < 9; ++T)
++            if (set[T]) cudaGraphExecDestroy(set[T]);
++    if (ev_head_) cudaEventDestroy(ev_head_);
++    if (sa_hist_) cudaFree(sa_hist_);
+     if (commit_exec_) cudaGraphExecDestroy(commit_exec_);
+     for (auto& kv : exec_bm_)
+         if (kv.second) cudaGraphExecDestroy(kv.second);
+@@ -1098,16 +1103,22 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+ 
+     // ---- the window's inputs, from mapped staging.  With branches the steps and positions (first read by the first
+     // layer's mixer) cross PCIe on side 1 beside the embedding and the first hyper-connection read.
+-    copy_i32_from_mapped(tok_, m_tok_, T, cs);
++    // STRUCT-A (STRATA_SA_BET): a window recorded in two graphs, the head [lb_, rec_to_) and the tail [rec_from_, le_);
++    // the tail records no inputs (its head left them on the device) and the head no hand-off
++    const int64_t rec_l0 = rec_from_ >= 0 ? rec_from_ : lb_, rec_l1 = rec_to_ >= 0 ? rec_to_ : le_;
++    const bool rec_in = rec_l0 == lb_;
++    if (rec_in) copy_i32_from_mapped(tok_, m_tok_, T, cs);
+     bool inputs_pending = false;
+     cudaStream_t in_s = cs;
+-    if (br) {
++    if (br && rec_in) {
+         fork(1);
+         in_s = df_side_[1];
+         inputs_pending = true;
+     }
+-    copy_i32_from_mapped(step_, m_step_, (int64_t) T * kStepCount, in_s);
+-    copy_i32_from_mapped(pos_, m_pos_, (int64_t) MT * (NH + NKV + IQ), in_s);
++    if (rec_in) {
++        copy_i32_from_mapped(step_, m_step_, (int64_t) T * kStepCount, in_s);
++        copy_i32_from_mapped(pos_, m_pos_, (int64_t) MT * (NH + NKV + IQ), in_s);
++    }
+     // per-ROW positions of the K rows [t][NKV] and the indexer query rows [t][IQ] (for batched RoPE)
+     const int32_t* pos_k = pos_ + MT * NH;
+     const int32_t* pos_i = pos_ + MT * (NH + NKV);
+@@ -1115,7 +1126,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+     // ---- the embeddings, broadcast to the hc streams - or, in a later stage of a layer split, the previous stage's
+     // residual, pending write and inject (see set_stage)
+     const int64_t HB = Verifier::handoff_floats(g);
+-    if (lb_ > 0) {
++    if (!rec_in) {
++        // STRUCT-A: a tail - the residual rows are its head's
++    } else if (lb_ > 0) {
+         const float* hin = hand_in_ + (size_t) hrow0 * HB;   // the group's rows: [R][bo][inj] contiguous
+         // the overlapped split: this graph was launched before the previous stage finished - wait for its hand-off
+         if (hflag_in_d_ != nullptr && !batch_rec_) wait_handoff(hflag_in_d_, 1u, herr_d_, g_split_wait_ns, cs);
+@@ -2138,12 +2151,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+     };
+ 
+     for (int grp = 0; grp < G; ++grp)
+-        if (!pre(lb_, grp)) return false;
+-    for (int64_t l = lb_; l < le_; ++l)
++        if (!pre(rec_l0, grp)) return false;
++    for (int64_t l = rec_l0; l < rec_l1; ++l)
+         for (int grp = 0; grp < G; ++grp) {
+             if (!post(l, grp)) return false;
+-            if (l + 1 < le_ && !pre(l + 1, grp)) return false;
++            if (l + 1 < rec_l1 && !pre(l + 1, grp)) return false;
+         }
++    if (rec_l1 < le_) return true;   // STRUCT-A: a head ends after its last layer
+     if (le_ < g.n_layers) {   // a layer split's earlier stage: hand the residual on, no head
+         float* hout = hand_out_ + (size_t) hrow0 * HB;
+         if (hflag_out_d_ != nullptr && !batch_rec_) {   // the overlapped split: payload + the next stage's flag
+@@ -4089,7 +4103,8 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
+ 
+ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_layers) {
+     if (!fl_active_) return 1;
+-    if (fl_k_ >= fl_total_) return 1;
++    const int64_t fl_cap = fl_cap_ > 0 ? fl_cap_ : fl_total_;   // STRUCT-A: a head bet serves its own layers only
++    if (fl_k_ >= fl_cap) return 1;
+     // Nothing rang yet and neither the WDDM flush nor the timeout below is due: return before any CUDA call.  The
+     // pipelined loop asks both stages' windows this millions of times a second while they wait on their doorbells,
+     // and the device switch (OnDevice: cudaGetDevice and two cudaSetDevice) made that a few driver calls each time:
+@@ -4125,7 +4140,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
+     const int G = groups_[T] > 0 ? groups_[T] : 1;
+     const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
+     int served = 0;   // this call's layers (a layer's halves count apart when its window is split in two groups)
+-    while (fl_k_ < fl_total_) {
++    while (fl_k_ < fl_cap) {
+         if (max_layers > 0 && served >= max_layers) return 0;
+         const int64_t l = lb_ + fl_k_ / G;
+         const uint32_t want = (uint32_t) (fl_k_ + 1);
+@@ -4133,7 +4148,7 @@ int Verifier::service(PoolMultiFn pool, void* user, std::string& err, int max_la
+             const double now = now_ms();
+             if (now - fl_flush_ms_ > 2.0) {   // flush WDDM and notice a dead graph, as run() does
+                 fl_flush_ms_ = now;
+-                const cudaError_t q = cudaEventQuery(ev_done_);
++                const cudaError_t q = cudaEventQuery(sa_head_ ? ev_head_ : ev_done_);   // STRUCT-A: a head bet has no done event yet
+                 if (q != cudaErrorNotReady && *(volatile uint32_t*) h_seq_ < want) {
+                     trace_ev("NEVER-RANG", fl_k_, l, (int64_t) q);
+                     err = "verify: layer " + std::to_string(l) + " never rang (" +
+@@ -4259,6 +4274,153 @@ bool Verifier::pl_commit_async(int n_keep, std::string& err) {
+     return true;
+ }
+ 
++// ---- STRUCT-A (STRATA_SA_BET, docs/STRUCT_A.md): the head bet of a pipelined window
++bool Verifier::sa_prepare(int c, int max_t, std::string& err) {
++    using namespace strata::kernels;
++    const OnDevice on_device(device_);
++    if (g_ == nullptr || ev_done_ == nullptr || pl_ple_rows_.empty()) { err = "verify: the head bet before capture_all"; return false; }
++    if (fl_active_) { err = "verify: the head bet's capture with a window in flight"; return false; }
++    if (ar_on() || remote_opt_ != nullptr || batch_rec_) { err = "verify: the head bet needs the stage's doorbell graph"; return false; }
++    const ModelGeometry& g = *g_;
++    int gdn = 0;   // the stage's GDN layers before its first QSA layer: no K/V, no indexer
++    while (lb_ + gdn < le_ && !is_qsa_layer(g, lb_ + gdn)) ++gdn;
++    c = std::min<int>(c, gdn);
++    c = (int) std::min<int64_t>(c, le_ - lb_ - 1);
++    if (c < 1) { err = "verify: no GDN layer before the stage's first QSA layer"; return false; }
++    max_t = std::max(1, std::min(max_t, max_t_));
++    SessionState& ss = *ss_;
++    if (ss.ple.ready() && ple_stage() && sa_hist_ == nullptr) {   // the PLE history the head's layer 1 advances in place
++        sa_hist_n_ = (int64_t) NG_HIST * NG_HC_DIM;
++        if (cudaMalloc((void**) &sa_hist_, (size_t) sa_hist_n_ * sizeof(float)) != cudaSuccess) {
++            sa_hist_ = nullptr;
++            cudaGetLastError();
++            err = "verify: the head bet's PLE history copy does not fit";
++            return false;
++        }
++    }
++    if (ev_head_ == nullptr && cudaEventCreateWithFlags(&ev_head_, cudaEventDisableTiming) != cudaSuccess) {
++        err = "verify: event create failed";
++        return false;
++    }
++    auto cap = [&](int T, int64_t from, int64_t to, cudaGraphExec_t& ex, const char* what) -> bool {
++        if (ex != nullptr) return true;
++        if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
++            err = "verify: begin capture failed";
++            return false;
++        }
++        rec_from_ = from;
++        rec_to_ = to;
++        std::string rerr;
++        const bool ok = record_window(T, cs_, rerr);
++        rec_from_ = rec_to_ = -1;
++        cudaGraph_t graph = nullptr;
++        const cudaError_t ce = cudaStreamEndCapture(cs_, &graph);
++        if (!ok || ce != cudaSuccess) {
++            if (graph) cudaGraphDestroy(graph);
++            cudaGetLastError();
++            err = std::string("verify: the head bet's ") + what + " capture: " + (ok ? cudaGetErrorString(ce) : rerr.c_str());
++            return false;
++        }
++        const bool made = instantiate_evicting(ex, graph, {}, what, err);
++        cudaGraphDestroy(graph);
++        if (!made) return false;
++        (void) cudaGraphUpload(ex, cs_);
++        return cudaStreamSynchronize(cs_) == cudaSuccess;
++    };
++    for (int T = 1; T <= max_t; ++T)
++        if (!cap(T, lb_, lb_ + c, exec_head_[T], "head") || !cap(T, lb_ + c, le_, exec_tail_[T], "tail")) return false;
++    sa_c_ = c;
++    sa_max_t_ = max_t;
++    return true;
++}
++
++bool Verifier::pl_launch_head(int T, const int32_t* tokens, int64_t pos0, std::string& err) {
++    const OnDevice on_device(device_);
++    if (fl_active_) { err = "verify: a window is already in flight on this verifier"; return false; }
++    if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
++    if (!sa_ready(T) || ar_on()) { err = "verify: no head graph for this window"; return false; }
++    SessionState& ss = *ss_;
++    if (pos0 + T > ss.qsa_states[ss.qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
++    const Clock::time_point t0 = Clock::now();
++    last_batch_ = false;
++    pl_prestaged_ = false;
++    pl_stage(T, tokens, pos0, ss.ple_prev);
++    const int G = groups_[T] > 0 ? groups_[T] : 1;
++    fl_T_ = T;
++    fl_k_ = 0;
++    fl_total_ = (le_ - lb_) * G;
++    fl_cap_ = (int64_t) sa_c_ * G;
++    fl_prof_ = false;
++    if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);
++    std::atomic_thread_fence(std::memory_order_seq_cst);
++    trace_ev("WINDOW HEAD (pipelined)", -1, -1, pos0 * 16 + T);
++    ms_host += ms_since(t0);
++    if (sa_hist_ != nullptr && cudaMemcpyAsync(sa_hist_, ss.ple.hist, (size_t) sa_hist_n_ * sizeof(float),
++                                               cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
++        err = "verify: saving the PLE history failed";
++        return false;
++    }
++    const cudaError_t le = cudaGraphLaunch(exec_head_[T], cs_);
++    if (le != cudaSuccess) { err = std::string("verify: head launch: ") + cudaGetErrorString(le); return false; }
++    if (cudaEventRecord(ev_head_, cs_) != cudaSuccess) { err = "verify: event record failed"; return false; }
++    (void) cudaStreamQuery(cs_);   // WDDM: submit now
++    fl_active_ = true;
++    sa_head_ = true;
++    fl_since_ms_ = fl_flush_ms_ = fl_launch_ms_ = now_ms();
++    return true;
++}
++
++bool Verifier::pl_head_done(std::string& err) {
++    if (!fl_active_ || !sa_head_ || fl_k_ < fl_cap_) return false;
++    const OnDevice on_device(device_);
++    const cudaError_t q = cudaEventQuery(ev_head_);
++    if (q == cudaErrorNotReady) {
++        const double now = now_ms();
++        if (now - fl_flush_ms_ > 2.0) { fl_flush_ms_ = now; (void) cudaStreamQuery(cs_); }
++        return false;
++    }
++    if (q != cudaSuccess) { err = std::string("verify: head: ") + cudaGetErrorString(q); return false; }
++    if (copy_used_) {
++        if (cudaStreamQuery(copy_) == cudaErrorNotReady) return false;
++        copy_used_ = false;
++    }
++    return true;
++}
++
++bool Verifier::pl_launch_tail(std::string& err) {
++    const OnDevice on_device(device_);
++    if (!fl_active_ || !sa_head_) { err = "verify: no head in flight"; return false; }
++    const int T = fl_T_;
++    const int G = groups_[T] > 0 ? groups_[T] : 1;
++    fl_cap_ = 0;
++    sa_head_ = false;
++    fl_prof_ = prof_on_ && G == 1 && prof_pin_ != nullptr;
++    const cudaError_t le = cudaGraphLaunch(exec_tail_[T], cs_);
++    trace_ev("LAUNCHED TAIL", -1, -1, (int64_t) le);
++    if (le != cudaSuccess) { err = std::string("verify: tail launch: ") + cudaGetErrorString(le); return false; }
++    if (fl_prof_) cudaMemcpyAsync(prof_pin_, prof_, prof_h_.size() * 8, cudaMemcpyDeviceToHost, cs_);
++    if (cudaEventRecord(ev_done_, cs_) != cudaSuccess) { err = "verify: event record failed"; return false; }
++    (void) cudaStreamQuery(cs_);
++    fl_since_ms_ = fl_flush_ms_ = now_ms();   // GPU-reach wait counts from here, as from a launch
++    return true;
++}
++
++bool Verifier::pl_drop_head(std::string& err) {
++    if (!fl_active_ || !sa_head_) return true;
++    const OnDevice on_device(device_);
++    if (sa_hist_ != nullptr && cudaMemcpyAsync(ss_->ple.hist, sa_hist_, (size_t) sa_hist_n_ * sizeof(float),
++                                               cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
++        err = "verify: restoring the PLE history failed";
++        return false;
++    }
++    (void) cudaStreamQuery(cs_);
++    fl_active_ = false;
++    sa_head_ = false;
++    fl_cap_ = 0;
++    trace_ev("HEAD DROPPED", -1, -1, 0);
++    return true;
++}
++
+ void Verifier::absorb_stats(Verifier& o) {
+     ms_wait += o.ms_wait; ms_pool += o.ms_pool; ms_host += o.ms_host; ms_commit += o.ms_commit;
+     windows += o.windows;
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 7ede9f8e..660a0f33 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -1305,6 +1305,25 @@ void drive_pool_split(void* user, const float* x_f, const int32_t* ids, int64_t
+     drive_pool_multi(s->base, x_f, ids, n_tok, k, out, layer);
+ }
+ 
++/// STRUCT-A (STRATA_SA_BET, docs/STRUCT_A.md): the pool of a head bet's layers - the stage's split pool without counting
++/// the routes in the adaptive tier's usage (`ExpertDispatch::no_usage`); the bet counts them once it is confirmed, so a
++/// thrown-away bet leaves the counts as they were
++struct SaBetPool {
++    SplitDrive* sd = nullptr;
++    int64_t n_expert = 0;
++    std::vector<int64_t> routes;   ///< layer * n_expert + id, as the dispatch counts them
++};
++void sa_bet_pool(void* user, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k, float* out, int64_t layer) {
++    SaBetPool* b = (SaBetPool*) user;
++    strata::core::ExpertDispatch& d = b->sd->base->d;
++    d.no_usage = true;
++    drive_pool_split(b->sd, x_f, ids, n_tok, k, out, layer);
++    d.no_usage = false;
++    if (!d.usage.empty() && !d.failed)
++        for (int64_t i = 0; i < n_tok * k; ++i)
++            if (ids[i] >= 0 && ids[i] < b->n_expert) b->routes.push_back(layer * b->n_expert + ids[i]);
++}
++
+ /// Layer split across GPUs: a later stage on its own device, with its own copy of the dense weights, a session, an
+ /// expert cache for its layers, a verify window and a prompt path; the last one also holds the head (the drafter
+ /// lives on its device too).
+@@ -14941,6 +14960,63 @@ int main(int argc, char** argv) {
+                 bool early_used = false;
+                 bool b_done = false;     // B has been made from the chain in flight
+                 int chain_n = 0;
++                // ---- STRUCT-A (docs/STRUCT_A.md), opt-in.  STRATA_SA_BET=1: a fresh window's HEAD (its first
++                // STRATA_SA_BET_LAYERS GDN layers, default 2) goes to stage 0 as a bet while the drafter's chain still
++                // decides its rows - first [x] (T = 1), then [x, d1] once d1 clears spec_min_p, up to T =
++                // STRATA_SA_BET_MAXT (2); where A launches today the bet's tail runs if A is the bet, else the head is
++                // thrown away (Verifier::pl_drop_head).  STRATA_SA_CHAIN=1: the forced chain (after an on-path verdict)
++                // queued a step at a time (STRATA_SA_CHAIN_AHEAD more, default 0) and cut once B is decided.
++                static const int sa_bet_c = [] {
++                    const char* v = std::getenv("STRATA_SA_BET");
++                    if (v == nullptr || std::atoi(v) == 0) return 0;
++                    const char* c = std::getenv("STRATA_SA_BET_LAYERS");
++                    return c != nullptr ? std::max(1, std::atoi(c)) : 2;
++                }();
++                static const int sa_bet_maxt = [] {
++                    const char* v = std::getenv("STRATA_SA_BET_MAXT");
++                    return v != nullptr ? std::max(1, std::min(3, std::atoi(v))) : 2;
++                }();
++                // STRATA_SA_BET_MINT (2): the smallest bet.  After a rollback (most fresh windows) stage 0 replays the
++                // commit until about when the chain decides T = 1, so a T = 1 head gains nothing there and, lost, holds
++                // stage 0 when the T = 2 bet should start (docs/STRUCT_A.md, 5)
++                static const int sa_bet_mint = [] {
++                    const char* v = std::getenv("STRATA_SA_BET_MINT");
++                    return v != nullptr ? std::max(1, std::min(3, std::atoi(v))) : 2;
++                }();
++                static const bool sa_chain = [] { const char* v = std::getenv("STRATA_SA_CHAIN"); return v != nullptr && std::atoi(v) != 0; }();
++                static const int sa_chain_ahead = [] {
++                    const char* v = std::getenv("STRATA_SA_CHAIN_AHEAD");
++                    return v != nullptr ? std::max(0, std::atoi(v)) : 0;
++                }();
++                static bool sa_bet_failed = false;   // the head graphs could not be made: the bet stays off
++                bool sa_bet_on = sa_bet_c > 0 && !sa_bet_failed && pl_nf == 1 && req_spec_min_p > 0.0;
++                if (sa_bet_on)
++                    for (int par = 0; par < 2 && sa_bet_on; ++par) {
++                        strata::core::Verifier& v = stage_ver_p(0, par);
++                        if (v.sa_ready(1)) continue;
++                        const strata::core::OnDevice on(v.device());
++                        std::string e2;
++                        if (!v.sa_prepare(sa_bet_c, std::min(sa_bet_maxt, S_mtp - 1), e2)) {
++                            std::fprintf(stderr, "strata struct-a: STRATA_SA_BET off: %s\n", e2.c_str());
++                            sa_bet_failed = true;
++                            sa_bet_on = false;
++                        } else if (par == 1)
++                            std::fprintf(stderr, "strata struct-a: STRATA_SA_BET: heads of %d layers on CUDA%d, bets T=%d..%d\n",
++                                         v.sa_layers(), v.device(), sa_bet_mint, std::min(sa_bet_maxt, S_mtp - 1));
++                    }
++                struct SaBet {
++                    bool live = false, dead = false;   // dead: known lost, served on empty plans until its head is done
++                    int T = 0, seq = -1;
++                    int64_t p = 0;
++                    int32_t tok[8] = {};
++                };
++                SaBet bet;
++                SaBetPool sa_pool;
++                sa_pool.n_expert = g.n_expert;
++                int64_t sa_want = -1, sa_forced = -1;   // the fresh window a bet is for; A's forced rows read (once per A)
++                int64_t sa_snapped = -1;                // the window whose GDN snapshot a bet took
++                int sa_last_T = 0;                      // the last bet's size for sa_want
++                int64_t sa_placed[4] = {}, sa_tails[4] = {}, sa_drops[4] = {}, sa_chains = 0, sa_cut = 0;
+                 int64_t pl_spec = 0, pl_on = 0, pl_undo = 0, pl_gate = 0, pl_fm = 0;
+                 double pl_chain_t0 = 0.0, pl_chain_ms[2] = {0, 0}, pl_chain_n[2] = {0, 0};   // fork: chain -> B latency
+                 // fork (Daily 1541e340): the elastic tail beside the windows, at the gaps of stage 0 (see el_gap)
+@@ -15307,6 +15383,40 @@ int main(int argc, char** argv) {
+                     return v == nullptr || std::atoi(v) != 0;
+                 }();
+                 auto ms_now = [&]() { return std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count(); };
++                // STRUCT-A: A's head launched as a bet of size T (its rows: A's row 0 and the chain's first T - 1 drafts),
++                // with the gap work and the GDN snapshot A's launch on stage 0 does (nothing commits on stage 0 before
++                // A's launch, so the snapshot is the same)
++                auto sa_place = [&](int T) -> bool {
++                    bet = SaBet{};
++                    bet.T = T;
++                    bet.seq = A.seq;
++                    bet.p = A.p;
++                    bet.tok[0] = A.tok[0];
++                    for (int i = 1; i < T; ++i) bet.tok[i] = mtp.chain_tok()[i - 1];
++                    if (ajob) a_gap(0);
++                    if (!el_gap()) return false;
++                    if (sa_snapped != A.seq && !snap_take(0, A.seq)) { err = "the GDN snapshot failed"; return false; }
++                    sa_snapped = A.seq;
++                    if (!VF(0, A).pl_launch_head(T, bet.tok, bet.p, err)) return false;
++                    bet.live = true;
++                    sa_pool.routes.clear();
++                    sa_last_T = T;
++                    ++sa_placed[T];
++                    tre("SH", A.seq, T);
++                    return true;
++                };
++                // a lost bet thrown away once its head is done: 1 thrown away (or no bet), 0 its head still runs, -1 error
++                auto sa_try_drop = [&]() -> int {
++                    if (!bet.live) return 1;
++                    strata::core::Verifier& v = stage_ver_p(0, bet.seq & 1);
++                    if (!v.pl_head_done(err)) return err.empty() ? 0 : -1;
++                    if (!v.pl_drop_head(err)) return -1;
++                    sa_pool.routes.clear();   // never counted (sa_bet_pool)
++                    bet.live = false;
++                    ++sa_drops[bet.T];
++                    tre("SX", bet.seq, bet.T);
++                    return 1;
++                };
+                 while (true) {
+                     g_pl_diag.iters.fetch_add(1, std::memory_order_relaxed);
+                     g_pl_diag.a_seq.store(A.seq, std::memory_order_relaxed);
+@@ -15343,6 +15453,11 @@ int main(int argc, char** argv) {
+                         } else if (!err.empty()) return die(err);
+                     }
+                     if (pl_yield && ((doomed && !pump0(D)) || !pump0(B, A.s1 && !A.s1_done ? 1 : 0))) return die(err);
++                    if (bet.live) {   // STRUCT-A: the head bet's layers (a lost one on empty plans)
++                        sa_pool.sd = PSD[bet.seq & 1];
++                        if (stage_ver_p(0, bet.seq & 1).service(bet.dead ? nullptr : &sa_bet_pool, &sa_pool, err) < 0)
++                            return die(err);
++                    }
+                     if (drive.d.failed) return die(drive.d.fail ? drive.d.fail : "the expert pool failed");
+                     if (!el_gap()) return die(err);   // fork: the elastic tail at a gap of stage 0
+                     // ---- a wrong speculative window has stopped (it is launched on no further stage once doomed):
+@@ -15368,6 +15483,12 @@ int main(int argc, char** argv) {
+                         tre("U", undo_w.seq, undo_keep);
+                     }
+                     if (ending) {
++                        if (bet.live) {   // STRUCT-A: no head left in flight (a drain cannot finish it)
++                            bet.dead = true;
++                            const int d = sa_try_drop();
++                            if (d < 0) return die(err);
++                            if (d == 0) continue;
++                        }
+                         if (!doomed) break;
+                         continue;
+                     }
+@@ -15377,6 +15498,10 @@ int main(int argc, char** argv) {
+                     if (chain_kind != 0) {
+                         const int k_ready = mtp.chain_outputs_ready(err);
+                         if (k_ready < 0) return die(err);
++                        // STRUCT-A: a bet of size T is lost once the output after its rows clears spec_min_p (A is bigger)
++                        if (bet.live && !bet.dead && chain_kind == 2 && k_ready >= bet.T &&
++                            mtp.chain_prob()[bet.T - 1] >= (float) req_spec_min_p)
++                            bet.dead = true;
+                         if (chain_kind == 2 && !early_used) {
+                             // A's size is decided by its first outputs: a draft below spec_min_p ends it (the serial
+                             // loop's rule), so A goes to stage 0 as soon as that is known, not after all S_mtp - 1
+@@ -15454,17 +15579,69 @@ int main(int argc, char** argv) {
+                                                          "outputs)\n", chain_kind, (long long) A.p, A.T, B.T, B.p_on, k);
+                             }
+                         }
++                        // STRUCT-A (STRATA_SA_CHAIN): the forced chain one step past what is seen, cut once B is decided
++                        if (r != 1 && chain_kind == 1 && sa_chain && mtp.chain_live()) {
++                            if (b_done) {
++                                sa_cut += chain_n - mtp.chain_queued();
++                                mtp.chain_cut();
++                            } else if (!mtp.chain_extend(k_ready + 1 + sa_chain_ahead, err))
++                                return die(err);
++                        }
+                         if (r == 1) chain_kind = 0;
+                     }
++                    // ---- STRUCT-A: a lost bet thrown away once its head is done; then a bet on the next size (the first
++                    // one, T = 1, as soon as the fresh A exists and stage 0 is free)
++                    if (bet.live && bet.dead) {
++                        if (sa_try_drop() < 0) return die(err);
++                    }
++                    if (sa_bet_on && !bet.live && A.seq == sa_want && chain_kind == 2 && !early_used && !A.ready && !A.fl &&
++                        A.fr == 0 && !doomed && !VF(0, A).in_flight()) {
++                        const int k = mtp.chain_outputs_ready(err);
++                        if (k < 0) return die(err);
++                        int T = std::max(sa_last_T + 1, sa_bet_mint);   // the smallest size A can still have and is bet on
++                        while (k >= T && mtp.chain_prob()[T - 1] >= (float) req_spec_min_p) ++T;
++                        if (T > std::min(sa_bet_maxt, S_mtp - 1) || A.p + T > o.max_context) {
++                            sa_want = -1;   // no bet left for this window
++                        } else if (k >= T - 1) {   // its rows are out (else: wait for them)
++                            bool ok = true;
++                            for (int j = 0; ok && j < T - 1; ++j) ok = mtp.chain_prob()[j] >= (float) req_spec_min_p;
++                            if (!ok) sa_want = -1;   // A is smaller (and decided by now)
++                            else if (!sa_place(T)) return die(err);
++                        }
++                    }
+                     // ---- the front stages: A on its next one (never while a wrong window still holds a front stage's
+                     // state)
+                     if (A.ready && !A.fl && A.fr < pl_nf && !doomed) {
+                         const int st = A.fr;
+-                        if (st == 0 && force_win != nullptr) force_window(A.p, A.tok[0], A.T, A.tok, S);   // lab bench replay
++                        if (st == 0 && force_win != nullptr && sa_forced != A.seq)   // lab bench replay
++                            force_window(A.p, A.tok[0], A.T, A.tok, S);
++                        if (st == 0) sa_forced = A.seq;   // STRUCT-A: read once, even when a head below makes A wait
++                        if (st == 0 && bet.live) {   // STRUCT-A: A is the bet - its tail; else the head is thrown away
++                            const bool match = !bet.dead && bet.seq == A.seq && bet.T == A.T && bet.p == A.p &&
++                                               std::equal(bet.tok, bet.tok + bet.T, A.tok);
++                            if (match) {
++                                if (!VF(0, A).pl_launch_tail(err)) return die(err);
++                                if (!sa_pool.routes.empty() && !drive.d.usage.empty())   // the bet's routes, counted now
++                                    for (const int64_t i : sa_pool.routes) drive.d.usage[(size_t) i] += 1.0f;
++                                sa_pool.routes.clear();
++                                bet.live = false;
++                                ++sa_tails[bet.T];
++                                A.fl = true;
++                                A.launched = true;
++                                tre("ST", A.seq, A.T);
++                                tre("L0", A.seq, A.T, st);
++                                continue;
++                            }
++                            bet.dead = true;
++                            const int d = sa_try_drop();
++                            if (d < 0) return die(err);
++                            if (d == 0) continue;   // its head still runs: A launches behind it at a later pass
++                        }
+                         if (st == 0 && A.p + A.T > o.max_context) { ending = true; continue; }
+                         if (ajob && st == 0) a_gap(0);   // --adapt-async: stage 0 is idle until this launch
+                         if (st == 0 && !el_gap()) return die(err);   // fork: the elastic tail
+-                        if (!snap_take(st, A.seq)) return die("the GDN snapshot failed");
++                        // STRUCT-A: a thrown-away bet took this snapshot already (a head leaves the GDN state alone)
++                        if (!(st == 0 && sa_snapped == A.seq) && !snap_take(st, A.seq)) return die("the GDN snapshot failed");
+                         if (!VF(st, A).pl_launch(A.T, A.tok, A.p, err)) return die(err);
+                         A.fl = true;
+                         if (st == 0) A.launched = true;
+@@ -15525,6 +15702,10 @@ int main(int argc, char** argv) {
+                     // the drafter must be idle before the next chain.  The chain needs nothing from the host, so this
+                     // wait is bounded even with B (made from its first outputs) in flight on stage 0; in practice the
+                     // chain ended long before a verdict that needs a whole stage-1 window.
++                    if (sa_chain && chain_kind != 0 && mtp.chain_live()) {   // STRUCT-A: a chain fed a step at a time ends here
++                        sa_cut += chain_n - mtp.chain_queued();
++                        mtp.chain_cut();
++                    }
+                     while (chain_kind != 0 && mtp.chain_live())
+                         if (mtp.chain_poll(err) < 0) return die(err);
+                     if (chain_kind != 0 && !B.launched && !B.made) B = PW{};
+@@ -15592,7 +15773,11 @@ int main(int argc, char** argv) {
+                         // the chain over A, forced through B's drafts: B's bonus guess and the next window's drafts
+                         mtp.set_source_R(V1(A).final_R(0));
+                         chain_n = std::min(strata::kernels::kVerifyMaxT - 1, B.T + S_mtp - 1);
+-                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err))
++                        // STRUCT-A (STRATA_SA_CHAIN): only the outputs B's size needs first - B's row 0 and one draft
++                        // past the forced ones - then a step at a time from the loop
++                        const int sa_now = sa_chain ? std::min(chain_n, B.T + 1 + sa_chain_ahead) : 0;
++                        if (sa_chain) ++sa_chains;
++                        if (!mtp.chain_launch(A.T, outp.data(), A.p, a, B.tok + 1, B.T - 1, chain_n, chain_n, err, sa_now))
+                             return die(err);
+                         chain_kind = 1;
+                         tre("CL", A.seq, 1);
+@@ -15636,6 +15821,10 @@ int main(int argc, char** argv) {
+                             nA.p = A.p + a + 1;
+                             nA.tok[0] = outp[(size_t) a];
+                             A = nA;
++                            if (sa_bet_on) {   // STRUCT-A: this fresh window's head may go to stage 0 as a bet
++                                sa_want = A.seq;
++                                sa_last_T = 0;
++                            }
+                         }
+                     }
+                     // --adapt-async: the verdict's tick, once the drafter's chain is launched (off its critical path)
+@@ -15680,6 +15869,7 @@ int main(int argc, char** argv) {
+                     std::printf("ERR an adaptive refill failed\n");
+                     return 1;
+                 }
++                if (mtp.chain_live()) mtp.chain_cut();   // STRUCT-A: a chain fed a step at a time ends with what it has
+                 while (mtp.chain_live() && mtp.chain_poll(err) == 0) {}
+                 mtp.set_source_R(ver.final_R_all());   // the serial loop's rows again
+                 const double pl_ms = std::chrono::duration<double, std::milli>(Clock::now() - pl_t0).count();
+@@ -15721,6 +15911,13 @@ int main(int argc, char** argv) {
+                     std::fprintf(stderr, "strata pipeline: drafter on CUDA%d: %.3f ms of host time per chain launch (%.3f ms of it "
+                                          "staging the source rows, %lld times so far)\n", mtp.device(),
+                                  avg(mtp.ms_draft, (double) mtp.rounds), avg(mtp.ms_src, (double) mtp.n_src), (long long) mtp.n_src);
++                    if (sa_bet_on || sa_chain)   // STRUCT-A
++                        std::fprintf(stderr, "strata struct-a: head bets (placed/tail/dropped) T1 %lld/%lld/%lld, T2 %lld/%lld/%lld, "
++                                             "T3 %lld/%lld/%lld; forced chains fed a step at a time %lld, outputs not run %lld\n",
++                                     (long long) sa_placed[1], (long long) sa_tails[1], (long long) sa_drops[1],
++                                     (long long) sa_placed[2], (long long) sa_tails[2], (long long) sa_drops[2],
++                                     (long long) sa_placed[3], (long long) sa_tails[3], (long long) sa_drops[3],
++                                     (long long) sa_chains, (long long) sa_cut);
+                     std::string cal;
+                     char b[48];
+                     for (int i = 0; i < 10; ++i)

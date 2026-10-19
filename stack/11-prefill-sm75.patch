@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Sun, 18 Oct 2026 16:07:11 +0200
+Subject: [PATCH] SONNET-UPSYNC-Porta su 0.2.0 i default prefill sm_75 (patch
+ 11)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/include/strata/core/tc_sm75.hpp b/include/strata/core/tc_sm75.hpp
+index 30160d9a..6720c82a 100644
+--- a/include/strata/core/tc_sm75.hpp
++++ b/include/strata/core/tc_sm75.hpp
+@@ -12,14 +12,20 @@
+ //
+ // 0.1.45: the Turing paths are opt-in (nobody here has an sm_75 card to confirm them): STRATA_SM75_PERF=1
+ // (sm75_series.hpp) turns them on, STRATA_TC_SM75=0 / 1 forces this one off / on (still only on a 7.5 card).
++// Fork (RTX 2080 Ti, the Daily): this one (the 16-byte dequant of the prompt projections, bitwise) is on by default on a
++// 7.5 card, as before 0.1.45; STRATA_TC_SM75=0 turns it off.
+ #pragma once
+ 
+ #include "strata/core/sm75_series.hpp"
+ 
++#include <cstdlib>
++
+ namespace strata::core {
+ 
+ inline bool tc_sm75_enabled(int cc_major, int cc_minor) {
+-    return strata::sm75_switch("STRATA_TC_SM75", cc_major, cc_minor);   // 7.5 and only 7.5 - never another SM model
++    if (!strata::is_sm75(cc_major, cc_minor)) return false;   // 7.5 and only 7.5 - never another SM model
++    const char* v = std::getenv("STRATA_TC_SM75");
++    return v == nullptr || std::atoi(v) != 0;
+ }
+ 
+ }  // namespace strata::core
+diff --git a/include/strata/kernels/qsa_select.hpp b/include/strata/kernels/qsa_select.hpp
+index e8beacce..35697ef9 100644
+--- a/include/strata/kernels/qsa_select.hpp
++++ b/include/strata/kernels/qsa_select.hpp
+@@ -55,7 +55,7 @@ bool qsa_block_scores_rows(const float* pooled, const float* dead, const float*
+ /// The same scores on tensor cores (3xTF32, FP32-level accuracy but another summation order: not bitwise; the tail
+ /// block n_bid is the warp kernel's arithmetic). For the prompt path; false (nothing launched) on another geometry.
+ /// On AMD it is the gfx12 (RDNA4) WMMA kernel (a three-way bf16 split, six products); false on any other AMD target.
+-/// On CUDA below sm_80 (no TF32 tensor cores) it is an FP32 tiled kernel, also not bitwise, and only with STRATA_SELECT_SIMT=1 (otherwise false).
++/// On CUDA below sm_80 (no TF32 tensor cores) it is an FP32 tiled kernel, also not bitwise; fork: on by default (STRATA_SELECT_SIMT=0: false).
+ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
+                          int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t active_blocks);
+ 
+diff --git a/src/kernels/cuda/qsa_select.cu b/src/kernels/cuda/qsa_select.cu
+index e956dc8b..e3844972 100644
+--- a/src/kernels/cuda/qsa_select.cu
++++ b/src/kernels/cuda/qsa_select.cu
+@@ -1874,12 +1874,13 @@ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
+             cc_major[dev] = w && (!std::strcmp(w, "1") || !std::strcmp(w, "select")) ? 7 : strata::cc_major_of(major);
+         }
+         if (cc_major[dev] < 8) {
+-            // no TF32 tensor cores: the FP32 tiled kernel, opt-in (STRATA_SELECT_SIMT=1): its sum order differs from the
+-            // warp kernel's, so the default stays the caller's warp kernel and the output bytes stay the same
+-            // STRATA_SELECT_SIMT=2: block_scores_simt2_kernel (the same bits as =1, larger tiles)
++            // no TF32 tensor cores: the FP32 tiled kernel (its sum order differs from the warp kernel's: not bitwise).
++            // Fork (Daily dab24920, PR #1091): on by default, as in the Daily (-16% of a 2080 Ti's prompt time);
++            // STRATA_SELECT_SIMT=0 keeps the caller's warp kernel (upstream's default), =2 is block_scores_simt2_kernel
++            // (the same bits as =1, larger tiles)
+             static const int simt = [] {
+                 const char* v = std::getenv("STRATA_SELECT_SIMT");
+-                return v == nullptr ? 0 : v[0] == '1' ? 1 : v[0] == '2' ? 2 : 0;
++                return v == nullptr ? 1 : v[0] == '1' ? 1 : v[0] == '2' ? 2 : 0;
+             }();
+             if (!simt) return false;
+             const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index 43fe42ab..e3ba85de 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -3332,7 +3332,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                         // C-1: the grid reaches the batch's last query's n_bid (they rise with the position)
+                         const int64_t active = (int64_t) m.steps_host[(size_t) ((t0 + nb - 1) * strata::kernels::kStepCount +
+                                                                                 strata::kernels::kStepNBid)] + 1;
+-                        // the scores on tensor cores (3xTF32: FP32-level, not bitwise), below sm_80 the FP32 tiled kernel with STRATA_SELECT_SIMT=1;
++                        // the scores on tensor cores (3xTF32: FP32-level, not bitwise), below sm_80 the FP32 tiled kernel (fork: by default, STRATA_SELECT_SIMT=0 off);
+                         // STRATA_SELECT_OLD=1: the warp kernel
+                         static const bool old_sel = std::getenv("STRATA_SELECT_OLD") != nullptr;
+                         if (old_sel || !strata::kernels::qsa_block_scores_tc(st.idx_pooled, st.idx_dead, m.q_idx + t0 * 512,

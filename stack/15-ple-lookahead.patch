@@ -1,0 +1,250 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Sun, 18 Oct 2026 16:08:25 +0200
+Subject: [PATCH] SONNET-UPSYNC-Porta su 0.2.0 il lookahead PLE (patch 15)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/include/strata/kernels/ngram.hpp b/include/strata/kernels/ngram.hpp
+index 4452b4f6..c82eb3f0 100644
+--- a/include/strata/kernels/ngram.hpp
++++ b/include/strata/kernels/ngram.hpp
+@@ -187,6 +187,12 @@ public:
+     /// as ONE reader request - page dedupe and sort across the whole batch, the reader's full queue depth.  Not
+     /// while a single-token `issue` is pending.  The mapped mode gathers row by row.
+     bool gather_batch(const uint32_t* rows, size_t n_tokens, float* out, std::string& err);
++    /// Fork (TTFT): read the rows of `n_tokens` tokens into the reader's row cache and nothing else, so a later
++    /// gather_batch of them is served from RAM (the same bytes: the cache holds what the file holds).  Only in Direct
++    /// mode with the reader's I/O thread, where it may run on another thread beside every other call (it issues and
++    /// collects its own reader ticket, nothing of this object's state); returns false having done nothing otherwise,
++    /// or when the row cache is too small to keep them.
++    bool warm_rows(const uint32_t* rows, size_t n_tokens, std::string& err);
+ 
+     /// Fault injection (Direct mode): every row read completes no earlier than `us` after issue.
+     void set_injected_delay_us(double us);
+diff --git a/include/strata/ngram/ple_reader.hpp b/include/strata/ngram/ple_reader.hpp
+index 75a2aaef..0f425bd7 100644
+--- a/include/strata/ngram/ple_reader.hpp
++++ b/include/strata/ngram/ple_reader.hpp
+@@ -93,6 +93,9 @@ public:
+     void reset_stats();
+     uint64_t cache_capacity() const;
+     uint64_t cache_size() const;
++    /// True when a worker thread owns the reads (`open` with io_thread): `issue`/`collect` may then be called
++    /// from several threads (fork, TTFT: PleTable::warm_rows).
++    bool threaded() const;
+ 
+ private:
+     struct Impl;
+diff --git a/include/strata/prefill/prefill.hpp b/include/strata/prefill/prefill.hpp
+index af4147a9..4e78c11f 100644
+--- a/include/strata/prefill/prefill.hpp
++++ b/include/strata/prefill/prefill.hpp
+@@ -21,6 +21,7 @@
+ #include <future>
+ #include <memory>
+ #include <string>
++#include <vector>
+ 
+ namespace strata::core { class PeerExperts; }
+ namespace strata::kernels::cpu { class ExpertPool; }
+@@ -177,6 +178,17 @@ public:
+ 
+     const PrefillStats& stats() const { return stats_; }
+ 
++    /// Fork (TTFT): the PLE rows of the NEXT run's first tokens (`tokens`, `n` of them, `prev0`/`prev1` the two before
++    /// them, oldest first).  The first chunk of every run waits for its whole chunk's rows (the read-ahead only covers
++    /// the chunks after it): 5.7 s of SSD reads for the part after the system turn of Claude Code's first request.
++    /// Set before a run, they are read into the PLE row cache on a thread once this run has its last chunk's rows (the
++    /// SSD is idle then), and the next run's first gather finds them there: the same bytes, earlier.  A run waits for
++    /// a warm still in flight before its first gather.  No-op on a stage without the PLE, in mmap mode, without the
++    /// reader's I/O thread or a row cache that can hold them.  STRATA_PLE_LOOKAHEAD=0 turns both calls off.
++    void set_ple_lookahead(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1);
++    /// The same read, started now (e.g. beside a prefix restore, before the run that needs them).
++    void ple_warm_now(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1);
++
+     /// multi-GPU: the experts the peer GPU holds are computed THERE for every prompt chunk (up to `cap_rows` routed
+     /// rows per layer; the rest of the peer's experts are read by this GPU over P2P).  Allocates the peer's buffers for
+     /// chunks of up to init's `chunk` tokens.  Needs P2P between the two cards.
+@@ -276,6 +288,13 @@ private:
+     std::future<bool> next_run_;
+     int hand_buf_ = 0;
+ 
++    // fork (TTFT): set_ple_lookahead / ple_warm_now
++    std::vector<int64_t> ple_ahead_;
++    int32_t ple_ahead_prev_[2] = {-1, -1};
++    std::future<bool> ple_warm_;
++    void ple_warm_launch(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1);
++    void ple_warm_wait();
++
+     bool carve(std::size_t T, void* alloc);   // the device buffers of a chunk (prefill.cpp's Alloc)
+     void release();                          // the destructor's cleanup (also `reset`'s)
+     struct Impl;
+diff --git a/src/kernels/ngram.cpp b/src/kernels/ngram.cpp
+index 22c9672e..2e88b8aa 100644
+--- a/src/kernels/ngram.cpp
++++ b/src/kernels/ngram.cpp
+@@ -617,6 +617,16 @@ bool PleTable::gather_batch(const uint32_t* rows, size_t n_tokens, float* out, s
+     return true;
+ }
+ 
++bool PleTable::warm_rows(const uint32_t* rows, size_t n_tokens, std::string& err) {
++    const size_t n = n_tokens * (size_t) PLE_N_HEADS;
++    if (n == 0 || impl_->mode != PleIo::Direct || !impl_->reader.is_open() || !impl_->reader.threaded() ||
++        impl_->reader.cache_capacity() < 2 * (uint64_t) n)
++        return false;
++    std::vector<uint8_t> raw(n * impl_->rb);
++    const auto ticket = impl_->reader.issue(rows, n, raw.data());
++    return impl_->reader.collect(ticket, err);
++}
++
+ void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_delay_us(us); }
+ 
+ std::string PleTable::io_report() const {
+diff --git a/src/ngram/ple_reader.cpp b/src/ngram/ple_reader.cpp
+index 0df35e47..00f79876 100644
+--- a/src/ngram/ple_reader.cpp
++++ b/src/ngram/ple_reader.cpp
+@@ -546,5 +546,6 @@ void PleReader::reset_stats() {
+ }
+ uint64_t PleReader::cache_capacity() const { return impl_->cache.sets * WAYS; }
+ uint64_t PleReader::cache_size() const { return impl_->cache.used; }
++bool PleReader::threaded() const { return impl_->threaded; }
+ 
+ }  // namespace strata::ngram
+diff --git a/src/prefill/prefill.cpp b/src/prefill/prefill.cpp
+index e3ba85de..e12ca3e1 100644
+--- a/src/prefill/prefill.cpp
++++ b/src/prefill/prefill.cpp
+@@ -2650,6 +2650,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+         return ss.ple.table->gather_batch(m.ple_rows[buf].data(), (size_t) T, m.ple_emb_host[buf], e);
+     };
+     std::string ple_next_err;
++    struct AheadOnce {   // fork (TTFT): a lookahead belongs to the run after this one only
++        std::vector<int64_t>& v;
++        ~AheadOnce() { v.clear(); }
++    } ahead_once{ple_ahead_};
+     std::future<bool> ple_next;             // declared after everything it reads: an early return waits for it
+     int ple_buf = 0;
+ 
+@@ -2765,8 +2769,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+         // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
+         // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
+         if (ple_on && !ple_next.valid())
+-            ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
++            ple_next = std::async(std::launch::async, [this, &ple_gather, &ple_next_err, c0, b = ple_buf] {
+                 strata::aux_cpus::pin_current_thread();
++                ple_warm_wait();   // fork (TTFT): rows a lookahead is still reading land in the row cache first
+                 return ple_gather(c0, b, ple_next_err);
+             });
+         bool ple_pending = ple_on;
+@@ -2798,6 +2803,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+                     strata::aux_cpus::pin_current_thread();
+                     return ple_gather(c1, b, ple_next_err);
+                 });
++            } else if (!ple_ahead_.empty()) {
++                // fork (TTFT): this run's last rows are here and the SSD is idle: the next run's first chunk now
++                ple_warm_launch(ple_ahead_.data(), (int64_t) ple_ahead_.size(), ple_ahead_prev_[0], ple_ahead_prev_[1]);
++                ple_ahead_.clear();
+             }
+             ple_buf ^= 1;
+             const double waited = ms_since(tp);
+@@ -5058,6 +5067,58 @@ bool Prefill::reserve_uploads(int64_t T) {
+     return ok;
+ }
+ 
++// fork (TTFT): STRATA_PLE_LOOKAHEAD=0 turns set_ple_lookahead / ple_warm_now off
++namespace {
++bool ple_lookahead_on() {
++    static const bool on = [] {
++        const char* e = std::getenv("STRATA_PLE_LOOKAHEAD");
++        return e == nullptr || std::atoi(e) != 0;
++    }();
++    return on;
++}
++constexpr int64_t kPleWarmMaxTokens = 8192;   // a chunk of the auto prefill at most: what the first gather asks for
++}  // namespace
++
++void Prefill::ple_warm_wait() {
++    if (ple_warm_.valid()) (void) ple_warm_.get();   // a failed warm only means the gather reads the rows itself
++}
++
++void Prefill::ple_warm_launch(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1) {
++    if (!ple_lookahead_on() || impl_ == nullptr || impl_->ss == nullptr || tokens == nullptr || n <= 0) return;
++    core::SessionState& ss = *impl_->ss;
++    if (!ss.ple.ready() || !(stage_lb_ <= 1 && 1 < stage_le_) || ss.ple.table->mode() != kernels::PleIo::Direct) return;
++    ple_warm_wait();   // one at a time
++    const int64_t T = std::min<int64_t>(n, kPleWarmMaxTokens);
++    std::vector<int32_t> toks((size_t) T);
++    for (int64_t t = 0; t < T; ++t) toks[(size_t) t] = (int32_t) tokens[t];
++    ple_warm_ = std::async(std::launch::async, [table = ss.ple.table, consts = &ss.ple.consts, toks = std::move(toks),
++                                                prev0, prev1]() -> bool {
++        strata::aux_cpus::pin_current_thread();
++        // the rows exactly as the prefill's ple_gather hashes them: each token after the two before it
++        std::vector<uint32_t> rows(toks.size() * (size_t) strata::kernels::PLE_N_HEADS);
++        int32_t pv[2] = {prev0, prev1};
++        for (size_t t = 0; t < toks.size(); ++t) {
++            strata::kernels::ngram_rows(&toks[t], pv, 1, *consts, rows.data() + t * strata::kernels::PLE_N_HEADS);
++            pv[0] = pv[1];
++            pv[1] = toks[t];
++        }
++        std::string e;
++        return table->warm_rows(rows.data(), toks.size(), e);
++    });
++}
++
++void Prefill::set_ple_lookahead(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1) {
++    ple_ahead_.clear();
++    if (!ple_lookahead_on() || tokens == nullptr || n <= 0) return;
++    ple_ahead_.assign(tokens, tokens + std::min<int64_t>(n, kPleWarmMaxTokens));
++    ple_ahead_prev_[0] = prev0;
++    ple_ahead_prev_[1] = prev1;
++}
++
++void Prefill::ple_warm_now(const int64_t* tokens, int64_t n, int32_t prev0, int32_t prev1) {
++    ple_warm_launch(tokens, n, prev0, prev1);
++}
++
+ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
+ #if defined(STRATA_GPU_METAL)
+     {
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 73de5bdc..0c0f4572 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -13230,7 +13230,14 @@ int main(int argc, char** argv) {
+                         std::error_code kec;
+                         auto keyed = strata::core::prefix_cache_keyed_path(o.prompt_cache_file, prefix,
+                                                                            int32_t(ids[size_t(disk_root)]));
+-                        if (std::filesystem::is_regular_file(keyed, kec) && !kec) disk_path = std::move(keyed);
++                        if (std::filesystem::is_regular_file(keyed, kec) && !kec) {
++                            disk_path = std::move(keyed);
++                            // fork (TTFT): this prefix's own file (a hit unless the engine's identity changed): the
++                            // PLE rows of the part read after it are read beside the restore (~0.7 s of file read)
++                            if (o.batch <= 0 && disk_root >= 2 && last_turn - disk_root > o.short_read)
++                                sp.ple_warm_now(ids.data() + disk_root, last_turn - disk_root,
++                                                (int32_t) ids[size_t(disk_root - 2)], (int32_t) ids[size_t(disk_root - 1)]);
++                        }
+                     }
+                     std::error_code ec;
+                     const auto bytes = std::filesystem::file_size(disk_path, ec);
+@@ -14655,6 +14662,19 @@ int main(int argc, char** argv) {
+                 }
+                 if (win) merge_at = merge_from(at, to);   // (after the refill: the loans are back)
+                 const int64_t read_to = merge_at >= 0 ? merge_at : to;   // (merge_at > at: the part's windows before it)
++                // fork (TTFT): a batched part followed by another batched part (Claude Code's system turn, then its
++                // first message): the next part's first PLE rows are read once this part has its last chunk's rows,
++                // so the next run's first chunk does not wait for the SSD (Prefill::set_ple_lookahead)
++                if (!win && o.batch <= 0) {
++                    int64_t next_to = INT64_MAX;
++                    for (const int64_t c : cuts)
++                        if (c > to) next_to = std::min(next_to, c);
++                    if (next_to != INT64_MAX && to >= 2 && !windows_ok(to, next_to))
++                        sp.set_ple_lookahead(ids.data() + to, next_to - to, (int32_t) ids[(size_t) (to - 2)],
++                                             (int32_t) ids[(size_t) (to - 1)]);
++                    else
++                        sp.set_ple_lookahead(nullptr, 0, -1, -1);
++                }
+                 const auto tsp = Clock::now();
+                 pp_exact = false;   // a batched or pipelined part is in flight: a cancel may leave the state past pp_reached
+                 const bool sp_ok = read_to <= at || (win ? read_windows(at, read_to, err) : read_part(at, to, err));

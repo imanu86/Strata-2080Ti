@@ -1,0 +1,1717 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Sun, 18 Oct 2026 16:05:22 +0200
+Subject: [PATCH] SONNET-UPSYNC-Porta su 0.2.0 il prefisso su disco (patch 05,
+ --prompt-cache-file)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 48fedd37..74217546 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -116,8 +116,23 @@ option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
+ # native-experts section far below, so a first configure registered four tests fewer than the second)
+ option(STRATA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
+ 
++# fork: the system prefix persisted on disk (--prompt-cache-file)
++add_library(strata_prefix_cache STATIC src/core/prefix_cache_file.cpp)
++target_include_directories(strata_prefix_cache PUBLIC include)
++if(WIN32)
++  target_link_libraries(strata_prefix_cache PRIVATE bcrypt)
++endif()
++
+ if(STRATA_BUILD_CONVERSATION_TESTS)
+   enable_testing()
++  add_executable(prefix_cache_file_test src/core/prefix_cache_file_test.cpp)
++  target_link_libraries(prefix_cache_file_test PRIVATE strata_prefix_cache)
++  add_test(NAME prefix_cache_file_test COMMAND prefix_cache_file_test)
++  add_executable(prefix_cache_portable_test src/core/prefix_cache_file_test.cpp src/core/prefix_cache_file.cpp)
++  target_include_directories(prefix_cache_portable_test PRIVATE include)
++  target_compile_definitions(prefix_cache_portable_test PRIVATE STRATA_PREFIX_PORTABLE_SHA=1)
++  add_test(NAME prefix_cache_portable_test COMMAND prefix_cache_portable_test)
++  set_tests_properties(prefix_cache_file_test prefix_cache_portable_test PROPERTIES TIMEOUT 60)
+   add_executable(conversation_cache_test src/core/conversation_cache_test.cpp)
+   target_include_directories(conversation_cache_test PRIVATE include)
+   add_test(NAME conversation_cache_test COMMAND conversation_cache_test)
+@@ -572,7 +587,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
+     src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
+   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+-  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
++  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu strata_prefix_cache ${_strata_gpu_runtime_target})
+   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
+     add_executable(host_graph_launch_test tests/core/host_graph_launch_test.cu)
+     target_include_directories(host_graph_launch_test PRIVATE include)
+diff --git a/include/strata/core/mtp.hpp b/include/strata/core/mtp.hpp
+index 7216f015..fdb7c080 100644
+--- a/include/strata/core/mtp.hpp
++++ b/include/strata/core/mtp.hpp
+@@ -160,7 +160,12 @@ public:
+     const uint16_t* tensor_bf16(const char* name) const { return bf16(name); }
+     const void* tensor_q8(const char* name) const { return q8(name); }
+     QsaState& kv_state_rw() { return st_; }
+-    int64_t first_needed() const { return (window_ > 0 && prompt_len_ > 0) ? prompt_len_ - window_ - 64 : 0; }
++    int64_t first_needed() const {
++        return (window_ > 0 && prompt_len_ > 0 && !full_prefix_) ? prompt_len_ - window_ - 64 : 0;
++    }
++    /// this prompt's root goes to the prefix file: K/V for every cell, also those the window will not reach again
++    /// (a saved prefix must serve later prompts of any length)
++    void set_full_prefix(bool on) { full_prefix_ = on; }
+     int device() const { return device_; }
+     bool idle(std::string& err) {
+         if (cs_ && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp: its stream failed"; return false; }
+@@ -266,6 +271,7 @@ private:
+     std::string rt_dir_;
+     int64_t window_ = 0;        // attention over the last window_ cells (0 = every cell)
+     int64_t prompt_len_ = 0;
++    bool full_prefix_ = false;
+     const int32_t* rr_res_ = nullptr;
+     float rr_margin_ = 0.0f;
+     int rr_lo_ = 6, rr_hi_ = 9;
+diff --git a/include/strata/core/prefix_cache_file.hpp b/include/strata/core/prefix_cache_file.hpp
+new file mode 100644
+index 00000000..5fc82ebf
+--- /dev/null
++++ b/include/strata/core/prefix_cache_file.hpp
+@@ -0,0 +1,64 @@
++// Optional, single text-prefix persistence. The codec has no CUDA dependency.
++#pragma once
++#include "strata/core/conversation_cache.hpp"
++#include <array>
++#include <filesystem>
++#include <string>
++
++namespace strata::core {
++using PrefixDigest = std::array<uint8_t, 32>;
++// Tokens: an agent client's system turn (Claude Code: tools + system prompt,
++// ~40K tokens) fits many times over; 131072 is the target, 262144 the cap.
++//
++// Bytes: the whole image (top level plus every stage image of a layer split;
++// the split only partitions the layers, so the sum is the one-GPU size).  For
++// the shipped geometry (layout.hpp: 48 layers, 12 full-attention QSA layers,
++// 36 GDN layers, n_head_kv 2, head_dim 256, idx_key_dim 128, idx_block 4) at
++// 131072 tokens with --kv fp16, the largest K/V format:
++//   QSA K/V   13 layers (12 + the MTP draft layer) x 131072 cells x
++//             (2 heads x 256 x 2 B) x 2 (K and V)              = 3328 MiB
++//   indexer   12 x (131072 / 4 + 1) rows x 128 x 4 B           ~  192 MiB
++//   GDN       36 x (128 x 48 x 128 + 10240 x 3) x 4 B          ~  112 MiB
++//   hyper-connection (PLE) history 9 x 10240 x 4 B per stage   ~  0.4 MiB
++//   indexer tails/dead/block_pos, token ids (8 B each on disk,
++//   repeated per stage image)                                   ~    2 MiB
++//   total                                                       ~ 3.55 GiB
++// The same formula gives the measured 4003-token int8 file of
++// docs/sm75/BENCHMARKS.md (179,213,800 bytes) to within ~2 KB of metadata.
++// No checkpoints are stored (the file holds one live prefix).  int8 K/V
++// (1056 B/cell/layer) is ~2.0 GiB, q4_0/k8v4 less.  8 GiB holds 131072 fp16 tokens with > 2x margin
++// and the 262144-token cap at fp16 (~7.0 GiB).  It is only a format bound:
++// the physical-RAM admission checks at read and write are the real guard.
++constexpr uint64_t prefix_cache_max_bytes = 8ULL * 1024 * 1024 * 1024;
++constexpr size_t prefix_cache_max_tokens = 262144;
++// A layer split runs at most 8 stages (SplitDrive::kMax), so at most 7 later
++// stage images; the bound is kept at 8.
++constexpr size_t prefix_cache_max_stage_images = 8;
++
++// SHA-256 payload integrity and cache-key hashing (CNG on Windows).
++PrefixDigest prefix_cache_digest(const void *bytes, size_t size);
++// Local artifact identity: canonical paths, size/mtime, complete small files,
++// and three 64 KiB samples of large files. This is NOT a full weights hash.
++// Replacing weights while preserving metadata and unsampled bytes requires
++// removing the cache; ordinary model/config/prompt edits invalidate it.
++bool prefix_cache_identity(const std::vector<std::filesystem::path> &assets,
++                           const std::vector<std::string> &settings,
++                           PrefixDigest &identity, std::string &error);
++
++// One minimal snapshot: no images, stage parts or duplicate checkpoints.  With
++// a layer split, image.stage_images holds the later stages' images (same
++// rules each, same prefix; format v2).
++// next_token also keys MTP's one-token lookahead at the saved frontier.
++bool prefix_cache_write(const std::filesystem::path &path,
++                        const PrefixDigest &identity, int32_t next_token,
++                        const SavedConversation &image, std::string &error);
++// Bounded decode into a temporary CPU object; out is untouched on any failure.
++// Exact expected prefix is checked before allocating the large state payload.
++// Caller must still validate every image (the top level, and each stage image
++// against its stage's session) before any GPU writes.
++bool prefix_cache_read(const std::filesystem::path &path,
++                       const PrefixDigest &identity,
++                       const std::vector<int32_t> &expected_prefix,
++                       int32_t next_token, bool cvec, SavedConversation &out,
++                       std::string &error);
++} // namespace strata::core
+diff --git a/src/core/mtp.cpp b/src/core/mtp.cpp
+index 58627029..c229a8ea 100644
+--- a/src/core/mtp.cpp
++++ b/src/core/mtp.cpp
+@@ -1422,8 +1422,9 @@ bool MtpDrafter::prefill(const float* R_rows, const int32_t* next_tokens, int64_
+     const OnDevice on_device(device_);
+     const Clock::time_point t0 = Clock::now();
+     const int64_t HCN = g_->hc * g_->n_embd;
+-    // cells the window can never reach again need no K/V
+-    const int64_t first_needed = (window_ > 0 && prompt_len_ > 0) ? prompt_len_ - window_ - 64 : 0;
++    // cells the window can never reach again need no K/V (all of them do when the root goes to the prefix file:
++    // first_needed() is 0 then, see set_full_prefix)
++    const int64_t first_needed = this->first_needed();
+     // E-4: every group's token / step / position records uploaded at once; each group is then device copies and a
+     // graph on the one stream, with a single sync at the end (a group of <= max_t rows used to be staged in mapped
+     // memory and synced before the next: ~5,500 host round trips on a 32K prompt).  The same work in the same
+diff --git a/src/core/prefix_cache_file.cpp b/src/core/prefix_cache_file.cpp
+new file mode 100644
+index 00000000..abcf6dc9
+--- /dev/null
++++ b/src/core/prefix_cache_file.cpp
+@@ -0,0 +1,599 @@
++#include "strata/core/prefix_cache_file.hpp"
++
++#include <bit>
++#include <chrono>
++#include <climits>
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <limits>
++#include <memory>
++#include <set>
++#include <stdexcept>
++#ifdef _WIN32
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++// Windows types must be declared before bcrypt.h.
++// clang-format off
++#include <windows.h>
++#include <bcrypt.h>
++// clang-format on
++#else
++#include <unistd.h>
++#endif
++
++namespace strata::core {
++namespace {
++// Portable fallback follows FIPS 180-4; Windows uses the OS SHA-256 provider.
++class Sha256 {
++#if defined(_WIN32) && !defined(STRATA_PREFIX_PORTABLE_SHA)
++  BCRYPT_ALG_HANDLE algorithm_ = nullptr;
++  BCRYPT_HASH_HANDLE hash_ = nullptr;
++  static void check(NTSTATUS s) {
++    if (s < 0)
++      throw std::runtime_error("SHA-256 provider failed");
++  }
++
++public:
++  Sha256() {
++    check(BCryptOpenAlgorithmProvider(&algorithm_, BCRYPT_SHA256_ALGORITHM,
++                                      nullptr, 0));
++    const auto s =
++        BCryptCreateHash(algorithm_, &hash_, nullptr, 0, nullptr, 0, 0);
++    if (s < 0) {
++      BCryptCloseAlgorithmProvider(algorithm_, 0);
++      algorithm_ = nullptr;
++      check(s);
++    }
++  }
++  ~Sha256() {
++    if (hash_)
++      BCryptDestroyHash(hash_);
++    if (algorithm_)
++      BCryptCloseAlgorithmProvider(algorithm_, 0);
++  }
++  void update(const void *data, size_t n) {
++    auto p = static_cast<const uint8_t *>(data);
++    while (n) {
++      const ULONG part = static_cast<ULONG>(std::min<size_t>(n, 1U << 30));
++      check(BCryptHashData(hash_, const_cast<PUCHAR>(p), part, 0));
++      p += part;
++      n -= part;
++    }
++  }
++  PrefixDigest finish() {
++    PrefixDigest out{};
++    check(BCryptFinishHash(hash_, out.data(), ULONG(out.size()), 0));
++    return out;
++  }
++#else
++  std::array<uint32_t, 8> h_{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
++                             0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
++  std::array<uint8_t, 64> buffer_{};
++  uint64_t total_ = 0;
++  size_t used_ = 0;
++  void block(const uint8_t *p) {
++    static constexpr uint32_t k[64] = {
++        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
++        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
++        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
++        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
++        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
++        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
++        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
++        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
++        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
++        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
++    uint32_t w[64];
++    for (int i = 0; i < 16; ++i)
++      w[i] = (uint32_t(p[4 * i]) << 24) | (uint32_t(p[4 * i + 1]) << 16) |
++             (uint32_t(p[4 * i + 2]) << 8) | p[4 * i + 3];
++    for (int i = 16; i < 64; ++i) {
++      const uint32_t a = w[i - 15], b = w[i - 2];
++      w[i] = w[i - 16] + (std::rotr(a, 7) ^ std::rotr(a, 18) ^ (a >> 3)) +
++             w[i - 7] + (std::rotr(b, 17) ^ std::rotr(b, 19) ^ (b >> 10));
++    }
++    auto [a, b, c, d, e, f, g, h] = h_;
++    for (int i = 0; i < 64; ++i) {
++      const uint32_t t =
++          h + (std::rotr(e, 6) ^ std::rotr(e, 11) ^ std::rotr(e, 25)) +
++          ((e & f) ^ ((~e) & g)) + k[i] + w[i];
++      const uint32_t u =
++          (std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22)) +
++          ((a & b) ^ (a & c) ^ (b & c));
++      h = g;
++      g = f;
++      f = e;
++      e = d + t;
++      d = c;
++      c = b;
++      b = a;
++      a = t + u;
++    }
++    const uint32_t v[8] = {a, b, c, d, e, f, g, h};
++    for (size_t i = 0; i < 8; ++i)
++      h_[i] += v[i];
++  }
++
++public:
++  void update(const void *data, size_t n) {
++    auto p = static_cast<const uint8_t *>(data);
++    total_ += n;
++    while (n) {
++      const size_t part = std::min(n, 64 - used_);
++      std::memcpy(buffer_.data() + used_, p, part);
++      p += part;
++      n -= part;
++      used_ += part;
++      if (used_ == 64) {
++        block(buffer_.data());
++        used_ = 0;
++      }
++    }
++  }
++  PrefixDigest finish() {
++    const uint64_t bits = total_ * 8;
++    const uint8_t one = 128, zero = 0;
++    update(&one, 1);
++    while (used_ != 56)
++      update(&zero, 1);
++    uint8_t length[8];
++    for (int i = 0; i < 8; ++i)
++      length[i] = uint8_t(bits >> (56 - 8 * i));
++    update(length, 8);
++    PrefixDigest out{};
++    for (size_t i = 0; i < 8; ++i)
++      for (size_t j = 0; j < 4; ++j)
++        out[4 * i + j] = uint8_t(h_[i] >> (24 - 8 * j));
++    return out;
++  }
++#endif
++  Sha256(const Sha256 &) = delete;
++  Sha256 &operator=(const Sha256 &) = delete;
++#if !defined(_WIN32) || defined(STRATA_PREFIX_PORTABLE_SHA)
++  Sha256() = default;
++#endif
++};
++
++constexpr char magic[8] = {'S', 'T', 'R', 'A', 'P', 'F', 'X', '1'};
++// v2: the payload ends with a layer split's stage images (a count, then each
++// one in the top-level image's encoding). A v1 file is rejected by version
++// before any payload byte is interpreted: a clean miss, never a misread.
++constexpr uint64_t format_version = 2;
++constexpr size_t header_bytes = 8 + 8 + 8 + 32 + 32;
++// SavedConversation::kv holds at most n_layers + 1 (the draft) layers.
++constexpr uint64_t max_kv_layers = 129;
++void require(bool ok, const char *why) {
++  if (!ok)
++    throw std::runtime_error(why);
++}
++void u64_bytes(uint64_t x, uint8_t (&b)[8]) {
++  for (size_t i = 0; i < 8; ++i)
++    b[i] = uint8_t(x >> (8 * i));
++}
++uint64_t get_u64(const uint8_t *b) {
++  uint64_t x = 0;
++  for (size_t i = 0; i < 8; ++i)
++    x |= uint64_t(b[i]) << (8 * i);
++  return x;
++}
++void raw_write(std::ostream &out, const void *p, size_t n) {
++  if (!n)
++    return;
++  out.write(static_cast<const char *>(p), std::streamsize(n));
++  require(bool(out), "cache write failed");
++}
++void raw_read(std::istream &in, void *p, size_t n) {
++  if (!n)
++    return;
++  in.read(static_cast<char *>(p), std::streamsize(n));
++  require(bool(in), "truncated cache");
++}
++struct Writer {
++  std::ostream &out;
++  Sha256 hash;
++  uint64_t size = 0;
++  void bytes(const void *p, size_t n) {
++    require(n <= prefix_cache_max_bytes - size, "cache exceeds byte limit");
++    raw_write(out, p, n);
++    hash.update(p, n);
++    size += n;
++  }
++  void number(uint64_t x) {
++    uint8_t b[8];
++    u64_bytes(x, b);
++    bytes(b, 8);
++  }
++  void blob(const std::vector<uint8_t> &v) {
++    number(v.size());
++    bytes(v.data(), v.size());
++  }
++  void blob(const ConversationBuffer &v) {
++    number(v.size());
++    require(v.visit(0, v.size(),
++                    [&](const uint8_t *p, size_t n, size_t) {
++                      bytes(p, n);
++                      return true;
++                    }),
++            "invalid segmented buffer");
++  }
++};
++struct Reader {
++  std::istream &in;
++  Sha256 hash;
++  uint64_t remaining;
++  void bytes(void *p, size_t n) {
++    require(n <= remaining, "cache field exceeds payload");
++    raw_read(in, p, n);
++    hash.update(p, n);
++    remaining -= n;
++  }
++  uint64_t number() {
++    uint8_t b[8];
++    bytes(b, 8);
++    return get_u64(b);
++  }
++  size_t length() {
++    const uint64_t n = number();
++    require(n <= remaining && n <= prefix_cache_max_bytes,
++            "invalid cache field length");
++    return size_t(n);
++  }
++  void blob(std::vector<uint8_t> &v) {
++    const size_t n = length();
++    v.resize(n);
++    bytes(v.data(), n);
++  }
++  void blob(ConversationBuffer &v) {
++    const size_t n = length();
++    v.resize(n);
++    require(v.visit(0, n,
++                    [&](uint8_t *p, size_t count, size_t) {
++                      bytes(p, count);
++                      return true;
++                    }),
++            "invalid segmented field");
++  }
++};
++void hash_number(Sha256 &hash, uint64_t n) {
++  uint8_t b[8];
++  u64_bytes(n, b);
++  hash.update(b, 8);
++}
++void hash_text(Sha256 &hash, const std::string &s) {
++  hash_number(hash, s.size());
++  hash.update(s.data(), s.size());
++}
++int64_t signed_number(Reader &r) {
++  const auto n = r.number();
++  require(n <= uint64_t(INT64_MAX), "invalid signed cache field");
++  return int64_t(n);
++}
++std::filesystem::path temporary_path(const std::filesystem::path &path) {
++#ifdef _WIN32
++  const auto pid = GetCurrentProcessId();
++#else
++  const auto pid = getpid();
++#endif
++  auto tmp = path;
++  tmp += std::string(".tmp-") + std::to_string(pid) + "-" +
++         std::to_string(
++             std::chrono::steady_clock::now().time_since_epoch().count());
++  return tmp;
++}
++
++// One image (the top-level one, or a stage image) in the shared encoding.
++// `top` (non-null for a stage image) adds the stage-image rules.
++void write_image(Writer &w, const SavedConversation &image, int32_t next_token,
++                 const SavedConversation *top) {
++  require(!image.live.ids.empty() &&
++              image.live.ids.size() <= prefix_cache_max_tokens &&
++              next_token >= 0,
++          "invalid prefix length/frontier");
++  require(image.live.imgs.empty() && image.live.stage_parts.empty() &&
++              image.checkpoints.empty(),
++          "only one text prefix is supported");
++  require(image.kv.size() <= max_kv_layers, "invalid prefix snapshot size");
++  if (top) {
++    require(image.stage_images.empty(), "nested stage image");
++    require(image.geometry == top->geometry && image.cvec == top->cvec &&
++                image.live.ids == top->live.ids,
++            "stage image differs from its prefix");
++  }
++  for (auto n : image.geometry) {
++    require(n >= 0, "negative geometry");
++    w.number(uint64_t(n));
++  }
++  require(image.layer_lo >= 0 && image.layer_hi > image.layer_lo,
++          "invalid layer carve");
++  w.number(uint64_t(image.layer_lo));
++  w.number(uint64_t(image.layer_hi));
++  w.number(image.cvec ? 1 : 0);
++  w.number(uint64_t(next_token));
++  w.number(image.live.ids.size());
++  for (auto id : image.live.ids) {
++    require(id >= 0, "negative token");
++    w.number(uint64_t(id));
++  }
++  for (auto *v : {&image.live.gdn, &image.live.ple, &image.live.tails,
++                  &image.live.dead, &image.live.block_pos})
++    w.blob(*v);
++  w.number(image.kv.size());
++  for (const auto &k : image.kv) {
++    require(k.format >= 0, "invalid KV format");
++    w.number(uint64_t(k.format));
++    for (auto n : {k.cells, k.heads, k.head_dim, k.page_size, k.pooled_rows,
++                   k.idx_dim}) {
++      require(n >= 0, "invalid KV geometry");
++      w.number(uint64_t(n));
++    }
++    for (auto *v : {&k.k, &k.v, &k.k_scale, &k.v_scale, &k.pooled})
++      w.blob(*v);
++  }
++}
++
++// The exact expected prefix is checked before any large field is allocated.
++// `top`: the already-decoded top-level image when this is a stage image.
++void read_image(Reader &r, SavedConversation &image,
++                const std::vector<int32_t> &prefix, int32_t next_token,
++                bool cvec, const SavedConversation *top) {
++  for (auto &n : image.geometry)
++    n = signed_number(r);
++  if (top)
++    require(image.geometry == top->geometry, "stage image geometry differs");
++  image.layer_lo = signed_number(r);
++  image.layer_hi = signed_number(r);
++  require(image.layer_hi > image.layer_lo, "invalid layer carve");
++  const auto cv = r.number();
++  require(cv <= 1 && bool(cv) == cvec, "steering mode changed");
++  image.cvec = bool(cv);
++  require(r.number() == uint64_t(next_token), "prefix frontier changed");
++  require(r.number() == prefix.size(), "prefix length changed");
++  image.live.ids.reserve(prefix.size());
++  for (auto expected : prefix) {
++    require(expected >= 0 && r.number() == uint64_t(expected),
++            "prefix tokens changed");
++    image.live.ids.push_back(expected);
++  }
++  for (auto *v : {&image.live.gdn, &image.live.ple, &image.live.tails,
++                  &image.live.dead, &image.live.block_pos})
++    r.blob(*v);
++  const auto layers = r.number();
++  require(layers <= max_kv_layers, "invalid KV layer count");
++  image.kv.resize(size_t(layers));
++  for (auto &k : image.kv) {
++    const auto format = r.number();
++    require(format <= INT_MAX, "invalid KV format");
++    k.format = int(format);
++    for (auto *n : {&k.cells, &k.heads, &k.head_dim, &k.page_size,
++                    &k.pooled_rows, &k.idx_dim})
++      *n = signed_number(r);
++    for (auto *v : {&k.k, &k.v, &k.k_scale, &k.v_scale, &k.pooled})
++      r.blob(*v);
++  }
++}
++} // namespace
++
++PrefixDigest prefix_cache_digest(const void *p, size_t n) {
++  Sha256 h;
++  h.update(p, n);
++  return h.finish();
++}
++
++bool prefix_cache_identity(const std::vector<std::filesystem::path> &assets,
++                           const std::vector<std::string> &settings,
++                           PrefixDigest &identity, std::string &error) {
++  error.clear();
++  try {
++    Sha256 h;
++    hash_text(h, "Strata single text prefix v1; little endian IEEE754");
++    require(std::endian::native == std::endian::little,
++            "prefix cache requires little endian");
++    for (const auto &s : settings)
++      hash_text(h, s);
++    std::set<std::filesystem::path> files;
++    for (const auto &asset : assets) {
++      if (asset.empty())
++        continue;
++      const auto path = std::filesystem::canonical(asset);
++      if (std::filesystem::is_directory(path)) {
++        for (const auto &entry :
++             std::filesystem::recursive_directory_iterator(path)) {
++          require(!entry.is_symlink(), "symlink in model assets");
++          if (entry.is_regular_file())
++            files.insert(entry.path());
++          require(files.size() <= 100000, "too many model asset files");
++        }
++      } else {
++        require(std::filesystem::is_regular_file(path),
++                "model asset is not a regular file");
++        files.insert(path);
++      }
++    }
++    require(!files.empty(), "empty model identity");
++    hash_number(h, files.size());
++    std::array<uint8_t, 65536> data{};
++    for (const auto &p : files) {
++      const auto size = std::filesystem::file_size(p);
++      const auto stamp = std::filesystem::last_write_time(p);
++      const auto name = p.generic_u8string();
++      hash_text(h, std::string(name.begin(), name.end()));
++      hash_number(h, size);
++      hash_number(h, uint64_t(stamp.time_since_epoch().count()));
++      std::ifstream f(p, std::ios::binary);
++      require(bool(f), "cannot read model identity");
++      if (size <= 1024 * 1024) {
++        for (uint64_t at = 0; at < size;) {
++          const auto n = size_t(std::min<uint64_t>(size - at, data.size()));
++          raw_read(f, data.data(), n);
++          h.update(data.data(), n);
++          at += n;
++        }
++      } else {
++        for (uint64_t at : {uint64_t(0), size / 2, size - data.size()}) {
++          f.seekg(std::streamoff(at));
++          require(bool(f), "cannot seek model identity");
++          raw_read(f, data.data(), data.size());
++          h.update(data.data(), data.size());
++        }
++      }
++      require(size == std::filesystem::file_size(p) &&
++                  stamp == std::filesystem::last_write_time(p),
++              "model asset changed while fingerprinting");
++    }
++    identity = h.finish();
++    return true;
++  } catch (const std::exception &e) {
++    error = e.what();
++    return false;
++  }
++}
++
++bool prefix_cache_write(const std::filesystem::path &path,
++                        const PrefixDigest &identity, int32_t next_token,
++                        const SavedConversation &image, std::string &error) {
++  error.clear();
++  std::filesystem::path tmp;
++  try {
++    require(std::endian::native == std::endian::little,
++            "unsupported cache endianness");
++    require(!image.live.ids.empty() &&
++                image.live.ids.size() <= prefix_cache_max_tokens &&
++                next_token >= 0,
++            "invalid prefix length/frontier");
++    require(image.live.imgs.empty() && image.live.stage_parts.empty() &&
++                image.checkpoints.empty(),
++            "only one text prefix is supported");
++    require(image.stage_images.size() <= prefix_cache_max_stage_images,
++            "too many stage images");
++    // Every image's own rules are rechecked as it is written; here only what
++    // spans them: at least one K/V layer, and the whole image's byte cap.
++    uint64_t kv_layers = image.kv.size();
++    for (const auto &stage : image.stage_images)
++      kv_layers += stage.kv.size();
++    require(kv_layers >= 1 && image.kv.size() <= max_kv_layers &&
++                image.bytes() <= prefix_cache_max_bytes,
++            "invalid prefix snapshot size");
++    if (std::filesystem::exists(path)) {
++      std::ifstream previous(path, std::ios::binary);
++      char mark[8];
++      raw_read(previous, mark, sizeof(mark));
++      require(std::memcmp(mark, magic, sizeof(mark)) == 0,
++              "refusing to replace a non-prefix-cache file");
++    }
++    if (!path.parent_path().empty())
++      std::filesystem::create_directories(path.parent_path());
++    tmp = temporary_path(path);
++    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
++    require(bool(out), "cannot create temporary prefix cache");
++    std::array<uint8_t, header_bytes> header{};
++    std::memcpy(header.data(), magic, 8);
++    uint8_t b[8];
++    u64_bytes(format_version, b);
++    std::memcpy(header.data() + 8, b, 8);
++    std::memcpy(header.data() + 24, identity.data(), identity.size());
++    raw_write(out, header.data(), header.size());
++    Writer w{out};
++    w.hash.update(identity.data(), identity.size());
++    write_image(w, image, next_token, nullptr);
++    // v2: the later stages of a layer split, in stage order, each carving the
++    // layers after the previous image's (no overlap; the restore checks the
++    // exact carve against each stage's session)
++    w.number(image.stage_images.size());
++    int64_t previous_hi = image.layer_hi;
++    for (const auto &stage : image.stage_images) {
++      require(stage.layer_lo >= previous_hi, "stage images out of layer order");
++      write_image(w, stage, next_token, &image);
++      previous_hi = stage.layer_hi;
++    }
++    const auto digest = w.hash.finish();
++    u64_bytes(w.size, b);
++    std::memcpy(header.data() + 16, b, 8);
++    std::memcpy(header.data() + 56, digest.data(), digest.size());
++    out.seekp(0);
++    raw_write(out, header.data(), header.size());
++    out.flush();
++    require(bool(out), "cache flush failed");
++    out.close();
++    require(!out.fail(), "cache close failed");
++#ifdef _WIN32
++    require(MoveFileExW(tmp.c_str(), path.c_str(),
++                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) !=
++                0,
++            "cache atomic replacement failed");
++#else
++    std::filesystem::rename(tmp, path);
++#endif
++    return true;
++  } catch (const std::exception &e) {
++    error = e.what();
++    if (!tmp.empty()) {
++      std::error_code ignored;
++      std::filesystem::remove(tmp, ignored);
++    }
++    return false;
++  }
++}
++
++bool prefix_cache_read(const std::filesystem::path &path,
++                       const PrefixDigest &identity,
++                       const std::vector<int32_t> &prefix, int32_t next_token,
++                       bool cvec, SavedConversation &out, std::string &error) {
++  error.clear();
++  try {
++    require(std::endian::native == std::endian::little,
++            "unsupported cache endianness");
++    require(!prefix.empty() && prefix.size() <= prefix_cache_max_tokens,
++            "invalid expected prefix");
++    const auto size = std::filesystem::file_size(path);
++    require(size >= header_bytes &&
++                size - header_bytes <= prefix_cache_max_bytes,
++            "invalid cache file size");
++    std::ifstream in(path, std::ios::binary);
++    require(bool(in), "cannot open prefix cache");
++    std::array<uint8_t, header_bytes> header{};
++    raw_read(in, header.data(), header.size());
++    require(std::memcmp(header.data(), magic, 8) == 0 &&
++                get_u64(header.data() + 8) == format_version,
++            "unsupported cache format/version");
++    require(get_u64(header.data() + 16) == size - header_bytes,
++            "invalid cache payload size");
++    require(std::equal(identity.begin(), identity.end(), header.begin() + 24),
++            "model/config identity changed");
++    Reader r{in, {}, size - header_bytes};
++    r.hash.update(identity.data(), identity.size());
++    SavedConversation image;
++    read_image(r, image, prefix, next_token, cvec, nullptr);
++    // v2: the stage images, bounded before any is allocated; each one is
++    // checked against the same expected prefix, frontier and steering mode
++    const auto stages = r.number();
++    require(stages <= prefix_cache_max_stage_images,
++            "invalid stage image count");
++    image.stage_images.resize(size_t(stages));
++    uint64_t kv_layers = image.kv.size();
++    int64_t previous_hi = image.layer_hi;
++    for (auto &stage : image.stage_images) {
++      read_image(r, stage, prefix, next_token, cvec, &image);
++      require(stage.layer_lo >= previous_hi,
++              "stage images out of layer order");
++      previous_hi = stage.layer_hi;
++      kv_layers += stage.kv.size();
++    }
++    require(kv_layers >= 1, "invalid KV layer count");
++    require(r.remaining == 0 && in.peek() == std::char_traits<char>::eof(),
++            "trailing cache data");
++    const auto digest = r.hash.finish();
++    require(std::equal(digest.begin(), digest.end(), header.begin() + 56),
++            "cache SHA-256 mismatch");
++    require(image.bytes() <= prefix_cache_max_bytes,
++            "decoded cache exceeds byte limit");
++    out = std::move(image);
++    return true;
++  } catch (const std::exception &e) {
++    error = e.what();
++    return false;
++  }
++}
++} // namespace strata::core
+diff --git a/src/core/prefix_cache_file_test.cpp b/src/core/prefix_cache_file_test.cpp
+new file mode 100644
+index 00000000..1fc27973
+--- /dev/null
++++ b/src/core/prefix_cache_file_test.cpp
+@@ -0,0 +1,587 @@
++#include "strata/core/prefix_cache_file.hpp"
++
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <filesystem>
++#include <fstream>
++#include <iterator>
++#include <string>
++#include <system_error>
++#include <vector>
++
++using namespace strata::core;
++namespace fs = std::filesystem;
++
++namespace {
++int checks = 0;
++void check(bool ok, const char *message) {
++  ++checks;
++  if (!ok) {
++    std::fprintf(stderr, "FAIL: %s\n", message);
++    std::exit(1);
++  }
++}
++
++std::string hex(const PrefixDigest &digest) {
++  static constexpr char digits[] = "0123456789abcdef";
++  std::string result;
++  result.reserve(digest.size() * 2);
++  for (uint8_t byte : digest) {
++    result.push_back(digits[byte >> 4]);
++    result.push_back(digits[byte & 15]);
++  }
++  return result;
++}
++
++struct TempDirectory {
++  fs::path path;
++  TempDirectory() {
++    const auto root = fs::current_path();
++    for (unsigned attempt = 0; attempt < 32; ++attempt) {
++      const auto stamp =
++          std::chrono::steady_clock::now().time_since_epoch().count();
++      auto candidate =
++          root / ("prefix-cache-file-test-" + std::to_string(stamp) + "-" +
++                  std::to_string(attempt));
++      std::error_code ec;
++      if (fs::create_directory(candidate, ec)) {
++        path = std::move(candidate);
++        return;
++      }
++      if (ec && ec != std::errc::file_exists) {
++        std::fprintf(stderr, "cannot create test directory: %s\n",
++                     ec.message().c_str());
++        std::exit(1);
++      }
++    }
++    std::fprintf(stderr, "cannot allocate a unique test directory\n");
++    std::exit(1);
++  }
++  ~TempDirectory() {
++    std::error_code ec;
++    fs::remove_all(path, ec);
++    if (ec)
++      std::fprintf(stderr, "warning: test directory cleanup failed: %s\n",
++                   ec.message().c_str());
++  }
++};
++
++void fill_pattern(ConversationBuffer &buffer, uint8_t salt);
++
++SavedConversation make_image() {
++  SavedConversation image;
++  image.geometry = {1,  2,  3,  4,  5,  6,  7,  8,  9,
++                    10, 11, 12, 13, 14, 15, 16, 17, 18};
++  image.layer_lo = 2;
++  image.layer_hi = 5;
++  image.cvec = true;
++  image.live.ids = {17, 23, 41, 59};
++  image.live.gdn = {1, 2, 3};
++  image.live.ple = {4, 5};
++  image.live.tails = {6};
++  image.live.dead = {7, 8, 9};
++  image.live.block_pos = {10, 11};
++  ConversationKv kv;
++  kv.format = 3;
++  kv.cells = 64;
++  kv.heads = 8;
++  kv.head_dim = 128;
++  kv.page_size = 16;
++  kv.pooled_rows = 12;
++  kv.idx_dim = 32;
++  kv.k.resize(ConversationBuffer::segment_bytes + 257);
++  kv.v.resize(37);
++  kv.k_scale = {12, 13, 14};
++  kv.v_scale = {15, 16};
++  kv.pooled.resize(19);
++  fill_pattern(kv.k, 29);
++  fill_pattern(kv.v, 47);
++  fill_pattern(kv.pooled, 83);
++  image.kv.push_back(std::move(kv));
++  return image;
++}
++
++void fill_pattern(ConversationBuffer &buffer, uint8_t salt) {
++  const bool ok = buffer.visit(
++      0, buffer.size(), [=](uint8_t *data, size_t size, size_t offset) {
++        for (size_t i = 0; i < size; ++i)
++          data[i] = static_cast<uint8_t>(salt + (offset + i) * 17 +
++                                         (offset + i) / 251);
++        return true;
++      });
++  check(ok, "fill segmented conversation buffer");
++}
++
++// A later stage's image of `top`'s prefix: its own carve [lo, hi), running
++// state and K/V layers (the last stage of a split also holds the draft's).
++SavedConversation make_stage_image(const SavedConversation &top, int64_t lo,
++                                   int64_t hi, size_t layers, uint8_t salt) {
++  SavedConversation stage;
++  stage.geometry = top.geometry;
++  stage.layer_lo = lo;
++  stage.layer_hi = hi;
++  stage.cvec = top.cvec;
++  stage.live.ids = top.live.ids;
++  stage.live.gdn = {uint8_t(salt), uint8_t(salt + 1), uint8_t(salt + 2)};
++  stage.live.ple = {uint8_t(salt + 3)};
++  stage.live.dead = {uint8_t(salt + 4), uint8_t(salt + 5)};
++  stage.live.block_pos = {uint8_t(salt + 6)};
++  for (size_t i = 0; i < layers; ++i) {
++    const bool draft = i + 1 == layers && layers > 1; // no indexer
++    ConversationKv kv;
++    kv.format = 3;
++    kv.cells = 64;
++    kv.heads = 8;
++    kv.head_dim = 128;
++    kv.page_size = 16;
++    kv.pooled_rows = draft ? 0 : 12;
++    kv.idx_dim = 32;
++    kv.k.resize(41 + i);
++    kv.v.resize(23 + i);
++    kv.k_scale = {uint8_t(salt + 7), uint8_t(i)};
++    kv.pooled.resize(draft ? 0 : 19);
++    fill_pattern(kv.k, uint8_t(salt + 11 * i));
++    fill_pattern(kv.v, uint8_t(salt + 13 * i + 1));
++    fill_pattern(kv.pooled, uint8_t(salt + 17 * i + 2));
++    stage.kv.push_back(std::move(kv));
++  }
++  return stage;
++}
++
++// Two later stages, as a three-GPU split parks them: [5, 9) and [9, 12),
++// the last with an extra (draft) K/V layer.
++SavedConversation make_split_image() {
++  SavedConversation image = make_image();
++  image.stage_images.push_back(
++      make_stage_image(image, image.layer_hi, 9, 1, 101));
++  image.stage_images.push_back(make_stage_image(image, 9, 12, 2, 151));
++  return image;
++}
++
++bool equal_image(const SavedConversation &a, const SavedConversation &b) {
++  if (a.geometry != b.geometry || a.layer_lo != b.layer_lo ||
++      a.layer_hi != b.layer_hi || a.cvec != b.cvec ||
++      a.live.ids != b.live.ids || a.live.imgs != b.live.imgs ||
++      a.live.gdn != b.live.gdn || a.live.ple != b.live.ple ||
++      a.live.tails != b.live.tails || a.live.dead != b.live.dead ||
++      a.live.block_pos != b.live.block_pos ||
++      a.live.stage_parts.size() != b.live.stage_parts.size() ||
++      a.checkpoints.size() != b.checkpoints.size() ||
++      a.kv.size() != b.kv.size() ||
++      a.stage_images.size() != b.stage_images.size())
++    return false;
++  for (size_t i = 0; i < a.stage_images.size(); ++i)
++    if (!equal_image(a.stage_images[i], b.stage_images[i]))
++      return false;
++  for (size_t i = 0; i < a.kv.size(); ++i) {
++    const auto &x = a.kv[i];
++    const auto &y = b.kv[i];
++    if (x.format != y.format || x.cells != y.cells || x.heads != y.heads ||
++        x.head_dim != y.head_dim || x.page_size != y.page_size ||
++        x.pooled_rows != y.pooled_rows || x.idx_dim != y.idx_dim ||
++        !(x.k == y.k) || !(x.v == y.v) || !(x.k_scale == y.k_scale) ||
++        !(x.v_scale == y.v_scale) || !(x.pooled == y.pooled))
++      return false;
++  }
++  return true;
++}
++
++std::vector<uint8_t> read_file(const fs::path &path) {
++  std::ifstream input(path, std::ios::binary);
++  if (!input)
++    return {};
++  return std::vector<uint8_t>(std::istreambuf_iterator<char>(input),
++                              std::istreambuf_iterator<char>());
++}
++void write_file(const fs::path &path, const std::vector<uint8_t> &bytes) {
++  std::ofstream output(path, std::ios::binary | std::ios::trunc);
++  check(bool(output), "open mutation fixture");
++  output.write(reinterpret_cast<const char *>(bytes.data()),
++               static_cast<std::streamsize>(bytes.size()));
++  check(bool(output), "write mutation fixture");
++}
++void put_u64_le(std::vector<uint8_t> &data, size_t offset, uint64_t value) {
++  check(offset <= data.size() && data.size() - offset >= 8,
++        "u64 mutation offset in bounds");
++  for (size_t i = 0; i < 8; ++i)
++    data[offset + i] = static_cast<uint8_t>(value >> (i * 8));
++}
++
++void preserved_failure(const fs::path &path, const PrefixDigest &identity,
++                       const std::vector<int32_t> &prefix, int32_t frontier,
++                       bool cvec, const SavedConversation &sentinel,
++                       const char *message) {
++  SavedConversation out = sentinel;
++  std::string error;
++  check(!prefix_cache_read(path, identity, prefix, frontier, cvec, out, error),
++        message);
++  check(!error.empty(), "failed read reports a diagnostic");
++  check(equal_image(out, sentinel),
++        "failed read leaves caller output unchanged");
++}
++
++uint64_t get_u64_le(const std::vector<uint8_t> &data, size_t offset) {
++  check(offset <= data.size() && data.size() - offset >= 8,
++        "u64 read offset in bounds");
++  uint64_t value = 0;
++  for (size_t i = 0; i < 8; ++i)
++    value |= uint64_t(data[offset + i]) << (i * 8);
++  return value;
++}
++
++// The diagnostic of a read that must fail and leave `out` untouched.
++std::string failure_reason(const fs::path &path, const PrefixDigest &identity,
++                           const std::vector<int32_t> &prefix,
++                           int32_t frontier, bool cvec,
++                           const SavedConversation &sentinel,
++                           const char *message) {
++  SavedConversation out = sentinel;
++  std::string error;
++  check(!prefix_cache_read(path, identity, prefix, frontier, cvec, out, error),
++        message);
++  check(!error.empty(), "failed read reports a diagnostic");
++  check(equal_image(out, sentinel),
++        "failed read leaves caller output unchanged");
++  return error;
++}
++} // namespace
++
++int main() {
++  check(hex(prefix_cache_digest(nullptr, 0)) ==
++            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++        "SHA-256 empty vector");
++  const char abc[] = "abc";
++  check(hex(prefix_cache_digest(abc, 3)) ==
++            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
++        "SHA-256 abc vector");
++  const char multi[] =
++      "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
++  check(hex(prefix_cache_digest(multi, sizeof(multi) - 1)) ==
++            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
++        "SHA-256 multiblock vector");
++
++  TempDirectory temp;
++  const fs::path weights = temp.path / "weights.bin";
++  {
++    std::ofstream file(weights, std::ios::binary);
++    const char contents[] = "prefix-cache model bytes v1";
++    file.write(contents, sizeof(contents) - 1);
++    check(bool(file), "create identity asset");
++  }
++  const std::vector<std::string> settings = {"format=iq3", "context=262144",
++                                             "prompt-hash=abc"};
++  PrefixDigest identity{};
++  std::string error;
++  check(prefix_cache_identity({weights}, settings, identity, error),
++        "compute model/config identity");
++  check(error.empty(), "identity success clears diagnostic");
++  PrefixDigest config_identity{};
++  check(prefix_cache_identity(
++            {weights}, {"format=iq3", "context=262144", "prompt-hash=def"},
++            config_identity, error),
++        "compute changed-prompt identity");
++  check(config_identity != identity,
++        "prompt/configuration participates in identity");
++  PrefixDigest asset_identity{};
++  {
++    std::ofstream file(weights, std::ios::binary | std::ios::trunc);
++    const char contents[] = "prefix-cache model bytes v2";
++    file.write(contents, sizeof(contents) - 1);
++  }
++  check(prefix_cache_identity({weights}, settings, asset_identity, error),
++        "recompute changed-asset identity");
++  check(asset_identity != identity,
++        "model asset content participates in identity");
++  {
++    std::ofstream file(weights, std::ios::binary | std::ios::trunc);
++    const char contents[] = "prefix-cache model bytes v1";
++    file.write(contents, sizeof(contents) - 1);
++  }
++  check(prefix_cache_identity({weights}, settings, identity, error),
++        "restore original identity");
++
++  const fs::path cache = temp.path / "saved-prefix.bin";
++  const SavedConversation source = make_image();
++  const std::vector<int32_t> prefix = source.live.ids;
++  constexpr int32_t frontier = 101;
++  check(prefix_cache_write(cache, identity, frontier, source, error),
++        "write minimal text prefix cache");
++  check(error.empty(), "write success clears diagnostic");
++  SavedConversation restored;
++  check(prefix_cache_read(cache, identity, prefix, frontier, source.cvec,
++                          restored, error),
++        "read valid cache");
++  check(error.empty() && equal_image(source, restored),
++        "roundtrip preserves metadata and all segmented KV bytes");
++  check(restored.kv[0].k.size() > ConversationBuffer::segment_bytes,
++        "roundtrip exercised multiple KV segments");
++
++  const SavedConversation sentinel = make_image();
++  const auto valid_bytes = read_file(cache);
++  check(valid_bytes.size() > 88 + 208,
++        "serialized fixture includes fixed header and first field");
++  check(valid_bytes.size() - 88 <= prefix_cache_max_bytes,
++        "valid fixture below file cap");
++  check(valid_bytes[0] == 'S' && valid_bytes[1] == 'T',
++        "serialized fixture magic sanity");
++
++  check(!prefix_cache_read(cache, config_identity, prefix, frontier,
++                           source.cvec, restored, error) &&
++            equal_image(restored, source),
++        "identity mismatch rejects without replacing output");
++  check(!prefix_cache_read(cache, asset_identity, prefix, frontier, source.cvec,
++                           restored, error) &&
++            equal_image(restored, source),
++        "changed model asset identity rejects without replacing output");
++  auto changed_prefix = prefix;
++  changed_prefix[1]++;
++  check(!prefix_cache_read(cache, identity, changed_prefix, frontier,
++                           source.cvec, restored, error) &&
++            equal_image(restored, source),
++        "prompt token mismatch rejects without replacing output");
++  check(!prefix_cache_read(cache, identity, prefix, frontier + 1, source.cvec,
++                           restored, error) &&
++            equal_image(restored, source),
++        "next-token frontier mismatch rejects without replacing output");
++  check(!prefix_cache_read(cache, identity, prefix, frontier, false, restored,
++                           error) &&
++            equal_image(restored, source),
++        "cvec mode mismatch rejects without replacing output");
++
++  const auto reject_mutation = [&](const char *name, auto mutate) {
++    auto bytes = valid_bytes;
++    mutate(bytes);
++    const fs::path bad = temp.path / (std::string(name) + ".bin");
++    write_file(bad, bytes);
++    preserved_failure(bad, identity, prefix, frontier, source.cvec, sentinel,
++                      name);
++  };
++  reject_mutation("bad-magic", [](auto &b) { b[0] ^= 0x20; });
++  reject_mutation("bad-version", [](auto &b) { b[8] ^= 1; });
++  reject_mutation("truncated", [](auto &b) { b.pop_back(); });
++  reject_mutation("bad-checksum", [](auto &b) { b[56] ^= 0x80; });
++  reject_mutation("trailing-data", [](auto &b) {
++    b.push_back(0x5a);
++    put_u64_le(b, 16, static_cast<uint64_t>(b.size() - 88));
++  });
++  reject_mutation("oversized-field-length", [](auto &b) {
++    // Still below the global byte cap, but larger than all remaining file
++    // bytes.
++    put_u64_le(b, 88 + 216, static_cast<uint64_t>(b.size()));
++  });
++  reject_mutation("field-over-512mib", [](auto &b) {
++    // Header(88) + 18 geometry + layer bounds + cvec/frontier + token count +
++    // IDs.
++    put_u64_le(b, 88 + 216, prefix_cache_max_bytes + 1);
++  });
++
++  const fs::path atomic = temp.path / "atomic-preserve.bin";
++  check(prefix_cache_write(atomic, identity, frontier, source, error),
++        "seed atomic-write destination");
++  const auto before_invalid_write = read_file(atomic);
++  auto invalid = source;
++  invalid.live.ids[0] = -1; // Fail after the temporary file has already
++                            // received part of the payload.
++  check(!prefix_cache_write(atomic, identity, frontier, invalid, error),
++        "reject invalid token during atomic write");
++  check(read_file(atomic) == before_invalid_write,
++        "invalid write preserves prior file byte-for-byte");
++  for (const auto &entry : fs::directory_iterator(temp.path))
++    check(entry.path().filename().string().find(".tmp-") == std::string::npos,
++          "atomic writer leaves no temp file");
++
++  auto too_many_tokens = source;
++  too_many_tokens.live.ids.resize(prefix_cache_max_tokens + 1, 1);
++  const fs::path too_many = temp.path / "too-many-tokens.bin";
++  check(
++      !prefix_cache_write(too_many, identity, frontier, too_many_tokens, error),
++      "reject token count above the cap");
++  check(!fs::exists(too_many), "oversized token write publishes no file");
++  check(!prefix_cache_read(cache, identity,
++                           std::vector<int32_t>(prefix_cache_max_tokens + 1, 1),
++                           frontier, source.cvec, restored, error) &&
++            equal_image(restored, source),
++        "reject expected prefix above the cap without changing output");
++
++  // ---- v2: version, layer-split stage images, limits
++  reject_mutation("version-1", [](auto &b) { put_u64_le(b, 8, 1); });
++  {
++    auto v1 = valid_bytes;
++    put_u64_le(v1, 8, 1);
++    const fs::path old_file = temp.path / "version-1-reason.bin";
++    write_file(old_file, v1);
++    check(failure_reason(old_file, identity, prefix, frontier, source.cvec,
++                         sentinel, "v1 file is a miss") ==
++              "unsupported cache format/version",
++          "v1 file rejected by version, before any payload byte");
++  }
++  // Without a split the payload ends with a zero stage count; the top-level
++  // encoding is the same with stages, so this is the count's offset in both.
++  const size_t stage_count_at = valid_bytes.size() - 8;
++  check(get_u64_le(valid_bytes, stage_count_at) == 0,
++        "one-GPU file ends with a zero stage count");
++
++  const fs::path split_cache = temp.path / "split-prefix.bin";
++  const SavedConversation split = make_split_image();
++  check(prefix_cache_write(split_cache, identity, frontier, split, error),
++        "write a two-stage split prefix");
++  check(error.empty(), "split write success clears diagnostic");
++  SavedConversation split_restored;
++  check(prefix_cache_read(split_cache, identity, prefix, frontier, split.cvec,
++                          split_restored, error),
++        "read a two-stage split prefix");
++  check(error.empty() && equal_image(split, split_restored),
++        "split roundtrip preserves every stage image byte for byte");
++  check(split_restored.stage_images.size() == 2 &&
++            split_restored.stage_images[1].kv.size() == 2 &&
++            split_restored.stage_images[0].live.ids == prefix,
++        "split roundtrip keeps stage order, draft layer and prefix");
++  const auto split_bytes = read_file(split_cache);
++  check(get_u64_le(split_bytes, stage_count_at) == 2,
++        "split file carries its stage count after the top-level image");
++
++  const auto reject_split_mutation = [&](const char *name, auto mutate) {
++    auto bytes = split_bytes;
++    mutate(bytes);
++    const fs::path bad = temp.path / (std::string(name) + ".bin");
++    write_file(bad, bytes);
++    return failure_reason(bad, identity, prefix, frontier, split.cvec,
++                          sentinel, name);
++  };
++  check(reject_split_mutation("stage-count-over-cap",
++                              [&](auto &b) {
++                                put_u64_le(b, stage_count_at,
++                                           prefix_cache_max_stage_images + 1);
++                              }) == "invalid stage image count",
++        "forged stage count above the cap rejected before allocating");
++  check(reject_split_mutation("stage-count-huge",
++                              [&](auto &b) {
++                                put_u64_le(b, stage_count_at, ~uint64_t(0));
++                              }) == "invalid stage image count",
++        "forged 2^64-1 stage count rejected before allocating");
++  reject_split_mutation("stage-count-more-than-present", [&](auto &b) {
++    put_u64_le(b, stage_count_at, 3);
++  });
++  check(reject_split_mutation("stage-count-fewer-than-present",
++                              [&](auto &b) {
++                                put_u64_le(b, stage_count_at, 1);
++                              }) == "trailing cache data",
++        "forged smaller stage count leaves trailing data");
++  reject_split_mutation("stage-count-zero", [&](auto &b) {
++    put_u64_le(b, stage_count_at, 0);
++  });
++  reject_split_mutation("split-truncated", [](auto &b) { b.pop_back(); });
++  reject_split_mutation("split-truncated-mid-stage", [&](auto &b) {
++    // Cut inside the first stage image and keep the header's payload size
++    // consistent, so only the bounded field reads can catch it.
++    b.resize(stage_count_at + 8 + 100);
++    put_u64_le(b, 16, static_cast<uint64_t>(b.size() - 88));
++  });
++  reject_split_mutation("split-bad-checksum",
++                        [](auto &b) { b[56] ^= 0x80; });
++  reject_split_mutation("split-last-byte-flipped",
++                        [](auto &b) { b[b.size() - 1] ^= 0x01; });
++  reject_split_mutation("stage-image-token-forged", [&](auto &b) {
++    // The first stage image's first token id: 18 geometry fields, the carve,
++    // cvec, frontier and the id count precede it.
++    put_u64_le(b, stage_count_at + 8 + 8 * (18 + 2 + 1 + 1 + 1), 99999);
++  });
++
++  const auto reject_split_write = [&](const char *name,
++                                      const SavedConversation &bad) {
++    const fs::path target = temp.path / (std::string(name) + ".bin");
++    check(!prefix_cache_write(target, identity, frontier, bad, error), name);
++    check(!error.empty(), "failed split write reports a diagnostic");
++    check(!fs::exists(target), "failed split write publishes no file");
++  };
++  {
++    auto bad = split;
++    bad.stage_images[1].live.ids[2]++;
++    reject_split_write("stage-prefix-differs", bad);
++  }
++  {
++    auto bad = split;
++    bad.stage_images[0].stage_images.push_back(make_image());
++    reject_split_write("stage-image-nested", bad);
++  }
++  {
++    auto bad = split;
++    bad.stage_images[0].layer_lo = bad.layer_hi - 1;
++    reject_split_write("stage-carve-overlap", bad);
++  }
++  {
++    auto bad = split;
++    bad.stage_images[1].checkpoints.push_back(ConversationCheckpoint{});
++    reject_split_write("stage-image-checkpoint", bad);
++  }
++  {
++    auto bad = split;
++    bad.stage_images[0].cvec = !bad.cvec;
++    reject_split_write("stage-image-steering-differs", bad);
++  }
++  {
++    auto bad = split;
++    while (bad.stage_images.size() <= prefix_cache_max_stage_images) {
++      const int64_t lo = bad.stage_images.back().layer_hi;
++      bad.stage_images.push_back(make_stage_image(bad, lo, lo + 1, 1, 7));
++    }
++    reject_split_write("too-many-stage-images", bad);
++  }
++  {
++    auto bad = split;
++    bad.kv.clear();
++    for (auto &stage : bad.stage_images)
++      stage.kv.clear();
++    reject_split_write("split-without-kv", bad);
++  }
++
++  // Limits: a 131072-token prefix (twice the old 65536 cap) round-trips with
++  // its stage images, and the byte cap holds the 131072-token fp16 estimate
++  // of prefix_cache_file.hpp for the shipped geometry.
++  check(prefix_cache_max_tokens == 262144, "token cap is 262144");
++  {
++    const uint64_t tokens = 131072, mib = 1024 * 1024;
++    const uint64_t qsa_kv = 13 * tokens * (2 * 256 * 2) * 2;
++    const uint64_t indexer = 12 * (tokens / 4 + 1) * 128 * 4;
++    const uint64_t gdn = uint64_t(36) * (128 * 48 * 128 + 10240 * 3) * 4;
++    const uint64_t estimate = qsa_kv + indexer + gdn +
++                              uint64_t(3) * 9 * 10240 * 4 + 3 * tokens * 8 +
++                              4 * mib;
++    check(estimate > 3500 * mib && estimate < 3700 * mib,
++          "131072-token fp16 estimate is about 3.55 GiB");
++    check(2 * estimate <= prefix_cache_max_bytes,
++          "byte cap holds the 131072-token fp16 image with 2x margin");
++    check(2 * qsa_kv + 2 * indexer + gdn <= prefix_cache_max_bytes,
++          "byte cap holds the 262144-token fp16 image");
++  }
++  {
++    auto long_split = make_split_image();
++    std::vector<int32_t> long_prefix(131072);
++    for (size_t i = 0; i < long_prefix.size(); ++i)
++      long_prefix[i] = int32_t((i * 7919) % 151643);
++    long_split.live.ids = long_prefix;
++    for (auto &stage : long_split.stage_images)
++      stage.live.ids = long_prefix;
++    const fs::path long_cache = temp.path / "split-131072.bin";
++    check(prefix_cache_write(long_cache, identity, frontier, long_split,
++                             error),
++          "write a 131072-token split prefix");
++    SavedConversation long_restored;
++    check(prefix_cache_read(long_cache, identity, long_prefix, frontier,
++                            long_split.cvec, long_restored, error) &&
++              equal_image(long_split, long_restored),
++          "131072-token split prefix round-trips");
++    auto over_cap = long_split;
++    over_cap.live.ids.resize(prefix_cache_max_tokens + 1, 1);
++    for (auto &stage : over_cap.stage_images)
++      stage.live.ids = over_cap.live.ids;
++    reject_split_write("split-above-token-cap", over_cap);
++  }
++
++  std::printf("prefix_cache_file_test: %d checks passed\n", checks);
++  return 0;
++}
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index faaeb0a1..ffe13811 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -27,6 +27,7 @@
+ #include "strata/core/conversation_snapshot.hpp"
+ #include "strata/core/conversation_file.hpp"
+ #include "strata/core/session_save_reclaim.hpp"
++#include "strata/core/prefix_cache_file.hpp"
+ #include "strata/core/conversation_memory.hpp"
+ #include "strata/core/coupled_draft.hpp"
+ #include "strata/core/expert_source.hpp"
+@@ -135,6 +136,7 @@ namespace strata::metal_engine { void set_model_shard(const char* shard1); }   /
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <cwchar>
+ #include <filesystem>
+ #include <fstream>
+ #include <sstream>
+@@ -818,6 +820,7 @@ struct Options {
+     /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and
+     /// the PLE history (~118 MB of host RAM); the KV cache itself is positional and stays where it is.
+     int prompt_cache = 6;
++    std::string prompt_cache_file; // opt-in single text-root snapshot, persisted across engine restarts
+     int64_t conversation_cache_mib = 0; // opt-in host RAM for independent conversations
+     int conversation_cache_slots = 4;
+     int64_t conversation_cache_min_free_mib = 2560;
+@@ -977,6 +980,9 @@ void usage() {
+                  "  --vision             --serve takes images too (GENI requests; embeddings from strata-vision)\n"
+                  "  --prompt-cache N     --serve: keep N conversation checkpoints between requests (default 6, ~118 MB\n"
+                  "                       of RAM each; 0 = read every prompt from the start)\n"
++                 "  --prompt-cache-file PATH  persist one text system-prefix across restarts (default off; one GPU or a\n"
++                 "                       --layer-split, up to 262144 tokens/8 GiB; replaces its prior prefix when\n"
++                 "                       instructions change)\n"
+                  "  --conversation-cache-mib N  --serve: RAM budget for parked conversations (default 0 = off)\n"
+                  "  --conversation-cache-slots N  --serve: at most N parked conversations (default 4)\n"
+                  "  --conversation-cache-min-free-mib N  --serve: RAM floor (under MemAvailable, the cgroup limits and\n"
+@@ -2665,6 +2671,7 @@ int main(int argc, char** argv) {
+         else if (a == "--vision") o.vision = true;
+         else if (a == "--session-save-reclaim") o.session_save_reclaim = true;
+         else if (a == "--prompt-cache") o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
++        else if (a == "--prompt-cache-file") o.prompt_cache_file = next("--prompt-cache-file");
+         else if (a == "--conversation-cache-mib" || a == "--conversation-cache-slots" ||
+                  a == "--conversation-cache-min-free-mib" || a == "--conversation-cache-min-tokens" ||
+                  a == "--conversation-cache-park-gain" ||
+@@ -2949,6 +2956,13 @@ int main(int argc, char** argv) {
+     }();
+     strata::core::set_primary_device(primary_device);
+     // parking with --layer-split saves every stage (SavedConversation::stage_images)
++    if (!o.prompt_cache_file.empty() && (!o.serve || o.prompt_cache <= 0 || o.prompt_cache_root <= 0 ||
++            o.turn_token < 0 || o.peer_device >= 1 ||
++            std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int slots) { return slots > 0; }))) {
++        std::fprintf(stderr, "strata: --prompt-cache-file requires --serve, enabled root checkpoints, no peer device "
++                             "and no remote expert caches\n");
++        return 2;
++    }
+     // Layer split (multi-GPU): the later stages run layers [K_i, K_i+1) on their own GPUs (--split-device, default
+     // the next visible ones); "auto" places the K from each GPU's free VRAM once the weights are in (below).  KV
+     // streaming and images (the server's GPU encoder) run across a split, also with parking and --batch.  Across
+@@ -9283,6 +9297,103 @@ int main(int argc, char** argv) {
+         bool cvec_cached = true;   // the control vector's state the live session and the checkpoints were read with
+         // without --mtp the conversation cache stays on: a parked image carries the draft layer's K/V only when there is one
+         // (the snapshots accept a null draft)
++        strata::core::PrefixDigest prefix_identity{};
++        bool prefix_disk_enabled = !o.prompt_cache_file.empty();
++        if (prefix_disk_enabled) {
++            const auto identity_start = Clock::now();
++            std::vector<std::filesystem::path> assets{argv[0], o.pack, o.mtp, o.ple_gguf, o.embd_gguf,
++                o.native_preset, o.native_head_gguf, o.expert_profile};
++            for (const auto& p : o.native_shards) assets.emplace_back(p);
++            for (const auto& p : o.native_head_shards) assets.emplace_back(p);
++            for (const auto& p : o.native_dense_gguf) assets.emplace_back(p);
++            for (const auto& item : o.cvec_files) assets.emplace_back(item.first);
++            std::vector<std::string> settings;
++            // Activations are local to this device/runtime, not portable model files.
++            int device = 0, driver = 0, runtime = 0;
++            cudaDeviceProp device_properties{};
++            if (cudaGetDevice(&device) != cudaSuccess ||
++                    cudaGetDeviceProperties(&device_properties, device) != cudaSuccess ||
++                    cudaDriverGetVersion(&driver) != cudaSuccess || cudaRuntimeGetVersion(&runtime) != cudaSuccess) {
++                cudaGetLastError(); prefix_disk_enabled = false; err = "device/runtime identity unavailable";
++            } else {
++                settings.emplace_back(device_properties.name);
++                settings.push_back(std::to_string(device_properties.major) + ":" +
++                    std::to_string(device_properties.minor) + ":" + std::to_string(driver) + ":" + std::to_string(runtime));
++#if defined(STRATA_USE_HIP)
++                settings.emplace_back(device_properties.gcnArchName);
++                settings.push_back(std::to_string(device_properties.pciDomainID) + ":" +
++                    std::to_string(device_properties.pciBusID) + ":" + std::to_string(device_properties.pciDeviceID));
++#else
++                settings.emplace_back(device_properties.uuid.bytes, sizeof(device_properties.uuid.bytes));
++#endif
++                // A layer split: every later stage's own card and layer carve too (each stage image is that card's
++                // running state and K/V).  Nothing is added without a split, so one GPU's identity is unchanged.
++                for (size_t k = 0; k < stages.size(); ++k) {
++                    const GpuStage& stage_k = *stages[k];
++                    cudaDeviceProp stage_properties{};
++                    if (cudaGetDeviceProperties(&stage_properties, stage_k.dev) != cudaSuccess) {
++                        cudaGetLastError(); prefix_disk_enabled = false; err = "stage device identity unavailable";
++                        break;
++                    }
++                    settings.push_back("stage " + std::to_string(k + 1) + ":" + std::to_string(stage_k.dev) + ":" +
++                                       std::to_string(stage_k.lb) + ":" + std::to_string(stage_k.le));
++                    settings.emplace_back(stage_properties.name);
++                    settings.push_back(std::to_string(stage_properties.major) + ":" +
++                                       std::to_string(stage_properties.minor));
++#if defined(STRATA_USE_HIP)
++                    settings.emplace_back(stage_properties.gcnArchName);
++                    settings.push_back(std::to_string(stage_properties.pciDomainID) + ":" +
++                        std::to_string(stage_properties.pciBusID) + ":" + std::to_string(stage_properties.pciDeviceID));
++#else
++                    settings.emplace_back(stage_properties.uuid.bytes, sizeof(stage_properties.uuid.bytes));
++#endif
++                }
++            }
++            // Conservative compatibility: all engine options except the cache destination,
++            // and all STRATA_/CUDA_ environment overrides. Exact request tokens are checked separately.
++            for (int i = 1; i < argc; ++i) {
++                if (std::string(argv[i]) == "--prompt-cache-file") { ++i; continue; }
++                settings.emplace_back(argv[i]);
++            }
++            std::vector<std::string> environment;
++#ifdef _WIN32
++            if (wchar_t* block = GetEnvironmentStringsW()) {
++                for (const wchar_t* p = block; *p; p += std::wcslen(p) + 1) {
++                    if (_wcsnicmp(p, L"STRATA_", 7) && _wcsnicmp(p, L"CUDA_", 5)) continue;
++                    const int count = WideCharToMultiByte(CP_UTF8, 0, p, -1, nullptr, 0, nullptr, nullptr);
++                    std::string entry(size_t(count > 0 ? count : 1), '\0');
++                    if (count > 0 && WideCharToMultiByte(CP_UTF8, 0, p, -1, entry.data(), count, nullptr, nullptr)) {
++                        entry.pop_back(); environment.push_back(std::move(entry));
++                    }
++                }
++                FreeEnvironmentStringsW(block);
++            } else { prefix_disk_enabled = false; err = "environment identity unavailable"; }
++#else
++            for (char** p = environ; p && *p; ++p)
++                if (!std::strncmp(*p, "STRATA_", 7) || !std::strncmp(*p, "CUDA_", 5)) environment.emplace_back(*p);
++#endif
++            std::sort(environment.begin(), environment.end());
++            settings.insert(settings.end(), environment.begin(), environment.end());
++            try {
++                const auto destination = std::filesystem::weakly_canonical(o.prompt_cache_file);
++                for (const auto& p : assets) {
++                    if (p.empty()) continue;
++                    const auto asset = std::filesystem::canonical(p);
++                    const auto relative = destination.lexically_relative(asset);
++                    if (destination == asset || (std::filesystem::is_directory(asset) && !relative.empty() &&
++                            *relative.begin() != "..")) {
++                        prefix_disk_enabled = false; err = "cache destination overlaps model assets"; break;
++                    }
++                }
++            } catch (const std::exception& e) { prefix_disk_enabled = false; err = e.what(); }
++            if (prefix_disk_enabled)
++                prefix_disk_enabled = strata::core::prefix_cache_identity(assets, settings, prefix_identity, err);
++            std::fprintf(stderr, "strata serve: prefix disk cache: %s (identity %.1f ms)%s%s\n",
++                         prefix_disk_enabled ? "enabled" : "disabled",
++                         std::chrono::duration<double, std::milli>(Clock::now() - identity_start).count(),
++                         prefix_disk_enabled ? "" : ": ", prefix_disk_enabled ? "" : err.c_str());
++            err.clear();
++        }
+         strata::core::ConversationCache conversations(
+             o.prompt_cache > 0 ? (size_t) o.conversation_cache_mib * 1024 * 1024 : 0,
+             (size_t) o.conversation_cache_slots, o.conversation_cache_min_tokens);
+@@ -12892,6 +13003,60 @@ int main(int argc, char** argv) {
+                     err.clear();
+                 }
+             }
++            int64_t incoming_tokens = parked.tokens;
++            bool incoming_live = parked.live, incoming_disk = false;
++            double disk_read_ms = 0;
++            // Only the same first-turn boundary as the ordinary root checkpoint is eligible.
++            // Do not replace a longer in-RAM match or read a disk image for a vision request.
++            if (prefix_disk_enabled && req_imgs.empty() && std::getenv("STRATA_CKPT_REREAD") == nullptr) {
++                int64_t disk_root = -1, last_turn = -1;
++                for (int64_t i = n - 1; i > 0; --i) if (ids[size_t(i)] == o.turn_token) { last_turn = i; break; }
++                for (int64_t i = 1; i < last_turn; ++i) if (ids[size_t(i)] == o.turn_token) { disk_root = i; break; }
++                if (disk_root >= o.prompt_cache_root && disk_root <= int64_t(strata::core::prefix_cache_max_tokens) &&
++                        disk_root > std::max(resume, (incoming || borrow) ? incoming_tokens : int64_t(0))) {
++                    const auto t0 = Clock::now();
++                    std::error_code ec;
++                    const auto bytes = std::filesystem::file_size(o.prompt_cache_file, ec);
++                    const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
++                    const uint64_t held = incoming ? incoming->bytes() : 0;
++                    if (!ec && bytes <= strata::core::prefix_cache_max_bytes + 88 &&
++                            strata::core::conversation_memory_admit(strata::core::available_host_bytes(), bytes + held + 1024 * 1024, floor)) {
++                        std::vector<int32_t> prefix(ids.begin(), ids.begin() + disk_root);
++                        strata::core::SavedConversation image;
++                        // One GPU: the whole-session form, as before.  A layer split: the same checks as a parked
++                        // image - each later stage's image against its own session (the draft K/V with the last
++                        // stage's), then the first stage's without the draft - all before any GPU write.
++                        auto disk_image_valid = [&](const strata::core::SavedConversation& im) -> bool {
++                            if (stages.empty()) return strata::core::conversation_snapshot_validate(im, ss, g, use_mtp ? &mtp.kv_state() : nullptr, err);
++                            if (im.stage_images.size() != stages.size()) { err = "stage count differs"; return false; }
++                            for (size_t i = 0; i < stages.size(); ++i) {
++                                const strata::core::OnDevice on(stages[i]->dev);
++                                if (!strata::core::conversation_snapshot_validate(im.stage_images[i], stages[i]->ss, g,
++                                        use_mtp && i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err)) {
++                                    err = "stage CUDA" + std::to_string(stages[i]->dev) + ": " + err;
++                                    return false;
++                                }
++                            }
++                            return strata::core::conversation_snapshot_validate(im, ss, g,
++                                       static_cast<const strata::core::QsaState*>(nullptr), err);
++                        };
++                        if (strata::core::prefix_cache_read(o.prompt_cache_file, prefix_identity, prefix,
++                                int32_t(ids[size_t(disk_root)]), want_cvec, image, err) &&
++                                disk_image_valid(image)) {
++                            incoming.emplace(std::move(image)); incoming_tokens = disk_root;
++                            incoming_live = true; incoming_disk = true;
++                            borrow = false;   // the disk root is the longer match: a donor stays parked, untouched
++                            slot_source = -1;   // batch slots: the disk root is the longer match
++                        } else {
++                            std::fprintf(stderr, "strata serve: prefix disk cache: miss (%s)\n", err.c_str()); err.clear();
++                        }
++                    } else {
++                        std::fprintf(stderr, "strata serve: prefix disk cache: miss (%s)\n",
++                                     ec ? "file unavailable" : "file size or physical RAM admission");
++                    }
++                    disk_read_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
++                }
++            }
+             // Preserve the outgoing branch before any checkpoint rewind, reset,
+             // or incoming restore overwrites the positional state it requires.
+             // pin=N: this request resumes exactly at the pinned shared prefix of the conversation the session holds
+@@ -13060,19 +13225,29 @@ int main(int argc, char** argv) {
+                                  mtp.kv_state().kv_mode, "ram",
+                                  (long long) (mtp.kv_state().n_slots * strata::kernels::qsa_real_shapes().page_size));
+                 }
+-                live = std::move(incoming->live.ids);
+-                live_imgs = std::move(incoming->live.imgs);
+-                if (stages.empty()) {
+-                    checks = std::move(incoming->checkpoints);
+-                } else {   // give each checkpoint back its stage parts (moved, not copied); none if they do not line up
+-                    strata::core::ConversationCheckpointSplit cs;
+-                    cs.stage0 = std::move(incoming->checkpoints);
+-                    for (auto& si : incoming->stage_images) cs.parts.push_back(std::move(si.checkpoints));
+-                    if (!strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear();
++                if (incoming_disk) {
++                    live = incoming->live.ids;
++                    live_imgs.clear(); checks.clear();
++                    incoming->live.used = ++check_clock;
++                    // a layer split: the root checkpoint carries each later stage's running state in its stage
++                    // parts, as checkpoint_at saves one (the stage images hold the same ids; restored above)
++                    for (auto& si : incoming->stage_images) incoming->live.stage_parts.push_back(std::move(si.live));
++                    checks.push_back(std::move(incoming->live)); // keep the restored root pinned in RAM
++                } else {
++                    live = std::move(incoming->live.ids);
++                    live_imgs = std::move(incoming->live.imgs);
++                    if (stages.empty()) {
++                        checks = std::move(incoming->checkpoints);
++                    } else {   // give each checkpoint back its stage parts (moved, not copied); none if they do not line up
++                        strata::core::ConversationCheckpointSplit cs;
++                        cs.stage0 = std::move(incoming->checkpoints);
++                        for (auto& si : incoming->stage_images) cs.parts.push_back(std::move(si.checkpoints));
++                        if (!strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear();
++                    }
+                 }
+                 cvec_cached = incoming->cvec;
+-                resume = parked.tokens;
+-                from_live = parked.live;
++                resume = incoming_tokens;
++                from_live = incoming_live;
+                 if (std::getenv("STRATA_SNAPSHOT_FULL_CAPTURE") == nullptr) {
+                     std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park
+                     for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));
+@@ -13080,6 +13255,10 @@ int main(int argc, char** argv) {
+                 }
+                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
+                 lent_slot = -1;   // (the main session holds the parked conversation now)
++                if (incoming_disk)
++                    std::fprintf(stderr, "strata serve: prefix disk cache: restored %lld tokens; read/validate %.1f ms, upload %.1f ms\n",
++                                 (long long) resume, disk_read_ms,
++                                 std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+                 std::fprintf(stderr, "strata serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu\n",
+                              (long long) resume, from_live ? "live" : "checkpoint",
+                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+@@ -14173,6 +14352,11 @@ int main(int argc, char** argv) {
+                         if (i >= o.prompt_cache_root) root_at = i;
+                         break;
+                     }
++            // a root past the drafter's window (Claude Code's ~40K system turn): its draft K/V are computed in full, or
++            // the prefix file below would skip it as incomplete; costs the draft layer's K/V of the extra cells once
++            if (use_mtp)
++                mtp.set_full_prefix(prefix_disk_enabled && root_at > 0 && req_imgs.empty() &&
++                                    root_at <= int64_t(strata::core::prefix_cache_max_tokens));
+             static const bool message_checkpoint = [] {
+                 const char* e = std::getenv("STRATA_CACHE_MESSAGE_BOUNDARY");
+                 return e != nullptr && std::atoi(e) != 0;
+@@ -14300,6 +14484,72 @@ int main(int argc, char** argv) {
+                 if (trace && to == message_at)
+                     std::fprintf(stderr, "strata serve: message boundary checkpoint: %lld tokens, %lld tail\n",
+                                  (long long) message_at, (long long) (turn_at - message_at));
++                // A long first request may skip old draft cells outside MTP's window.
++                // Persist only complete draft prefixes, usable by later shorter requests too.
++                if (to == root_at && prefix_disk_enabled && req_imgs.empty() && mtp.first_needed() > 0)
++                    std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (incomplete windowed draft prefix)\n");
++                if (to == root_at && prefix_disk_enabled && req_imgs.empty() && mtp.first_needed() <= 0 &&
++                        to <= int64_t(strata::core::prefix_cache_max_tokens)) {
++                    const auto save_start = Clock::now();
++                    try {
++                        const std::vector<int32_t> prefix(ids.begin(), ids.begin() + to);
++                        const std::vector<ImgKey> no_images;
++                        const std::vector<ConvCheckpoint> no_checkpoints;
++                        const strata::core::ConversationView view{prefix, no_images, no_checkpoints, want_cvec};
++                        size_t estimate = 0;
++                        const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
++                        // A layer split saves one image per stage, as parking does: the first stage's without the
++                        // draft, each later stage's on its own device, the draft K/V with the last one; the size is
++                        // the sum of the stages'.  Every stage is at `to` here (checkpoint_at just read them all).
++                        const size_t n_st = stages.size();
++                        const strata::core::QsaState* const no_draft = nullptr;
++                        auto disk_draft_of = [&](size_t k) -> const strata::core::QsaState* {
++                            return use_mtp && k + 1 == n_st ? &mtp.kv_state() : nullptr;
++                        };
++                        bool sized = n_st == 0
++                            ? strata::core::conversation_snapshot_bytes(view, ss, g, use_mtp ? &mtp.kv_state() : nullptr, estimate, err)
++                            : strata::core::conversation_snapshot_bytes(view, ss, g, no_draft, estimate, err);
++                        for (size_t k = 0; sized && k < n_st; ++k) {
++                            const strata::core::OnDevice on(stages[k]->dev);
++                            size_t stage_bytes = 0;
++                            sized = strata::core::conversation_snapshot_bytes(view, stages[k]->ss, g, disk_draft_of(k),
++                                                                              stage_bytes, err) &&
++                                    stage_bytes <= SIZE_MAX - estimate;
++                            if (sized) estimate += stage_bytes;
++                        }
++                        if (sized &&
++                                estimate <= strata::core::prefix_cache_max_bytes &&
++                                strata::core::conversation_memory_admit(strata::core::available_host_bytes(), estimate, floor)) {
++                            strata::core::SavedConversation image;
++                            bool captured = n_st == 0
++                                ? strata::core::conversation_snapshot_save(image, view, ss, g, use_mtp ? &mtp.kv_state() : nullptr, err)
++                                : strata::core::conversation_snapshot_save(image, view, ss, g, no_draft, err);
++                            for (size_t k = 0; captured && k < n_st; ++k) {   // the later stages, in stage order
++                                const strata::core::OnDevice on(stages[k]->dev);
++                                strata::core::SavedConversation part;
++                                captured = strata::core::conversation_snapshot_save(part, view, stages[k]->ss, g,
++                                                                                    disk_draft_of(k), err);
++                                if (!captured) err = "stage CUDA" + std::to_string(stages[k]->dev) + ": " + err;
++                                else image.stage_images.push_back(std::move(part));
++                            }
++                            if (!captured) {
++                                // A CUDA copy/synchronization error can poison the live session.
++                                std::printf("ERR capturing prefix disk cache: %s\n", err.c_str()); return 1;
++                            }
++                            const bool stored = strata::core::prefix_cache_write(o.prompt_cache_file, prefix_identity,
++                                                    int32_t(ids[size_t(to)]), image, err);
++                            std::fprintf(stderr, "strata serve: prefix disk cache: %s %lld tokens, %zu bytes in %.1f ms%s%s\n",
++                                         stored ? "saved" : "skip saving", (long long) to, image.bytes(),
++                                         std::chrono::duration<double, std::milli>(Clock::now() - save_start).count(),
++                                         stored ? "" : ": ", stored ? "" : err.c_str());
++                        } else {
++                            std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (size, geometry or physical RAM admission)\n");
++                        }
++                    } catch (const std::bad_alloc&) {
++                        std::fprintf(stderr, "strata serve: prefix disk cache: skip saving (host allocation failed)\n");
++                    }
++                    err.clear(); // A disk miss/write failure never changes the normal prefill error channel.
++                }
+             }
+             if (!refill(err)) {
+                 std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
