@@ -3301,6 +3301,26 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
     return true;
 }
 
+void Verifier::release_slots() {
+    const OnDevice on_device(device_);
+    if (cs_) cudaStreamSynchronize(cs_);
+    for (auto* m : {&exec_bm_, &commit_bm_, &save_bm_, &dcommit_bm_}) {
+        for (auto& kv : *m)
+            if (kv.second) cudaGraphExecDestroy(kv.second);
+        m->clear();
+    }
+    bm_used_.clear();
+    if (arena_b_) cudaFree(arena_b_);
+    if (h_commitb_) cudaFreeHost(h_commitb_);
+    arena_b_ = nullptr;
+    commitb_ = nullptr;
+    tail_snap_b_ = nullptr;
+    h_commitb_ = m_commitb_ = nullptr;
+    slots_.clear();
+    slot_sp_.clear();
+    last_batch_ = false;
+}
+
 bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err) {
     cudaGraphExec_t& ex = exec_bm_[bkey(rows, S, hbase)];
     if (ex != nullptr) return true;
