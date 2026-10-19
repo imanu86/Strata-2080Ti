@@ -7,7 +7,7 @@
     "tag": "v0.1.45",
     "commit": "477ac13cbe8e582c20484871ce459d20d82df09d"
   },
-  "stack_head": "0dd4dd954da53581ba821c06b600d2eeae4ae7b9",
+  "stack_head": "ecaad9074db6a547346f295d767cf17858fceeb6",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -3489,7 +3489,7 @@
       "switch": "`STRATA_PW_WITH_BATCH=1` (off: `--batch` turns the pipeline off, as upstream)",
       "origin": "upstream PR #3095 (18 Oct, +23/-5)",
       "upstream_status": "PR #3095 open, no maintainer answer yet; not in 0.1.45. Earlier precedent: fork noon-at-cgn d84da294.",
-      "measured": "Author: +20% solo decode on 2x RX 6900 XT (75 -> 66.5 tok/s lost to --batch at 32K). Here: single chat with `--batch 4 --batch-groups 2` is 50-55 tok/s against 64.5 without `--batch`; the lever is meant to recover it. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs).",
+      "measured": "Compiled and run 19 Oct (build 99fa6bd8, 2x solo:S with `--batch 4 --batch-groups 2`, 384 tokens, same reserves in both arms, A-P-A-P): decode 57.3 / 56.5 / 57.5 / 56.1 with the lever against 56.0 / 56.8 / 54.8 / 54.5 without (+2.4% mean), reserve 2300 MiB; the lever needs the larger reserve (the drafter, 837 MiB, and the windows, 234 MiB, move onto the 3060: with 1905 MiB the first request stalled for 240 s with 0 MiB free). It does NOT recover the single chat: the same config with reserve 1905 and no lever gives 60.8 (one run), the Daily without --batch 64.5. Installed no.",
       "docs": "docs/MULTICHAT.md",
       "patch": "18-pw-with-batch.patch",
       "commit": "890bbca5e5be6f91981dd25a855a5c1c30ebeca2",
@@ -3579,7 +3579,7 @@
       "switch": "`STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` (off). `STRATA_PF_FUSED=1` also switches on the existing sm_86 native path of the first stage.",
       "origin": "upstream PR #3104 (rebased from #1581; supersedes #3085, the same idea with another gate)",
       "upstream_status": "PR #3104 open (and #3085); in 0.1.45 `STRATA_PF_FUSED_SM75` only covers the Q2_0 pack, so on our IQ3_XXS pack it did nothing",
-      "measured": "Author: PP 509 -> 606 tok/s (+19.2%, RTX 2060); +11.5% together with the VRAM loans of #3105 (2080 Super Max-Q 8 GB, 31k prompt); relative RMS against MMQ 3.5e-5..2.6e-4. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs).",
+      "measured": "Compiled and run 19 Oct (build ecaad907, fixed `--expert-cache 1500`, 3 prompts of ~300 and ~3000 tokens): TTFT median 1.83 s (control 1.77-1.84) at ~300 tokens and 6.55 s (control 5.72-5.89) at ~3000, i.e. +11% slower on the long prompts; first-token logits against the control KL 3e-5..6e-4, inside the control-to-control spread (1e-4..1.3e-3, the bench is not deterministic). The 300-token texts differ from a control as often as two controls differ. No gain on this pack and card pair; kept opt-in. Installed no.",
       "docs": "docs/DETAILS.md",
       "patch": "19-pf-fused-native-sm75.patch",
       "commit": "2ddc5e9f99d46260fc6413a1fa460a49fcbfe2ab",
@@ -3753,7 +3753,7 @@
       "switch": "`STRATA_PF_DIRETTO=1`, `STRATA_PF_DIRETTO_MAX=<rows>` (off here; the PR has it on), `STRATA_PF_ROUTE_PRIOR=<lambda>` (off)",
       "origin": "upstream PR #2774 (apatassini); default turned to opt-in in this fork",
       "upstream_status": "PR #2774 open; not in 0.1.45",
-      "measured": "Author (RTX 5070 Ti, Q2_0 pack, 28K cached context): 177 tokens 473 -> 315 ms, 500 668 -> 470, 900 826 -> 677; unchanged from 1 024 tokens. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs).",
+      "measured": "Compiled and run 19 Oct (build ecaad907): needed a fix (the PR's scratch was one static, allocated on the first stage's card and read by the second: stall at layer 16, then an illegal memory access); with one scratch per device it runs. TTFT median 1.81 s at ~300 tokens (control 1.77-1.84) and 5.81 s at ~3000 (control 5.72-5.89): no gain. Logits: bitwise equal to the control on the prompts above stream_all_min, KL 8e-5..1e-3 on the three ~300-token ones (the control-to-control spread is of the same size). Installed no.",
       "docs": "docs/MULTICHAT.md",
       "patch": "20-pf-diretto.patch",
       "commit": "0dd4dd954da53581ba821c06b600d2eeae4ae7b9",
@@ -3846,7 +3846,8 @@
       ],
       "files": [
         "src/prefill/prefill.cpp"
-      ]
+      ],
+      "notes": "Follow-up on lab/multichat45b: ecaad907 (one scratch per device); folded into this patch. The PR has the path on by default; here STRATA_PF_DIRETTO=1 is needed."
     }
   ],
   "retired": [

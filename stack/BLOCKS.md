@@ -8441,14 +8441,15 @@ Anchor:
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
 ```
-Block (hunk 2 of `src/prefill/prefill.cpp` in the patch, 17 lines):
+Block (hunk 2 of `src/prefill/prefill.cpp` in the patch, 18 lines):
 ```diff
                      pt.mark(kPfRouter, cs);
                      if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
                      route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
 +                    {   // QWEN3.8 16/10/2026 STRATA_PF_ROUTE_PRIOR=lambda: the push toward resident experts in short chunks
 +                        static const float pf_prior = [] { const char* v = std::getenv("STRATA_PF_ROUTE_PRIOR"); return v ? (float) std::atof(v) : 0.0f; }();
-+                        static int32_t* d_res_row = nullptr;
++                        static int32_t* d_res_rows[16] = {};   // per device (a layer split has two)
++                        int32_t*& d_res_row = d_res_rows[m.device >= 0 && m.device < 16 ? m.device : 0];
 +                        if (pf_prior > 0.0f && !stream_all && m.host_res != nullptr && m.cache != nullptr && m.g->n_expert == 512 && m.g->n_expert_used == 10) {
 +                            if (d_res_row == nullptr && cudaMalloc((void**) &d_res_row, 512 * sizeof(int32_t)) != cudaSuccess) d_res_row = nullptr;
 +                            if (d_res_row != nullptr) {
@@ -8577,15 +8578,21 @@ Anchor:
                         }
                         n_order = order.size();
 ```
-Block (hunk 7 of `src/prefill/prefill.cpp` in the patch, 78 lines):
+Block (hunk 7 of `src/prefill/prefill.cpp` in the patch, 84 lines):
 ```diff
                              }
                          }
                          n_order = order.size();
 +                        if (!on_pf.empty()) {   // QWEN3.8 PF_DIRETTO v2: the resident experts on the decode's grouped kernel
 +                            constexpr int64_t CH = 1024;
-+                            static void* d_buf = nullptr;
-+                            static size_t sc_bytes = 0, xq_bytes = 0, xs_bytes = 0;
++                            // one scratch per device: a layer split runs this on two GPUs (the single static of the PR
++                            // was allocated on the first stage's card and read by the second: illegal memory access)
++                            struct PfDirBuf { void* p = nullptr; size_t sc = 0, xq = 0, xs = 0; };
++                            static PfDirBuf pf_bufs[16];
++                            PfDirBuf& pfb = pf_bufs[m.device >= 0 && m.device < 16 ? m.device : 0];
++                            void*& d_buf = pfb.p;
++                            size_t &sc_bytes = pfb.sc, &xq_bytes = pfb.xq, &xs_bytes = pfb.xs;
++                            const strata::core::OnDevice on_pfdir(m.device);
 +                            const strata::kernels::cpu::ExpertLayout& lay2 = strata::kernels::cpu::expert_layout();
 +                            const bool nat = lay2.native;
 +                            const size_t xq_need = nat ? (size_t) T * (size_t) (N / 32) * 36 : (size_t) T * (size_t) (N / 32) * 34;
@@ -8597,64 +8604,5 @@ Block (hunk 7 of `src/prefill/prefill.cpp` in the patch, 78 lines):
 +                                const size_t s1 = nat ? strata::kernels::native_expert_scratch_bytes(CH, nff)
 +                                                      : (size_t) strata::kernels::moe_hit_grouped_scratch_bytes(CH, N, 640);
 +                                sc_bytes = (s1 + 255) & ~(size_t) 255;
-+                                xq_bytes = (std::max<size_t>(xq_need, (size_t) 1024 * (N / 32) * 36) + 255) & ~(size_t) 255;
-+                                xs_bytes = (std::max<size_t>(xs_need, (size_t) 1024 * (N / 32) * 4) + 255) & ~(size_t) 255;
-+                                const size_t grp_bytes = (size_t) CH * 8 + (size_t) (CH + 1) * 4 + (size_t) CH * 8 + 64;
-+                                if (cudaMalloc(&d_buf, sc_bytes + xq_bytes + xs_bytes + grp_bytes) != cudaSuccess) {
-+                                    (void) cudaGetLastError(); d_buf = nullptr; pf_dir_failed = true;
-+                                    err = "prefill: PF_DIRETTO scratch (QWEN3.8): no VRAM";
-+                                    return false;
-+                                }
-+                                std::fprintf(stderr, "QWEN3.8 PF_DIRETTO v2: on (%s kernel, %.1f MiB of scratch)\n", nat ? "native" : "s2",
-+                                             (double) (sc_bytes + xq_bytes + xs_bytes + grp_bytes) / 1048576.0);
-+                            }
-+                            uint8_t* base8 = (uint8_t*) d_buf;
-+                            void* scratch = base8;
-+                            uint8_t* xq = base8 + sc_bytes;
-+                            float* xs = (float*) (base8 + sc_bytes + xq_bytes);
-+                            unsigned long long* g_ptr = (unsigned long long*) (base8 + sc_bytes + xq_bytes + xs_bytes);
-+                            int32_t* g_start = (int32_t*) (g_ptr + CH);
-+                            int32_t* g_dst = g_start + (CH + 1);
-+                            int32_t* g_tok = g_dst + CH;
-+                            int32_t* g_n = g_tok + CH;
-+                            pt.mark(kPfDequant, cs);
-+                            if (nat) strata::kernels::quantize_q8_1_rows(m.mixed, T, N, xq, m.cs);
-+                            else strata::kernels::quantize_q8_0_scaled(m.mixed, xq, xs, (int64_t) T * N, m.cs);
-+                            // host tables (pageable: cudaMemcpyAsync stages them before returning, so they can be reused)
-+                            std::vector<unsigned long long> hp; std::vector<int32_t> hs, hd, ht;
-+                            auto run = [&]() {
-+                                if (hp.empty()) return;
-+                                hs.push_back((int32_t) hd.size());
-+                                const int32_t ng = (int32_t) hp.size();
-+                                cudaMemcpyAsync(g_ptr, hp.data(), hp.size() * 8, cudaMemcpyHostToDevice, m.cs);
-+                                cudaMemcpyAsync(g_start, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice, m.cs);
-+                                cudaMemcpyAsync(g_dst, hd.data(), hd.size() * 4, cudaMemcpyHostToDevice, m.cs);
-+                                cudaMemcpyAsync(g_tok, ht.data(), ht.size() * 4, cudaMemcpyHostToDevice, m.cs);
-+                                cudaMemcpyAsync(g_n, &ng, 4, cudaMemcpyHostToDevice, m.cs);
-+                                if (nat) {
-+                                    const auto& f = lay2.fmt[(size_t) l];
-+                                    const strata::kernels::NativeExpertLayout L = strata::kernels::native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff);
-+                                    strata::kernels::native_expert_grouped(L, g_ptr, g_start, g_n, g_dst, g_tok, ng, (int64_t) hd.size(), xq, scratch, m.Dm, m.cs);
-+                                } else {
-+                                    strata::kernels::moe_grouped_s2(g_ptr, g_start, g_n, g_dst, g_tok, ng, (int64_t) hd.size(), xq, xs, scratch, m.Dm, m.cs);
-+                                }
-+                                hp.clear(); hs.clear(); hd.clear(); ht.clear();
-+                            };
-+                            for (int32_t e = 0; e < m.g->n_expert; ++e) {
-+                                if (!on_pf[(size_t) e]) continue;
-+                                const int64_t o0 = m.off[(size_t) e], ne = m.cnt[(size_t) e];
-+                                if ((int64_t) hd.size() + ne > CH) run();
-+                                const unsigned long long bp = (unsigned long long) m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]);
-+                                const int64_t gmax = nat ? ne : 8;   // QWEN3.8 PF_DIRETTO v4: moe_grouped_s2 takes <= 8 rows a group
-+                                for (int64_t r2 = 0; r2 < ne; ++r2) {
-+                                    if (r2 % gmax == 0) { hp.push_back(bp); hs.push_back((int32_t) hd.size()); }
-+                                    hd.push_back((int32_t) (o0 + r2)); ht.push_back(src_h[(size_t) (o0 + r2)]);
-+                                }
-+                                stats_.experts_resident++;
-+                            }
-+                            run();
-+                        }
-                         // set_cpu_pool: the CPU's experts on a thread while this one streams and runs the GPU's; their
-                         // unweighted rows land in Dm's row order, so the combine weights them as any other row
-                         if (rows_cpu > 0) {
+... 60 more lines: see 20-pf-diretto.patch
 ```

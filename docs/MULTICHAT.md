@@ -46,18 +46,17 @@ Non portati: #1524 (rifiutata da upstream), #2738 (-22% misurato da terzi su 208
 prestito di prefisso per stadio (#1164 esteso: i sotto-agenti funzionano gia' con la cache a 16 posti, costo park+restore
 ~0,3 s contro ~4 s di lettura).
 
-## Leve del 19/10 (lab/multichat45b, da multichat45 34cf6351) - compilato no, installato no, provato no
+## Leve del 19/10 (lab/multichat45b, da multichat45 34cf6351) - compilato si (sm_75+86), installato no, provato con mc2.py e mc45b_det.py
 
 Quattro leve dalla ricognizione `RICOGNIZIONE_PR_FORK_2026-10-19.md`; tutte opt-in, un commit per leva, registro in `stack/` (patch 18-20).
-Scritte con il laboratorio in pausa (coordinatore, 19/10): **nessuna compilazione, nessuna misura**. La build (`build_lock.py`) e la serie di
-verifica (`corse_2080ti/20261019_multichat45b/coda_mc45b.sh`, un solo `bench.lock`) partono quando la pausa viene tolta.
+Build `build-multichat45b-99fa6bd8` (#3095, #3104) e `-ecaad907` (con la correzione di #2774); esiti nella sottosezione "Esiti" in fondo.
 
 | leva | origine | env | commit | stato |
 |---|---|---|---|---|
-| la chat singola tiene `--pipeline-windows` accanto a `--batch` | upstream #3095 (+23/-5) | `STRATA_PW_WITH_BATCH=1` | 890bbca5 | portata; 3 conflitti in `generate.cpp` risolti (con `STRATA_BATCH_PIPELINE` e `STRATA_PIPED_MTP`, che restano indipendenti) |
+| la chat singola tiene `--pipeline-windows` accanto a `--batch` | upstream #3095 (+23/-5) | `STRATA_PW_WITH_BATCH=1` | 890bbca5 | portata; 3 conflitti in `generate.cpp` risolti (con `STRATA_BATCH_PIPELINE` e `STRATA_PIPED_MTP`, che restano indipendenti); funziona, +2,4% di decode, **non recupera la chat singola** |
 | prefill delle richieste brevi, raccolta MMQ in blocchi | fork sibnick 97b83332 | (`STRATA_PREFILL_BATCH_GATHER`) | - | **non portata: gia' in 0.1.45** (vedi sotto) |
-| fusione int8 degli esperti IQ anche su Turing | upstream #3104 (sostituisce #3085) | `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` | 2ddc5e9f | portata, applicata pulita; cambia i bit (nb) |
-| prefill di chunk molto corti sul kernel di decode | upstream #2774 | `STRATA_PF_DIRETTO=1` (la PR l'ha acceso di default: qui spento), `STRATA_PF_DIRETTO_MAX`, `STRATA_PF_ROUTE_PRIOR` (spento) | 0dd4dd95 | portata, applicata pulita; cambia i bit dei prompt corti (nb) |
+| fusione int8 degli esperti IQ anche su Turing | upstream #3104 (sostituisce #3085) | `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` | 2ddc5e9f | portata, applicata pulita; cambia i bit (nb); TTFT +8..11% sui prompt da ~3000 token |
+| prefill di chunk molto corti sul kernel di decode | upstream #2774 | `STRATA_PF_DIRETTO=1` (la PR l'ha acceso di default: qui spento), `STRATA_PF_DIRETTO_MAX`, `STRATA_PF_ROUTE_PRIOR` (spento) | 0dd4dd95 + ecaad907 | portata; il PR aveva uno scratch unico per tutte le schede (stallo con lo split), corretto; nessun guadagno di TTFT |
 
 **#3095.** Con `--batch` il motore spegneva le due finestre e teneva il drafter sull'ultima scheda (`mtp_first` richiedeva `batch == 0`). Con la
 leva la richiesta sola mantiene le finestre e il drafter sulla prima scheda (3060); i drafter degli slot di `--batch-mtp` lo seguono (sessione
@@ -70,8 +69,7 @@ La 0.1.45 contiene `653f0113` (Breno Perucchi, 6/10: "gather experts in groups o
 `STAGE_GRP` = 32 slot, un solo wait e un solo evento per gruppo, spento da `STRATA_PREFILL_GROUP_GATHER=0`. E' lo stesso lavoro (108 078 -> 6 934 lanci
 in sibnick = raggruppare), quindi il guadagno dichiarato (-12/-15%) e' gia' nel nostro exe; nella 0.1.43 del Daily non c'era. Portare il suo
 codice avrebbe duplicato il raggruppamento (`group_gather` e `group_resident` coesisterebbero). Resta fuori solo il contatore opt-in
-`STRATA_PREFILL_GATHER_COUNTS`. Verifica prevista: braccio `gg0` (`STRATA_PREFILL_GROUP_GATHER=0`) contro controllo, che misura quanto il
-raggruppamento upstream gia' vale sui prompt da ~300 e ~3000 token.
+`STRATA_PREFILL_GATHER_COUNTS`. Misurato con il braccio `gg0` (`STRATA_PREFILL_GROUP_GATHER=0`): vedi Esiti.
 
 **#3104.** Copre gate/up IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_XS e down Q2_0/IQ4_NL su sm_75; le coppie non coperte vanno su MMQ. Il pack nostro (gate/up
 IQ3_XXS, down IQ4_NL sui layer 28-47) e' coperto dove il down e' IQ4_NL; gli altri layer restano su MMQ (da leggere nel log). `STRATA_PF_FUSED=1`
@@ -82,10 +80,47 @@ danno errore relativo RMS 3,5e-5..2,6e-4 contro MMQ: i testi non sono garantiti 
 compresso. Condizioni nel codice: `!stream_all`, senza peer, con cache e `host_res`. Scratch proprio (~9 MiB, `cudaMalloc` al primo uso: se non c'e'
 VRAM il prefill fallisce con "PF_DIRETTO scratch"). Con `STRATA_PF_DIRETTO` non impostato il percorso e' quello di prima.
 
-Verifica prevista sotto un solo `bench.lock` (`coda_mc45b.sh`): (a) `solo:S,solo:S` con `--batch 4 --batch-groups 2 ...` senza e con
-`STRATA_PW_WITH_BATCH=1`, ordine C-P-C-P; (b) `mc45b_det.py` a cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, senza cache
-su disco ne' visione), 3 prompt da ~300 e 3 da ~3000 token a T=0, 96 token: controllo, `fused`, `diretto`, `gg0`, secondo controllo; confronto
-con `cmp_det.py` (sha1 del testo contro il controllo, TTFT). Gli esiti vanno in una sezione apposta quando esistono.
+### Esiti (19/10, M = misurato; build `build-multichat45b-99fa6bd8` per #3095 e #3104, `-ecaad907` per #2774; installato no)
+
+Condizione: senza Jump Desktop (CPU di JumpConnect ferma durante le corse dopo le 13:37; prima non rilevata). Una macchina, una sola finestra di `bench.lock`
+per giro. Esiti grezzi in `corse_2080ti/20261019_multichat45b/` (`mc2_pw-*`, `mc45b_*`, `*.run.log`).
+
+**#3095, chat singola con `--batch 4 --batch-groups 2`** (`solo:S` x2 per corsa, 384 token, decode medio t/s; stesse riserve in entrambi i bracci):
+
+| braccio | corsa 1 | corsa 2 | note |
+|---|---:|---:|---|
+| riserva 1905/700, senza leva (`pw-ctrl1`) | 60,8 / 60,9 | - | una sola corsa |
+| riserva 1905/700, **con** la leva | - | - | **scartata: stallo di 240 s**, 0 MiB liberi sulla 3060 (il drafter da 837 MiB e le finestre da 234 MiB passano sulla 3060) |
+| riserva 2300/700, senza leva | 56,0 / 56,8 | 54,8 / 54,5 | |
+| riserva 2300/700, `STRATA_PW_WITH_BATCH=1` | 57,3 / 56,5 | 57,5 / 56,1 | media +2,4% |
+
+La leva funziona (le finestre restano, il drafter sta sulla prima scheda) ma **non recupera la chat singola**: +1,4 t/s contro un divario di ~8 rispetto al Daily senza
+`--batch` (64,5). Il guadagno di una configurazione e' la riserva, non la leva: da 1905 a 2300 MiB il controllo perde 5 t/s (meno esperti nella cache della 3060),
+e la leva ne ha bisogno (il motore stesso chiede 2196). Bozze accettate 198/315 contro 189/319 (uguali entro il rumore).
+
+**Bench a cache fissa** (`mc45b_det.py`: `--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, T=0, 96 token, 3 prompt da ~300 e 3 da ~3000 token, un motore per
+braccio; mediana dei 3 TTFT, s; i controlli sono 5 avvii):
+
+| braccio | ~300 token | ~3000 token |
+|---|---:|---:|
+| controllo (ctl0, ctl1, ctl2, ctl3, ctl4) | 1,77 / 1,83 / 1,83 / 1,84 / 1,83 | 5,72 / 5,80 / 5,84 / 5,89 / 5,89 |
+| `STRATA_PF_FUSED=1 ..._SM75=1 ..._NATIVE_SM75=1` (#3104) | 1,78 / 1,83 | 6,36 / 6,55 (**+8..11%**) |
+| `STRATA_PF_DIRETTO=1` (#2774, dopo la correzione) | 1,81 | 5,81 |
+| `STRATA_PREFILL_GROUP_GATHER=0` (spegne il raggruppamento di upstream, per la nota su sibnick) | 1,95 / 1,91 (+5%) | 6,23 / 6,19 (+7%) |
+
+**Il bench non e' deterministico**: due controlli identici (ctl3, ctl4) danno testi diversi (1/3 e 0/3 uguali) e logit del primo token diversi (KL 6e-5..1,3e-3, max|d| 0,4..1,4,
+argmax uguale); i risultati sembrano bimodali (ctl3 = diretto2 sui prompt lunghi = fused3 su s0; ctl4 = gg03 bit a bit). Quindi **"testo identico" non e' una prova** su questo
+percorso (MTP + finestre in pipeline + cache che si assesta); la KL delle leve (fused3 3e-5..6e-4, diretto2 8e-5..1e-3, 0 sui prompt lunghi dove non agisce) sta dentro
+il rumore fra controlli. Per una parita' vera servono il teacher forcing del banco DET (`STRATA_FORCE_IDS`) e la KL su molti prompt. Logit in `mc45b_*/fl.<n>`,
+confronto con `cmp_logits.py`.
+
+**#2774 (PF_DIRETTO) aveva un difetto**: lo scratch era un unico `static` allocato sulla scheda del primo stadio e letto dal secondo, quindi con lo split il primo chunk
+corto si fermava al layer 16 per 240 s e dopo il riavvio `mul_mat_q` dava "illegal memory access" (primo giro, `diretto`, TTFT 217-414 s). Corretto in `ecaad907` (uno scratch per scheda,
+anche il vettore di `STRATA_PF_ROUTE_PRIOR`); dopo la correzione gira e non cambia i prompt lunghi (bit a bit), ma **non accelera** i prompt da ~300 token (1,81 contro 1,77-1,84 s).
+
+**Lettura.** TTFT di 300 token = 1,8 s e di 3000 = 5,8 s sono dominati da altro che dal costo per lancio degli esperti (lettura degli esperti non residenti dalla RAM, PLE,
+due stadi): le tre leve sul prefill non muovono la mediana oltre il rumore (+-0,05 s), e #3104 la peggiora sui prompt lunghi. Sibnick K37 era gia' dentro (il suo vantaggio
+di -12% e' il raggruppamento di 653f0113, che da noi vale +5..7% di TTFT: braccio `gg0`). Nessuna delle quattro leve e' da accendere nel Daily.
 
 ## Misure mc2.py (corse singole, brevi; M = misurato)
 
