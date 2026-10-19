@@ -46,6 +46,47 @@ Non portati: #1524 (rifiutata da upstream), #2738 (-22% misurato da terzi su 208
 prestito di prefisso per stadio (#1164 esteso: i sotto-agenti funzionano gia' con la cache a 16 posti, costo park+restore
 ~0,3 s contro ~4 s di lettura).
 
+## Leve del 19/10 (lab/multichat45b, da multichat45 34cf6351) - compilato no, installato no, provato no
+
+Quattro leve dalla ricognizione `RICOGNIZIONE_PR_FORK_2026-10-19.md`; tutte opt-in, un commit per leva, registro in `stack/` (patch 18-20).
+Scritte con il laboratorio in pausa (coordinatore, 19/10): **nessuna compilazione, nessuna misura**. La build (`build_lock.py`) e la serie di
+verifica (`corse_2080ti/20261019_multichat45b/coda_mc45b.sh`, un solo `bench.lock`) partono quando la pausa viene tolta.
+
+| leva | origine | env | commit | stato |
+|---|---|---|---|---|
+| la chat singola tiene `--pipeline-windows` accanto a `--batch` | upstream #3095 (+23/-5) | `STRATA_PW_WITH_BATCH=1` | 890bbca5 | portata; 3 conflitti in `generate.cpp` risolti (con `STRATA_BATCH_PIPELINE` e `STRATA_PIPED_MTP`, che restano indipendenti) |
+| prefill delle richieste brevi, raccolta MMQ in blocchi | fork sibnick 97b83332 | (`STRATA_PREFILL_BATCH_GATHER`) | - | **non portata: gia' in 0.1.45** (vedi sotto) |
+| fusione int8 degli esperti IQ anche su Turing | upstream #3104 (sostituisce #3085) | `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` | 2ddc5e9f | portata, applicata pulita; cambia i bit (nb) |
+| prefill di chunk molto corti sul kernel di decode | upstream #2774 | `STRATA_PF_DIRETTO=1` (la PR l'ha acceso di default: qui spento), `STRATA_PF_DIRETTO_MAX`, `STRATA_PF_ROUTE_PRIOR` (spento) | 0dd4dd95 | portata, applicata pulita; cambia i bit dei prompt corti (nb) |
+
+**#3095.** Con `--batch` il motore spegneva le due finestre e teneva il drafter sull'ultima scheda (`mtp_first` richiedeva `batch == 0`). Con la
+leva la richiesta sola mantiene le finestre e il drafter sulla prima scheda (3060); i drafter degli slot di `--batch-mtp` lo seguono (sessione
+di carvatura `bslot_ss[0]`). `STRATA_BATCH_PIPELINE=1` (nostra, gia' misurata: solo 55,0) teneva le finestre ma non il drafter sulla prima
+scheda: probabile motivo del mancato recupero. Non provato: `STRATA_PW_WITH_BATCH` insieme a `STRATA_PIPED_MTP` (il drafter degli slot e' sulla
+prima scheda, le catene asincrone di PIPED_MTP presuppongono l'ultima). Atteso (S): chat singola da ~52 a ~62-65 t/s, aggregato invariato.
+
+**Sibnick K37, gia' in base.** Il commit sibnick (raccolta MMQ degli esperti in blocchi sul percorso corto) si appoggia a un `main` precedente.
+La 0.1.45 contiene `653f0113` (Breno Perucchi, 6/10: "gather experts in groups on short prompts too (resident and staged)"): ring da
+`STAGE_GRP` = 32 slot, un solo wait e un solo evento per gruppo, spento da `STRATA_PREFILL_GROUP_GATHER=0`. E' lo stesso lavoro (108 078 -> 6 934 lanci
+in sibnick = raggruppare), quindi il guadagno dichiarato (-12/-15%) e' gia' nel nostro exe; nella 0.1.43 del Daily non c'era. Portare il suo
+codice avrebbe duplicato il raggruppamento (`group_gather` e `group_resident` coesisterebbero). Resta fuori solo il contatore opt-in
+`STRATA_PREFILL_GATHER_COUNTS`. Verifica prevista: braccio `gg0` (`STRATA_PREFILL_GROUP_GATHER=0`) contro controllo, che misura quanto il
+raggruppamento upstream gia' vale sui prompt da ~300 e ~3000 token.
+
+**#3104.** Copre gate/up IQ2_XXS/XS/S, IQ3_XXS/S, IQ4_XS e down Q2_0/IQ4_NL su sm_75; le coppie non coperte vanno su MMQ. Il pack nostro (gate/up
+IQ3_XXS, down IQ4_NL sui layer 28-47) e' coperto dove il down e' IQ4_NL; gli altri layer restano su MMQ (da leggere nel log). `STRATA_PF_FUSED=1`
+accende anche il percorso nativo gia' in upstream sulla 3060 (sm_86): l'effetto sul prompt riguarda i due stadi, non e' isolabile. Gli autori
+danno errore relativo RMS 3,5e-5..2,6e-4 contro MMQ: i testi non sono garantiti identici, serve la KL.
+
+**#2774.** Sotto `stream_all_min` gli esperti residenti con al massimo 8 righe escono da MMQ e girano su `native_expert_grouped` dal blob
+compresso. Condizioni nel codice: `!stream_all`, senza peer, con cache e `host_res`. Scratch proprio (~9 MiB, `cudaMalloc` al primo uso: se non c'e'
+VRAM il prefill fallisce con "PF_DIRETTO scratch"). Con `STRATA_PF_DIRETTO` non impostato il percorso e' quello di prima.
+
+Verifica prevista sotto un solo `bench.lock` (`coda_mc45b.sh`): (a) `solo:S,solo:S` con `--batch 4 --batch-groups 2 ...` senza e con
+`STRATA_PW_WITH_BATCH=1`, ordine C-P-C-P; (b) `mc45b_det.py` a cache fissa (`--expert-cache 1500`, senza `--elastic`, `--adapt-every 0`, senza cache
+su disco ne' visione), 3 prompt da ~300 e 3 da ~3000 token a T=0, 96 token: controllo, `fused`, `diretto`, `gg0`, secondo controllo; confronto
+con `cmp_det.py` (sha1 del testo contro il controllo, TTFT). Gli esiti vanno in una sezione apposta quando esistono.
+
 ## Misure mc2.py (corse singole, brevi; M = misurato)
 
 Harness `corse_2080ti/20261018_multichat45/mc2.py` (copia di quello del 13/10), code `coda_mc45*.sh`, esiti `mc2_<tag>/res.json`.

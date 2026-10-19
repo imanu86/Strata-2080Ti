@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Mon, 19 Oct 2026 09:36:21 +0200
+Subject: [PATCH] SONNET-STRATA-Porta da upstream #3104
+ STRATA_PF_FUSED_NATIVE_SM75: esperti fusi int8 IQ del prefill anche su Turing
+ (opt-in)
+
+Estende i kernel nativi IQ (gate/up IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS; down Q2_0 e IQ4_NL)
+a sm_75 con la forma da 128 righe, dietro STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1
+STRATA_PF_FUSED_NATIVE_SM75=1. Le coppie non coperte restano su MMQ. Applicato pulito su 0.1.45
+(sostituisce #3085, stessa funzione con un altro gate). Cambia i bit del prefill (nb).
+Compilato no, installato no, provato no.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/docs/DETAILS.md b/docs/DETAILS.md
+index d6d9e33c..7b8ee1bd 100644
+--- a/docs/DETAILS.md
++++ b/docs/DETAILS.md
+@@ -28,6 +28,12 @@ argmax run on thread-block clusters (RTX 50, sm_90+; other cards keep the previo
+ IQ3 packs about even; on HIP they run on gfx11 and on gfx1200 / gfx1201, see AMD_HIP.md); `STRATA_QSA_CLUSTER=0` / `STRATA_ARGMAX_MULTI=0` turn the decode kernels off. The tables
+ below are 0.1.26's.
+ 
++On an sm_75 GPU, `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` extends the existing native-IQ
++path to covered IQ expert pairs with the qualified 128-row work shape. The first two variables are the existing fused
++prefill gates; `STRATA_PF_FUSED_NATIVE_SM75` is the new, separate A/B gate for this Turing extension. The upstream
++SM80+ native-IQ path is unchanged. Unsupported layers keep MMQ. The setting is manual and affects sm_75 prompt
++experts only.
++
+ ### Prompt processing (tokens/s)
+ 
+ | Model | 1K | 4K | 32K | 64K | 128K | 262K |
+diff --git a/include/strata/core/sm75_series.hpp b/include/strata/core/sm75_series.hpp
+index 5e6097fa..3d01ba7d 100644
+--- a/include/strata/core/sm75_series.hpp
++++ b/include/strata/core/sm75_series.hpp
+@@ -12,6 +12,7 @@
+ //
+ // The numerics-changing Turing options are NOT part of this switch and keep their own explicit opt-ins:
+ //   STRATA_SELECT_SIMT=1|2 (FP32 tiled block scorer), STRATA_PA_V2T=1 (v2 prompt attention), STRATA_PF_FUSED_SM75=1
++//   (Q2_0 prompt experts), STRATA_PF_FUSED_NATIVE_SM75=1 (native-IQ prompt experts)
+ //   (fused int8 prompt experts), STRATA_BF16_TC=1 (FP16 tensor-core projections).
+ #pragma once
+ 
+diff --git a/include/strata/prefill/moe_fused_iq.hpp b/include/strata/prefill/moe_fused_iq.hpp
+index 7e63df9b..83e6923a 100644
+--- a/include/strata/prefill/moe_fused_iq.hpp
++++ b/include/strata/prefill/moe_fused_iq.hpp
+@@ -1,6 +1,9 @@
+ // include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
+ // packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
+-// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; sm_75 and HIP: MMQ).
++// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1. The upstream
++// native-IQ path remains the SM80+ path; this PR extends admission to NVIDIA
++// sm_75 and additionally requires STRATA_PF_FUSED_SM75=1 and
++// STRATA_PF_FUSED_NATIVE_SM75=1. Unsupported devices and formats keep MMQ.
+ //
+ // The grouping on the GPU (fused::group), the per-expert pointers (fused::Batch: a cache slot or a ring slot, no
+ // gather) and the launch shape are the Q2_0 path's.  What differs is the load stage: the i-quant blocks are decoded to
+@@ -26,7 +29,7 @@ struct NativeGeom {
+     size_t up_off = 0, down_off = 0;  ///< inside the blob
+ };
+ 
+-/// enabled() (STRATA_PF_FUSED=1 on sm_80+), and the kernels cover this gate/up and down pair on this device.
++/// The fused path was explicitly enabled and the kernels cover this gate/up and down pair on this device.
+ bool native_supported(int gu_type, int d_type);
+ 
+ /// x [rows][cols] FP32 -> `xa` (act_bytes(rows, cols)): int8 per 32 values in natural order, the native kernels' form.
+diff --git a/src/prefill/moe_fused_iq.cu b/src/prefill/moe_fused_iq.cu
+index bc870c89..ab9347db 100644
+--- a/src/prefill/moe_fused_iq.cu
++++ b/src/prefill/moe_fused_iq.cu
+@@ -1181,12 +1181,24 @@ native_f16_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui
+ 
+ unsigned blocks(int64_t n, int per) { return (unsigned) ((n + per - 1) / per); }
+ 
++// The Q2_0 Turing fused path predates the native-IQ extension. Keep native IQ
++// behind its own explicit A/B switch so enabling the existing SM75 path does
++// not change which IQ layers are dispatched.
++bool sm75_native_on() {
++    static const bool on = [] {
++        const char* v = std::getenv("STRATA_PF_FUSED_NATIVE_SM75");
++        return v != nullptr && v[0] == '1';
++    }();
++    return on;
++}
++
+ // per device: whether every kernel here runs (sm_80+, device code in this build, fits), and their occupancy
+ struct DevInfo {
+     bool done = false, ok = false;
+     bool w12 = false;   // gfx12 (RDNA4): the native kernels only - the Q2_0 pack's (moe_fused.cu) are not ported there
+-    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): the Q2_0 / Q2_0 layers only (what was set up and checked there)
++    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): only specializations successfully set up below are eligible
+     int sms = 0, occ = 1;
++    bool t75_gu[64] = {}, t75_d[64] = {};
+ };
+ std::mutex g_mu;
+ DevInfo g_dev[32];
+@@ -1218,6 +1230,12 @@ template <int T, bool GU, int WW> bool setup_ww(int& occ) {
+     return true;
+ }
+ template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
++template <int T, bool GU> bool setup_t75(DevInfo& d) {
++    int occ2 = 1 << 20;
++    const bool ok = setup_ww<T, GU, 2>(occ2);
++    if (ok) d.occ = std::min(d.occ, occ2);
++    return ok;
++}
+ #endif
+ 
+ #if defined(__HIPCC__)
+@@ -1295,10 +1313,24 @@ const DevInfo& dev_info() {
+     static const bool sm75 = [] { const char* v = std::getenv("STRATA_PF_FUSED_SM75"); return v != nullptr && v[0] == '1'; }();
+     if (major < 8 && !(major == 7 && minor == 5 && sm75)) return d;
+     int occ = 1 << 20;
+-    if (major < 8) {   // Turing: the canonical Q2_0 pack's kernels (the codebook formats' do not fit 64 KB at 4 warps a row)
++    if (major < 8) {   // Turing: native IQ uses the 128-row shape; qualified 64-row specializations are optional
+         d.t75 = true;
+-        d.ok = setup_one<T_Q2_0, true>(occ) && setup_one<T_Q2_0, false>(occ);
+-        d.occ = d.ok ? occ : 1;
++        d.occ = 1 << 20;
++        d.t75_gu[T_Q2_0] = setup_one<T_Q2_0, true>(d.occ);
++        d.t75_d[T_Q2_0] = setup_one<T_Q2_0, false>(d.occ);
++        if (sm75_native_on()) {
++            d.t75_gu[T_IQ2_XXS] = setup_t75<T_IQ2_XXS, true>(d);
++            d.t75_gu[T_IQ2_XS] = setup_t75<T_IQ2_XS, true>(d);
++            d.t75_gu[T_IQ2_S] = setup_t75<T_IQ2_S, true>(d);
++            d.t75_gu[T_IQ3_XXS] = setup_t75<T_IQ3_XXS, true>(d);
++            d.t75_gu[T_IQ3_S] = setup_t75<T_IQ3_S, true>(d);
++            d.t75_gu[T_IQ4_XS] = setup_t75<T_IQ4_XS, true>(d);
++            d.t75_d[T_IQ4_NL] = setup_t75<T_IQ4_NL, false>(d);
++        }
++        // The already-qualified Q2_0 pair remains the device-level admission gate. Native IQ pairs are admitted
++        // independently below, so a specialization that does not fit cannot disable Q2_0 or another IQ format.
++        d.ok = d.t75_gu[T_Q2_0] && d.t75_d[T_Q2_0];
++        if (!d.ok) d.occ = 1;
+         cudaGetLastError();
+         return d;
+     }
+@@ -1403,7 +1435,9 @@ bool native_supported(int gu_type, int d_type) {
+     if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS) return false;   // default: only these two
+     const DevInfo& d = dev_info();
+     if (!d.ok || !d_covered_on(d_type, d)) return false;
+-    if (d.t75 && (gu_type != T_Q2_0 || d_type != T_Q2_0)) return false;
++    if (d.t75 && (gu_type < 0 || gu_type >= 64 || d_type < 0 || d_type >= 64 ||
++                  (gu_type != T_Q2_0 && !sm75_native_on()) ||
++                  !d.t75_gu[gu_type] || !d.t75_d[d_type])) return false;
+     if (env < 0) return d.w12;
+     return requested() || d.w12;
+ }
+@@ -1419,7 +1453,9 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
+                     const int32_t* src, void* ha, float* dm, void* stream) {
+     if (b.e1 <= b.e0 || n <= 0) return;
+     const DevInfo& d = dev_info();
+-    if (!d.ok || !gu_covered(g.gu_type) || !d_covered_on(g.d_type, d)) {
++    if (!d.ok || !gu_covered(g.gu_type) || !d_covered_on(g.d_type, d) ||
++        (d.t75 && (g.gu_type < 0 || g.gu_type >= 64 || g.d_type < 0 || g.d_type >= 64 ||
++                   !d.t75_gu[g.gu_type] || !d.t75_d[g.d_type]))) {
+         std::fprintf(stderr, "prefill fused experts (native): types %d / %d are not covered here\n", g.gu_type, g.d_type);
+         std::exit(1);
+     }
+@@ -1501,23 +1537,27 @@ void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
+         return;
+     }
+ #endif
+-    const int ww = pick_ww(n, n_expert);
++    int ww_gu = pick_ww(n, n_expert), ww_d = ww_gu;
++    if (d.t75 && g.gu_type != T_Q2_0) {
++        ww_gu = 2;
++        ww_d = 2;
++    }
+     // the most 64-row tiles the batch can have (every row in it, plus a partial tile per expert) - the items of the
+     // ones inside a larger item end at once
+     const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
+-    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / weight_rows(ww)), (int64_t) d.sms * d.occ);
+-    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / weight_rows(ww)), (int64_t) d.sms * d.occ);
++    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / weight_rows(ww_gu)), (int64_t) d.sms * d.occ);
++    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / weight_rows(ww_d)), (int64_t) d.sms * d.occ);
+     switch (g.gu_type) {
+-        case T_IQ2_XXS: launch<T_IQ2_XXS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ2_XS: launch<T_IQ2_XS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ2_S: launch<T_IQ2_S, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ3_XXS: launch<T_IQ3_XXS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ3_S: launch<T_IQ3_S, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_Q2_0: launch<T_Q2_0, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        default: launch<T_IQ4_XS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ2_XXS: launch<T_IQ2_XXS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ2_XS: launch<T_IQ2_XS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ2_S: launch<T_IQ2_S, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ3_XXS: launch<T_IQ3_XXS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ3_S: launch<T_IQ3_S, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_Q2_0: launch<T_Q2_0, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        default: launch<T_IQ4_XS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+     }
+-    if (g.d_type == T_Q2_0) launch<T_Q2_0, false>(ww, g_d, b, g, tb, ha, src, nullptr, dm, s);
+-    else launch<T_IQ4_NL, false>(ww, g_d, b, g, tb, ha, src, nullptr, dm, s);
++    if (g.d_type == T_Q2_0) launch<T_Q2_0, false>(ww_d, g_d, b, g, tb, ha, src, nullptr, dm, s);
++    else launch<T_IQ4_NL, false>(ww_d, g_d, b, g, tb, ha, src, nullptr, dm, s);
+     ck(cudaGetLastError(), "experts_native");
+ }
+ 
+diff --git a/tests/cuda/prefill_fused_iq_test.cpp b/tests/cuda/prefill_fused_iq_test.cpp
+index e07051e8..dab7c5fa 100644
+--- a/tests/cuda/prefill_fused_iq_test.cpp
++++ b/tests/cuda/prefill_fused_iq_test.cpp
+@@ -645,8 +645,12 @@ int main(int argc, char** argv) {
+     try {
+ #ifdef _WIN32
+         _putenv_s("STRATA_PF_FUSED", "1");
++        _putenv_s("STRATA_PF_FUSED_SM75", "1");
++        _putenv_s("STRATA_PF_FUSED_NATIVE_SM75", "1");
+ #else
+         setenv("STRATA_PF_FUSED", "1", 1);
++        setenv("STRATA_PF_FUSED_SM75", "1", 1);
++        setenv("STRATA_PF_FUSED_NATIVE_SM75", "1", 1);
+         setenv("STRATA_PF_FUSED_KQ", "1", 1);   // (the HIP build's Q4_K / Q5_K / Q5_1 / Q8_0 pairs)
+ #endif
+         int n = 0;
+@@ -691,8 +695,8 @@ int main(int argc, char** argv) {
+         for (const Pair& p : pairs) {
+             if (only ? std::string(p.name).find(only) == std::string::npos : p.gu == GGML_TYPE_Q4_K || p.gu == GGML_TYPE_Q5_K) continue;
+             if (!fused::native_supported((int) p.gu, (int) p.d)) {
+-                // the canonical Q2_0 pack's Q2_0 gate/up is the Turing opt-in's (STRATA_PF_FUSED_SM75=1), and on Turing that is
+-                // the only pair set up: skip what this device does not take (--only=NAME still insists)
++                // Turing uses only the specializations which fit its shared-memory limit; skip any unavailable pair
++                // in the default matrix (--only=NAME still insists).
+                 const bool turing_pair = p.gu == GGML_TYPE_Q2_0 && p.d == GGML_TYPE_Q2_0;
+                 int major = 0;
+                 cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, 0);
+@@ -705,7 +709,7 @@ int main(int argc, char** argv) {
+             // the IQ2_XS pack's layers (34 of 48 IQ2_S / Q2_0, 11 IQ2_XXS / Q2_0), the IQ3_S pack's most common, IQ3_XXS's
+             for (const Pair& p : only ? pairs : std::vector<Pair>{pairs[0], pairs[1], pairs[4], pairs[3]}) {
+                 if (only && std::string(p.name).find(only) == std::string::npos) continue;
+-                if (!fused::native_supported((int) p.gu, (int) p.d)) continue;   // (Turing: the Q2_0 pair only)
++                if (!fused::native_supported((int) p.gu, (int) p.d)) continue;
+                 for (int T : chunks) timing_part(p, T, s);
+             }
+         }

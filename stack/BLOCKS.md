@@ -7872,3 +7872,789 @@ Block (hunk 2 of `src/program/generate.cpp` in the patch, 25 lines):
                      char b[48];
                      for (int i = 0; i < 10; ++i)
 ```
+
+## 18 pw-with-batch
+
+`18-pw-with-batch.patch` — SONNET-STRATA-Porta da upstream #3095 STRATA_PW_WITH_BATCH: la chat singola tiene --pipeline-windows accanto a --batch (opt-in)
+
+### 18-1
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        return o.mtp_draft_vocab.empty() ? std::filesystem::exists(std::filesystem::path(o.mtp) / "draft_vocab.bin", ec)
+                                         : std::filesystem::exists(o.mtp_draft_vocab, ec);
+    }();
+```
+Block (hunk 1 of `src/program/generate.cpp` in the patch, 19 lines):
+```diff
+         return o.mtp_draft_vocab.empty() ? std::filesystem::exists(std::filesystem::path(o.mtp) / "draft_vocab.bin", ec)
+                                          : std::filesystem::exists(o.mtp_draft_vocab, ec);
+     }();
++    // --batch with the solo path pipelined (opt-in, STRATA_PW_WITH_BATCH=1).  With slots, a request that is alone runs the solo
++    // path (GEN, with drafts; serve/server.py goes back to it when a slot is left alone, #857), and that path can keep
++    // --pipeline-windows: both parities' verifiers share the stage's session (ver_b.init(.., gs.ss, ..)), so when the solo
++    // request is STOPped for a newcomer, copy_to_slot reads a whole state from `ss` after the pipeline has drained.  Batch
++    // windows never use the second verifiers.  With --batch-mtp the slot drafters go where the solo drafter is: the first
++    // stage's card when mtp_first (they share its weights and draft head, and copy the last stage's rows over as it does).
++    // Without this, --batch turns --pipeline-windows off and a request alone loses its overlap (2x RX 6900 XT, IQ3_S, 0.1.45:
++    // 75 -> 66.5 tok/s at 32K with "parallel": 2).
++    const bool pw_with_batch = [] {
++        const char* e = std::getenv("STRATA_PW_WITH_BATCH");
++        return e != nullptr && e[0] == '1';
++    }();
++    const bool batch_blocks_pw = o.batch != 0 && !pw_with_batch;
+     const bool pw_auto = o.pipeline_windows < 0;
+     if (pw_auto) {
+         static const char* ae = std::getenv("STRATA_PIPELINE_AUTO");
+```
+
+### 18-2
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        on = false;
+#endif
+        const bool helpers_a = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+```
+Block (hunk 2 of `src/program/generate.cpp` in the patch, 8 lines):
+```diff
+         on = false;
+ #endif
+         const bool helpers_a = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+-        on = on && !o.mtp.empty() && o.spec >= 2 && o.batch == 0 && o.peer_device < 0 && !helpers_a && !o.adapt_async;
++        on = on && !o.mtp.empty() && o.spec >= 2 && !batch_blocks_pw && o.peer_device < 0 && !helpers_a && !o.adapt_async;
+         o.pipeline_windows = on ? 2 : 0;
+         if (on)
+             std::fprintf(stderr, "strata generate: --pipeline-windows 2 is on by default for a layer split of %zu stages "
+```
+
+### 18-3
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                        : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
+                        : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
+                        : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
+```
+Block (hunk 3 of `src/program/generate.cpp` in the patch, 17 lines):
+```diff
+                         : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
+                         : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
+                         : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
+-                        : o.batch != 0 ? "not with --batch slots"
++                        : batch_blocks_pw ? "not with --batch slots (STRATA_PW_WITH_BATCH=1 keeps it for the solo path)"
+                         : o.peer_device >= 1 ? "not with --peer-device"
+                         : helpers ? "not with the helper caches (--expert-cache-device1..3, --remote-expert-opt)"
+                         : nullptr;
+         if (off != nullptr) {
+             std::fprintf(stderr, "strata generate: --pipeline-windows %d is off: %s\n", o.pipeline_windows, off);
+             o.pipeline_windows = 0;
++        } else if (o.batch != 0) {
++            std::fprintf(stderr, "strata generate: --pipeline-windows %d stays on for the solo path beside %d batch slots "
++                                 "(STRATA_PW_WITH_BATCH=1); batch windows run without it\n", o.pipeline_windows, o.batch);
+         } else if (!pw_auto && o.pipeline_windows >= 2 && split_devs.size() == 1) {
+             // #2637: the default (above) takes two stages only with the draft layer on the first card (mtp_first); asked for by
+             // hand it was taken without a word.  Recommend, never force: it stays on as asked, and the line says what it costs.
+```
+
+### 18-4
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+    // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
+    // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
+    const bool mtp_first = [&] {
+```
+Block (hunk 4 of `src/program/generate.cpp` in the patch, 8 lines):
+```diff
+     // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
+     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
+     const bool mtp_first = [&] {
+-        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || o.batch != 0) return false;
++        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || batch_blocks_pw) return false;
+         const char* e = std::getenv("STRATA_MTP_STAGE0");
+         if (e != nullptr) return std::atoi(e) != 0;   // 0 keeps the drafter on the last card, 1 asks for the first
+         return mtp_first_default_on();
+```
+
+### 18-5
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).
+            for (int b = 0; b < o.batch; ++b) {
+                auto d = std::make_unique<strata::core::MtpDrafter>();
+```
+Block (hunk 5 of `src/program/generate.cpp` in the patch, 10 lines):
+```diff
+             // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).
+             for (int b = 0; b < o.batch; ++b) {
+                 auto d = std::make_unique<strata::core::MtpDrafter>();
+-                if (!d->load(o.mtp, draft_geometry, *bslot_ss.back()[(size_t) b], o.spec, err, o.mtp_window, &mtp)) {
++                // (mtp_first: the solo drafter is on the first stage's card, so slot b's is carved from its first-stage session)
++                strata::core::SessionState& slot_s = mtp_first ? *bslot_ss[0][(size_t) b] : *bslot_ss.back()[(size_t) b];
++                if (!d->load(o.mtp, draft_geometry, slot_s, o.spec, err, o.mtp_window, &mtp)) {
+                     std::fprintf(stderr, "strata generate: batch MTP slot %d: %s%s\n", b, err.c_str(),
+                                  vram_free_note().c_str());
+                     return 1;
+```
+
+### 18-6
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    return 1;
+                }
+                slot_mtp_rows.emplace_back(r, free_slot_mtp_rows);
+```
+Block (hunk 6 of `src/program/generate.cpp` in the patch, 8 lines):
+```diff
+                     return 1;
+                 }
+                 slot_mtp_rows.emplace_back(r, free_slot_mtp_rows);
+-                if (!slot_mtp[(size_t) b]->bind(last_st ? last_st->wt : wt, last_st ? &last_st->head : &native_head, r, err,
++                if (!slot_mtp[(size_t) b]->bind(last_st && !mtp_first ? last_st->wt : wt, last_st ? &last_st->head : &native_head, r, err,
+                                                 &mtp)) {
+                     std::fprintf(stderr, "strata serve: batch MTP slot %d: %s%s\n", b, err.c_str(),
+                                  vram_free_note().c_str());
+```
+
+## 19 pf-fused-native-sm75
+
+`19-pf-fused-native-sm75.patch` — SONNET-STRATA-Porta da upstream #3104 STRATA_PF_FUSED_NATIVE_SM75: esperti fusi int8 IQ del prefill anche su Turing (opt-in)
+
+### 19-1
+
+`docs/DETAILS.md` · argmax run on thread-block clusters (RTX 50, sm_90+; other cards keep the previo
+
+Anchor:
+```
+IQ3 packs about even; on HIP they run on gfx11 and on gfx1200 / gfx1201, see AMD_HIP.md); `STRATA_QSA_CLUSTER=0` / `STRATA_ARGMAX_MULTI=0` turn the decode kernels off. The tables
+below are 0.1.26's.
+```
+Block (hunk 1 of `docs/DETAILS.md` in the patch, 12 lines):
+```diff
+ IQ3 packs about even; on HIP they run on gfx11 and on gfx1200 / gfx1201, see AMD_HIP.md); `STRATA_QSA_CLUSTER=0` / `STRATA_ARGMAX_MULTI=0` turn the decode kernels off. The tables
+ below are 0.1.26's.
+
++On an sm_75 GPU, `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` extends the existing native-IQ
++path to covered IQ expert pairs with the qualified 128-row work shape. The first two variables are the existing fused
++prefill gates; `STRATA_PF_FUSED_NATIVE_SM75` is the new, separate A/B gate for this Turing extension. The upstream
++SM80+ native-IQ path is unchanged. Unsupported layers keep MMQ. The setting is manual and affects sm_75 prompt
++experts only.
++
+ ### Prompt processing (tokens/s)
+
+ | Model | 1K | 4K | 32K | 64K | 128K | 262K |
+```
+
+### 19-2
+
+`include/strata/core/sm75_series.hpp` · (file scope)
+
+Anchor:
+```
+//
+// The numerics-changing Turing options are NOT part of this switch and keep their own explicit opt-ins:
+//   STRATA_SELECT_SIMT=1|2 (FP32 tiled block scorer), STRATA_PA_V2T=1 (v2 prompt attention), STRATA_PF_FUSED_SM75=1
+```
+Block (hunk 1 of `include/strata/core/sm75_series.hpp` in the patch, 7 lines):
+```diff
+ //
+ // The numerics-changing Turing options are NOT part of this switch and keep their own explicit opt-ins:
+ //   STRATA_SELECT_SIMT=1|2 (FP32 tiled block scorer), STRATA_PA_V2T=1 (v2 prompt attention), STRATA_PF_FUSED_SM75=1
++//   (Q2_0 prompt experts), STRATA_PF_FUSED_NATIVE_SM75=1 (native-IQ prompt experts)
+ //   (fused int8 prompt experts), STRATA_BF16_TC=1 (FP16 tensor-core projections).
+ #pragma once
+
+```
+
+### 19-3
+
+`include/strata/prefill/moe_fused_iq.hpp` · (file scope)
+
+Anchor:
+```
+// include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
+// packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
+```
+Block (hunk 1 of `include/strata/prefill/moe_fused_iq.hpp` in the patch, 10 lines):
+```diff
+ // include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
+ // packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
+-// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1 (NVIDIA sm_80 and newer; sm_75 and HIP: MMQ).
++// expert_layout().fmt), opt-in with the same STRATA_PF_FUSED=1. The upstream
++// native-IQ path remains the SM80+ path; this PR extends admission to NVIDIA
++// sm_75 and additionally requires STRATA_PF_FUSED_SM75=1 and
++// STRATA_PF_FUSED_NATIVE_SM75=1. Unsupported devices and formats keep MMQ.
+ //
+ // The grouping on the GPU (fused::group), the per-expert pointers (fused::Batch: a cache slot or a ring slot, no
+ // gather) and the launch shape are the Q2_0 path's.  What differs is the load stage: the i-quant blocks are decoded to
+```
+
+### 19-4
+
+`include/strata/prefill/moe_fused_iq.hpp` · struct NativeGeom {
+
+Anchor:
+```
+    size_t up_off = 0, down_off = 0;  ///< inside the blob
+};
+```
+Block (hunk 2 of `include/strata/prefill/moe_fused_iq.hpp` in the patch, 8 lines):
+```diff
+     size_t up_off = 0, down_off = 0;  ///< inside the blob
+ };
+
+-/// enabled() (STRATA_PF_FUSED=1 on sm_80+), and the kernels cover this gate/up and down pair on this device.
++/// The fused path was explicitly enabled and the kernels cover this gate/up and down pair on this device.
+ bool native_supported(int gu_type, int d_type);
+
+ /// x [rows][cols] FP32 -> `xa` (act_bytes(rows, cols)): int8 per 32 values in natural order, the native kernels' form.
+```
+
+### 19-5
+
+`src/prefill/moe_fused_iq.cu` · native_f16_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui
+
+Anchor:
+```
+
+unsigned blocks(int64_t n, int per) { return (unsigned) ((n + per - 1) / per); }
+```
+Block (hunk 1 of `src/prefill/moe_fused_iq.cu` in the patch, 25 lines):
+```diff
+
+ unsigned blocks(int64_t n, int per) { return (unsigned) ((n + per - 1) / per); }
+
++// The Q2_0 Turing fused path predates the native-IQ extension. Keep native IQ
++// behind its own explicit A/B switch so enabling the existing SM75 path does
++// not change which IQ layers are dispatched.
++bool sm75_native_on() {
++    static const bool on = [] {
++        const char* v = std::getenv("STRATA_PF_FUSED_NATIVE_SM75");
++        return v != nullptr && v[0] == '1';
++    }();
++    return on;
++}
++
+ // per device: whether every kernel here runs (sm_80+, device code in this build, fits), and their occupancy
+ struct DevInfo {
+     bool done = false, ok = false;
+     bool w12 = false;   // gfx12 (RDNA4): the native kernels only - the Q2_0 pack's (moe_fused.cu) are not ported there
+-    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): the Q2_0 / Q2_0 layers only (what was set up and checked there)
++    bool t75 = false;   // Turing (STRATA_PF_FUSED_SM75): only specializations successfully set up below are eligible
+     int sms = 0, occ = 1;
++    bool t75_gu[64] = {}, t75_d[64] = {};
+ };
+ std::mutex g_mu;
+ DevInfo g_dev[32];
+```
+
+### 19-6
+
+`src/prefill/moe_fused_iq.cu` · template <int T, bool GU, int WW> bool setup_ww(int& occ) {
+
+Anchor:
+```
+    return true;
+}
+template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
+```
+Block (hunk 2 of `src/prefill/moe_fused_iq.cu` in the patch, 12 lines):
+```diff
+     return true;
+ }
+ template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
++template <int T, bool GU> bool setup_t75(DevInfo& d) {
++    int occ2 = 1 << 20;
++    const bool ok = setup_ww<T, GU, 2>(occ2);
++    if (ok) d.occ = std::min(d.occ, occ2);
++    return ok;
++}
+ #endif
+
+ #if defined(__HIPCC__)
+```
+
+### 19-7
+
+`src/prefill/moe_fused_iq.cu` · const DevInfo& dev_info() {
+
+Anchor:
+```
+    static const bool sm75 = [] { const char* v = std::getenv("STRATA_PF_FUSED_SM75"); return v != nullptr && v[0] == '1'; }();
+    if (major < 8 && !(major == 7 && minor == 5 && sm75)) return d;
+    int occ = 1 << 20;
+```
+Block (hunk 3 of `src/prefill/moe_fused_iq.cu` in the patch, 27 lines):
+```diff
+     static const bool sm75 = [] { const char* v = std::getenv("STRATA_PF_FUSED_SM75"); return v != nullptr && v[0] == '1'; }();
+     if (major < 8 && !(major == 7 && minor == 5 && sm75)) return d;
+     int occ = 1 << 20;
+-    if (major < 8) {   // Turing: the canonical Q2_0 pack's kernels (the codebook formats' do not fit 64 KB at 4 warps a row)
++    if (major < 8) {   // Turing: native IQ uses the 128-row shape; qualified 64-row specializations are optional
+         d.t75 = true;
+-        d.ok = setup_one<T_Q2_0, true>(occ) && setup_one<T_Q2_0, false>(occ);
+-        d.occ = d.ok ? occ : 1;
++        d.occ = 1 << 20;
++        d.t75_gu[T_Q2_0] = setup_one<T_Q2_0, true>(d.occ);
++        d.t75_d[T_Q2_0] = setup_one<T_Q2_0, false>(d.occ);
++        if (sm75_native_on()) {
++            d.t75_gu[T_IQ2_XXS] = setup_t75<T_IQ2_XXS, true>(d);
++            d.t75_gu[T_IQ2_XS] = setup_t75<T_IQ2_XS, true>(d);
++            d.t75_gu[T_IQ2_S] = setup_t75<T_IQ2_S, true>(d);
++            d.t75_gu[T_IQ3_XXS] = setup_t75<T_IQ3_XXS, true>(d);
++            d.t75_gu[T_IQ3_S] = setup_t75<T_IQ3_S, true>(d);
++            d.t75_gu[T_IQ4_XS] = setup_t75<T_IQ4_XS, true>(d);
++            d.t75_d[T_IQ4_NL] = setup_t75<T_IQ4_NL, false>(d);
++        }
++        // The already-qualified Q2_0 pair remains the device-level admission gate. Native IQ pairs are admitted
++        // independently below, so a specialization that does not fit cannot disable Q2_0 or another IQ format.
++        d.ok = d.t75_gu[T_Q2_0] && d.t75_d[T_Q2_0];
++        if (!d.ok) d.occ = 1;
+         cudaGetLastError();
+         return d;
+     }
+```
+
+### 19-8
+
+`src/prefill/moe_fused_iq.cu` · bool native_supported(int gu_type, int d_type) {
+
+Anchor:
+```
+    if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS) return false;   // default: only these two
+    const DevInfo& d = dev_info();
+    if (!d.ok || !d_covered_on(d_type, d)) return false;
+```
+Block (hunk 4 of `src/prefill/moe_fused_iq.cu` in the patch, 10 lines):
+```diff
+     if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS) return false;   // default: only these two
+     const DevInfo& d = dev_info();
+     if (!d.ok || !d_covered_on(d_type, d)) return false;
+-    if (d.t75 && (gu_type != T_Q2_0 || d_type != T_Q2_0)) return false;
++    if (d.t75 && (gu_type < 0 || gu_type >= 64 || d_type < 0 || d_type >= 64 ||
++                  (gu_type != T_Q2_0 && !sm75_native_on()) ||
++                  !d.t75_gu[gu_type] || !d.t75_d[d_type])) return false;
+     if (env < 0) return d.w12;
+     return requested() || d.w12;
+ }
+```
+
+### 19-9
+
+`src/prefill/moe_fused_iq.cu` · void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
+
+Anchor:
+```
+                    const int32_t* src, void* ha, float* dm, void* stream) {
+    if (b.e1 <= b.e0 || n <= 0) return;
+    const DevInfo& d = dev_info();
+```
+Block (hunk 5 of `src/prefill/moe_fused_iq.cu` in the patch, 10 lines):
+```diff
+                     const int32_t* src, void* ha, float* dm, void* stream) {
+     if (b.e1 <= b.e0 || n <= 0) return;
+     const DevInfo& d = dev_info();
+-    if (!d.ok || !gu_covered(g.gu_type) || !d_covered_on(g.d_type, d)) {
++    if (!d.ok || !gu_covered(g.gu_type) || !d_covered_on(g.d_type, d) ||
++        (d.t75 && (g.gu_type < 0 || g.gu_type >= 64 || g.d_type < 0 || g.d_type >= 64 ||
++                   !d.t75_gu[g.gu_type] || !d.t75_d[g.d_type]))) {
+         std::fprintf(stderr, "prefill fused experts (native): types %d / %d are not covered here\n", g.gu_type, g.d_type);
+         std::exit(1);
+     }
+```
+
+### 19-10
+
+`src/prefill/moe_fused_iq.cu` · void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n
+
+Anchor:
+```
+        return;
+    }
+#endif
+```
+Block (hunk 6 of `src/prefill/moe_fused_iq.cu` in the patch, 39 lines):
+```diff
+         return;
+     }
+ #endif
+-    const int ww = pick_ww(n, n_expert);
++    int ww_gu = pick_ww(n, n_expert), ww_d = ww_gu;
++    if (d.t75 && g.gu_type != T_Q2_0) {
++        ww_gu = 2;
++        ww_d = 2;
++    }
+     // the most 64-row tiles the batch can have (every row in it, plus a partial tile per expert) - the items of the
+     // ones inside a larger item end at once
+     const int64_t tiles = (n + kTileRows - 1) / kTileRows + (b.e1 - b.e0);
+-    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / weight_rows(ww)), (int64_t) d.sms * d.occ);
+-    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / weight_rows(ww)), (int64_t) d.sms * d.occ);
++    const unsigned g_gu = (unsigned) std::min<int64_t>(tiles * (1280 / weight_rows(ww_gu)), (int64_t) d.sms * d.occ);
++    const unsigned g_d = (unsigned) std::min<int64_t>(tiles * (2560 / weight_rows(ww_d)), (int64_t) d.sms * d.occ);
+     switch (g.gu_type) {
+-        case T_IQ2_XXS: launch<T_IQ2_XXS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ2_XS: launch<T_IQ2_XS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ2_S: launch<T_IQ2_S, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ3_XXS: launch<T_IQ3_XXS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_IQ3_S: launch<T_IQ3_S, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        case T_Q2_0: launch<T_Q2_0, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+-        default: launch<T_IQ4_XS, true>(ww, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ2_XXS: launch<T_IQ2_XXS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ2_XS: launch<T_IQ2_XS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ2_S: launch<T_IQ2_S, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ3_XXS: launch<T_IQ3_XXS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_IQ3_S: launch<T_IQ3_S, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        case T_Q2_0: launch<T_Q2_0, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
++        default: launch<T_IQ4_XS, true>(ww_gu, g_gu, b, g, tb, xa, src, ha, nullptr, s); break;
+     }
+-    if (g.d_type == T_Q2_0) launch<T_Q2_0, false>(ww, g_d, b, g, tb, ha, src, nullptr, dm, s);
+-    else launch<T_IQ4_NL, false>(ww, g_d, b, g, tb, ha, src, nullptr, dm, s);
++    if (g.d_type == T_Q2_0) launch<T_Q2_0, false>(ww_d, g_d, b, g, tb, ha, src, nullptr, dm, s);
++    else launch<T_IQ4_NL, false>(ww_d, g_d, b, g, tb, ha, src, nullptr, dm, s);
+     ck(cudaGetLastError(), "experts_native");
+ }
+
+```
+
+### 19-11
+
+`tests/cuda/prefill_fused_iq_test.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+    try {
+#ifdef _WIN32
+        _putenv_s("STRATA_PF_FUSED", "1");
+```
+Block (hunk 1 of `tests/cuda/prefill_fused_iq_test.cpp` in the patch, 12 lines):
+```diff
+     try {
+ #ifdef _WIN32
+         _putenv_s("STRATA_PF_FUSED", "1");
++        _putenv_s("STRATA_PF_FUSED_SM75", "1");
++        _putenv_s("STRATA_PF_FUSED_NATIVE_SM75", "1");
+ #else
+         setenv("STRATA_PF_FUSED", "1", 1);
++        setenv("STRATA_PF_FUSED_SM75", "1", 1);
++        setenv("STRATA_PF_FUSED_NATIVE_SM75", "1", 1);
+         setenv("STRATA_PF_FUSED_KQ", "1", 1);   // (the HIP build's Q4_K / Q5_K / Q5_1 / Q8_0 pairs)
+ #endif
+         int n = 0;
+```
+
+### 19-12
+
+`tests/cuda/prefill_fused_iq_test.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        for (const Pair& p : pairs) {
+            if (only ? std::string(p.name).find(only) == std::string::npos : p.gu == GGML_TYPE_Q4_K || p.gu == GGML_TYPE_Q5_K) continue;
+            if (!fused::native_supported((int) p.gu, (int) p.d)) {
+```
+Block (hunk 2 of `tests/cuda/prefill_fused_iq_test.cpp` in the patch, 10 lines):
+```diff
+         for (const Pair& p : pairs) {
+             if (only ? std::string(p.name).find(only) == std::string::npos : p.gu == GGML_TYPE_Q4_K || p.gu == GGML_TYPE_Q5_K) continue;
+             if (!fused::native_supported((int) p.gu, (int) p.d)) {
+-                // the canonical Q2_0 pack's Q2_0 gate/up is the Turing opt-in's (STRATA_PF_FUSED_SM75=1), and on Turing that is
+-                // the only pair set up: skip what this device does not take (--only=NAME still insists)
++                // Turing uses only the specializations which fit its shared-memory limit; skip any unavailable pair
++                // in the default matrix (--only=NAME still insists).
+                 const bool turing_pair = p.gu == GGML_TYPE_Q2_0 && p.d == GGML_TYPE_Q2_0;
+                 int major = 0;
+                 cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, 0);
+```
+
+### 19-13
+
+`tests/cuda/prefill_fused_iq_test.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            // the IQ2_XS pack's layers (34 of 48 IQ2_S / Q2_0, 11 IQ2_XXS / Q2_0), the IQ3_S pack's most common, IQ3_XXS's
+            for (const Pair& p : only ? pairs : std::vector<Pair>{pairs[0], pairs[1], pairs[4], pairs[3]}) {
+                if (only && std::string(p.name).find(only) == std::string::npos) continue;
+```
+Block (hunk 3 of `tests/cuda/prefill_fused_iq_test.cpp` in the patch, 8 lines):
+```diff
+             // the IQ2_XS pack's layers (34 of 48 IQ2_S / Q2_0, 11 IQ2_XXS / Q2_0), the IQ3_S pack's most common, IQ3_XXS's
+             for (const Pair& p : only ? pairs : std::vector<Pair>{pairs[0], pairs[1], pairs[4], pairs[3]}) {
+                 if (only && std::string(p.name).find(only) == std::string::npos) continue;
+-                if (!fused::native_supported((int) p.gu, (int) p.d)) continue;   // (Turing: the Q2_0 pair only)
++                if (!fused::native_supported((int) p.gu, (int) p.d)) continue;
+                 for (int T : chunks) timing_part(p, T, s);
+             }
+         }
+```
+
+## 20 pf-diretto
+
+`20-pf-diretto.patch` — SONNET-STRATA-Porta da upstream #2774 STRATA_PF_DIRETTO: chunk corti, esperti residenti con al massimo 8 righe sul kernel di decode (opt-in)
+
+### 20-1
+
+`src/prefill/prefill.cpp` · (file scope)
+
+Anchor:
+```
+#include "strata/kernels/qsa_prompt_attn.hpp"
+#include "strata/kernels/qsa_select.hpp"
+#include "strata/prefill/gemm.hpp"
+```
+Block (hunk 1 of `src/prefill/prefill.cpp` in the patch, 10 lines):
+```diff
+ #include "strata/kernels/qsa_prompt_attn.hpp"
+ #include "strata/kernels/qsa_select.hpp"
+ #include "strata/prefill/gemm.hpp"
++#include "strata/kernels/route_prior.hpp"   // QWEN3.8 STRATA_PF_ROUTE_PRIOR
++#include "strata/kernels/iq_kernels.hpp"   // QWEN3.8 STRATA_PF_DIRETTO
++#include "strata/kernels/s2_expert_grouped.hpp"   // QWEN3.8 PF_DIRETTO v2
++#include "strata/kernels/quantize_act.hpp"   // QWEN3.8 PF_DIRETTO v2
+ #include "strata/prefill/moe_fused.hpp"
+ #include "strata/prefill/moe_fused_iq.hpp"
+ #include "strata/prefill/moe_mmq.hpp"
+```
+
+### 20-2
+
+`src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+
+Anchor:
+```
+                    pt.mark(kPfRouter, cs);
+                    if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
+                    route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
+```
+Block (hunk 2 of `src/prefill/prefill.cpp` in the patch, 17 lines):
+```diff
+                     pt.mark(kPfRouter, cs);
+                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
+                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
++                    {   // QWEN3.8 16/10/2026 STRATA_PF_ROUTE_PRIOR=lambda: the push toward resident experts in short chunks
++                        static const float pf_prior = [] { const char* v = std::getenv("STRATA_PF_ROUTE_PRIOR"); return v ? (float) std::atof(v) : 0.0f; }();
++                        static int32_t* d_res_row = nullptr;
++                        if (pf_prior > 0.0f && !stream_all && m.host_res != nullptr && m.cache != nullptr && m.g->n_expert == 512 && m.g->n_expert_used == 10) {
++                            if (d_res_row == nullptr && cudaMalloc((void**) &d_res_row, 512 * sizeof(int32_t)) != cudaSuccess) d_res_row = nullptr;
++                            if (d_res_row != nullptr) {
++                                cudaMemcpyAsync(d_res_row, m.host_res + (size_t) l * 512, 512 * sizeof(int32_t), cudaMemcpyHostToDevice, m.cs);
++                                strata::kernels::route_prior_top10(m.logits, d_res_row, pf_prior, m.ids, m.w, (int) T, m.cs);
++                            }
++                        }
++                    }
+                     // RESEARCH HOOK (141-research, opt-in, never on by default): STRATA_DBG_FEAT=<file> dumps, per MoE layer and chunk,
+                     // the routed ids + weights (and for the layers in STRATA_DBG_FEAT_LAYERS the router-input hidden state, bf16);
+                     // STRATA_DBG_ROUTE_OVERRIDE=<file> replaces the routing of the layers listed in that file with the file's ids + weights.
+```
+
+### 20-3
+
+`src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+
+Anchor:
+```
+                                ++n_cpu;
+                            }
+                        }
+```
+Block (hunk 3 of `src/prefill/prefill.cpp` in the patch, 19 lines):
+```diff
+                                 ++n_cpu;
+                             }
+                         }
++                        // QWEN3.8 16/10/2026 PF_DIRETTO v2 (patch_pfdiretto2.py): the short chunk's resident experts leave MMQ's
++                        // list; their rows form a block after the local ones and the decode's grouped kernel computes them
++                        static const bool pf_dir_on = [] { const char* v = std::getenv("STRATA_PF_DIRETTO"); return v != nullptr && std::atoi(v) != 0; }();   // opt-in here (#2774 has it on by default)
++                        static bool pf_dir_failed = false;
++                        static const int pf_max_rows = [] { const char* v = std::getenv("STRATA_PF_DIRETTO_MAX"); return v ? std::atoi(v) : 8; }();   // QWEN3.8 PF_DIRETTO v5: experts with few rows only
++                        std::vector<char> on_pf;
++                        if (pf_dir_on && !pf_dir_failed && !stream_all && m.pp == nullptr && m.cache != nullptr && m.host_res != nullptr) {
++                            on_pf.assign((size_t) m.g->n_expert, 0);
++                            for (int32_t e = 0; e < m.g->n_expert; ++e)
++                                if (m.cnt[(size_t) e] > 0 && m.cnt[(size_t) e] <= pf_max_rows && m.host_res[(size_t) l * m.g->n_expert + e] >= 0 &&
++                                    (on_cpu.empty() || !on_cpu[(size_t) e]))
++                                    on_pf[(size_t) e] = 1;
++                        }
+                         // multi-GPU: the rows of the experts the peer computes go last, as one block [rows_local, T*K)
+                         const bool pre_mmq = mmq_plan().any && mmq_plan().layer[(size_t) l];
+                         std::vector<char> on_peer;
+```
+
+### 20-4
+
+`src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+
+Anchor:
+```
+                        {
+                            int32_t r = 0;
+                            for (int32_t e = 0; e < m.g->n_expert; ++e)
+```
+Block (hunk 4 of `src/prefill/prefill.cpp` in the patch, 14 lines):
+```diff
+                         {
+                             int32_t r = 0;
+                             for (int32_t e = 0; e < m.g->n_expert; ++e)
+-                                if ((on_peer.empty() || !on_peer[(size_t) e]) && (on_cpu.empty() || !on_cpu[(size_t) e])) {
++                                if ((on_peer.empty() || !on_peer[(size_t) e]) && (on_cpu.empty() || !on_cpu[(size_t) e]) &&
++                                    (on_pf.empty() || !on_pf[(size_t) e])) {
+                                     m.off[(size_t) e] = r;
+                                     r += m.cnt[(size_t) e];
+                                 }
++                            for (int32_t e = 0; e < m.g->n_expert && !on_pf.empty(); ++e)   // QWEN3.8 PF_DIRETTO v2: our block
++                                if (on_pf[(size_t) e]) { m.off[(size_t) e] = r; r += m.cnt[(size_t) e]; }
+                             // the peer's rows in order_peer's order (peer-held, then peer-streamed): its groups need them contiguous
+                             for (int kind = 1; kind <= 2 && !on_peer.empty(); ++kind)
+                                 for (int32_t e = 0; e < m.g->n_expert; ++e)
+```
+
+### 20-5
+
+`src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+
+Anchor:
+```
+                                if (on_cpu[(size_t) e]) { m.off[(size_t) e] = r; r += m.cnt[(size_t) e]; }
+                            m.off[(size_t) m.g->n_expert] = r;
+                            rows_local -= rows_cpu;
+```
+Block (hunk 5 of `src/prefill/prefill.cpp` in the patch, 8 lines):
+```diff
+                                 if (on_cpu[(size_t) e]) { m.off[(size_t) e] = r; r += m.cnt[(size_t) e]; }
+                             m.off[(size_t) m.g->n_expert] = r;
+                             rows_local -= rows_cpu;
++                            for (int32_t e = 0; e < m.g->n_expert && !on_pf.empty(); ++e)   // QWEN3.8 PF_DIRETTO v3: MMQ ends before our block
++                                if (on_pf[(size_t) e]) rows_local -= m.cnt[(size_t) e];
+                         }
+                         std::vector<int32_t> fill(m.off.begin(), m.off.end() - 1);
+                         for (int64_t i = 0; i < T * K; ++i) {
+```
+
+### 20-6
+
+`src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+
+Anchor:
+```
+                        std::vector<int32_t> order, order_peer;
+                        for (int32_t e = 0; e < m.g->n_expert; ++e)
+                            if (m.cnt[(size_t) e] > 0 && (on_peer.empty() || on_peer[(size_t) e] != 2) &&
+```
+Block (hunk 6 of `src/prefill/prefill.cpp` in the patch, 8 lines):
+```diff
+                         std::vector<int32_t> order, order_peer;
+                         for (int32_t e = 0; e < m.g->n_expert; ++e)
+                             if (m.cnt[(size_t) e] > 0 && (on_peer.empty() || on_peer[(size_t) e] != 2) &&
+-                                (on_cpu.empty() || !on_cpu[(size_t) e]))
++                                (on_cpu.empty() || !on_cpu[(size_t) e]) && (on_pf.empty() || !on_pf[(size_t) e]))
+                                 (!on_peer.empty() && on_peer[(size_t) e] ? order_peer : order).push_back(e);
+                         for (int32_t e = 0; e < m.g->n_expert && !on_peer.empty(); ++e)   // the peer-streamed ones last:
+                             if (on_peer[(size_t) e] == 2) order_peer.push_back(e);        // their copies get the most time
+```
+
+### 20-7
+
+`src/prefill/prefill.cpp` · bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
+
+Anchor:
+```
+                            }
+                        }
+                        n_order = order.size();
+```
+Block (hunk 7 of `src/prefill/prefill.cpp` in the patch, 78 lines):
+```diff
+                             }
+                         }
+                         n_order = order.size();
++                        if (!on_pf.empty()) {   // QWEN3.8 PF_DIRETTO v2: the resident experts on the decode's grouped kernel
++                            constexpr int64_t CH = 1024;
++                            static void* d_buf = nullptr;
++                            static size_t sc_bytes = 0, xq_bytes = 0, xs_bytes = 0;
++                            const strata::kernels::cpu::ExpertLayout& lay2 = strata::kernels::cpu::expert_layout();
++                            const bool nat = lay2.native;
++                            const size_t xq_need = nat ? (size_t) T * (size_t) (N / 32) * 36 : (size_t) T * (size_t) (N / 32) * 34;
++                            const size_t xs_need = nat ? 0 : (size_t) T * (size_t) (N / 32) * 4;
++                            if (d_buf == nullptr || xq_need > xq_bytes || xs_need > xs_bytes) {
++                                if (d_buf) cudaFree(d_buf);
++                                d_buf = nullptr;
++                                const int64_t nff = nat ? lay2.fmt[(size_t) l].n_ff : 640;
++                                const size_t s1 = nat ? strata::kernels::native_expert_scratch_bytes(CH, nff)
++                                                      : (size_t) strata::kernels::moe_hit_grouped_scratch_bytes(CH, N, 640);
++                                sc_bytes = (s1 + 255) & ~(size_t) 255;
++                                xq_bytes = (std::max<size_t>(xq_need, (size_t) 1024 * (N / 32) * 36) + 255) & ~(size_t) 255;
++                                xs_bytes = (std::max<size_t>(xs_need, (size_t) 1024 * (N / 32) * 4) + 255) & ~(size_t) 255;
++                                const size_t grp_bytes = (size_t) CH * 8 + (size_t) (CH + 1) * 4 + (size_t) CH * 8 + 64;
++                                if (cudaMalloc(&d_buf, sc_bytes + xq_bytes + xs_bytes + grp_bytes) != cudaSuccess) {
++                                    (void) cudaGetLastError(); d_buf = nullptr; pf_dir_failed = true;
++                                    err = "prefill: PF_DIRETTO scratch (QWEN3.8): no VRAM";
++                                    return false;
++                                }
++                                std::fprintf(stderr, "QWEN3.8 PF_DIRETTO v2: on (%s kernel, %.1f MiB of scratch)\n", nat ? "native" : "s2",
++                                             (double) (sc_bytes + xq_bytes + xs_bytes + grp_bytes) / 1048576.0);
++                            }
++                            uint8_t* base8 = (uint8_t*) d_buf;
++                            void* scratch = base8;
++                            uint8_t* xq = base8 + sc_bytes;
++                            float* xs = (float*) (base8 + sc_bytes + xq_bytes);
++                            unsigned long long* g_ptr = (unsigned long long*) (base8 + sc_bytes + xq_bytes + xs_bytes);
++                            int32_t* g_start = (int32_t*) (g_ptr + CH);
++                            int32_t* g_dst = g_start + (CH + 1);
++                            int32_t* g_tok = g_dst + CH;
++                            int32_t* g_n = g_tok + CH;
++                            pt.mark(kPfDequant, cs);
++                            if (nat) strata::kernels::quantize_q8_1_rows(m.mixed, T, N, xq, m.cs);
++                            else strata::kernels::quantize_q8_0_scaled(m.mixed, xq, xs, (int64_t) T * N, m.cs);
++                            // host tables (pageable: cudaMemcpyAsync stages them before returning, so they can be reused)
++                            std::vector<unsigned long long> hp; std::vector<int32_t> hs, hd, ht;
++                            auto run = [&]() {
++                                if (hp.empty()) return;
++                                hs.push_back((int32_t) hd.size());
++                                const int32_t ng = (int32_t) hp.size();
++                                cudaMemcpyAsync(g_ptr, hp.data(), hp.size() * 8, cudaMemcpyHostToDevice, m.cs);
++                                cudaMemcpyAsync(g_start, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice, m.cs);
++                                cudaMemcpyAsync(g_dst, hd.data(), hd.size() * 4, cudaMemcpyHostToDevice, m.cs);
++                                cudaMemcpyAsync(g_tok, ht.data(), ht.size() * 4, cudaMemcpyHostToDevice, m.cs);
++                                cudaMemcpyAsync(g_n, &ng, 4, cudaMemcpyHostToDevice, m.cs);
++                                if (nat) {
++                                    const auto& f = lay2.fmt[(size_t) l];
++                                    const strata::kernels::NativeExpertLayout L = strata::kernels::native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff);
++                                    strata::kernels::native_expert_grouped(L, g_ptr, g_start, g_n, g_dst, g_tok, ng, (int64_t) hd.size(), xq, scratch, m.Dm, m.cs);
++                                } else {
++                                    strata::kernels::moe_grouped_s2(g_ptr, g_start, g_n, g_dst, g_tok, ng, (int64_t) hd.size(), xq, xs, scratch, m.Dm, m.cs);
++                                }
++                                hp.clear(); hs.clear(); hd.clear(); ht.clear();
++                            };
++                            for (int32_t e = 0; e < m.g->n_expert; ++e) {
++                                if (!on_pf[(size_t) e]) continue;
++                                const int64_t o0 = m.off[(size_t) e], ne = m.cnt[(size_t) e];
++                                if ((int64_t) hd.size() + ne > CH) run();
++                                const unsigned long long bp = (unsigned long long) m.cache->device_slot(m.host_res[(size_t) l * m.g->n_expert + e]);
++                                const int64_t gmax = nat ? ne : 8;   // QWEN3.8 PF_DIRETTO v4: moe_grouped_s2 takes <= 8 rows a group
++                                for (int64_t r2 = 0; r2 < ne; ++r2) {
++                                    if (r2 % gmax == 0) { hp.push_back(bp); hs.push_back((int32_t) hd.size()); }
++                                    hd.push_back((int32_t) (o0 + r2)); ht.push_back(src_h[(size_t) (o0 + r2)]);
++                                }
++                                stats_.experts_resident++;
++                            }
++                            run();
++                        }
+                         // set_cpu_pool: the CPU's experts on a thread while this one streams and runs the GPU's; their
+                         // unweighted rows land in Dm's row order, so the combine weights them as any other row
+                         if (rows_cpu > 0) {
+```

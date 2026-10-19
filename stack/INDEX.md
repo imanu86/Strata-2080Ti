@@ -4,7 +4,9 @@ The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata,
 
 Rebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-17) come from lab/struct-a, lab/ttft43 and lab/pipeline2.
 
-Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `d06429ee`. 17 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Patches 18-20 (19 Oct 2026, branch `lab/multichat45b`) are upstream pull requests ported opt-in on top of the multi-chat branch: #3095 (`STRATA_PW_WITH_BATCH`), #3104 (`STRATA_PF_FUSED_NATIVE_SM75`) and #2774 (`STRATA_PF_DIRETTO`). Their `.patch` files are the clean ports onto the stack head of patch 17 (d06429ee), so they apply with `git am` on `lab/upsync-main`; the commits named in the table are the ones on `lab/multichat45b`, where #3095 is merged with `STRATA_BATCH_PIPELINE` and `STRATA_PIPED_MTP` (three conflicts in `generate.cpp`). The upstream pull request #3085 is not carried (#3104 does the same with another gate); the sibnick fork's batched gather (97b83332) is not carried because 0.1.45 already groups the gather of the short prefill walk (653f0113, `STRATA_PREFILL_GROUP_GATHER`).
+
+Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `0dd4dd95`. 20 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -52,6 +54,9 @@ Reference configuration environment (the fork's 0.1.43 Daily r2, config `strata-
 | 15 | [ple-lookahead](#15-ple-lookahead) | The PLE rows of the first chunk of the next prompt part are read while the previous part finishes, and beside the prefix restore (`Prefill::set_ple_lookahead`, `ple_warm_now`). | `STRATA_PLE_LOOKAHEAD=0` turns it off (ON by default, direct PLE only) | fork (lab/ttft43 ea73f49e) | never proposed | part of the TTFT bench of patch 14 (about 0.7 s of file read hidden per restore). |
 | 16 | [conv-disk](#16-conv-disk) | `STRATA_CONV_DISK=<s>`: after a request, once the engine has been idle that long, the live conversation at its last turn boundary goes to a keyed file; a request looks for the longest saved boundary among its own. | `STRATA_CONV_DISK=<idle seconds>`, `STRATA_CONV_DISK_MIN` (4096) (off; needs `--prompt-cache-file` and `STRATA_PREFIX_DISK_MULTI`, no `--batch`) | fork (lab/ttft43 abd685c5) | never proposed | a 130k conversation restarts from its file instead of the system turn alone (65-80 s of prefill); 13 Oct: a restart took 277 s with it on, later shown not to come from CONV_DISK (TTFT43.md). |
 | 17 | [p2-flush-noswitch](#17-p2-flush-noswitch) | Pipeline polling without switching card: `STRATA_P2_FLUSH_NOSWITCH` (service, done and the chain read their mapped flags with no OnDevice), `STRATA_P2_FLUSH_US` (flush period), `STRATA_P2_SWITCH_STAT` (host time in the window launches), `STRATA_P2_SMEM` (config cache to shared). | `STRATA_P2_FLUSH_NOSWITCH=1`, `STRATA_P2_FLUSH_US=<us>`, `STRATA_P2_SWITCH_STAT=1`, `STRATA_P2_SMEM=1` (off) | fork (lab/pipeline2 f6a0b6b2; the polling idea from NTRYourWaifu's v7/v8) | never proposed | 13 Oct B-A-B (isolated bench): NOSWITCH removes ~8 100 card switches per request but the gain is below the spread; never promoted (docs/PIPELINE2.md par. 11). |
+| 18 | [pw-with-batch](#18-pw-with-batch) | `--pipeline-windows` stays on for the solo path (one request alone) beside `--batch`, and the drafter stays on the first stage's card (`mtp_first`); the slot drafters of `--batch-mtp` follow it. Batch windows still run without the pipeline. | `STRATA_PW_WITH_BATCH=1` (off: `--batch` turns the pipeline off, as upstream) | upstream PR #3095 (18 Oct, +23/-5) | PR #3095 open, no maintainer answer yet; not in 0.1.45. Earlier precedent: fork noon-at-cgn d84da294. | Author: +20% solo decode on 2x RX 6900 XT (75 -> 66.5 tok/s lost to --batch at 32K). Here: single chat with `--batch 4 --batch-groups 2` is 50-55 tok/s against 64.5 without `--batch`; the lever is meant to recover it. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs). |
+| 19 | [pf-fused-native-sm75](#19-pf-fused-native-sm75) | The fused int8 prompt experts for the native i-quant packs (gate/up IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS; down Q2_0 or IQ4_NL) also on sm_75 (Turing), with the qualified 128-row shape. Pairs not covered stay on MMQ. Changes the bits of the prompt (rounding). | `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` (off). `STRATA_PF_FUSED=1` also switches on the existing sm_86 native path of the first stage. | upstream PR #3104 (rebased from #1581; supersedes #3085, the same idea with another gate) | PR #3104 open (and #3085); in 0.1.45 `STRATA_PF_FUSED_SM75` only covers the Q2_0 pack, so on our IQ3_XXS pack it did nothing | Author: PP 509 -> 606 tok/s (+19.2%, RTX 2060); +11.5% together with the VRAM loans of #3105 (2080 Super Max-Q 8 GB, 31k prompt); relative RMS against MMQ 3.5e-5..2.6e-4. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs). |
+| 20 | [pf-diretto](#20-pf-diretto) | Short prompt chunks (below `stream_all_min`): resident experts used by at most `STRATA_PF_DIRETTO_MAX` rows (8) leave MMQ's list and run on the decode's grouped kernel (`native_expert_grouped` for native packs) straight from the compressed blob; also `STRATA_PF_ROUTE_PRIOR=lambda` (router push toward resident experts, off). Changes the bits of short prompts. | `STRATA_PF_DIRETTO=1`, `STRATA_PF_DIRETTO_MAX=<rows>` (off here; the PR has it on), `STRATA_PF_ROUTE_PRIOR=<lambda>` (off) | upstream PR #2774 (apatassini); default turned to opt-in in this fork | PR #2774 open; not in 0.1.45 | Author (RTX 5070 Ti, Q2_0 pack, 28K cached context): 177 tokens 473 -> 315 ms, 500 668 -> 470, 900 826 -> 677; unchanged from 1 024 tokens. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs). |
 
 ## Retired
 
@@ -1848,4 +1853,201 @@ Insertion points (15):
                                        (long long) sa_placed[2], (long long) sa_tails[2], (long long) sa_drops[2],
                                        (long long) sa_placed[3], (long long) sa_tails[3], (long long) sa_drops[3],
                                        (long long) sa_chains, (long long) sa_cut);
+  ```
+
+## 18 pw-with-batch
+
+`18-pw-with-batch.patch` — SONNET-STRATA-Porta da upstream #3095 STRATA_PW_WITH_BATCH: la chat singola tiene --pipeline-windows accanto a --batch (opt-in)
+
+- **What**: `--pipeline-windows` stays on for the solo path (one request alone) beside `--batch`, and the drafter stays on the first stage's card (`mtp_first`); the slot drafters of `--batch-mtp` follow it. Batch windows still run without the pipeline.
+- **Switch (default)**: `STRATA_PW_WITH_BATCH=1` (off: `--batch` turns the pipeline off, as upstream)
+- **Origin**: upstream PR #3095 (18 Oct, +23/-5)
+- **Upstream**: PR #3095 open, no maintainer answer yet; not in 0.1.45. Earlier precedent: fork noon-at-cgn d84da294.
+- **Measured**: Author: +20% solo decode on 2x RX 6900 XT (75 -> 66.5 tok/s lost to --batch at 32K). Here: single chat with `--batch 4 --batch-groups 2` is 50-55 tok/s against 64.5 without `--batch`; the lever is meant to recover it. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs).
+- **Docs**: docs/MULTICHAT.md
+- **Files**: `src/program/generate.cpp`
+
+Insertion points (6):
+
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [18-1](BLOCKS.md#18-1)
+  ```
+          return o.mtp_draft_vocab.empty() ? std::filesystem::exists(std::filesystem::path(o.mtp) / "draft_vocab.bin", ec)
+                                           : std::filesystem::exists(o.mtp_draft_vocab, ec);
+      }();
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [18-2](BLOCKS.md#18-2)
+  ```
+          on = false;
+  #endif
+          const bool helpers_a = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [18-3](BLOCKS.md#18-3)
+  ```
+                          : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
+                          : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
+                          : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [18-4](BLOCKS.md#18-4)
+  ```
+      // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
+      // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
+      const bool mtp_first = [&] {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [18-5](BLOCKS.md#18-5)
+  ```
+              // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).
+              for (int b = 0; b < o.batch; ++b) {
+                  auto d = std::make_unique<strata::core::MtpDrafter>();
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [18-6](BLOCKS.md#18-6)
+  ```
+                      return 1;
+                  }
+                  slot_mtp_rows.emplace_back(r, free_slot_mtp_rows);
+  ```
+
+## 19 pf-fused-native-sm75
+
+`19-pf-fused-native-sm75.patch` — SONNET-STRATA-Porta da upstream #3104 STRATA_PF_FUSED_NATIVE_SM75: esperti fusi int8 IQ del prefill anche su Turing (opt-in)
+
+- **What**: The fused int8 prompt experts for the native i-quant packs (gate/up IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS; down Q2_0 or IQ4_NL) also on sm_75 (Turing), with the qualified 128-row shape. Pairs not covered stay on MMQ. Changes the bits of the prompt (rounding).
+- **Switch (default)**: `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` (off). `STRATA_PF_FUSED=1` also switches on the existing sm_86 native path of the first stage.
+- **Origin**: upstream PR #3104 (rebased from #1581; supersedes #3085, the same idea with another gate)
+- **Upstream**: PR #3104 open (and #3085); in 0.1.45 `STRATA_PF_FUSED_SM75` only covers the Q2_0 pack, so on our IQ3_XXS pack it did nothing
+- **Measured**: Author: PP 509 -> 606 tok/s (+19.2%, RTX 2060); +11.5% together with the VRAM loans of #3105 (2080 Super Max-Q 8 GB, 31k prompt); relative RMS against MMQ 3.5e-5..2.6e-4. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs).
+- **Docs**: docs/DETAILS.md
+- **Files**: `docs/DETAILS.md`, `include/strata/core/sm75_series.hpp`, `include/strata/prefill/moe_fused_iq.hpp`, `src/prefill/moe_fused_iq.cu`, `tests/cuda/prefill_fused_iq_test.cpp`
+
+Insertion points (13):
+
+- `docs/DETAILS.md` · `argmax run on thread-block clusters (RTX 50, sm_90+; other cards keep the previo` → [19-1](BLOCKS.md#19-1)
+  ```
+  IQ3 packs about even; on HIP they run on gfx11 and on gfx1200 / gfx1201, see AMD_HIP.md); `STRATA_QSA_CLUSTER=0` / `STRATA_ARGMAX_MULTI=0` turn the decode kernels off. The tables
+  below are 0.1.26's.
+  ```
+- `include/strata/core/sm75_series.hpp` · `(file scope)` → [19-2](BLOCKS.md#19-2)
+  ```
+  //
+  // The numerics-changing Turing options are NOT part of this switch and keep their own explicit opt-ins:
+  //   STRATA_SELECT_SIMT=1|2 (FP32 tiled block scorer), STRATA_PA_V2T=1 (v2 prompt attention), STRATA_PF_FUSED_SM75=1
+  ```
+- `include/strata/prefill/moe_fused_iq.hpp` · `(file scope)` → [19-3](BLOCKS.md#19-3)
+  ```
+  // include/strata/prefill/moe_fused_iq.hpp - #136: the fused int8 prompt experts (moe_fused.hpp) for the native GGUF
+  // packs (tools/iq_pack.py: an expert is its raw GGUF slices [gate rows | up rows | down rows], formats per layer in
+  ```
+- `include/strata/prefill/moe_fused_iq.hpp` · `struct NativeGeom {` → [19-4](BLOCKS.md#19-4)
+  ```
+      size_t up_off = 0, down_off = 0;  ///< inside the blob
+  };
+  ```
+- `src/prefill/moe_fused_iq.cu` · `native_f16_kernel(const Batch b, const NativeGeom geo, const Tables tb, const ui` → [19-5](BLOCKS.md#19-5)
+  ```
+  
+  unsigned blocks(int64_t n, int per) { return (unsigned) ((n + per - 1) / per); }
+  ```
+- `src/prefill/moe_fused_iq.cu` · `template <int T, bool GU, int WW> bool setup_ww(int& occ) {` → [19-6](BLOCKS.md#19-6)
+  ```
+      return true;
+  }
+  template <int T, bool GU> bool setup_one(int& occ) { return setup_ww<T, GU, 4>(occ) && setup_ww<T, GU, 2>(occ); }
+  ```
+- `src/prefill/moe_fused_iq.cu` · `const DevInfo& dev_info() {` → [19-7](BLOCKS.md#19-7)
+  ```
+      static const bool sm75 = [] { const char* v = std::getenv("STRATA_PF_FUSED_SM75"); return v != nullptr && v[0] == '1'; }();
+      if (major < 8 && !(major == 7 && minor == 5 && sm75)) return d;
+      int occ = 1 << 20;
+  ```
+- `src/prefill/moe_fused_iq.cu` · `bool native_supported(int gu_type, int d_type) {` → [19-8](BLOCKS.md#19-8)
+  ```
+      if (env < 0 && gu_type != T_IQ3_S && gu_type != T_IQ3_XXS) return false;   // default: only these two
+      const DevInfo& d = dev_info();
+      if (!d.ok || !d_covered_on(d_type, d)) return false;
+  ```
+- `src/prefill/moe_fused_iq.cu` · `void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n` → [19-9](BLOCKS.md#19-9)
+  ```
+                      const int32_t* src, void* ha, float* dm, void* stream) {
+      if (b.e1 <= b.e0 || n <= 0) return;
+      const DevInfo& d = dev_info();
+  ```
+- `src/prefill/moe_fused_iq.cu` · `void experts_native(const Batch& b, const NativeGeom& g, int n_expert, int64_t n` → [19-10](BLOCKS.md#19-10)
+  ```
+          return;
+      }
+  #endif
+  ```
+- `tests/cuda/prefill_fused_iq_test.cpp` · `int main(int argc, char** argv) {` → [19-11](BLOCKS.md#19-11)
+  ```
+      try {
+  #ifdef _WIN32
+          _putenv_s("STRATA_PF_FUSED", "1");
+  ```
+- `tests/cuda/prefill_fused_iq_test.cpp` · `int main(int argc, char** argv) {` → [19-12](BLOCKS.md#19-12)
+  ```
+          for (const Pair& p : pairs) {
+              if (only ? std::string(p.name).find(only) == std::string::npos : p.gu == GGML_TYPE_Q4_K || p.gu == GGML_TYPE_Q5_K) continue;
+              if (!fused::native_supported((int) p.gu, (int) p.d)) {
+  ```
+- `tests/cuda/prefill_fused_iq_test.cpp` · `int main(int argc, char** argv) {` → [19-13](BLOCKS.md#19-13)
+  ```
+              // the IQ2_XS pack's layers (34 of 48 IQ2_S / Q2_0, 11 IQ2_XXS / Q2_0), the IQ3_S pack's most common, IQ3_XXS's
+              for (const Pair& p : only ? pairs : std::vector<Pair>{pairs[0], pairs[1], pairs[4], pairs[3]}) {
+                  if (only && std::string(p.name).find(only) == std::string::npos) continue;
+  ```
+
+## 20 pf-diretto
+
+`20-pf-diretto.patch` — SONNET-STRATA-Porta da upstream #2774 STRATA_PF_DIRETTO: chunk corti, esperti residenti con al massimo 8 righe sul kernel di decode (opt-in)
+
+- **What**: Short prompt chunks (below `stream_all_min`): resident experts used by at most `STRATA_PF_DIRETTO_MAX` rows (8) leave MMQ's list and run on the decode's grouped kernel (`native_expert_grouped` for native packs) straight from the compressed blob; also `STRATA_PF_ROUTE_PRIOR=lambda` (router push toward resident experts, off). Changes the bits of short prompts.
+- **Switch (default)**: `STRATA_PF_DIRETTO=1`, `STRATA_PF_DIRETTO_MAX=<rows>` (off here; the PR has it on), `STRATA_PF_ROUTE_PRIOR=<lambda>` (off)
+- **Origin**: upstream PR #2774 (apatassini); default turned to opt-in in this fork
+- **Upstream**: PR #2774 open; not in 0.1.45
+- **Measured**: Author (RTX 5070 Ti, Q2_0 pack, 28K cached context): 177 tokens 473 -> 315 ms, 500 668 -> 470, 900 826 -> 677; unchanged from 1 024 tokens. Compiled no, installed no, tested no (19 Oct 2026, written while the lab was paused; see docs/MULTICHAT.md for the runs).
+- **Docs**: docs/MULTICHAT.md
+- **Files**: `src/prefill/prefill.cpp`
+
+Insertion points (7):
+
+- `src/prefill/prefill.cpp` · `(file scope)` → [20-1](BLOCKS.md#20-1)
+  ```
+  #include "strata/kernels/qsa_prompt_attn.hpp"
+  #include "strata/kernels/qsa_select.hpp"
+  #include "strata/prefill/gemm.hpp"
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [20-2](BLOCKS.md#20-2)
+  ```
+                      pt.mark(kPfRouter, cs);
+                      if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
+                      route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [20-3](BLOCKS.md#20-3)
+  ```
+                                  ++n_cpu;
+                              }
+                          }
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [20-4](BLOCKS.md#20-4)
+  ```
+                          {
+                              int32_t r = 0;
+                              for (int32_t e = 0; e < m.g->n_expert; ++e)
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [20-5](BLOCKS.md#20-5)
+  ```
+                                  if (on_cpu[(size_t) e]) { m.off[(size_t) e] = r; r += m.cnt[(size_t) e]; }
+                              m.off[(size_t) m.g->n_expert] = r;
+                              rows_local -= rows_cpu;
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [20-6](BLOCKS.md#20-6)
+  ```
+                          std::vector<int32_t> order, order_peer;
+                          for (int32_t e = 0; e < m.g->n_expert; ++e)
+                              if (m.cnt[(size_t) e] > 0 && (on_peer.empty() || on_peer[(size_t) e] != 2) &&
+  ```
+- `src/prefill/prefill.cpp` · `bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri` → [20-7](BLOCKS.md#20-7)
+  ```
+                              }
+                          }
+                          n_order = order.size();
   ```
