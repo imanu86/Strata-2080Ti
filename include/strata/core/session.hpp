@@ -103,6 +103,10 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
 /// Before the memory `session_init` carved is freed: forgets what points into it from outside the session (the
 /// rope kernels' registered angle table, #280), so a later session never rotates by freed memory.
 void session_release(SessionState& s);
+/// fork lab/batch-dyn: after session_release, for a session that goes away while the process lives (STRATA_BATCH_DYNAMIC's
+/// slot sessions): the pinned host memory its QSA states took (the KV streaming copy, the step staging) and the state
+/// array.  The device memory is the caller's to free.
+void session_free_host(SessionState& s);
 /// Zeroes every layer's state - the residual to `R_init`, everything else to zero, so a fresh sequence starts
 /// from the reference's own `zeros()`.
 void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, void* stream);

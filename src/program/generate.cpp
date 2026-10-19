@@ -11826,6 +11826,7 @@ int main(int argc, char** argv) {
                 for (size_t b = 0; b < bdyn_base[k].size(); ++b) {
                     if (bdyn_base[k][b] == nullptr) continue;
                     strata::core::session_release(*bslot_ss[k][b]);
+                    strata::core::session_free_host(*bslot_ss[k][b]);   // the pinned K/V copy (it leaked ~10 GiB a cycle)
                     cudaFree(bdyn_base[k][b]);
                     bdyn_base[k][b] = nullptr;
                     *bslot_ss[k][b] = strata::core::SessionState{};

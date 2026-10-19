@@ -716,6 +716,27 @@ void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0;
 int64_t qsa_kv_resident() { return g_kv_resident; }
 int64_t qsa_kv_resident_min() { return 20480; }
 uint64_t qsa_kv_host_bytes() { return g_kv_host_bytes; }
+void qsa_state_free_host(QsaState& st) {
+    if (st.host_base != nullptr) {
+#ifdef _WIN32
+        cudaFreeHost(st.host_base);
+#else
+        if (cudaFreeHost(st.host_base) != cudaSuccess) {   // kv_host_alloc's other way: anonymous memory registered
+            (void) cudaGetLastError();
+            cudaHostUnregister(st.host_base);
+            munmap(st.host_base, (size_t) st.host_bytes);
+        }
+#endif
+        g_kv_host_bytes -= std::min(g_kv_host_bytes, st.host_bytes);
+    }
+    if (st.host_step != nullptr) cudaFreeHost(st.host_step);
+    if (st.host_pos != nullptr) cudaFreeHost(st.host_pos);
+    st.host_base = nullptr;
+    st.host_bytes = 0;
+    st.host_step = nullptr;
+    st.host_pos = nullptr;
+    st.host = strata::kernels::KvHostPools{};
+}
 
 uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_rope, int64_t ring_cells) {
     const QsaShapes s = qsa_shapes(g);
@@ -863,6 +884,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
             return 0;
         }
         g_kv_host_bytes += bytes;
+        st.host_base = h;
+        st.host_bytes = bytes;
         Cursor hc{d};
         if (st.kv_hybrid) {
             st.host.k_q = hc.take<int8_t>(hrows * s.head_dim);

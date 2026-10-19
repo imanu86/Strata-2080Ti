@@ -137,6 +137,13 @@ void session_release(SessionState& s) {
         }
 }
 
+void session_free_host(SessionState& s) {
+    if (s.qsa_states == nullptr) return;
+    for (int64_t j = 0; j < s.qsa_alloc; ++j) qsa_state_free_host(s.qsa_states[s.qsa_ord0 + j]);
+    delete[] s.qsa_states;
+    s.qsa_states = nullptr;
+}
+
 #if defined(STRATA_GPU_METAL)
 }  // namespace strata::core
 namespace strata::metal_engine {
