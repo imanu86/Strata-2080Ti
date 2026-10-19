@@ -7872,3 +7872,624 @@ Block (hunk 2 of `src/program/generate.cpp` in the patch, 25 lines):
                      char b[48];
                      for (int i = 0; i < 10; ++i)
 ```
+
+## 21 batch-dyn
+
+`21-batch-dyn.patch` — OPUS-BATCH-Passaggio a caldo fra chat singola e modo agenti (STRATA_BATCH_DYNAMIC, opt-in)
+
+### 21-1
+
+`include/strata/core/verify.hpp` · public:
+
+Anchor:
+```
+    // Greedy only, no drafts (MTP) in a batch window.  `init_slots` once after `init` (S <= max_t); a layer
+    // split's stages each get their own sessions, and run_slots/commit_slots continue into the next stage.
+    bool init_slots(const std::vector<SessionState*>& slots, std::string& err);
+```
+Block (hunk 1 of `include/strata/core/verify.hpp` in the patch, 10 lines):
+```diff
+     // Greedy only, no drafts (MTP) in a batch window.  `init_slots` once after `init` (S <= max_t); a layer
+     // split's stages each get their own sessions, and run_slots/commit_slots continue into the next stage.
+     bool init_slots(const std::vector<SessionState*>& slots, std::string& err);
++    /// fork lab/batch-dyn (STRATA_BATCH_DYNAMIC): the reverse of init_slots - the batch graphs (they hold the slot
++    /// sessions' addresses), the batch buffers and the slot list go, so the sessions can be freed; init_slots may run
++    /// again afterwards.  Nothing of a batch window may be in flight.
++    void release_slots();
+     int n_slots() const { return (int) slots_.size(); }
+     /// One batch window over slots [0, S): tokens[s] at positions pos[s]; out[s] = the greedy pick after it.
+     bool run_slots(int S, const int32_t* tokens, const int64_t* pos, PoolMultiFn pool, void* user, int32_t* out,
+```
+
+### 21-2
+
+`src/core/verify.cpp` · bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string&
+
+Anchor:
+```
+bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err) {
+    cudaGraphExec_t& ex = exec_bm_[bkey(rows, S, hbase)];
+    if (ex != nullptr) return true;
+```
+Block (hunk 1 of `src/core/verify.cpp` in the patch, 26 lines):
+```diff
+     return true;
+ }
+
++void Verifier::release_slots() {
++    const OnDevice on_device(device_);
++    if (cs_) cudaStreamSynchronize(cs_);
++    for (auto* m : {&exec_bm_, &commit_bm_, &save_bm_, &dcommit_bm_}) {
++        for (auto& kv : *m)
++            if (kv.second) cudaGraphExecDestroy(kv.second);
++        m->clear();
++    }
++    bm_used_.clear();
++    if (arena_b_) cudaFree(arena_b_);
++    if (h_commitb_) cudaFreeHost(h_commitb_);
++    arena_b_ = nullptr;
++    commitb_ = nullptr;
++    tail_snap_b_ = nullptr;
++    h_commitb_ = m_commitb_ = nullptr;
++    slots_.clear();
++    slot_sp_.clear();
++    last_batch_ = false;
++}
++
+ bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err) {
+     cudaGraphExec_t& ex = exec_bm_[bkey(rows, S, hbase)];
+     if (ex != nullptr) return true;
+```
+
+### 21-3
+
+`src/program/generate.cpp` · bool slot_copy_batchsync_env() {
+
+Anchor:
+```
+// perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
+// A file-backed arena on AMD (STRATA_ARENA_MMAP; the engine raises ROCclr's pin-in-place threshold, see main): an
+// adaptive swap copies one expert straight from the mapped file.  Through ROCclr's staging that copy blocks the host
+```
+Block (hunk 1 of `src/program/generate.cpp` in the patch, 25 lines):
+```diff
+     return on;
+ }
+
++// fork lab/batch-dyn: STRATA_BATCH_DYNAMIC=1 (opt-in) - the hot switch between the single chat and the agents.  With
++// --batch N the engine starts as without --batch on CUDA0 (no slot sessions there, the elastic cache takes their room,
++// --pipeline-windows and the conversation disk cache stay on) and enters the AGENT mode at the first BGEN (the server
++// sends it only when a second request is busy or waiting): the elastic cache gives back what the slot sessions need
++// plus STRATA_BATCH_DYN_FREE_MIB (1024) of free VRAM, the sessions are carved and the batch windows bound.  Once no slot
++// has decoded for STRATA_BATCH_IDLE_S (30) seconds it goes back: the sessions and the batch graphs are freed and the
++// cache grows into the room at once.  In the agent mode the RAM floor of the conversation cache is raised to
++// STRATA_BATCH_DYN_RAM_FLOOR_MIB (8192) and the oldest parked conversations leave until it holds.  The later stages'
++// slot sessions (fixed caches) stay allocated from the start.  Unset: nothing changes.
++static bool g_batch_dyn = false;   // resolved in main (it needs --serve, --batch, --elastic)
++static bool batch_dyn_env() {
++    static const bool on = [] { const char* v = std::getenv("STRATA_BATCH_DYNAMIC"); return v != nullptr && v[0] == '1'; }();
++    return on;
++}
++static double batch_dyn_env_num(const char* name, double dflt, double lo) {
++    const char* v = std::getenv(name);
++    return v != nullptr && v[0] != '\0' ? std::max(lo, std::atof(v)) : dflt;
++}
++
+ // perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
+ // A file-backed arena on AMD (STRATA_ARENA_MMAP; the engine raises ROCclr's pin-in-place threshold, see main): an
+ // adaptive swap copies one expert straight from the mapped file.  Through ROCclr's staging that copy blocks the host
+```
+
+### 21-4
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        std::fprintf(stderr, "strata: elastic cache does not support peer or remote expert tiers; using fixed cache\n");
+        o.elastic = false;
+    }
+```
+Block (hunk 2 of `src/program/generate.cpp` in the patch, 21 lines):
+```diff
+         std::fprintf(stderr, "strata: elastic cache does not support peer or remote expert tiers; using fixed cache\n");
+         o.elastic = false;
+     }
++    if (batch_dyn_env()) {   // fork lab/batch-dyn (see batch_dyn_env)
++        auto env_set = [](const char* k) { const char* v = std::getenv(k); return v != nullptr && v[0] != '\0' && v[0] != '0'; };
++        const char* why = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs --batch 2 or more"
++                        : !o.elastic ? "it needs --elastic (CUDA0's slot sessions take the elastic cache's room)"
++                        : o.batch_mtp || env_set("STRATA_BATCH_MTP") ? "not with --batch-mtp"
++                        : env_set("STRATA_PACK_PREFILL") ? "not with STRATA_PACK_PREFILL"
++                        : env_set("STRATA_PIPED_MTP") ? "not with STRATA_PIPED_MTP" : nullptr;
++        if (why != nullptr) std::fprintf(stderr, "strata generate: STRATA_BATCH_DYNAMIC is off: %s\n", why);
++        g_batch_dyn = why == nullptr;
++    }
+     // --batch: the elastic step runs between two batch windows and at a request's start, before its prompt lends any
+     // slot; the pipelined groups (--batch-groups > 1) keep windows of several stages in flight: not with it
+-    if (o.elastic && o.batch != 0 && o.batch_groups > 1) {
++    // (STRATA_BATCH_DYNAMIC: the step runs only where every group has drained - a request's start, the mode switch)
++    if (o.elastic && o.batch != 0 && o.batch_groups > 1 && !g_batch_dyn) {
+         std::fprintf(stderr, "strata: elastic cache is not validated with --batch-groups; using fixed cache\n");
+         o.elastic = false;
+     }
+```
+
+### 21-5
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                        : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
+                        : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
+                        : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
+```
+Block (hunk 3 of `src/program/generate.cpp` in the patch, 8 lines):
+```diff
+                         : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
+                         : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
+                         : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
+-                        : o.batch != 0 ? "not with --batch slots"
++                        : o.batch != 0 && !g_batch_dyn ? "not with --batch slots"
+                         : o.peer_device >= 1 ? "not with --peer-device"
+                         : helpers ? "not with the helper caches (--expert-cache-device1..3, --remote-expert-opt)"
+                         : nullptr;
+```
+
+### 21-6
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+    // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
+    // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
+    const bool mtp_first = [&] {
+```
+Block (hunk 4 of `src/program/generate.cpp` in the patch, 10 lines):
+```diff
+     // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
+     // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
+     const bool mtp_first = [&] {
+-        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || o.batch != 0) return false;
++        // (STRATA_BATCH_DYNAMIC: the single chat as without --batch - its drafter on the first card, as upstream #3095
++        // does with STRATA_PW_WITH_BATCH; no slot drafter exists there, --batch-mtp is refused)
++        if (!mtp_first_ok || o.pipeline_windows < 2 || stages.empty() || (o.batch != 0 && !g_batch_dyn)) return false;
+         const char* e = std::getenv("STRATA_MTP_STAGE0");
+         if (e != nullptr) return std::atoi(e) != 0;   // 0 keeps the drafter on the last card, 1 asks for the first
+         return mtp_first_default_on();
+```
+
+### 21-7
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        return n;
+    };
+    std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+```
+Block (hunk 5 of `src/program/generate.cpp` in the patch, 10 lines):
+```diff
+         return n;
+     };
+     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
++    // STRATA_BATCH_DYNAMIC: CUDA0's slot sessions (bslot_ss[0]) are host objects until the agent mode carves them
++    uint64_t bdyn_bytes0 = 0;
++    int64_t bdyn_lo0 = 0, bdyn_hi0 = -1;
++    std::vector<void*> bdyn_base0;   // their device memory while carved (nullptr: not)
+     if (o.batch != 0) {
+         const int cap = strata::kernels::kVerifyMaxT;
+         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
+```
+
+### 21-8
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            const strata::core::OnDevice on_k(dev);
+            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+            if (k == 0) bytes0 = bytes;
+```
+Block (hunk 6 of `src/program/generate.cpp` in the patch, 17 lines):
+```diff
+             const strata::core::OnDevice on_k(dev);
+             const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+             if (k == 0) bytes0 = bytes;
++            if (k == 0 && g_batch_dyn) {   // STRATA_BATCH_DYNAMIC: CUDA0's sessions are carved at the first BGEN
++                bdyn_bytes0 = bytes;
++                bdyn_lo0 = lo;
++                bdyn_hi0 = hi;
++                for (int b = 0; b < fit; ++b) bslot_ss[k].push_back(std::make_unique<strata::core::SessionState>());
++                bdyn_base0.assign((size_t) fit, nullptr);
++                std::fprintf(stderr, "strata generate: STRATA_BATCH_DYNAMIC: %d slot sessions on CUDA%d (%.2f GiB each) "
++                                     "carved only in the agent mode, from the elastic cache\n", fit, dev,
++                             (double) bytes / 1073741824.0);
++                continue;
++            }
+             for (int b = 0; b < fit; ++b) {
+                 auto u = std::make_unique<strata::core::SessionState>();
+                 void* buf = nullptr;
+```
+
+### 21-9
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
+            // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
+            std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
+```
+Block (hunk 7 of `src/program/generate.cpp` in the patch, 11 lines):
+```diff
+             if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
+             // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
+             std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
+-                                 "expert cache would otherwise hold\n", o.batch,
+-                         (double) bytes0 * o.batch / 1073741824.0);
++                                 "expert cache would otherwise hold%s\n", o.batch,
++                         (double) bytes0 * o.batch / 1073741824.0,
++                         g_batch_dyn ? " (STRATA_BATCH_DYNAMIC: only in the agent mode)" : "");
+         }
+     }
+
+```
+
+### 21-10
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        // fixed caches.  Not with windows pipelined across the stages.
+        // upsync 0.1.42: a layer split with --batch now pipelines one group per stage by default, resolved after the
+        // check where --elastic is read: the same rule as there, on the resolved number
+```
+Block (hunk 8 of `src/program/generate.cpp` in the patch, 8 lines):
+```diff
+         // fixed caches.  Not with windows pipelined across the stages.
+         // upsync 0.1.42: a layer split with --batch now pipelines one group per stage by default, resolved after the
+         // check where --elastic is read: the same rule as there, on the resolved number
+-        if (o.elastic && o.batch != 0 && o.batch_groups > 1) {
++        if (o.elastic && o.batch != 0 && o.batch_groups > 1 && !g_batch_dyn) {
+             std::fprintf(stderr, "strata: elastic cache is not validated with --batch-groups; using fixed cache\n");
+             o.elastic = false;
+         }
+```
+
+### 21-11
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                for (auto& u : bslot_ss[k]) ptrs.push_back(u.get());
+                strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
+                const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+```
+Block (hunk 9 of `src/program/generate.cpp` in the patch, 7 lines):
+```diff
+                 for (auto& u : bslot_ss[k]) ptrs.push_back(u.get());
+                 strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
+                 const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
++                if (k == 0 && g_batch_dyn) continue;   // STRATA_BATCH_DYNAMIC: bound when the agent mode carves them
+                 if (!vk.init_slots(ptrs, err)) {
+                     std::fprintf(stderr, "strata serve: --batch, stage %zu: %s\n", k + 1, err.c_str());
+                     return 1;
+```
+
+### 21-12
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            const char* v = std::getenv("STRATA_CONV_DISK_MIN");
+            return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : int64_t(4096);
+        }();
+```
+Block (hunk 10 of `src/program/generate.cpp` in the patch, 15 lines):
+```diff
+             const char* v = std::getenv("STRATA_CONV_DISK_MIN");
+             return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : int64_t(4096);
+         }();
+-        const bool conv_disk_on = conv_disk_idle_s > 0.0 && prefix_disk_enabled && prefix_multi_cap > 0 && o.batch <= 0;
++        // (STRATA_BATCH_DYNAMIC: on in the single-chat mode, off in the agent mode - the switch sets it)
++        bool conv_disk_on = conv_disk_idle_s > 0.0 && prefix_disk_enabled && prefix_multi_cap > 0 && (o.batch <= 0 || g_batch_dyn);
++        const bool conv_disk_cfg = conv_disk_on;
+         if (conv_disk_idle_s > 0.0)
+             std::fprintf(stderr, "strata serve: conversation disk cache: %s\n",
+-                         conv_disk_on ? "on (the live conversation at its last turn boundary after the idle time)"
++                         conv_disk_on && g_batch_dyn ? "on in the single-chat mode (STRATA_BATCH_DYNAMIC; off while the agents run)"
++                         : conv_disk_on ? "on (the live conversation at its last turn boundary after the idle time)"
+                                       : "off (needs --prompt-cache-file, STRATA_PREFIX_DISK_MULTI and no --batch)");
+         int64_t conv_pending_len = -1;   // the last request's turn boundary, saved at the next idle
+         int64_t conv_root_len = -1;      // that request's system turn (a saved boundary must be past it)
+```
+
+### 21-13
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        // under a split host_res holds slot numbers of whichever cache owns the layer: the elastic cache is CUDA0's,
+        // so it shrinks and grows over the layers of the first stage only
+        auto el_layer = [&](int64_t l) { return !multi_gpu || stage_of(l) == 0; };
+```
+Block (hunk 11 of `src/program/generate.cpp` in the patch, 9 lines):
+```diff
+         // under a split host_res holds slot numbers of whichever cache owns the layer: the elastic cache is CUDA0's,
+         // so it shrinks and grows over the layers of the first stage only
+         auto el_layer = [&](int64_t l) { return !multi_gpu || stage_of(l) == 0; };
+-        const int64_t el_reserve = (int64_t) o.elastic_reserve_mib << 20;
++        int64_t el_reserve = (int64_t) o.elastic_reserve_mib << 20;   // (STRATA_BATCH_DYNAMIC raises it in the agent mode)
++        const int64_t el_reserve0 = el_reserve;
+         const int64_t el_hyst_min = 192ll << 20;   // growth only past the reserve plus max(this, the measured noise)
+         static const bool el_trace = std::getenv("STRATA_ELASTIC_TRACE") != nullptr;
+         const int64_t el_step_max = 512ll << 20;   // at most this much per growth step (its copies are async)
+```
+
+### 21-14
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        std::vector<int64_t> rc_n(rc_core.size(), 0), rc_kept_reg(rc_core.size(), 0);
+        std::vector<uint64_t> rc_bytes(rc_core.size(), 0);
+        auto rc_dev = [&](size_t ci) -> int { return ci == 0 ? 0 : stages[ci - 1]->dev; };
+```
+Block (hunk 12 of `src/program/generate.cpp` in the patch, 50 lines):
+```diff
+         std::vector<int64_t> rc_n(rc_core.size(), 0), rc_kept_reg(rc_core.size(), 0);
+         std::vector<uint64_t> rc_bytes(rc_core.size(), 0);
+         auto rc_dev = [&](size_t ci) -> int { return ci == 0 ? 0 : stages[ci - 1]->dev; };
++        bool bdyn_agent = !g_batch_dyn;   // STRATA_BATCH_DYNAMIC: the agent mode (slot sessions carved on CUDA0)
++        // fork lab/batch-dyn: how much of the recent routing (the decayed counts of the windows, the batch windows
++        // included) each card's fixed core holds, against the best core of the same size for that routing - whether a
++        // core rotated on the agents' routing would hold more (STRATA_CORE_STAT=1, or with STRATA_BATCH_DYNAMIC)
++        static const bool core_stat_on = g_batch_dyn || std::getenv("STRATA_CORE_STAT") != nullptr;
++        auto core_stat = [&](const char* when) {
++            if (!core_stat_on || drive.d.usage.empty() || rc_slot_of.size() != drive.d.usage.size()) return;
++            for (size_t ci = 0; ci < rc_core.size(); ++ci) {
++                double tot = 0.0, in_core = 0.0, in_vram = 0.0;
++                std::vector<float> us;
++                int64_t nc = 0;
++                for (size_t i = 0; i < rc_slot_of.size(); ++i) {
++                    const int64_t l = (int64_t) i / g.n_expert;
++                    if ((size_t) (multi_gpu ? stage_of(l) : 0) != ci) continue;
++                    const float u = drive.d.usage[i];
++                    tot += u;
++                    us.push_back(u);
++                    if (rc_slot_of[i] >= 0) { in_core += u; ++nc; }
++                    else if (host_res[i] >= 0) in_vram += u;
++                }
++                if (tot <= 0.0 || nc == 0 || nc > (int64_t) us.size()) continue;
++                std::vector<float> top = us;
++                std::nth_element(top.begin(), top.begin() + (nc - 1), top.end(), std::greater<float>());
++                const float thr = top[(size_t) (nc - 1)];
++                double ideal = 0.0;
++                int64_t above = 0;
++                for (float u : us) if (u > thr) { ideal += u; ++above; }
++                ideal += (double) (nc - above) * thr;
++                int64_t core_top = 0;
++                for (size_t i = 0; i < rc_slot_of.size(); ++i)
++                    if (rc_slot_of[i] >= 0 && (size_t) (multi_gpu ? stage_of((int64_t) i / g.n_expert) : 0) == ci &&
++                        drive.d.usage[i] >= thr && thr > 0.0f) ++core_top;
++                std::fprintf(stderr, "strata core stat (%s, %s): dev%d nucleo %lld esperti: %.1f%% del routing recente "
++                                     "(il miglior nucleo della stessa misura %.1f%%), resto della VRAM %.1f%%, CPU %.1f%%; "
++                                     "%lld del nucleo fra i %lld piu' usati\n", when,
++                             g_batch_dyn ? (bdyn_agent ? "agenti" : "chat singola") : o.batch > 0 ? "batch" : "senza batch",
++                             rc_dev(ci), (long long) nc,
++                             100.0 * in_core / tot, 100.0 * ideal / tot, 100.0 * in_vram / tot,
++                             100.0 * (tot - in_core - in_vram) / tot, (long long) core_top, (long long) nc);
++            }
++            std::fflush(stderr);
++        };
+         auto rc_log = [&](const char* when) {
++            core_stat(when);
+             if (!rc_req) return;
+             const double G = 1073741824.0;
+             int64_t misplaced = 0;
+```
+
+### 21-15
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            ConvCheckpoint::PromptPlan partial_plan;   ///< --prefill-pipe: the segment it stopped in, read on in its chunks
+        };
+        std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
+```
+Block (hunk 13 of `src/program/generate.cpp` in the patch, 165 lines):
+```diff
+             ConvCheckpoint::PromptPlan partial_plan;   ///< --prefill-pipe: the segment it stopped in, read on in its chunks
+         };
+         std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
++        // ---- STRATA_BATCH_DYNAMIC (fork lab/batch-dyn, see batch_dyn_env): the switch between the single-chat mode and
++        // the agent mode, in place.  Both run between two command lines, with nothing in flight: no slot decoding, no
++        // pipelined group, the single request's pipeline drained at its end, the adaptive round landed (adapt_tick).
++        Clock::time_point bdyn_last = Clock::now();   // the last moment a slot decoded or was admitted
++        const double bdyn_idle_s = batch_dyn_env_num("STRATA_BATCH_IDLE_S", 30.0, 1.0);
++        const int64_t bdyn_free = (int64_t) batch_dyn_env_num("STRATA_BATCH_DYN_FREE_MIB", 1024.0, 0.0) << 20;
++        const int64_t bdyn_ram_floor = (int64_t) batch_dyn_env_num("STRATA_BATCH_DYN_RAM_FLOOR_MIB", 8192.0, 0.0);
++        const int64_t bdyn_floor0 = o.conversation_cache_min_free_mib;
++        int bdyn_enters = 0, bdyn_leaves = 0;
++        auto bdyn_idle_ok = [&] {   // no slot decodes, none holds a prompt read that gave way (BYIELD)
++            for (const BSlot& x : bs) if (x.active || x.partial) return false;
++            return true;
++        };
++        auto bdyn_drop_sessions = [&] {   // CUDA0's carved slot sessions back to the driver
++            const strata::core::OnDevice on0(0);
++            cudaDeviceSynchronize();
++            for (size_t b = 0; b < bdyn_base0.size(); ++b) {
++                if (bdyn_base0[b] == nullptr) continue;
++                strata::core::session_release(*bslot_ss[0][b]);
++                cudaFree(bdyn_base0[b]);
++                bdyn_base0[b] = nullptr;
+... 141 more lines: see 21-batch-dyn.patch
+```
+
+### 21-16
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+        for (;;) {
+            line_drain_ms = 0.0;
+            if (batch_on() || (piped && pipe_inflight())) {
+```
+Block (hunk 14 of `src/program/generate.cpp` in the patch, 7 lines):
+```diff
+         for (;;) {
+             line_drain_ms = 0.0;
+             if (batch_on() || (piped && pipe_inflight())) {
++                if (g_batch_dyn) bdyn_last = Clock::now();   // the slots decode: the agent mode stays
+                 if (!try_next_line(line)) {
+                     if (!(piped ? pump(true) : batch_step())) return 1;
+                     // --elastic: the cache's step between two batch windows (nothing lent, no window in flight), as
+```
+
+### 21-17
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+            } else if (!next_line(line)) {
+                break;
+            }
+```
+Block (hunk 15 of `src/program/generate.cpp` in the patch, 16 lines):
+```diff
+                     std::fflush(stdout);
+                     continue;
+                 }
++            } else if (g_batch_dyn && bdyn_agent && bdyn_idle_ok()) {
++                // STRATA_BATCH_DYNAMIC: the agent mode waits for the next line until the idle time is over, then leaves
++                const double left_s = bdyn_idle_s - std::chrono::duration<double>(Clock::now() - bdyn_last).count();
++                bool idle = left_s <= 0.0;
++                if (idle || !next_line_for(line, (int64_t) (left_s * 1000.0) + 1, idle)) {
++                    if (!idle) break;   // the input ended
++                    if (!bdyn_leave("nessuno slot attivo per il tempo di attesa")) return 1;
++                    std::fflush(stdout);
++                    continue;
++                }
+             } else if (!next_line(line)) {
+                 break;
+             }
+```
+
+### 21-18
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                return 1;
+            }
+            admit_slot = -1;
+```
+Block (hunk 16 of `src/program/generate.cpp` in the patch, 13 lines):
+```diff
+                 return 1;
+             }
+             admit_slot = -1;
++            // STRATA_BATCH_DYNAMIC: a single chat's request after the idle time (requests back to back never let the
++            // timed wait above run out) leaves the agent mode first
++            if (g_batch_dyn && bdyn_agent && bdyn_idle_ok() && (line.rfind("GEN ", 0) == 0 || line.rfind("GENI ", 0) == 0) &&
++                std::chrono::duration<double>(Clock::now() - bdyn_last).count() >= bdyn_idle_s) {
++                if (!bdyn_leave("una chat sola")) return 1;
++                std::fflush(stdout);
++            }
+             if (line.rfind("BGEN ", 0) == 0 || line.rfind("BGENI ", 0) == 0) {
+                 const bool bimg = line.rfind("BGENI ", 0) == 0;
+                 char* e1 = nullptr;
+```
+
+### 21-19
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                admit_slot = (int) b;
+                admit_max_new = mn;
+                adm_drain_ms = line_drain_ms;
+```
+Block (hunk 17 of `src/program/generate.cpp` in the patch, 16 lines):
+```diff
+                     std::fflush(stdout);
+                     continue;
+                 }
++                if (g_batch_dyn && !bdyn_agent) {   // STRATA_BATCH_DYNAMIC: the first slot of the agents
++                    std::string de;
++                    if (!bdyn_enter(de)) {
++                        std::fprintf(stderr, "strata batch-dyn: the agent mode did not start: %s\n", de.c_str());
++                        std::printf("ERR BGEN: %s\n", de.c_str());
++                        std::fflush(stdout);
++                        continue;
++                    }
++                }
++                bdyn_last = Clock::now();
+                 admit_slot = (int) b;
+                 admit_max_new = mn;
+                 adm_drain_ms = line_drain_ms;
+```
+
+### 21-20
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                // where the rest is read the same way after it (more than a chunk and more than a short read left),
+                // text only, and into a slot that is not decoding.
+                auto give_way = [&](int ys, int64_t q, std::string& err) -> bool {
+```
+Block (hunk 18 of `src/program/generate.cpp` in the patch, 10 lines):
+```diff
+                 // where the rest is read the same way after it (more than a chunk and more than a short read left),
+                 // text only, and into a slot that is not decoding.
+                 auto give_way = [&](int ys, int64_t q, std::string& err) -> bool {
+-                    const bool can = ys < (int) bs.size() && !bs[(size_t) ys].active &&
++                    // (STRATA_BATCH_DYNAMIC: not in the single-chat mode - CUDA0's slot sessions are not carved, and the
++                    // cache cannot give them room while this read holds its loan: the read goes on)
++                    const bool can = ys < (int) bs.size() && !bs[(size_t) ys].active && bdyn_agent &&
+                                      (admit_slot < 0 || ys == admit_slot) && req_imgs.empty() && o.prompt_cache > 0 &&
+                                      b0 - q > std::max<int64_t>(C_read, o.short_read);
+                     std::string ye;
+```
+
+### 21-21
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                    }
+                    return true;
+                }();
+```
+Block (hunk 19 of `src/program/generate.cpp` in the patch, 9 lines):
+```diff
+                     }
+                     return true;
+                 }();
+-                if (piped && pr_conc && req_imgs.empty()) {   // (with no slot decoding it only watches for a BYIELD)
++                if (piped && pr_conc && req_imgs.empty() && bdyn_agent) {   // (STRATA_BATCH_DYNAMIC: agents only)
++                    // (with no slot decoding it only watches for a BYIELD)
+                     // the drafter's prompt pass captures its graphs and grows its records at first use, and the
+                     // prompt path's pinned upload slots grow at their first larger upload: done here, with nothing in
+                     // flight (on the reader's thread a capture, an allocation or a free takes the driver's lock and
+```

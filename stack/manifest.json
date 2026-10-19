@@ -3481,6 +3481,279 @@
         "src/core/verify.cpp",
         "src/program/generate.cpp"
       ]
+    },
+    {
+      "id": "21",
+      "name": "batch-dyn",
+      "summary": "Hot switch between the single chat and the agents with `--batch N`: CUDA0 starts as without `--batch` (no slot sessions, elastic cache, `--pipeline-windows`, drafter on the first card, conversation disk cache); the first `BGEN` shrinks the elastic tail for the slot sessions plus a free-VRAM margin, carves them and binds the batch windows; after `STRATA_BATCH_IDLE_S` without slots `Verifier::release_slots` frees graphs and sessions and the cache grows back at once. In the agent mode the conversation cache keeps a higher RAM floor. Logs `strata core stat` (share of the recent routing held by each card's fixed core vs the best core of that size).",
+      "switch": "`STRATA_BATCH_DYNAMIC=1` with `--batch N --elastic` (off); `STRATA_BATCH_IDLE_S` (30), `STRATA_BATCH_DYN_FREE_MIB` (1024), `STRATA_BATCH_DYN_RAM_FLOOR_MIB` (8192); `STRATA_CORE_STAT=1` for the core statistic alone. Refused with `--batch-mtp`, `STRATA_PIPED_MTP`, `STRATA_PACK_PREFILL`",
+      "origin": "fork (lab/batch-dyn 20de720d + 246fb7aa)",
+      "upstream_status": "never proposed; nobody upstream or in the forks allocates slots on demand (survey 19 Oct). Builds on the ideas of PR #3095 (pipeline beside --batch), #1117 (elastic cache), #2522 (per-stage VRAM resize)",
+      "measured": "Not measured yet (19 Oct): compiled no.",
+      "docs": "moe-aggressive-commit docs/porto/strata_adattivo/BATCH_DINAMICO_2026-10-19.md",
+      "notes": "Written on lab/multichat45 (e42d8af8, with the multichat ports); this patch is the same change rebased on the stack head d06429ee (three context conflicts resolved: the pipeline gate without STRATA_BATCH_PIPELINE, the pack slots absent). Patches 18-20 live on lab/multichat45b.",
+      "patch": "21-batch-dyn.patch",
+      "commit": "afa455cf5e44c41e2b964e99a7f7de3b411116b7",
+      "title": "OPUS-BATCH-Passaggio a caldo fra chat singola e modo agenti (STRATA_BATCH_DYNAMIC, opt-in)",
+      "anchors": [
+        {
+          "block": "21-1",
+          "file": "include/strata/core/verify.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    // Greedy only, no drafts (MTP) in a batch window.  `init_slots` once after `init` (S <= max_t); a layer",
+            "    // split's stages each get their own sessions, and run_slots/commit_slots continue into the next stage.",
+            "    bool init_slots(const std::vector<SessionState*>& slots, std::string& err);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "21-2",
+          "file": "src/core/verify.cpp",
+          "symbol": "bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string&",
+          "anchor": [
+            "bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err) {",
+            "    cudaGraphExec_t& ex = exec_bm_[bkey(rows, S, hbase)];",
+            "    if (ex != nullptr) return true;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "21-3",
+          "file": "src/program/generate.cpp",
+          "symbol": "bool slot_copy_batchsync_env() {",
+          "anchor": [
+            "// perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each",
+            "// A file-backed arena on AMD (STRATA_ARENA_MMAP; the engine raises ROCclr's pin-in-place threshold, see main): an",
+            "// adaptive swap copies one expert straight from the mapped file.  Through ROCclr's staging that copy blocks the host"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "21-4",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        std::fprintf(stderr, \"strata: elastic cache does not support peer or remote expert tiers; using fixed cache\\n\");",
+            "        o.elastic = false;",
+            "    }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "21-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        : split_devs.size() > 1 && o.pipeline_windows == 1 ? \"--pipeline-windows 1 needs exactly two stages\"",
+            "                        : split_devs.size() > 1 && o.adapt_async ? \"not with --adapt-async on three or more stages\"",
+            "                        : o.mtp.empty() || o.spec < 2 ? \"it needs the MTP drafter (--mtp, --spec)\""
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "21-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's",
+            "    // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.",
+            "    const bool mtp_first = [&] {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "21-7",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        return n;",
+            "    };",
+            "    std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "21-8",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            const strata::core::OnDevice on_k(dev);",
+            "            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);",
+            "            if (k == 0) bytes0 = bytes;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "21-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;",
+            "            // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)",
+            "            std::fprintf(stderr, \"strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the \""
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "21-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // fixed caches.  Not with windows pipelined across the stages.",
+            "        // upsync 0.1.42: a layer split with --batch now pipelines one group per stage by default, resolved after the",
+            "        // check where --elastic is read: the same rule as there, on the resolved number"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "21-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                for (auto& u : bslot_ss[k]) ptrs.push_back(u.get());",
+            "                strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;",
+            "                const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "21-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            const char* v = std::getenv(\"STRATA_CONV_DISK_MIN\");",
+            "            return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : int64_t(4096);",
+            "        }();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "21-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        // under a split host_res holds slot numbers of whichever cache owns the layer: the elastic cache is CUDA0's,",
+            "        // so it shrinks and grows over the layers of the first stage only",
+            "        auto el_layer = [&](int64_t l) { return !multi_gpu || stage_of(l) == 0; };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "21-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        std::vector<int64_t> rc_n(rc_core.size(), 0), rc_kept_reg(rc_core.size(), 0);",
+            "        std::vector<uint64_t> rc_bytes(rc_core.size(), 0);",
+            "        auto rc_dev = [&](size_t ci) -> int { return ci == 0 ? 0 : stages[ci - 1]->dev; };"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "21-15",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            ConvCheckpoint::PromptPlan partial_plan;   ///< --prefill-pipe: the segment it stopped in, read on in its chunks",
+            "        };",
+            "        std::vector<BSlot> bs((size_t) std::max(o.batch, 0));"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        },
+        {
+          "block": "21-16",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        for (;;) {",
+            "            line_drain_ms = 0.0;",
+            "            if (batch_on() || (piped && pipe_inflight())) {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 14
+        },
+        {
+          "block": "21-17",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            } else if (!next_line(line)) {",
+            "                break;",
+            "            }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 15
+        },
+        {
+          "block": "21-18",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                return 1;",
+            "            }",
+            "            admit_slot = -1;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 16
+        },
+        {
+          "block": "21-19",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                admit_slot = (int) b;",
+            "                admit_max_new = mn;",
+            "                adm_drain_ms = line_drain_ms;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 17
+        },
+        {
+          "block": "21-20",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                // where the rest is read the same way after it (more than a chunk and more than a short read left),",
+            "                // text only, and into a slot that is not decoding.",
+            "                auto give_way = [&](int ys, int64_t q, std::string& err) -> bool {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 18
+        },
+        {
+          "block": "21-21",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    }",
+            "                    return true;",
+            "                }();"
+          ],
+          "status_in_base": "unique",
+          "hunk": 19
+        }
+      ],
+      "files": [
+        "include/strata/core/verify.hpp",
+        "src/core/verify.cpp",
+        "src/program/generate.cpp"
+      ]
     }
   ],
   "retired": [

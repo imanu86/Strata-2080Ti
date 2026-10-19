@@ -4,7 +4,7 @@ The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata,
 
 Rebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-17) come from lab/struct-a, lab/ttft43 and lab/pipeline2.
 
-Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `d06429ee`. 17 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `d06429ee`. 18 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -52,6 +52,7 @@ Reference configuration environment (the fork's 0.1.43 Daily r2, config `strata-
 | 15 | [ple-lookahead](#15-ple-lookahead) | The PLE rows of the first chunk of the next prompt part are read while the previous part finishes, and beside the prefix restore (`Prefill::set_ple_lookahead`, `ple_warm_now`). | `STRATA_PLE_LOOKAHEAD=0` turns it off (ON by default, direct PLE only) | fork (lab/ttft43 ea73f49e) | never proposed | part of the TTFT bench of patch 14 (about 0.7 s of file read hidden per restore). |
 | 16 | [conv-disk](#16-conv-disk) | `STRATA_CONV_DISK=<s>`: after a request, once the engine has been idle that long, the live conversation at its last turn boundary goes to a keyed file; a request looks for the longest saved boundary among its own. | `STRATA_CONV_DISK=<idle seconds>`, `STRATA_CONV_DISK_MIN` (4096) (off; needs `--prompt-cache-file` and `STRATA_PREFIX_DISK_MULTI`, no `--batch`) | fork (lab/ttft43 abd685c5) | never proposed | a 130k conversation restarts from its file instead of the system turn alone (65-80 s of prefill); 13 Oct: a restart took 277 s with it on, later shown not to come from CONV_DISK (TTFT43.md). |
 | 17 | [p2-flush-noswitch](#17-p2-flush-noswitch) | Pipeline polling without switching card: `STRATA_P2_FLUSH_NOSWITCH` (service, done and the chain read their mapped flags with no OnDevice), `STRATA_P2_FLUSH_US` (flush period), `STRATA_P2_SWITCH_STAT` (host time in the window launches), `STRATA_P2_SMEM` (config cache to shared). | `STRATA_P2_FLUSH_NOSWITCH=1`, `STRATA_P2_FLUSH_US=<us>`, `STRATA_P2_SWITCH_STAT=1`, `STRATA_P2_SMEM=1` (off) | fork (lab/pipeline2 f6a0b6b2; the polling idea from NTRYourWaifu's v7/v8) | never proposed | 13 Oct B-A-B (isolated bench): NOSWITCH removes ~8 100 card switches per request but the gain is below the spread; never promoted (docs/PIPELINE2.md par. 11). |
+| 21 | [batch-dyn](#21-batch-dyn) | Hot switch between the single chat and the agents with `--batch N`: CUDA0 starts as without `--batch` (no slot sessions, elastic cache, `--pipeline-windows`, drafter on the first card, conversation disk cache); the first `BGEN` shrinks the elastic tail for the slot sessions plus a free-VRAM margin, carves them and binds the batch windows; after `STRATA_BATCH_IDLE_S` without slots `Verifier::release_slots` frees graphs and sessions and the cache grows back at once. In the agent mode the conversation cache keeps a higher RAM floor. Logs `strata core stat` (share of the recent routing held by each card's fixed core vs the best core of that size). | `STRATA_BATCH_DYNAMIC=1` with `--batch N --elastic` (off); `STRATA_BATCH_IDLE_S` (30), `STRATA_BATCH_DYN_FREE_MIB` (1024), `STRATA_BATCH_DYN_RAM_FLOOR_MIB` (8192); `STRATA_CORE_STAT=1` for the core statistic alone. Refused with `--batch-mtp`, `STRATA_PIPED_MTP`, `STRATA_PACK_PREFILL` | fork (lab/batch-dyn 20de720d + 246fb7aa) | never proposed; nobody upstream or in the forks allocates slots on demand (survey 19 Oct). Builds on the ideas of PR #3095 (pipeline beside --batch), #1117 (elastic cache), #2522 (per-stage VRAM resize) | Not measured yet (19 Oct): compiled no. |
 
 ## Retired
 
@@ -1848,4 +1849,146 @@ Insertion points (15):
                                        (long long) sa_placed[2], (long long) sa_tails[2], (long long) sa_drops[2],
                                        (long long) sa_placed[3], (long long) sa_tails[3], (long long) sa_drops[3],
                                        (long long) sa_chains, (long long) sa_cut);
+  ```
+
+## 21 batch-dyn
+
+`21-batch-dyn.patch` — OPUS-BATCH-Passaggio a caldo fra chat singola e modo agenti (STRATA_BATCH_DYNAMIC, opt-in)
+
+- **What**: Hot switch between the single chat and the agents with `--batch N`: CUDA0 starts as without `--batch` (no slot sessions, elastic cache, `--pipeline-windows`, drafter on the first card, conversation disk cache); the first `BGEN` shrinks the elastic tail for the slot sessions plus a free-VRAM margin, carves them and binds the batch windows; after `STRATA_BATCH_IDLE_S` without slots `Verifier::release_slots` frees graphs and sessions and the cache grows back at once. In the agent mode the conversation cache keeps a higher RAM floor. Logs `strata core stat` (share of the recent routing held by each card's fixed core vs the best core of that size).
+- **Switch (default)**: `STRATA_BATCH_DYNAMIC=1` with `--batch N --elastic` (off); `STRATA_BATCH_IDLE_S` (30), `STRATA_BATCH_DYN_FREE_MIB` (1024), `STRATA_BATCH_DYN_RAM_FLOOR_MIB` (8192); `STRATA_CORE_STAT=1` for the core statistic alone. Refused with `--batch-mtp`, `STRATA_PIPED_MTP`, `STRATA_PACK_PREFILL`
+- **Origin**: fork (lab/batch-dyn 20de720d + 246fb7aa)
+- **Upstream**: never proposed; nobody upstream or in the forks allocates slots on demand (survey 19 Oct). Builds on the ideas of PR #3095 (pipeline beside --batch), #1117 (elastic cache), #2522 (per-stage VRAM resize)
+- **Measured**: Not measured yet (19 Oct): compiled no.
+- **Notes**: Written on lab/multichat45 (e42d8af8, with the multichat ports); this patch is the same change rebased on the stack head d06429ee (three context conflicts resolved: the pipeline gate without STRATA_BATCH_PIPELINE, the pack slots absent). Patches 18-20 live on lab/multichat45b.
+- **Docs**: moe-aggressive-commit docs/porto/strata_adattivo/BATCH_DINAMICO_2026-10-19.md
+- **Files**: `include/strata/core/verify.hpp`, `src/core/verify.cpp`, `src/program/generate.cpp`
+
+Insertion points (21):
+
+- `include/strata/core/verify.hpp` · `public:` → [21-1](BLOCKS.md#21-1)
+  ```
+      // Greedy only, no drafts (MTP) in a batch window.  `init_slots` once after `init` (S <= max_t); a layer
+      // split's stages each get their own sessions, and run_slots/commit_slots continue into the next stage.
+      bool init_slots(const std::vector<SessionState*>& slots, std::string& err);
+  ```
+- `src/core/verify.cpp` · `bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string&` → [21-2](BLOCKS.md#21-2)
+  ```
+  bool Verifier::capture_batch(const int* rows, int S, int hbase, std::string& err) {
+      cudaGraphExec_t& ex = exec_bm_[bkey(rows, S, hbase)];
+      if (ex != nullptr) return true;
+  ```
+- `src/program/generate.cpp` · `bool slot_copy_batchsync_env() {` → [21-3](BLOCKS.md#21-3)
+  ```
+  // perf-review D-4: the lent slots are refilled with queued copies and one wait; STRATA_REFILL_BLOCKING=1 waits on each
+  // A file-backed arena on AMD (STRATA_ARENA_MMAP; the engine raises ROCclr's pin-in-place threshold, see main): an
+  // adaptive swap copies one expert straight from the mapped file.  Through ROCclr's staging that copy blocks the host
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-4](BLOCKS.md#21-4)
+  ```
+          std::fprintf(stderr, "strata: elastic cache does not support peer or remote expert tiers; using fixed cache\n");
+          o.elastic = false;
+      }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-5](BLOCKS.md#21-5)
+  ```
+                          : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
+                          : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
+                          : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-6](BLOCKS.md#21-6)
+  ```
+      // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
+      // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
+      const bool mtp_first = [&] {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-7](BLOCKS.md#21-7)
+  ```
+          return n;
+      };
+      std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-8](BLOCKS.md#21-8)
+  ```
+              const strata::core::OnDevice on_k(dev);
+              const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+              if (k == 0) bytes0 = bytes;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-9](BLOCKS.md#21-9)
+  ```
+              if (o.batch_groups > 1 && o.batch % o.batch_groups != 0) o.batch_groups = 1;
+              // the sessions' VRAM is the expert cache's: say what it costs (docs/BATCHING.md has the measured trade)
+              std::fprintf(stderr, "strata generate: --batch %d: the slot sessions take %.2f GiB of VRAM on CUDA0 that the "
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-10](BLOCKS.md#21-10)
+  ```
+          // fixed caches.  Not with windows pipelined across the stages.
+          // upsync 0.1.42: a layer split with --batch now pipelines one group per stage by default, resolved after the
+          // check where --elastic is read: the same rule as there, on the resolved number
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-11](BLOCKS.md#21-11)
+  ```
+                  for (auto& u : bslot_ss[k]) ptrs.push_back(u.get());
+                  strata::core::Verifier& vk = k == 0 ? ver : stages[k - 1]->ver;
+                  const strata::core::OnDevice on_k(k == 0 ? 0 : stages[k - 1]->dev);
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-12](BLOCKS.md#21-12)
+  ```
+              const char* v = std::getenv("STRATA_CONV_DISK_MIN");
+              return v != nullptr ? std::max<int64_t>(1, std::atoll(v)) : int64_t(4096);
+          }();
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-13](BLOCKS.md#21-13)
+  ```
+          // under a split host_res holds slot numbers of whichever cache owns the layer: the elastic cache is CUDA0's,
+          // so it shrinks and grows over the layers of the first stage only
+          auto el_layer = [&](int64_t l) { return !multi_gpu || stage_of(l) == 0; };
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-14](BLOCKS.md#21-14)
+  ```
+          std::vector<int64_t> rc_n(rc_core.size(), 0), rc_kept_reg(rc_core.size(), 0);
+          std::vector<uint64_t> rc_bytes(rc_core.size(), 0);
+          auto rc_dev = [&](size_t ci) -> int { return ci == 0 ? 0 : stages[ci - 1]->dev; };
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-15](BLOCKS.md#21-15)
+  ```
+              ConvCheckpoint::PromptPlan partial_plan;   ///< --prefill-pipe: the segment it stopped in, read on in its chunks
+          };
+          std::vector<BSlot> bs((size_t) std::max(o.batch, 0));
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-16](BLOCKS.md#21-16)
+  ```
+          for (;;) {
+              line_drain_ms = 0.0;
+              if (batch_on() || (piped && pipe_inflight())) {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-17](BLOCKS.md#21-17)
+  ```
+              } else if (!next_line(line)) {
+                  break;
+              }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-18](BLOCKS.md#21-18)
+  ```
+                  return 1;
+              }
+              admit_slot = -1;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-19](BLOCKS.md#21-19)
+  ```
+                  admit_slot = (int) b;
+                  admit_max_new = mn;
+                  adm_drain_ms = line_drain_ms;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-20](BLOCKS.md#21-20)
+  ```
+                  // where the rest is read the same way after it (more than a chunk and more than a short read left),
+                  // text only, and into a slot that is not decoding.
+                  auto give_way = [&](int ys, int64_t q, std::string& err) -> bool {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-21](BLOCKS.md#21-21)
+  ```
+                      }
+                      return true;
+                  }();
   ```
