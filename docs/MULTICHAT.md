@@ -679,3 +679,25 @@ limiti di parità e prestazioni elencati sopra. Il confronto PACK a pari slot è
 al ritorno dal batch ordinario senza `--batch-mtp` resta il limite preesistente descritto sopra.
 L2 gruppi con MTP, ammissione senza copia, condivisione fisica del
 prefisso e tuning esteso restano lavori futuri: non sono necessari per validare questa correzione.
+
+## Passata unica — pacco sul thread concorrente: `STRATA_PACK_CONCURRENT` (19/10, opt-in, patch 21)
+
+Design: `moe-aggressive-commit/docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md`. Il caso dell'owner: prefisso
+comune ~40k in cache, 1-4k token nuovi per agente a ogni turno, 3-4 agenti che leggono mentre gli altri scrivono.
+
+- **Perché**: con `STRATA_PIPED_CONCURRENT=1` la lettura usciva da `read_part` prima di `pk_read`: nelle corse `pack3-conc`
+  (r9) il pacco non è mai scattato (zero righe `strata pack:` nel log); `pack3` da solo (r8) ferma i decoder a ogni lettura.
+- **Cosa**: `pk_read` è spezzato in `pk_prepare` (BHINT presi, prefissi ripristinati nei pack slot, `lend(total)`,
+  `on_pack_rows`; sul thread host a pipeline scarica, dove già si fa `lend`), `Prefill::run_packed` (sul thread di
+  lettura, mentre i gruppi decodificano via `pump`) e `pk_finish` (checkpoint dei pack slot dopo `join` + `pipe_drain`).
+  `STRATA_PACK_CONCURRENT=1` (con `STRATA_PACK_PREFILL=N` e `STRATA_PIPED_CONCURRENT=1`) usa le tre parti nel percorso
+  concorrente; spenta, `pk_read` le fa di fila come prima (percorso identico). Una lettura impacchettata non prende
+  `BYIELD` (lo `stopped_at` cadrebbe nel flusso impacchettato, non nel segmento proprio): è «not taken», come una
+  lettura finita prima. Non con un segmento pianificato (`--prefill-pipe`), come `pk_read`.
+- **Perché NON righe di decode nel chunk del prefill** (la (b) dell'owner alla lettera): qui un chunk dura secondi
+  (M: 128 token 1,2 s, 2k 4,5 s, 8k 10 s, stream_all ridequantizza tutti gli esperti a ogni chunk); una riga agganciata
+  avanza di un token (o una finestra) per chunk: tetto sotto 1 t/s per agente contro 15-20 t/s per slot delle finestre
+  concorrenti. La passata unica qui è: una passata per tutte le letture pendenti + finestre dei decoder in parallelo.
+- **Misura**: banco `corse_2080ti/20261019_passata_unica/letture_concorrenti.py` (4 lettori da 2-4k su R0..R3 in cache +
+  2 scrittori da 600 token, 2 giri, poi parità da soli) e `replay_trace.py`, B-A-B sullo stesso exe. Esiti: sotto,
+  quando misurati.
