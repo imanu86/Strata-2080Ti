@@ -9,7 +9,8 @@
   },
   "stack_head": "d9a26384af8122b4945fb02191136d812ac094cb",
   "skip_subjects": [
-    "FABLE-STRATA-Riporta docs/UPSYNC.md"
+    "FABLE-STRATA-Riporta docs/UPSYNC.md",
+    "OPUS-BF16-"
   ],
   "patches": [
     {
@@ -3489,7 +3490,7 @@
       "switch": "`STRATA_HC16_SM75=1` (off; sm_75 only, not part of `STRATA_SM75_PERF`)",
       "origin": "fork (pr/prefill-hc16-sm75 626d324c, the 0.1.43 Daily's hc16, rewritten on 0.1.45's kernels)",
       "upstream_status": "never proposed. Overlaps upstream's `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091), which sends every BF16 GEMM through FP16 with per-call conversion buffers; hc16 is the narrow version (these call sites only, a 6.55 MB buffer allocated and priced with the prompt path, the draft layer untouched)",
-      "measured": "0.1.43 Daily: -19.5% of the GPU prompt time on the 2080 Ti (131k prefill 100 -> 75 s together with SELECT_SIMT). Not bitwise (FP16 activations). On 0.1.45: see docs/UPSYNC_MAIN.md par. 8.",
+      "measured": "0.1.43 Daily: -19.5% of the GPU prompt time on the 2080 Ti (131k prefill 100 -> 75 s together with SELECT_SIMT). Not bitwise (FP16 activations). On 0.1.45: see docs/UPSYNC_MAIN.md par. 8. 0.1.45, 131k, FORCE_IDS only (free windows), two cards, 19 Oct: prompt 88.8 -> 78.5 s (-11.6%), draft acceptance 69.5/64.7% against 69.1-69.7/65.6-65.9% off, decode unchanged; upstream BF16_TC=1 on the same bench -12.5% (77.7 s), acceptance 69.4/65.5% (moe-aggressive-commit BF16_TURING_2026-10-19.md).",
       "notes": "Precedence with `STRATA_BF16_TC=1`: on hc16's call sites hc16 wins (xn16 is written by hc16's rule, not as BF16_TC's FP16-of-BF16 image, and the staged weight replaces BF16_TC's per-call conversion); every other BF16 GEMM (router, indexer, draft layer) follows BF16_TC. Off for BF16X2, `STRATA_HC_REQ8` and non-BF16 resident matrices (a clear error, not a silent fallback). `carve` and `bytes_needed_impl` take the buffer in step.",
       "docs": "docs/UPSYNC_MAIN.md",
       "patch": "18-hc16-sm75.patch",
@@ -3912,6 +3913,18 @@
       "summary": "The server tokenizes the prompt from the last shared prefix (`STRATA_PROMPT_ENCODER`, server side).",
       "measured": "TTFT bench of 13 Oct, see patch 14.",
       "retired": "18 Oct 2026: in upstream 0.1.45 (f13a870d, Niko1221, from gputier's #1852), unconditional there; the Daily bat variable is harmless."
+    },
+    {
+      "name": "hc-down75 / up75-all (lab/bf16-turing)",
+      "summary": "Turing decode hyper-connection reads: `STRATA_GR_DOWN75=1|2|4|8` (the staged down projection without shared-memory staging or barriers, weights prefetched 8 chunks deep, activations read through L1, 2-8 rows a block) and `STRATA_GR_UP75=2` (upstream's gr_up75_kernel at T 1-2 too). Both bitwise (same output hashes, checked at start-up against the plain read).",
+      "measured": "fused_gr_bench on the 2080 Ti, cold weights, 19 Oct: down at T 2 20.4 -> 20.7-24.5 us (T 3-4 worse), up at T 1-2 20.3/22.5 -> 21.7/23.5 us. No gain: the 6.55 MB read is ~17 us of kernel against ~12 us of practical bandwidth plus launch and tail.",
+      "retired": "19 Oct 2026: rejected at the kernel bench, never registered as a patch. Code: fork branch lab/bf16-turing (5e7b71d9). Details: moe-aggressive-commit docs/porto/strata_adattivo/BF16_TURING_2026-10-19.md."
+    },
+    {
+      "name": "bf16tc-draft (lab/bf16-turing)",
+      "summary": "`STRATA_BF16_TC_DRAFT=0`: with upstream's `STRATA_BF16_TC=1`, the MTP drafter's K/V fill in the prompt (draft_kv, the drafter's hyper-connection down/up) stays on cuBLAS's BF16 call.",
+      "measured": "131k, FORCE_IDS only (free windows), 19 Oct: BF16_TC alone already keeps the draft acceptance (69.4/65.5% against 69.1-69.7/65.6-65.9% off) with the prompt 88.8 -> 77.7 s (-12.5%); with the drafter kept on BF16 77.8 s, 68.8/66.1%: the same.",
+      "retired": "19 Oct 2026: nothing to protect (the 27-point acceptance loss attributed to BF16_TC did not reproduce). Code: fork branch lab/bf16-turing (d6192242)."
     }
   ]
 }
