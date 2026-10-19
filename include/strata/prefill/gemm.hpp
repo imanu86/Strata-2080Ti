@@ -111,6 +111,19 @@ private:
 /// CUDA 12 build.
 void gemm_set_dense_f32(int mode);
 
+/// Fork STRATA_BF16_TC_DRAFT=0 (with STRATA_BF16_TC=1 on a 7.x card): while a guard is alive on this thread, Gemm::bf16
+/// takes cuBLAS's BF16 call instead of the FP16 tensor-core path - the MTP drafter's K/V fill (draft_kv) keeps the
+/// default arithmetic, as STRATA_HC16_SM75 does.  gemm_bf16_tc_draft(): the switch (read once; true = BF16_TC also
+/// for the drafter, upstream's behaviour).
+bool gemm_bf16_tc_draft();
+struct Bf16NativeGuard {
+    explicit Bf16NativeGuard(bool on);
+    ~Bf16NativeGuard();
+    Bf16NativeGuard(const Bf16NativeGuard&) = delete;
+    Bf16NativeGuard& operator=(const Bf16NativeGuard&) = delete;
+    bool on_;
+};
+
 /// HIP on gfx103x (RDNA2), for the current device: rocBLAS's tuned GEMMs there are FP16 in -> FP16 out only (FP16 or
 /// BF16 in -> FP32 out runs ~6x slower), so the prompt path's 16-bit GEMMs run in FP16 (Gemm::set_f16_io,
 /// set_act_f16).  Cached per device (a layer split can mix cards).  STRATA_HIP_PROMPT_F16=0/1 overrides.

@@ -711,8 +711,14 @@ int current_cc() {
     }
     return v;
 }
+thread_local int t_bf16_native = 0;   // fork Bf16NativeGuard: > 0 = the FP16 path (1) gives way to cuBLAS's BF16 call
+int bf16_path_raw();
 // 0: cuBLAS's BF16 GEMM, 1: through FP16 (tensor cores), 2: through FP32 (Pascal)
 int bf16_path() {
+    const int p = bf16_path_raw();
+    return p == 1 && t_bf16_native > 0 ? 0 : p;
+}
+int bf16_path_raw() {
     static const int forced = [] {
         const char* v = std::getenv("STRATA_BF16_TC");
         return v != nullptr && v[0] != '\0' ? std::atoi(v) : -1;
@@ -788,6 +794,17 @@ int64_t dense_f32_min_t(int64_t N, int64_t K) {
 void gemm_set_dense_f32(int mode) { g_dense_f32 = mode; }
 #else
 void gemm_set_dense_f32(int) {}
+#endif
+bool gemm_bf16_tc_draft() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_BF16_TC_DRAFT"); return v == nullptr || std::atoi(v) != 0; }();
+    return on;
+}
+#if !defined(__HIPCC__)
+Bf16NativeGuard::Bf16NativeGuard(bool on) : on_(on) { if (on_) ++t_bf16_native; }
+Bf16NativeGuard::~Bf16NativeGuard() { if (on_) --t_bf16_native; }
+#else
+Bf16NativeGuard::Bf16NativeGuard(bool on) : on_(on) {}
+Bf16NativeGuard::~Bf16NativeGuard() {}
 #endif
 bool Gemm::bf16_hcd_exact(const uint16_t* X, int64_t ldx, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K) {
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)

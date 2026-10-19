@@ -1723,9 +1723,12 @@ bool Prefill::draft_kv(core::MtpDrafter& mtp, const float* R_rows, const int32_t
         strata::kernels::add_streams_broadcast(h2, e2, Rm, Nn, (int) g.hc, (int) nb, m.cs);
         // the attention hyper-connection's read (its mixed input only: this pass writes nothing back)
         gr_norm_rs(Rm, w_hn, EPS, grs, xn16, nb, m.cs);
-        m.gemm.bf16(xn16, w_dn, lo, nb, LR, HCN);
-        gr_silu(lo, lo16, nb, m.cs);
-        m.gemm.bf16(lo16, w_up, gated, nb, HCN, LR);
+        {   // fork STRATA_BF16_TC_DRAFT=0: with STRATA_BF16_TC=1 the drafter's hyper-connection stays on cuBLAS's BF16 call
+            const strata::prefill::Bf16NativeGuard keep_bf16(!strata::prefill::gemm_bf16_tc_draft());
+            m.gemm.bf16(xn16, w_dn, lo, nb, LR, HCN);
+            gr_silu(lo, lo16, nb, m.cs);
+            m.gemm.bf16(lo16, w_up, gated, nb, HCN, LR);
+        }
         gr_mix_r(Rm, grs, w_hn, gated, mixed, nullptr, nb, m.cs, mixed_h);
         // K and V into the drafter's cache, as the prompt path's QSA layers append theirs
         proj(mixed, mixed_h, w_k, Kc, nb, KV, Nn, 0);
