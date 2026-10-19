@@ -1033,6 +1033,102 @@ __global__ void __launch_bounds__(THREADS) gr_down_staged_kernel(GrMulti m) {
     }
 }
 
+// Fork STRATA_GR_DOWN75 (opt-in, Turing): gr_down_staged_kernel's rows without the shared-memory staging.  On sm_75
+// there is no cp.async, so the staged kernel's "ahead" copy is a load into registers and a store, waited for by every
+// thread before each of the 8 tiles, between two __syncthreads; and its 8-row blocks fill 41 of the 2080 Ti's 68 SMs.
+// Here every warp is on its own: its row's 40 weight chunks are loaded BATCH at a time ahead of the dots and the
+// activations are read straight from global (the RPB warps of a block, and the blocks sharing an SM, hit the same
+// lines in L1), with no barrier; RPB rows a block (4: 80 + 1 blocks).  A lane sums the chunks lane + 32 q, q = 0..39,
+// in ascending order - which is the staged kernel's tile-by-tile order (a tile is 5 whole rounds of 32 chunks) - each
+// chunk with the same dot8u, then the same xor reduction and epilogue: the same bits (fused_gr_check compares the
+// staged read, which this replaces, with the plain read on the card at start-up and drops it if they differ).
+template <int MAX_T, int RPB>
+__global__ void __launch_bounds__(RPB * 32) gr_down75_kernel(GrMulti m) {
+    constexpr int NQ = D / 8 / 32;                     // 40 chunks of 8 per lane
+    constexpr int BATCH = 8;
+    static_assert(NQ % BATCH == 0, "whole batches");
+    constexpr int NB = LR / RPB;                       // blocks of down rows; the inject rows follow
+    static_assert(LR % RPB == 0, "whole blocks of down rows");
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    const bool inject_block = (int) blockIdx.x >= NB;
+    const int row = inject_block ? ((int) blockIdx.x - NB) * RPB + warp : (int) blockIdx.x * RPB + warp;
+    if (inject_block && (m.a[0].w_inject == nullptr || row >= HC)) return;   // no barrier below: a warp may leave
+    const uint4* w4 = reinterpret_cast<const uint4*>((inject_block ? m.a[0].w_inject : m.a[0].w_down) + (size_t) row * D);
+    float acc[MAX_T];
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) acc[k] = 0.0f;
+    uint4 wv[BATCH], wn[BATCH];
+#pragma unroll
+    for (int q = 0; q < BATCH; ++q) wv[q] = __ldg(w4 + lane + 32 * q);
+#pragma unroll 1
+    for (int b = 0; b < NQ; b += BATCH) {
+        if (b + BATCH < NQ) {
+#pragma unroll
+            for (int q = 0; q < BATCH; ++q) wn[q] = __ldg(w4 + lane + 32 * (b + BATCH + q));
+        }
+#pragma unroll
+        for (int q = 0; q < BATCH; ++q) {
+            const int j = lane + 32 * (b + q);
+            const Bf16x8 wq = unpack8(wv[q]);
+#pragma unroll
+            for (int k = 0; k < MAX_T; ++k) {
+                const float4* x4 = reinterpret_cast<const float4*>(m.xn + (size_t) k * D) + 2 * j;
+                acc[k] += dot8u(wq, __ldg(x4), __ldg(x4 + 1));
+            }
+        }
+        if (b + BATCH < NQ) {
+#pragma unroll
+            for (int q = 0; q < BATCH; ++q) wv[q] = wn[q];
+        }
+    }
+    float s[MAX_T];
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) s[k] = warp_sum(acc[k]);
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        if (lane != k) continue;
+        if (inject_block) {
+            m.a[k].inject_out[row] = s[k];
+        } else {
+            const float x = s[k] / (float) HC;
+            m.a[k].lo[row] = x / (1.0f + __expf(-x));
+        }
+    }
+}
+// STRATA_GR_DOWN75: unset / 0 off; 1 = 4 rows a block; 2, 4, 8 = that many rows a block.  Any card (a test switch);
+// the engine's own check still compares the read with the plain one at start-up.
+int down75_rpb() {
+#if defined(__HIPCC__)
+    return 0;
+#else
+    static const int rpb = [] {
+        const char* v = std::getenv("STRATA_GR_DOWN75");
+        const int n = v ? std::atoi(v) : 0;
+        return n == 1 ? 4 : (n == 2 || n == 4 || n == 8) ? n : 0;
+    }();
+    return rpb;
+#endif
+}
+template <int RPB>
+void launch_down75_rpb(const GrMulti& m, cudaStream_t st) {
+    const unsigned blocks = (unsigned) (LR / RPB + (HC + RPB - 1) / RPB);
+    switch (m.T) {
+        case 1: gr_down75_kernel<1, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+        case 2: gr_down75_kernel<2, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+        case 3: gr_down75_kernel<3, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+        case 4: gr_down75_kernel<4, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+        case 5: gr_down75_kernel<5, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+        case 6: gr_down75_kernel<6, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+        case 7: gr_down75_kernel<7, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+        default: gr_down75_kernel<kFusedGrMaxT, RPB><<<blocks, RPB * 32, 0, st>>>(m); break;
+    }
+}
+void launch_down75(const GrMulti& m, int rpb, cudaStream_t st) {
+    if (rpb == 2) launch_down75_rpb<2>(m, st);
+    else if (rpb == 8) launch_down75_rpb<8>(m, st);
+    else launch_down75_rpb<4>(m, st);
+}
+
 // the current device is Volta (sm_70): the fast norm/up is its default
 bool cur_dev_volta() {
 #if defined(__HIPCC__)
@@ -1205,6 +1301,15 @@ bool up75_on() {
     return per_dev[dev] == 2;
 #endif
 }
+// fork: STRATA_GR_UP75=2 takes gr_up75_kernel for every T (1-2 too; the same bits as gr_up_multi_kernel)
+bool up75_all() {
+#if defined(__HIPCC__)
+    return false;
+#else
+    static const bool all = [] { const char* v = std::getenv("STRATA_GR_UP75"); return v != nullptr && std::atoi(v) == 2; }();
+    return all;
+#endif
+}
 // sm_75: the staged down kernel's tokens per block (gridDim.y = ct / tg), 0 = one block row for all of them.
 // STRATA_GR_DOWN_TG=n forces n where it divides the launch (0 = off).
 int down_tg(int ct) {
@@ -1258,6 +1363,10 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
         return no != nullptr && no[0] != '\0' && no[0] != '0';
     }();
     const bool exact_t = !no_multi_gr;
+    // fork STRATA_GR_DOWN75: the staged read's down projection without shared memory, all tokens in one launch
+    const int rpb75 = staged ? down75_rpb() : 0;
+    if (rpb75 > 0) launch_down75(m, rpb75, st);
+    else
     for (int c0 = 0; c0 < n_tok; c0 += chunk_tok) {
         const int ct = n_tok - c0 < chunk_tok ? n_tok - c0 : chunk_tok;
         GrMulti c{};
@@ -1335,7 +1444,7 @@ void launch_multi(const GrMulti& m, int variant, cudaStream_t st, unsigned long 
             case 6: gr_up_multi_kernel<6, true, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             default: gr_up_multi_kernel<kFusedGrMaxT, false, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
         }
-    } else if (n_tok >= 3 && up75_on()) {   // T 1-2: gr_up_multi_kernel is as fast or faster (fused_gr_bench, cold)
+    } else if ((n_tok >= 3 || up75_all()) && up75_on()) {   // T 1-2: gr_up_multi_kernel is as fast or faster (fused_gr_bench, cold)
         switch (no_multi_gr ? kFusedGrMaxT : n_tok) {
             case 1: gr_up75_kernel<1, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             case 2: gr_up75_kernel<2, true><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
