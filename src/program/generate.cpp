@@ -14747,6 +14747,14 @@ int main(int argc, char** argv) {
                     }();
                     if (pack_conc && !pks.empty() && !planned && !pk_prepare(a0, b0, e)) return false;
                     const bool pk_on = pk_run.active;
+                    // every way out of this round with the pack still open (an early `return false` below, a thread
+                    // that could not start, an exception): the pack is closed - on_pack_rows cleared (it captures
+                    // pk_run, which does not outlive this iteration), the slots taken dropped.  After the normal
+                    // pk_finish below it is a no-op.  Declared before the reader, so it runs after the reader joined.
+                    struct PkClose {
+                        std::function<void()> fn;
+                        ~PkClose() { if (fn) fn(); }
+                    } pk_close{pk_on ? std::function<void()>([&] { pk_finish(false, 0); }) : std::function<void()>()};
                     const int64_t Cc = pk_on ? std::max<int64_t>(sp.chunk(), 1) : C;   // (the pack's loan may relayout)
                     // the drafter's prompt pass captures its graphs and grows its records at first use, and the
                     // prompt path's pinned upload slots grow at their first larger upload: done here, with nothing in
