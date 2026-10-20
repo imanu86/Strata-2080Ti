@@ -1337,6 +1337,7 @@ struct GpuStage {
     int32_t* d_res = nullptr;                            ///< the residency table on its device
     strata::core::Verifier ver;
     strata::core::Verifier ver_b;                        ///< --pipeline-windows: the odd windows' verifier
+    strata::core::Verifier ver_c;                        ///< lab/overlap 1.6 (STRATA_OV_TREE>=2): the tree draft's lane
     strata::prefill::Prefill sp;
     cudaStream_t adapt_stream = nullptr;
     cudaEvent_t adapt_ev = nullptr;
@@ -1496,7 +1497,7 @@ void disk_wait_threads(std::FILE* f) {
 
 // --pipeline-windows: what the watchdog prints about the pipelined decode loop (set while it runs)
 struct PlDiag {
-    strata::core::Verifier* v[2][2] = {};
+    strata::core::Verifier* v[2][3] = {};   // slot 2: the tree draft's lane (STRATA_OV_TREE), null when it is off
     std::atomic<int> a_seq{0}, a_bits{0}, b_bits{0}, d_bits{0}, chain_kind{0}, doomed{0}, ending{0}, chain_live{0};
     std::atomic<long long> iters{0};
 };
@@ -1513,9 +1514,10 @@ void pl_diag_print(std::FILE* f) {
                     "S1-launched S1-done); chain kind %d live %d; doomed %d ending %d\n", d.iters.load(), d.a_seq.load(),
                  bits(d.a_bits.load(), ba), bits(d.b_bits.load(), bb), bits(d.d_bits.load(), bd), d.chain_kind.load(),
                  d.chain_live.load(), d.doomed.load(), d.ending.load());
-    const char* names[2][2] = {{"stage 0 even", "stage 0 odd"}, {"stage 1 even", "stage 1 odd"}};
+    const char* names[2][3] = {{"stage 0 even", "stage 0 odd", "stage 0 tree lane"},
+                               {"stage 1 even", "stage 1 odd", "stage 1 tree lane"}};
     for (int st = 0; st < 2; ++st)
-        for (int par = 0; par < 2; ++par)
+        for (int par = 0; par < 3; ++par)
             if (d.v[st][par] != nullptr) d.v[st][par]->diag_pipelined(f, names[st][par]);
 }
 
@@ -4446,8 +4448,14 @@ int main(int argc, char** argv) {
     // 64 MiB left two RTX 5070 Ti under Linux short of it) and, with the decode pipelined, two copies of the first
     // stage's GDN state (sized from its session where the first card's cache is sized; this is the split search's
     // estimate).  Allocated after the caches, so kept out of them.
-    const int64_t kPipeWindowMib = o.pipeline_windows > 0 ? 160 : 0;
-    const int64_t kPipeSnapMib = o.pipeline_windows >= 2 ? 96 : 0;   // ~3 MiB per GDN layer, twice, ~15 layers
+    // lab/overlap 1.6 (STRATA_OV_TREE >= 2): the tree draft's lane is a THIRD verifier on the first card and on the
+    // last one (arena 70-75 MiB measured + its graphs) and a THIRD copy of the first stage's GDN state for its undo.
+    // Priced here so the split search and the expert cache give it up before the split is even chosen.
+    const int64_t ov_tree_lvl = strata::core::MtpDrafter::ov_tree();
+    const bool ov_tree_lane_asked = ov_tree_lvl >= 2 && o.pipeline_windows >= 2 && multi_gpu;   // two stages only, below
+    const int64_t kPipeWindowMib = o.pipeline_windows > 0 ? 160 + (ov_tree_lane_asked ? 110 : 0) : 0;
+    const int64_t kPipeSnapMib = o.pipeline_windows >= 2 ? 96 + (ov_tree_lane_asked ? 48 : 0) : 0;   // ~3 MiB per GDN layer, twice, ~15 layers
+    const int kPipeSnapCopies = o.pipeline_windows >= 2 ? (ov_tree_lane_asked ? 3 : 2) : 0;
     auto gdn_snapshot_bytes = [&](const strata::core::SessionState& s0) -> size_t {
         return (size_t) s0.gdn_alloc * ((size_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                         (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1)) * sizeof(float);
@@ -5724,7 +5732,7 @@ int main(int argc, char** argv) {
                         if (stages.empty())
                             for (const auto& d : slot_mtp) mtp_b += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);
                         const int64_t pipe_b = o.pipeline_windows <= 0 ? 0
-                            : (kPipeWindowMib << 20) + (o.pipeline_windows >= 2 ? 2 * (int64_t) gdn_snapshot_bytes(ss) : 0);
+                            : (kPipeWindowMib << 20) + (int64_t) kPipeSnapCopies * (int64_t) gdn_snapshot_bytes(ss);
                         const int64_t room = (int64_t) strata::core::device_free_bytes() -
                                              ((((int64_t) o.vram_reserve_mib + pf_mib) << 20) + mtp_b + pipe_b);
                         cap_bytes = room > 0 ? (uint64_t) room : 0;
@@ -5861,11 +5869,12 @@ int main(int argc, char** argv) {
     bool reserve_adapted = false;   // #496: the auto sizing lowered the reserve so a small card's cache fits
     // --pipeline-windows: what it allocates on CUDA0 after the cache (see kPipeWindowMib)
     const int64_t pipe_first = o.pipeline_windows <= 0 ? 0
-        : (kPipeWindowMib << 20) + (o.pipeline_windows >= 2 ? 2 * (int64_t) gdn_snapshot_bytes(ss) : 0);
+        : (kPipeWindowMib << 20) + (int64_t) kPipeSnapCopies * (int64_t) gdn_snapshot_bytes(ss);
     if (pipe_first > 0)
         std::fprintf(stderr, "strata generate: --pipeline-windows %d: %lld MiB of CUDA0 kept out of the expert cache "
-                             "(the second verifier%s)\n", o.pipeline_windows, (long long) (pipe_first >> 20),
-                     o.pipeline_windows >= 2 ? ", the GDN snapshots" : "");
+                             "(the second verifier%s%s)\n", o.pipeline_windows, (long long) (pipe_first >> 20),
+                     o.pipeline_windows >= 2 ? ", the GDN snapshots" : "",
+                     ov_tree_lane_asked ? ", the tree draft's lane (STRATA_OV_TREE)" : "");
     // The MiB the prompt path's OWN buffers (no loan) take, which the cache sizing leaves out.  0.1.39's rule is
     // 160 + chunk * 680 / 1024 (~16 GiB at 24576 against ~2.4 GiB really allocated); STRATA_OWNED_PRICE=exact prices the
     // real allocation instead (Prefill::bytes_needed_owned: 2 MiB pages, the ring in one piece, as PR #796 measured)
@@ -8746,9 +8755,18 @@ int main(int argc, char** argv) {
         const bool pipe = o.pipeline_windows > 0 && n_stages >= 2 && !split_same && (int) stages.size() == n_stages - 1;
         strata::core::Verifier ver_b;
         SplitDrive split_drive_b;
+        // lab/overlap 1.6 (STRATA_OV_TREE >= 2): the tree draft's THIRD lane on stage 0 and on the last stage.  Two
+        // parities hold the two generations a pipelined loop has in flight on a stage (A and B); a speculative SECOND
+        // hypothesis needs a lane of its own, because the hand-off is per parity: a window of A's parity would write
+        // the hand-off stage 1 is still reading for A.  Two-stage splits only (the hand-off chain below is built for
+        // one boundary), which is the Daily's and the bench's `--layer-split`.
+        strata::core::Verifier ver_c;
+        SplitDrive split_drive_c;
+        bool pl_tree_lane = pipe && o.pipeline_windows >= 2 && n_stages == 2 && ov_tree_lvl >= 2;
         std::vector<cudaStream_t> pl_stream(pipe ? (size_t) n_stages : 0, nullptr);
-        // stage st's verifier of one parity (0: the even windows, 1: the odd ones)
+        // stage st's verifier of one parity (0: the even windows, 1: the odd ones, 2: the tree draft's lane)
         auto stage_ver_p = [&](int st, int par) -> strata::core::Verifier& {
+            if (par == 2) return st == 0 ? ver_c : stages[(size_t) st - 1]->ver_c;
             if (st == 0) return par == 0 ? ver : ver_b;
             return par == 0 ? stages[(size_t) st - 1]->ver : stages[(size_t) st - 1]->ver_b;
         };
@@ -8761,7 +8779,7 @@ int main(int argc, char** argv) {
             }
             if (!ok_p) { std::fprintf(stderr, "strata serve: --pipeline-windows: stream creation failed\n"); return 1; }
             for (int st = 0; st < n_stages; ++st)
-                for (int par = 0; par < 2; ++par) {
+                for (int par = 0; par < (pl_tree_lane ? 3 : 2); ++par) {
                     stage_ver_p(st, par).set_stream(pl_stream[(size_t) st]);
                     stage_ver_p(st, par).set_always_publish(true);
                 }
@@ -8916,6 +8934,57 @@ int main(int argc, char** argv) {
             // the setters reach the later stages; the pipeline never chains run/commit
             for (int st = 0; st + 1 < n_stages; ++st) stage_ver_p(st, 1).set_next(&stage_ver_p(st + 1, 1), &split_drive_b);
         }
+        // lab/overlap 1.6 (STRATA_OV_TREE >= 2): the tree draft's lane - its own hand-off on the boundary, its own
+        // verifier on the first card and on the last one.  Made here, used by the decode loop only at level 3: at
+        // level 2 it answers the question the design cannot answer on paper - whether the first card can hold a third
+        // window (arena + graphs + a third GDN snapshot copy), and what that takes from its expert cache.
+        if (pl_tree_lane) {
+            const size_t hb_c = (size_t) strata::kernels::kVerifyMaxT *
+                                (size_t) strata::core::Verifier::handoff_floats(g) * sizeof(float);
+            float* hh_c = nullptr;
+            float* hand_c = nullptr;
+            if (cudaHostAlloc((void**) &hh_c, hb_c, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
+                cudaHostGetDevicePointer((void**) &hand_c, hh_c, 0) != cudaSuccess) {
+                cudaGetLastError();
+                pl_tree_lane = false;
+                std::fprintf(stderr, "strata serve: STRATA_OV_TREE: the tree lane's hand-off does not fit: the lane "
+                                     "stays off (STRATA_OV_TREE=1 counts the second hypothesis without a lane)\n");
+            } else {
+                std::memset(hh_c, 0, hb_c);
+                ver_c.set_stage(0, split_at[0], nullptr, hand_c);
+                {
+                    const strata::core::OnDevice on(0);   // the first card: the speculative windows are its job
+                    if (!ver_c.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
+                        std::fprintf(stderr, "strata serve: STRATA_OV_TREE: the tree lane's verifier on CUDA0 (the first "
+                                             "card): %s (raise --vram-reserve-mib by ~150, or STRATA_OV_TREE=1)\n",
+                                     err.c_str());
+                        return 1;
+                    }
+                }
+                GpuStage& gs = *stages[0];
+                gs.ver_c.set_stage(split_at[0], -1, hand_c, nullptr);
+                {
+                    const strata::core::OnDevice on(gs.dev);
+                    strata::core::VerifyHits vs;
+                    vs.d_res = gs.d_res;
+                    vs.h_res = host_res.empty() ? nullptr : host_res.data();
+                    vs.cache_base = gs.cache.device_slot(0);
+                    vs.blob = thits.blob;
+                    vs.slot_off = gs.cache.slot_offsets();
+                    vs.n_slots = gs.cache.slots();
+                    if (!gs.ver_c.init(gs.wt, g, gs.ss, vs, gs.head.loaded() ? &gs.head : nullptr, o.spec, err)) {
+                        std::fprintf(stderr, "strata serve: STRATA_OV_TREE: the tree lane's verifier on CUDA%d (the last "
+                                             "stage): %s (raise --vram-reserve-mib by ~150, or STRATA_OV_TREE=1)\n",
+                                     gs.dev, err.c_str());
+                        return 1;
+                    }
+                }
+                ver_c.set_next(&gs.ver_c, &split_drive_c);
+                std::fprintf(stderr, "strata serve: STRATA_OV_TREE: a third lane on CUDA0 and CUDA%d (the tree draft's "
+                                     "second hypothesis; %d GDN snapshot copies on the first card)\n",
+                             gs.dev, kPipeSnapCopies);
+            }
+        }
         ver.set_remote_expert_opt(remote_opt.get());
         if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
         if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
@@ -8978,6 +9047,14 @@ int main(int argc, char** argv) {
                 stage_ver_p(st, 1).set_split(o.spec_split);
                 stage_ver_p(st, 1).set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : 2);
             }
+            if (pl_tree_lane) {   // the tree lane: the same routing table, its own plan sink
+                split_drive_c = split_drive;
+                for (int st = 0; st < n_stages; ++st) {
+                    split_drive_c.plan[st] = stage_ver_p(st, 2).plan_sink();
+                    stage_ver_p(st, 2).set_split(o.spec_split);
+                    stage_ver_p(st, 2).set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : 2);
+                }
+            }
         }
         // the pool the verify windows call: with a layer split, the wrapper that routes each layer to its stage
         const strata::core::PoolMultiFn win_pool_fn = n_stages > 1 ? &drive_pool_split : &drive_pool_multi;
@@ -8999,9 +9076,11 @@ int main(int argc, char** argv) {
             int dev = 0;
             size_t bytes = 0;
             void* state = nullptr;            // the stage's GDN state (its session's)
-            float* buf[2] = {nullptr, nullptr};
+            // slot 2 is the tree draft's lane (lab/overlap 1.6): it is NOT `seq & 1`, and must stay a buffer of its own
+            // - the rollback reads the slot of its own window's parity, and a lane sharing it would erase that state.
+            float* buf[3] = {nullptr, nullptr, nullptr};
             cudaStream_t side = nullptr;
-            cudaEvent_t pre[2] = {nullptr, nullptr}, ev[2] = {nullptr, nullptr};
+            cudaEvent_t pre[3] = {nullptr, nullptr, nullptr}, ev[3] = {nullptr, nullptr, nullptr};
         };
         const int pl_nf = pipe ? n_stages - 1 : 0;   // the front stages
         std::vector<PlSnap> pl_snaps((size_t) pl_nf);
@@ -9030,23 +9109,39 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < 2 && ok_s; ++i)
                         ok_s = cudaEventCreateWithFlags(&sn.pre[i], cudaEventDisableTiming) == cudaSuccess &&
                                cudaEventCreateWithFlags(&sn.ev[i], cudaEventDisableTiming) == cudaSuccess;
+                    // lab/overlap 1.6: the tree lane's own copy of the state it started from - without it a second
+                    // speculative window could not be given back, so the lane is dropped rather than risk the undo.
+                    if (ok_s && pl_tree_lane) {
+                        ok_s = cudaMalloc((void**) &sn.buf[2], sn.bytes) == cudaSuccess &&
+                               cudaEventCreateWithFlags(&sn.pre[2], cudaEventDisableTiming) == cudaSuccess &&
+                               cudaEventCreateWithFlags(&sn.ev[2], cudaEventDisableTiming) == cudaSuccess;
+                        if (!ok_s)
+                            std::fprintf(stderr, "strata serve: STRATA_OV_TREE: the tree lane's GDN snapshot of stage %d "
+                                                 "(%.1f MiB) does not fit: the lane stays off\n",
+                                         st + 1, (double) sn.bytes / 1048576.0);
+                    }
                     if (!ok_s) {
                         cudaGetLastError();
                         pl_snap_overlap = false;
+                        pl_tree_lane = false;
                     }
                 }
             }
         }
         if (pipe)
-            std::fprintf(stderr, "strata serve: --pipeline-windows %d: two verifiers per stage, %d stages overlap across "
-                                 "windows%s\n", o.pipeline_windows, n_stages,
+            std::fprintf(stderr, "strata serve: --pipeline-windows %d: %s verifiers per stage, %d stages overlap across "
+                                 "windows%s%s\n", o.pipeline_windows, pl_tree_lane ? "three" : "two", n_stages,
                          !pl_snap_ok ? "" : pl_snap_overlap ? " (decode too; the GDN snapshots beside the window)"
-                                                            : " (decode too; the GDN snapshot on the critical path)");
+                                                            : " (decode too; the GDN snapshot on the critical path)",
+                         pl_tree_lane ? "; the third is the tree draft's lane (STRATA_OV_TREE)" : "");
         // the verifiers by [stage][parity] - the first stage and the LAST (stage 1 of a two-stage split; the decode loop
         // reaches the middle stages through stage_ver_p) - their pool routing, and the drafter's events (in a pipelined
         // prompt read, a stage-1 window waits until the drafter has read the rows of the same parity's previous window)
-        strata::core::Verifier* PV[2][2] = {{&ver, &ver_b}, {pipe ? &stages.back()->ver : nullptr, pipe ? &stages.back()->ver_b : nullptr}};
-        SplitDrive* PSD[2] = {&split_drive, &split_drive_b};
+        // Parity 2 is the tree draft's lane (lab/overlap 1.6, STRATA_OV_TREE >= 2): null when the lane is off.
+        strata::core::Verifier* PV[2][3] = {{&ver, &ver_b, pl_tree_lane ? &ver_c : nullptr},
+            {pipe ? &stages.back()->ver : nullptr, pipe ? &stages.back()->ver_b : nullptr,
+             pl_tree_lane ? &stages.back()->ver_c : nullptr}};
+        SplitDrive* PSD[3] = {&split_drive, &split_drive_b, pl_tree_lane ? &split_drive_c : nullptr};
         cudaEvent_t pl_mtp_ev[2] = {nullptr, nullptr};
         bool pl_mtp_live[2] = {false, false};
         bool pl_prepared = false;
@@ -9054,7 +9149,7 @@ int main(int argc, char** argv) {
         auto pl_prepare = [&](std::string& e) -> bool {
             if (pl_prepared) return true;
             for (int st = 0; st < n_stages; ++st)
-                for (int par = 0; par < 2; ++par) {
+                for (int par = 0; par < (pl_tree_lane ? 3 : 2); ++par) {
                     strata::core::Verifier& v = stage_ver_p(st, par);
                     const strata::core::OnDevice on(v.device());
                     if (!v.capture_all(e)) return false;
@@ -9079,7 +9174,7 @@ int main(int argc, char** argv) {
             for (int round = 0; round < 10000000; ++round) {
                 bool any = false;
                 for (int st = 0; st < n_stages && pipe; ++st)
-                    for (int par = 0; par < 2; ++par) {
+                    for (int par = 0; par < (pl_tree_lane ? 3 : 2); ++par) {
                         strata::core::Verifier& v = stage_ver_p(st, par);
                         if (!v.in_flight()) continue;
                         any = true;
@@ -14887,12 +14982,15 @@ int main(int argc, char** argv) {
                 static const bool pl_log = pipe_dbg_env("STRATA_PIPELINE_LOG") != nullptr;
                 // the snapshot of the GDN state window `seq` reads on front stage `st` (overlapped: before its launch
                 // there, on the stage's side stream)
-                auto snap_take = [&](int st, int seq) -> bool {
+                // `q`: which snapshot slot holds this window's copy of the state.  -1 = the window's parity (today);
+                // the tree draft's lane passes 2 (lab/overlap 1.6): its state copy must not land in the slot the
+                // rollback of A reads.
+                auto snap_take = [&](int st, int seq, int q = -1) -> bool {
                     if (!pl_snap_overlap) return true;
                     PlSnap& sn = pl_snaps[(size_t) st];
                     const strata::core::OnDevice on(sn.dev);
                     cudaStream_t cs = pl_stream[(size_t) st];
-                    const int q = seq & 1;
+                    if (q < 0) q = seq & 1;
                     return cudaEventRecord(sn.pre[q], cs) == cudaSuccess &&
                            cudaStreamWaitEvent(sn.side, sn.pre[q], 0) == cudaSuccess &&
                            cudaMemcpyAsync(sn.buf[q], sn.state, sn.bytes, cudaMemcpyDeviceToDevice, sn.side) == cudaSuccess &&
@@ -15140,7 +15238,10 @@ int main(int argc, char** argv) {
                 };
                 // --adapt-async: the asynchronous tier beside the windows (see adapt_tick).  A stage is idle when neither
                 // of its verifiers has a window in flight (a commit or a snapshot copy waits on nothing of the host's)
-                if (ajob) a_pl_idle = [&](int st) { return !PV[st][0]->in_flight() && !PV[st][1]->in_flight(); };
+                if (ajob) a_pl_idle = [&](int st) {
+                    return !PV[st][0]->in_flight() && !PV[st][1]->in_flight() &&
+                           (PV[st][2] == nullptr || !PV[st][2]->in_flight());   // lab/overlap 1.6: the tree lane too
+                };
                 // fork (Daily 1541e340): the elastic tail of CUDA0's cache beside the windows, without a drain.  Every CUDA
                 // call of it reaches CUDA0 at a GAP of stage 0 - neither of its verifiers has a window in flight (a commit
                 // or a snapshot copy waits on nothing of the host's) - so no driver call meets a window that spins on this
@@ -15154,7 +15255,8 @@ int main(int argc, char** argv) {
                 // is unpublished (el_hold_tier).  False (with err) when a step failed.
                 bool el_res_dirty = false;   // every residency table uploaded again once the loop has drained
                 auto el_gap = [&]() -> bool {
-                    if (!el_on || PV[0][0]->in_flight() || PV[0][1]->in_flight()) return true;
+                    if (!el_on || PV[0][0]->in_flight() || PV[0][1]->in_flight() ||
+                        (PV[0][2] != nullptr && PV[0][2]->in_flight())) return true;   // lab/overlap 1.6: the tree lane too
                     if (!el_fill.empty()) {   // a growth's fills: published once landed
                         const cudaError_t q = cudaEventQuery(el_fill_ev);
                         if (q == cudaErrorNotReady) return true;
@@ -15328,7 +15430,7 @@ int main(int argc, char** argv) {
                     for (int k = 0; k < 2; ++k) { s0.launches[k] = 0; s0.launch_ns[k] = 0; s0.launch_max_ns[k] = 0; }
                 }
                 for (int st = 0; st < 2; ++st)
-                    for (int par = 0; par < 2; ++par) g_pl_diag.v[st][par] = PV[st][par];
+                    for (int par = 0; par < 3; ++par) g_pl_diag.v[st][par] = PV[st][par];
                 strata::core::diag_pipeline_fn().store(&pl_diag_print);
                 auto pw_bits = [](const PW& w) {
                     return (w.ready ? 1 : 0) | (w.launched ? 2 : 0) | (w.finished ? 4 : 0) | (w.com != 0 ? 8 : 0) |
@@ -15894,7 +15996,10 @@ int main(int argc, char** argv) {
                     }
                 }
                 // the odd windows' counters and GPU profiles into the verifiers that report them
-                for (int st = 0; st < n_stages; ++st) stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 1));
+                for (int st = 0; st < n_stages; ++st) {
+                    stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 1));
+                    if (pl_tree_lane) stage_ver_p(st, 0).absorb_stats(stage_ver_p(st, 2));   // the lane reports with its stage
+                }
                 if (!pl_adapt_ok) {
                     std::printf("ERR an adaptive refill failed\n");
                     return 1;
