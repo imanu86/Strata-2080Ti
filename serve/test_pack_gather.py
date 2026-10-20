@@ -106,6 +106,19 @@ class PackGather(unittest.TestCase):
         engine._send.assert_called_once_with("BHINT 1,42")   # the advisory line is the release one
         self.assertEqual(engine.pack_pending, 0)             # nothing was counted, no Condition touched
 
+    def test_a_read_without_window_drops_the_stale_hints(self):
+        engine = self.engine(slots=1, pending=1)  # a hint counted while nobody held the window to gather it
+        engine.ctl.release()
+        engine.waiting, engine.wait_lens, engine.ctl_epoch = 0, [], 0
+        with self.window(1000):
+            list(engine._take_control(threading.Event(), 10, pack=False))
+            self.assertEqual(engine.pack_pending, 0)         # it must not close a later window early
+        engine.ctl.release()
+        engine.pack_pending = 1
+        with self.window(1000):
+            list(engine._take_control(threading.Event(), 10, pack=True))
+            self.assertEqual(engine.pack_pending, 0)         # a window consumes what it found (as before)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1532,6 +1532,9 @@ class StrataEngine:
                     self.wait_lens.remove(entry)
         with self.slot_cv:
             self.ctl_epoch += 1
+            if PACK_CONCURRENT and not pack:
+                self.pack_pending = 0           # this read line has no window: it takes the queued hints in, so
+                                                # they must not close a later window early (base >= slots)
             self.slot_cv.notify_all()
         if pack:
             self._pack_gather()
