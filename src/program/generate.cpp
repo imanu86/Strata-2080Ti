@@ -16625,11 +16625,17 @@ int main(int argc, char** argv) {
                              (long long) dp_ok[0], (long long) dp_tested[0], (long long) dp_ok[1], (long long) dp_tested[1],
                              (long long) dp_ok[2], (long long) dp_tested[2], (long long) dp_ok[3], (long long) dp_tested[3],
                              (long long) dp_ok[4], (long long) dp_tested[4]);
-            if (strata::core::MtpDrafter::top2_env())
+            if (strata::core::MtpDrafter::top2_env()) {   // lab/overlap 1.2: the last pair is the ratio a tree draft's
+                // second branch would have recovered, over the positions where its first branch was wrong
+                int64_t t2_r = 0, t2_h = 0;
+                for (int d = 0; d < 4; ++d) { t2_r += t2_rej[d]; t2_h += t2_hit[d]; }
                 std::fprintf(stderr, "strata serve: mtp top2: rejected/runner-up by depth %lld/%lld %lld/%lld %lld/%lld %lld/%lld "
-                                     "of %lld windows\n", (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
+                                     "of %lld windows; seconda scelta giusta %lld di %lld respinte (%.1f%%)\n",
+                             (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
                              (long long) t2_hit[1], (long long) t2_rej[2], (long long) t2_hit[2], (long long) t2_rej[3],
-                             (long long) t2_hit[3], (long long) dec_windows);
+                             (long long) t2_hit[3], (long long) dec_windows, (long long) t2_h, (long long) t2_r,
+                             t2_r > 0 ? 100.0 * (double) t2_h / (double) t2_r : 0.0);
+            }
             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
                 std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "

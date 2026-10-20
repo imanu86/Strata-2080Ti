@@ -1724,6 +1724,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         drafts[last] = ((volatile int32_t*) h_out_)[last];
         if (probs) probs[last] = ((volatile float*) h_prob_)[last];
         prefetch_ple(drafts[last]);
+        // STRATA_MTP_TOP2=1 (lab/overlap 1.2, diagnostic): here every step was launched back to back, so by now the
+        // draft head's row 0 holds the LAST step's logits only - the runner-up is read for that one step and the
+        // earlier ones stay unknown (-1).  Nothing is recorded while a step graph is still in flight.
+        if (top2_env() && !cp) record_top2(last);
         n = max_steps;
     } else if (max_steps > 0) {
         g_dt.init();
@@ -1755,6 +1759,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         drafts[0] = ((volatile int32_t*) h_out_)[0];
         float pj = ((volatile float*) h_prob_)[0];
         if (probs) probs[0] = pj;
+        // STRATA_MTP_TOP2=1 (lab/overlap 1.2, diagnostic): the draft head's row 0 is this step's logits, and nothing
+        // else is in flight on cs_ until the next launch - so the runner-up is read here, per step, off the measured
+        // path (one blocking copy per step: the diagnostic is slow on purpose, and off it costs nothing).
+        if (top2_env() && !cp) record_top2(0);
         n = 1;
         for (int j = 1; j < max_steps && pj >= min_p; ++j) {
             if (dt) cudaEventRecord(g_dt.eb[j], cs_);
@@ -1773,6 +1781,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
             drafts[j] = ((volatile int32_t*) h_out_)[j];
             pj = ((volatile float*) h_prob_)[j];
             if (probs) probs[j] = pj;
+            if (top2_env() && !cp) record_top2(j);   // STRATA_MTP_TOP2: same point as draft 0's, before the next launch
             ++n;
         }
         prefetch_ple(drafts[n - 1]);
@@ -1801,6 +1810,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         }
     }
     for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
+    // STRATA_MTP_TOP2 (diagnostic): a draft the round never produced has no runner-up - say so instead of leaving
+    // whatever the previous draft() left in the slot (a window's verdict reads top2(j) for j < its own draft count).
+    if (top2_env() && !top2_.empty())
+        for (int j = n; j < (int) top2_.size(); ++j) top2_[(size_t) j] = -1;
     if (n_drafts) *n_drafts = n;
     ms_draft += ms_since(t0);
     ++rounds;
