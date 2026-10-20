@@ -4,7 +4,7 @@ The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata,
 
 Rebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-18) come from lab/struct-a, lab/ttft43, lab/pipeline2 and the 0.1.43 Daily's hc16 (18). The two levers 19-20 come from lab/overlap (19 Oct 2026): the chain's priority beside stage 1, and the runner-up diagnostic behind a tree draft (docs/OVERLAP.md).
 
-Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `f20bd46e`. 21 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `bf03aeac`. 22 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -56,6 +56,7 @@ Reference configuration environment (the fork's 0.1.43 Daily r2, config `strata-
 | 19 | [ov-chain-prio](#19-ov-chain-prio) | The draft chain's stream at the default priority instead of the highest: `STRATA_OV_CHAIN_PRIO=1` creates it with `cudaStreamCreateWithFlags`, so a forced (kind 1) chain no longer preempts the window stage 1 is running beside it. | `STRATA_OV_CHAIN_PRIO=1` (unset / `=0`: the highest priority, exactly as today) | fork (lab/overlap 19 Oct 2026, from the chain-vs-stage-1 contention measured in docs/PIPELINE2.md) | never proposed | closed as a lever, code left opt-in. Serial run (build-overlap-bc2e87a0) read 0,1% and was inert. Pipelined run 20/10 (DET-ov2-prio-A1/B1/A2, build-overlap2-f20bd46e, --pipeline-windows 2, Jump connesso): the marker `the chain's stream runs at the default priority` fires only in the B arm (the lever did start) but the B-A-B reads 0,1% and the speculative windows do not fall (req0 A 22,65 vs B 22,37 ms, req1 A 20,95 vs B 21,20), `chain late` unchanged -> the plan's 'if the speculative windows do not drop, close the lever' applies. |
 | 20 | [ov-top2-stat](#20-ov-top2-stat) | Diagnostic for a tree draft: `STRATA_OV_TOP2_STAT=1` brings every chain step's draft logits to the host (a memcpy node inside that step's own graph) and, for each window accepted whole, reports whether the model's bonus token was the chain's top-1 at that position, its runner-up, or neither. | `STRATA_OV_TOP2_STAT=1` (off); the line prints with `STRATA_DECODE_TIMING`: `strata overlap top2: bonus=top1 N1, bonus=top2 N2, altro N3 su N` | fork (lab/overlap 19 Oct 2026) | never proposed.  Upstream's `STRATA_MTP_TOP2` counts runner-up hits on the serial loop's windows only, and its `record_top2` was never called anywhere in the tree (cuda or sycl), so its counter read -1 until patch 21; this one covers the pipelined loop. | number read on the pipelined loop 20/10 (DET-ov2-top2, build-overlap2-f20bd46e, --pipeline-windows 2, STRATA_OV_TOP2_STAT=1 + STRATA_DECODE_TIMING=1): `bonus=top1 170, top2 79, altro 156 su 405` and `top1 187, top2 79, altro 222 su 488`, `runner-up non letto 0` (valid run). N2/(N2+N3) = 79/235 = 0,336 and 79/301 = 0,262; together 158/536 = 0,295 - above the 0,20 close threshold on this (pipeline) path, but the Daily runs the serial loop (patch 21 gives 0,452 there), so the operative number is the serial one. Off: no pinned staging, no copy node, the round/step graphs and the tokens unchanged. |
 | 21 | [mtp-top2-serial](#21-mtp-top2-serial) | `draft()` calls the diagnostic `record_top2` per draft step, so `STRATA_MTP_TOP2=1` finally fills `top2(j)`: the serial loop's window verdict can ask, at every position where draft j was wrong, whether the draft head's runner-up was the token the model really produced.  Steps the round never produced are set to -1 instead of keeping the previous draft()'s value. | `STRATA_MTP_TOP2=1` (off); the line prints at the end of a request: `strata serve: mtp top2: rejected/runner-up by depth ... ; seconda scelta giusta N di M respinte (%)` | fork (lab/overlap 20 Oct 2026; upstream already had the switch and the counter, but nothing filled them) | not proposed yet - it only completes a diagnostic upstream ships half-connected | number read on the serial loop 20/10 (DET-ov2-t2s, build-overlap2-f20bd46e, STRATA_MTP_TOP2=1 + STRATA_DECODE_TIMING=1): `seconda scelta giusta 56 di 113 respinte (49,6%)` and `44 di 108 (40,7%)` -> together 100/221 = 0,452. This is the path the Daily really runs (0.1.45 leaves the pipeline off on CUDA), so it is the number that decides the tree draft: above 0,30 -> signal to the owner as an 8-12 day job for a big model; not implemented here. Not a speed arm (host copy makes the draft slower). Off: no call, no graph change, same tokens. |
+| 22 | [ov-tree-hypothesis](#22-ov-tree-hypothesis) | Tree draft's second hypothesis for a speculative window's row 0, opt-in and in levels. Level 1 (`=1`): when `make_b` builds B from the chain, a second `PW` is built for the same row 0 - the chain's runner-up at that position (`chain_top2`/`chain_top2_prob`, so the tree's switch turns the runner-up's data path on too) - with the chain's drafts after it, `p_on = pa * p(second)`, B's guards (no lookup/suffix windows), and a verdict score: for every window accepted whole, which of the two candidates is the model's own bonus token, how many second hypotheses would clear `theta`, and both branches' mean `p_on`. Nothing is launched: `pump0` and the launches know only A, B and D, so the windows served and the tokens emitted stay today's. Level 2 (`>=2`): the lane the launch will need - a THIRD verifier on stage 0 and on the last stage (`ver_c`), its own pinned hand-off, its own `SplitDrive`, a THIRD GDN snapshot buffer (`PlSnap::buf[3]`, slot 2, not `seq & 1`: the rollback reads the parity slot and must not be overwritten), `snap_take(st, seq, q)` with an explicit slot, wiring through `stage_ver_p`/`PV[2][3]`/`PSD[3]`/`capture_all`/`pl_drain`/`absorb_stats`/watchdog (`stage 0 tree lane`), the stage-0 occupancy tests (`a_pl_idle`, `el_gap`) and the reserve (`kPipeWindowMib` 160->270, `kPipeSnapMib` 96->144, `kPipeSnapCopies` 2->3). Two-stage splits only. Level 3 (launch + keep-the-right-one + a restore-only discard on the Verifier) is NOT implemented: today `pl_commit_async` refuses `n_keep < 1`, so a wrong branch cannot be given back without a new method. | `STRATA_OV_TREE=0` (off, today's path byte-identical) \| `=1` build and score the second hypothesis \| `>=2` its lane exists (three verifiers per stage on a two-stage split). Line at the end of a request, with `STRATA_DECODE_TIMING`: `strata overlap tree (STRATA_OV_TREE=1): seconda ipotesi fatta N su M finestre B; finestre intere N -> prima scelta giusta N, seconda giusta N, nessuna N; seconda sopra la soglia <theta>: N; p_on media: prima X, seconda Y` | fork (lab/overlap 20 Oct 2026, after patch 20/21 said the second choice is right 45,2% on the serial path and 29,5% on the pipeline - above the 0,30 signal threshold, so the owner opened the work) | not proposed yet - a lab lever, and its level 3 is unfinished | not measured yet. The arm that closes level 1: `STRATA_OV_TREE=1` with `--add-opt=--pipeline-windows=2` on the DET bench (CODA_MISURE blocco 16) - it must print the `strata overlap tree` line and a `force_trace.txt` byte-identical to the arm without the switch (nothing is launched, so any difference is a bug). The arm that closes level 2: `STRATA_OV_TREE=2` on the same bench - the engine must print `a third lane on CUDA0 and CUDA1` and `three verifiers per stage`, and survive the 3060's VRAM (the reserve says ~270+144 MiB kept out of the expert cache); if the third snapshot does not fit the lane turns itself off with its own line. No speed claim is possible at these levels: the runner-up comes to the host through a copy node per chain step, which is a diagnostic cost. |
 
 ## Retired
 
@@ -2197,4 +2198,175 @@ Insertion points (5):
                                (long long) dp_ok[0], (long long) dp_tested[0], (long long) dp_ok[1], (long long) dp_tested[1],
                                (long long) dp_ok[2], (long long) dp_tested[2], (long long) dp_ok[3], (long long) dp_tested[3],
                                (long long) dp_ok[4], (long long) dp_tested[4]);
+  ```
+
+## 22 ov-tree-hypothesis
+
+`22-ov-tree-hypothesis.patch` — QWEN-OVERLAP-Costruisce e conta la seconda ipotesi di B (STRATA_OV_TREE=1) senza lanciarla
+
+- **What**: Tree draft's second hypothesis for a speculative window's row 0, opt-in and in levels. Level 1 (`=1`): when `make_b` builds B from the chain, a second `PW` is built for the same row 0 - the chain's runner-up at that position (`chain_top2`/`chain_top2_prob`, so the tree's switch turns the runner-up's data path on too) - with the chain's drafts after it, `p_on = pa * p(second)`, B's guards (no lookup/suffix windows), and a verdict score: for every window accepted whole, which of the two candidates is the model's own bonus token, how many second hypotheses would clear `theta`, and both branches' mean `p_on`. Nothing is launched: `pump0` and the launches know only A, B and D, so the windows served and the tokens emitted stay today's. Level 2 (`>=2`): the lane the launch will need - a THIRD verifier on stage 0 and on the last stage (`ver_c`), its own pinned hand-off, its own `SplitDrive`, a THIRD GDN snapshot buffer (`PlSnap::buf[3]`, slot 2, not `seq & 1`: the rollback reads the parity slot and must not be overwritten), `snap_take(st, seq, q)` with an explicit slot, wiring through `stage_ver_p`/`PV[2][3]`/`PSD[3]`/`capture_all`/`pl_drain`/`absorb_stats`/watchdog (`stage 0 tree lane`), the stage-0 occupancy tests (`a_pl_idle`, `el_gap`) and the reserve (`kPipeWindowMib` 160->270, `kPipeSnapMib` 96->144, `kPipeSnapCopies` 2->3). Two-stage splits only. Level 3 (launch + keep-the-right-one + a restore-only discard on the Verifier) is NOT implemented: today `pl_commit_async` refuses `n_keep < 1`, so a wrong branch cannot be given back without a new method.
+- **Switch (default)**: `STRATA_OV_TREE=0` (off, today's path byte-identical) | `=1` build and score the second hypothesis | `>=2` its lane exists (three verifiers per stage on a two-stage split). Line at the end of a request, with `STRATA_DECODE_TIMING`: `strata overlap tree (STRATA_OV_TREE=1): seconda ipotesi fatta N su M finestre B; finestre intere N -> prima scelta giusta N, seconda giusta N, nessuna N; seconda sopra la soglia <theta>: N; p_on media: prima X, seconda Y`
+- **Origin**: fork (lab/overlap 20 Oct 2026, after patch 20/21 said the second choice is right 45,2% on the serial path and 29,5% on the pipeline - above the 0,30 signal threshold, so the owner opened the work)
+- **Upstream**: not proposed yet - a lab lever, and its level 3 is unfinished
+- **Measured**: not measured yet. The arm that closes level 1: `STRATA_OV_TREE=1` with `--add-opt=--pipeline-windows=2` on the DET bench (CODA_MISURE blocco 16) - it must print the `strata overlap tree` line and a `force_trace.txt` byte-identical to the arm without the switch (nothing is launched, so any difference is a bug). The arm that closes level 2: `STRATA_OV_TREE=2` on the same bench - the engine must print `a third lane on CUDA0 and CUDA1` and `three verifiers per stage`, and survive the 3060's VRAM (the reserve says ~270+144 MiB kept out of the expert cache); if the third snapshot does not fit the lane turns itself off with its own line. No speed claim is possible at these levels: the runner-up comes to the host through a copy node per chain step, which is a diagnostic cost.
+- **Docs**: docs/OVERLAP.md
+- **Files**: `include/strata/core/mtp.hpp`, `src/core/mtp.cpp`, `src/program/generate.cpp`
+
+Insertion points (26):
+
+- `include/strata/core/mtp.hpp` · `public:` → [22-1](BLOCKS.md#22-1)
+  ```
+      /// lab/overlap 1.2 (`STRATA_OV_TOP2_STAT=1`, a diagnostic, opt-in and slow): the chain step's runner-up under the
+      /// draft head and its probability -- what a tree draft's second branch would have to hit.  Each step's logits are
+      /// copied to the host inside its own graph; -1 / 0 when the switch is off or the step has no second token.
+  ```
+- `src/core/mtp.cpp` · `void MtpDrafter::record_top2(int j) {` → [22-2](BLOCKS.md#22-2)
+  ```
+  // A chain step's draft logits (the row `row_top_prob` took its top-1 and its probability from) also come to the host,
+  // so a window's verdict can ask what the drafter's runner-up was at the bonus position: the token a tree draft's
+  // second branch would have to hit.  Off: no pinned staging, no copy node, the round and step graphs are the old ones.
+  ```
+- `src/program/generate.cpp` · `struct GpuStage {` → [22-3](BLOCKS.md#22-3)
+  ```
+      int32_t* d_res = nullptr;                            ///< the residency table on its device
+      strata::core::Verifier ver;
+      strata::core::Verifier ver_b;                        ///< --pipeline-windows: the odd windows' verifier
+  ```
+- `src/program/generate.cpp` · `void disk_wait_threads(std::FILE* f) {` → [22-4](BLOCKS.md#22-4)
+  ```
+  
+  // --pipeline-windows: what the watchdog prints about the pipelined decode loop (set while it runs)
+  struct PlDiag {
+  ```
+- `src/program/generate.cpp` · `void pl_diag_print(std::FILE* f) {` → [22-5](BLOCKS.md#22-5)
+  ```
+                      "S1-launched S1-done); chain kind %d live %d; doomed %d ending %d\n", d.iters.load(), d.a_seq.load(),
+                   bits(d.a_bits.load(), ba), bits(d.b_bits.load(), bb), bits(d.d_bits.load(), bd), d.chain_kind.load(),
+                   d.chain_live.load(), d.doomed.load(), d.ending.load());
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-6](BLOCKS.md#22-6)
+  ```
+      // 64 MiB left two RTX 5070 Ti under Linux short of it) and, with the decode pipelined, two copies of the first
+      // stage's GDN state (sized from its session where the first card's cache is sized; this is the split search's
+      // estimate).  Allocated after the caches, so kept out of them.
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-7](BLOCKS.md#22-7)
+  ```
+                          if (stages.empty())
+                              for (const auto& d : slot_mtp) mtp_b += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);
+                          const int64_t pipe_b = o.pipeline_windows <= 0 ? 0
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-8](BLOCKS.md#22-8)
+  ```
+      bool reserve_adapted = false;   // #496: the auto sizing lowered the reserve so a small card's cache fits
+      // --pipeline-windows: what it allocates on CUDA0 after the cache (see kPipeWindowMib)
+      const int64_t pipe_first = o.pipeline_windows <= 0 ? 0
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-9](BLOCKS.md#22-9)
+  ```
+          const bool pipe = o.pipeline_windows > 0 && n_stages >= 2 && !split_same && (int) stages.size() == n_stages - 1;
+          strata::core::Verifier ver_b;
+          SplitDrive split_drive_b;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-10](BLOCKS.md#22-10)
+  ```
+              }
+              if (!ok_p) { std::fprintf(stderr, "strata serve: --pipeline-windows: stream creation failed\n"); return 1; }
+              for (int st = 0; st < n_stages; ++st)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-11](BLOCKS.md#22-11)
+  ```
+              // the setters reach the later stages; the pipeline never chains run/commit
+              for (int st = 0; st + 1 < n_stages; ++st) stage_ver_p(st, 1).set_next(&stage_ver_p(st + 1, 1), &split_drive_b);
+          }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-12](BLOCKS.md#22-12)
+  ```
+                  stage_ver_p(st, 1).set_split(o.spec_split);
+                  stage_ver_p(st, 1).set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : 2);
+              }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-13](BLOCKS.md#22-13)
+  ```
+              int dev = 0;
+              size_t bytes = 0;
+              void* state = nullptr;            // the stage's GDN state (its session's)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-14](BLOCKS.md#22-14)
+  ```
+                      for (int i = 0; i < 2 && ok_s; ++i)
+                          ok_s = cudaEventCreateWithFlags(&sn.pre[i], cudaEventDisableTiming) == cudaSuccess &&
+                                 cudaEventCreateWithFlags(&sn.ev[i], cudaEventDisableTiming) == cudaSuccess;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-15](BLOCKS.md#22-15)
+  ```
+          auto pl_prepare = [&](std::string& e) -> bool {
+              if (pl_prepared) return true;
+              for (int st = 0; st < n_stages; ++st)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-16](BLOCKS.md#22-16)
+  ```
+              for (int round = 0; round < 10000000; ++round) {
+                  bool any = false;
+                  for (int st = 0; st < n_stages && pipe; ++st)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-17](BLOCKS.md#22-17)
+  ```
+                  static const bool pl_log = pipe_dbg_env("STRATA_PIPELINE_LOG") != nullptr;
+                  // the snapshot of the GDN state window `seq` reads on front stage `st` (overlapped: before its launch
+                  // there, on the stage's side stream)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-18](BLOCKS.md#22-18)
+  ```
+                             (cudaStreamQuery(sn.side), true);
+                  };
+                  PW A, B, D;              // A: the oldest window not verified; B: the next; D: a wrong speculative window
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-19](BLOCKS.md#22-19)
+  ```
+                  static const bool ov_top2 = strata::core::MtpDrafter::ov_top2_stat();
+                  int64_t ov_n = 0, ov_t1 = 0, ov_t2 = 0, ov_t3 = 0, ov_no2 = 0;
+                  double ov_p2 = 0.0;   // the runner-up's probability, summed over the counted windows
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-20](BLOCKS.md#22-20)
+  ```
+                  };
+                  // --adapt-async: the asynchronous tier beside the windows (see adapt_tick).  A stage is idle when neither
+                  // of its verifiers has a window in flight (a commit or a snapshot copy waits on nothing of the host's)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-21](BLOCKS.md#22-21)
+  ```
+                  // is unpublished (el_hold_tier).  False (with err) when a step failed.
+                  bool el_res_dirty = false;   // every residency table uploaded again once the loop has drained
+                  auto el_gap = [&]() -> bool {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-22](BLOCKS.md#22-22)
+  ```
+                      for (int k = 0; k < 2; ++k) { s0.launches[k] = 0; s0.launch_ns[k] = 0; s0.launch_max_ns[k] = 0; }
+                  }
+                  for (int st = 0; st < 2; ++st)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-23](BLOCKS.md#22-23)
+  ```
+                                      for (int i = 0; i + 1 < A.T; ++i) pa *= A.prob[i];
+                                  }
+                                  if (!A.sfx) make_b(oc, op, base, k, pa);   // a lookup window's bonus is not the chain's
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-24](BLOCKS.md#22-24)
+  ```
+                      const bool last = nf || eos || produced_n >= max_new || stop_req.load();
+                      const bool on = !nf && B.launched && a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
+                      if (B.made) {   // the gate's calibration: would B have been on the path, by its estimate p_on
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-25](BLOCKS.md#22-25)
+  ```
+                      }
+                  }
+                  // the odd windows' counters and GPU profiles into the verifiers that report them
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-26](BLOCKS.md#22-26)
+  ```
+                                               "(runner-up non letto %lld, sua probabilita media %.3f)\n",
+                                       (long long) ov_t1, (long long) ov_t2, (long long) ov_t3, (long long) ov_n,
+                                       (long long) ov_no2, ov_n > 0 ? ov_p2 / (double) ov_n : 0.0);
   ```

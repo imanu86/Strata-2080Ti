@@ -7,7 +7,7 @@
     "tag": "v0.1.45",
     "commit": "477ac13cbe8e582c20484871ce459d20d82df09d"
   },
-  "stack_head": "f20bd46e9173f735c79d45b19265cff578a4b006",
+  "stack_head": "bf03aeac8c111078764205fe13170921a3fa55f1",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -4131,6 +4131,344 @@
         }
       ],
       "files": [
+        "src/core/mtp.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "22",
+      "name": "ov-tree-hypothesis",
+      "summary": "Tree draft's second hypothesis for a speculative window's row 0, opt-in and in levels. Level 1 (`=1`): when `make_b` builds B from the chain, a second `PW` is built for the same row 0 - the chain's runner-up at that position (`chain_top2`/`chain_top2_prob`, so the tree's switch turns the runner-up's data path on too) - with the chain's drafts after it, `p_on = pa * p(second)`, B's guards (no lookup/suffix windows), and a verdict score: for every window accepted whole, which of the two candidates is the model's own bonus token, how many second hypotheses would clear `theta`, and both branches' mean `p_on`. Nothing is launched: `pump0` and the launches know only A, B and D, so the windows served and the tokens emitted stay today's. Level 2 (`>=2`): the lane the launch will need - a THIRD verifier on stage 0 and on the last stage (`ver_c`), its own pinned hand-off, its own `SplitDrive`, a THIRD GDN snapshot buffer (`PlSnap::buf[3]`, slot 2, not `seq & 1`: the rollback reads the parity slot and must not be overwritten), `snap_take(st, seq, q)` with an explicit slot, wiring through `stage_ver_p`/`PV[2][3]`/`PSD[3]`/`capture_all`/`pl_drain`/`absorb_stats`/watchdog (`stage 0 tree lane`), the stage-0 occupancy tests (`a_pl_idle`, `el_gap`) and the reserve (`kPipeWindowMib` 160->270, `kPipeSnapMib` 96->144, `kPipeSnapCopies` 2->3). Two-stage splits only. Level 3 (launch + keep-the-right-one + a restore-only discard on the Verifier) is NOT implemented: today `pl_commit_async` refuses `n_keep < 1`, so a wrong branch cannot be given back without a new method.",
+      "switch": "`STRATA_OV_TREE=0` (off, today's path byte-identical) | `=1` build and score the second hypothesis | `>=2` its lane exists (three verifiers per stage on a two-stage split). Line at the end of a request, with `STRATA_DECODE_TIMING`: `strata overlap tree (STRATA_OV_TREE=1): seconda ipotesi fatta N su M finestre B; finestre intere N -> prima scelta giusta N, seconda giusta N, nessuna N; seconda sopra la soglia <theta>: N; p_on media: prima X, seconda Y`",
+      "origin": "fork (lab/overlap 20 Oct 2026, after patch 20/21 said the second choice is right 45,2% on the serial path and 29,5% on the pipeline - above the 0,30 signal threshold, so the owner opened the work)",
+      "upstream_status": "not proposed yet - a lab lever, and its level 3 is unfinished",
+      "measured": "not measured yet. The arm that closes level 1: `STRATA_OV_TREE=1` with `--add-opt=--pipeline-windows=2` on the DET bench (CODA_MISURE blocco 16) - it must print the `strata overlap tree` line and a `force_trace.txt` byte-identical to the arm without the switch (nothing is launched, so any difference is a bug). The arm that closes level 2: `STRATA_OV_TREE=2` on the same bench - the engine must print `a third lane on CUDA0 and CUDA1` and `three verifiers per stage`, and survive the 3060's VRAM (the reserve says ~270+144 MiB kept out of the expert cache); if the third snapshot does not fit the lane turns itself off with its own line. No speed claim is possible at these levels: the runner-up comes to the host through a copy node per chain step, which is a diagnostic cost.",
+      "docs": "docs/OVERLAP.md",
+      "commit": "299650a9b9457d910d3835e704ccc3e6935a2ec2",
+      "title": "QWEN-OVERLAP-Costruisce e conta la seconda ipotesi di B (STRATA_OV_TREE=1) senza lanciarla",
+      "follow_up_subjects": [
+        "QWEN-OVERLAP-Da' una corsia in piu'"
+      ],
+      "patch": "22-ov-tree-hypothesis.patch",
+      "follow_up_commits": [
+        "bf03aeac8c111078764205fe13170921a3fa55f1"
+      ],
+      "anchors": [
+        {
+          "block": "22-1",
+          "file": "include/strata/core/mtp.hpp",
+          "symbol": "public:",
+          "anchor": [
+            "    /// lab/overlap 1.2 (`STRATA_OV_TOP2_STAT=1`, a diagnostic, opt-in and slow): the chain step's runner-up under the",
+            "    /// draft head and its probability -- what a tree draft's second branch would have to hit.  Each step's logits are",
+            "    /// copied to the host inside its own graph; -1 / 0 when the switch is off or the step has no second token."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "22-2",
+          "file": "src/core/mtp.cpp",
+          "symbol": "void MtpDrafter::record_top2(int j) {",
+          "anchor": [
+            "// A chain step's draft logits (the row `row_top_prob` took its top-1 and its probability from) also come to the host,",
+            "// so a window's verdict can ask what the drafter's runner-up was at the bonus position: the token a tree draft's",
+            "// second branch would have to hit.  Off: no pinned staging, no copy node, the round and step graphs are the old ones."
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "22-3",
+          "file": "src/program/generate.cpp",
+          "symbol": "struct GpuStage {",
+          "anchor": [
+            "    int32_t* d_res = nullptr;                            ///< the residency table on its device",
+            "    strata::core::Verifier ver;",
+            "    strata::core::Verifier ver_b;                        ///< --pipeline-windows: the odd windows' verifier"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "22-4",
+          "file": "src/program/generate.cpp",
+          "symbol": "void disk_wait_threads(std::FILE* f) {",
+          "anchor": [
+            "",
+            "// --pipeline-windows: what the watchdog prints about the pipelined decode loop (set while it runs)",
+            "struct PlDiag {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "22-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "void pl_diag_print(std::FILE* f) {",
+          "anchor": [
+            "                    \"S1-launched S1-done); chain kind %d live %d; doomed %d ending %d\\n\", d.iters.load(), d.a_seq.load(),",
+            "                 bits(d.a_bits.load(), ba), bits(d.b_bits.load(), bb), bits(d.d_bits.load(), bd), d.chain_kind.load(),",
+            "                 d.chain_live.load(), d.doomed.load(), d.ending.load());"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "22-6",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    // 64 MiB left two RTX 5070 Ti under Linux short of it) and, with the decode pipelined, two copies of the first",
+            "    // stage's GDN state (sized from its session where the first card's cache is sized; this is the split search's",
+            "    // estimate).  Allocated after the caches, so kept out of them."
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "22-7",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                        if (stages.empty())",
+            "                            for (const auto& d : slot_mtp) mtp_b += (int64_t) d->bind_bytes(native_head.row_bytes(), n_vocab);",
+            "                        const int64_t pipe_b = o.pipeline_windows <= 0 ? 0"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "22-8",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "    bool reserve_adapted = false;   // #496: the auto sizing lowered the reserve so a small card's cache fits",
+            "    // --pipeline-windows: what it allocates on CUDA0 after the cache (see kPipeWindowMib)",
+            "    const int64_t pipe_first = o.pipeline_windows <= 0 ? 0"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "22-9",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        const bool pipe = o.pipeline_windows > 0 && n_stages >= 2 && !split_same && (int) stages.size() == n_stages - 1;",
+            "        strata::core::Verifier ver_b;",
+            "        SplitDrive split_drive_b;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "22-10",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            }",
+            "            if (!ok_p) { std::fprintf(stderr, \"strata serve: --pipeline-windows: stream creation failed\\n\"); return 1; }",
+            "            for (int st = 0; st < n_stages; ++st)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "22-11",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            // the setters reach the later stages; the pipeline never chains run/commit",
+            "            for (int st = 0; st + 1 < n_stages; ++st) stage_ver_p(st, 1).set_next(&stage_ver_p(st + 1, 1), &split_drive_b);",
+            "        }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "22-12",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                stage_ver_p(st, 1).set_split(o.spec_split);",
+            "                stage_ver_p(st, 1).set_pcie_mode(o.pcie_mode == \"dma\" ? 0 : o.pcie_mode == \"direct\" ? 1 : 2);",
+            "            }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "22-13",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            int dev = 0;",
+            "            size_t bytes = 0;",
+            "            void* state = nullptr;            // the stage's GDN state (its session's)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 11
+        },
+        {
+          "block": "22-14",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    for (int i = 0; i < 2 && ok_s; ++i)",
+            "                        ok_s = cudaEventCreateWithFlags(&sn.pre[i], cudaEventDisableTiming) == cudaSuccess &&",
+            "                               cudaEventCreateWithFlags(&sn.ev[i], cudaEventDisableTiming) == cudaSuccess;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 12
+        },
+        {
+          "block": "22-15",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "        auto pl_prepare = [&](std::string& e) -> bool {",
+            "            if (pl_prepared) return true;",
+            "            for (int st = 0; st < n_stages; ++st)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 13
+        },
+        {
+          "block": "22-16",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "            for (int round = 0; round < 10000000; ++round) {",
+            "                bool any = false;",
+            "                for (int st = 0; st < n_stages && pipe; ++st)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 14
+        },
+        {
+          "block": "22-17",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                static const bool pl_log = pipe_dbg_env(\"STRATA_PIPELINE_LOG\") != nullptr;",
+            "                // the snapshot of the GDN state window `seq` reads on front stage `st` (overlapped: before its launch",
+            "                // there, on the stage's side stream)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 15
+        },
+        {
+          "block": "22-18",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                           (cudaStreamQuery(sn.side), true);",
+            "                };",
+            "                PW A, B, D;              // A: the oldest window not verified; B: the next; D: a wrong speculative window"
+          ],
+          "status_in_base": "unique",
+          "hunk": 16
+        },
+        {
+          "block": "22-19",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                static const bool ov_top2 = strata::core::MtpDrafter::ov_top2_stat();",
+            "                int64_t ov_n = 0, ov_t1 = 0, ov_t2 = 0, ov_t3 = 0, ov_no2 = 0;",
+            "                double ov_p2 = 0.0;   // the runner-up's probability, summed over the counted windows"
+          ],
+          "status_in_base": "unique",
+          "hunk": 17
+        },
+        {
+          "block": "22-20",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                };",
+            "                // --adapt-async: the asynchronous tier beside the windows (see adapt_tick).  A stage is idle when neither",
+            "                // of its verifiers has a window in flight (a commit or a snapshot copy waits on nothing of the host's)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 18
+        },
+        {
+          "block": "22-21",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                // is unpublished (el_hold_tier).  False (with err) when a step failed.",
+            "                bool el_res_dirty = false;   // every residency table uploaded again once the loop has drained",
+            "                auto el_gap = [&]() -> bool {"
+          ],
+          "status_in_base": "unique",
+          "hunk": 19
+        },
+        {
+          "block": "22-22",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    for (int k = 0; k < 2; ++k) { s0.launches[k] = 0; s0.launch_ns[k] = 0; s0.launch_max_ns[k] = 0; }",
+            "                }",
+            "                for (int st = 0; st < 2; ++st)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 20
+        },
+        {
+          "block": "22-23",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                    for (int i = 0; i + 1 < A.T; ++i) pa *= A.prob[i];",
+            "                                }",
+            "                                if (!A.sfx) make_b(oc, op, base, k, pa);   // a lookup window's bonus is not the chain's"
+          ],
+          "status_in_base": "unique",
+          "hunk": 21
+        },
+        {
+          "block": "22-24",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    const bool last = nf || eos || produced_n >= max_new || stop_req.load();",
+            "                    const bool on = !nf && B.launched && a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];",
+            "                    if (B.made) {   // the gate's calibration: would B have been on the path, by its estimate p_on"
+          ],
+          "status_in_base": "unique",
+          "hunk": 22
+        },
+        {
+          "block": "22-25",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                    }",
+            "                }",
+            "                // the odd windows' counters and GPU profiles into the verifiers that report them"
+          ],
+          "status_in_base": "unique",
+          "hunk": 23
+        },
+        {
+          "block": "22-26",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                                             \"(runner-up non letto %lld, sua probabilita media %.3f)\\n\",",
+            "                                     (long long) ov_t1, (long long) ov_t2, (long long) ov_t3, (long long) ov_n,",
+            "                                     (long long) ov_no2, ov_n > 0 ? ov_p2 / (double) ov_n : 0.0);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 24
+        }
+      ],
+      "files": [
+        "include/strata/core/mtp.hpp",
         "src/core/mtp.cpp",
         "src/program/generate.cpp"
       ]

@@ -92,3 +92,45 @@ closed on this model, at or above 0,30 it is worth a real attempt), on the path 
 The commands that would actually test 17, 19 and 20 - with the pipeline on - and the two diagnostic arms for 20 and 21 are
 queued in the fork's work diary: `docs/porto/strata_adattivo/corse_2080ti/20261019_locale/CODA_MISURE.md`, section
 "Coda 20 ottobre".
+
+## 22 - the tree draft's second hypothesis (`STRATA_OV_TREE=1..3`, levels)
+
+The 20/10 diagnostics said the drafter's runner-up is the token the model really produced **45,2%** of the time on the
+serial loop and **29,5%** on the pipelined one - both above the 0,30 threshold that says "worth a real attempt".  So the
+tree draft (two hypotheses for B's row 0 in the same pass of stage 0, keep the one whose row 0 is right) is being built
+in levels, all of them behind `STRATA_OV_TREE` (0 off: today's path, byte for byte).
+
+**Level 1 - `=1`: built and counted, nothing launched.**  Where `make_b` takes B's row 0 from the chain's pick at the
+bonus position, a second window is built from `chain_top2`/`chain_top2_prob` for that same position, with the chain's
+drafts after it and B's guards (no lookup or suffix windows).  Its drafts follow the *first* candidate, so its
+acceptance is expected to be shorter - the model's own picks still decide at the verdict, so a wrong draft costs
+acceptance, never a wrong token.  `pump0` and the launches know only A, B and D, so the windows served and the tokens
+emitted stay today's.  At the verdict, per window accepted whole: which candidate is the model's own bonus token, how
+many second hypotheses would clear `theta`, and both branches' mean `p_on`:
+
+```
+strata overlap tree (STRATA_OV_TREE=1): seconda ipotesi fatta N su M finestre B; finestre intere N -> prima scelta
+giusta N, seconda giusta N, nessuna N; seconda sopra la soglia 0.50: N; p_on media: prima X, seconda Y
+```
+
+**Level 2 - `>=2`: the lane a launch needs exists.**  Two parities hold the two generations a pipelined loop has in
+flight on a stage (A and B).  A second speculative window on stage 0 needs a lane of its own: the hand-off is per
+parity (`ver -> hand[0] -> stage1.ver`), so a window on A's parity would write the hand-off stage 1 is still reading
+for A.  With the switch at 2 or 3 a two-stage split gets a **third verifier per stage** (`ver_c` / `stages[].ver_c`),
+its own pinned hand-off, its own `SplitDrive` and a **third GDN snapshot buffer** (`PlSnap::buf[2]`, not indexed by
+`seq & 1`: the rollback of a wrong window reads its parity's slot, and overwriting it would restore the wrong state).
+`capture_all`, `pl_drain`, `absorb_stats`, the watchdog (`stage 0 tree lane` / `stage 1 tree lane`) and the stage-0
+occupancy tests (`a_pl_idle`, `el_gap`) cover the lane, so it is inert but consistent.  Priced up front: the reserve on
+the first card goes from 160 + 96 MiB to **270 + 144 MiB** (a third arena and its graphs, a third copy of the recurrent
+state), which is that much less expert cache on a 12 GB card.  If the hand-off or the third snapshot does not fit, the
+lane turns itself off with its own line and the pipeline stays as it is today.
+
+**Level 3 is not implemented** (launch, keep the winner, throw the loser away).  What is missing is a way to *give back*
+a wrong speculative window: a pipelined window leaves the GDN state to the commit but does append its rows to the QSA
+indexer (`tail_snap_` restores them at the commit) and advances the PLE history, and `Verifier::pl_commit_async` refuses
+`n_keep < 1` - so the discard needs a new restore-only method on the Verifier (same restores, no rows appended, no GDN
+step), and the two discards must run in the inverse order of their launches (each verifier's `tail_snap_` holds the state
+as of *its* window's start).  Until that exists, levels 1 and 2 measure the idea and reserve its memory; they buy no
+speed.  The counter-evidence is on the record too (PIPELINE2, option d2): a fork tried the tree with a 31% second branch
+and gained nothing, because every speculative window added to stage 0 (~10 ms of a 3060) is paid always while the
+bottleneck is stage 1 (~16 ms).
