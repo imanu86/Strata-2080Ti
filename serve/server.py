@@ -264,6 +264,19 @@ try:
 except ValueError:
     ADMIT_SHORT_FIRST = 0
 ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+# STRATA_PACK_CONCURRENT=1 (docs/MULTICHAT.md, "Passata unica"): the engine (with STRATA_PACK_PREFILL=N pack slots and
+# STRATA_PIPED_CONCURRENT=1) reads the prompts sent ahead (BHINT) in ONE packed pass on the read's thread while the
+# batch slots keep decoding.  The server's half: the request that took the control lines holds its OWN prompt line for
+# STRATA_PACK_WAIT_MS (default 30, 0 = off) so the prompts the other requests are encoding in the same window reach the
+# engine as BHINT lines *before* the read starts, and are read in that same pass instead of one read after the other.
+# The window ends early when as many prompts are ahead as the engine's pack slots (INFO pack_hints=N): more would not
+# be packed anyway.  Unset or 0 here: none of this runs, the admission path is the one of the last release.
+PACK_CONCURRENT = (os.environ.get("STRATA_PACK_CONCURRENT") or "0").strip() not in ("", "0")
+try:
+    _pack_wait_ms = int(os.environ.get("STRATA_PACK_WAIT_MS") or (30 if PACK_CONCURRENT else 0))
+except ValueError:
+    _pack_wait_ms = 30 if PACK_CONCURRENT else 0
+PACK_WAIT_MS = min(500, max(0, _pack_wait_ms)) if PACK_CONCURRENT else 0
 STALL_CPU_EPS_S = 0.5       # CPU seconds the engine may use in the whole stall window and still count as frozen
 STALL_IO_EPS_B = 1 << 20    # bytes read or written in that window
 
@@ -980,6 +993,10 @@ class StrataEngine:
             self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
             self.ctl_epoch = 0                          # how often the control lines were taken
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
+            # STRATA_PACK_CONCURRENT (the collection window below): how many prompts were sent ahead (BHINT) since the
+            # last read line went out, and how many companions a window actually gathered (reported on /metrics).
+            self.pack_pending = 0
+            self.pack_gathered = 0
         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
         self._ctl_erred = False                         # #1059: the control lines ended on an ERR
         self._yielded = None                            # (slot, tokens read): the last request on them gave way
@@ -1465,10 +1482,12 @@ class StrataEngine:
 
     YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
 
-    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
+    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False,
+                      pack: bool = False):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
-        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these)."""
+        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these).
+        `pack`: the caller sends its whole prompt right after (STRATA_PACK_CONCURRENT's collection window below)."""
         entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: STRATA_ADMIT_SHORT_FIRST)
         with self.slot_cv:
             self.waiting += 1
@@ -1514,7 +1533,40 @@ class StrataEngine:
         with self.slot_cv:
             self.ctl_epoch += 1
             self.slot_cv.notify_all()
+        if pack:
+            self._pack_gather()
         return True
+
+    def _pack_gather(self) -> int:
+        """STRATA_PACK_CONCURRENT=1 (docs/MULTICHAT.md, "Passata unica"): this request holds the control lines and is
+        about to send its own prompt.  Hold that line for STRATA_PACK_WAIT_MS so the prompts the other requests are
+        encoding in the same window reach the engine as `BHINT` lines FIRST: the engine's pk_prepare takes the hints
+        that are already in its queue when the read line arrives, so they are read in ONE packed pass on the read's
+        thread while the batch slots decode, instead of one admission after the other.
+        Ends early once as many prompts are ahead as the engine's pack slots (INFO pack_hints=N): a hint beyond that
+        would wait for the next read anyway.  Counts them (self.pack_gathered, /metrics) and says so once in the log.
+        Off (no STRATA_PACK_CONCURRENT, or STRATA_PACK_WAIT_MS=0): returns 0 without touching anything."""
+        if not PACK_CONCURRENT or PACK_WAIT_MS <= 0:
+            return 0
+        slots = int((self.info or {}).get("pack_hints") or 0)
+        if slots <= 0:
+            return 0                                     # no pack slots in this engine: no hint is ever sent
+        with self.slot_cv:
+            base = self.pack_pending                     # prompts already sent ahead since the last read line
+            if base >= slots:
+                got = base                               # the engine can pack all of them: no reason to wait
+            else:
+                self.slot_cv.wait_for(
+                    lambda: self.pack_pending - base >= slots,   # as many ahead as the engine can pack at once
+                    timeout=PACK_WAIT_MS / 1000.0)
+                got = self.pack_pending
+            self.pack_pending = 0                        # the read line sent next takes them all in
+            if got:
+                self.pack_gathered += got
+        if got > base:
+            print(f"[strata] pack: {got - base} prompt(s) sent ahead in the {PACK_WAIT_MS} ms window before this read "
+                  f"(one packed pass, {slots or '?'} pack slots)", flush=True)
+        return got
 
     def _admit_next(self):
         """STRATA_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
@@ -1531,13 +1583,19 @@ class StrataEngine:
     def _pack_hint(self, prompt, embeddings):
         """STRATA_PACK_PREFILL (the engine says INFO pack_hints=N): a request that is about to wait for the control lines
         sends its prompt ahead (`BHINT <ids>`, no answer), so the engine can read it in the same chunks as the prompt it
-        reads next and the request then reads only its last few tokens (docs/MULTICHAT.md).  Text only."""
+        reads next and the request then reads only its last few tokens (docs/MULTICHAT.md).  Text only.
+        STRATA_PACK_CONCURRENT counts the line (the collection window in _pack_gather waits for these)."""
         if embeddings or not int((self.info or {}).get("pack_hints") or 0) or not self.ctl.locked():
             return
         try:
             self._send("BHINT " + ",".join(str(int(t)) for t in prompt))
         except EngineDied:
             pass
+        else:
+            if PACK_CONCURRENT:
+                with self.slot_cv:
+                    self.pack_pending += 1
+                    self.slot_cv.notify_all()      # a reader holding its window sees the prompt arrived
 
     SOLO_AGAIN_MAX = 2      # how often a request left alone in a slot goes back to the solo path
     SOLO_AGAIN_MIN_LEFT = 32  # ... only with at least this many tokens still allowed (max_tokens)
@@ -1577,7 +1635,7 @@ class StrataEngine:
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
         self._pack_hint(prompt, embeddings)
-        ok = yield from self._take_control(cancel, len(prompt), new=True)
+        ok = yield from self._take_control(cancel, len(prompt), new=True, pack=embeddings is None)
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -1590,7 +1648,7 @@ class StrataEngine:
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
-                    ok = yield from self._take_control(cancel, len(prompt))
+                    ok = yield from self._take_control(cancel, len(prompt), pack=embeddings is None)
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -1691,7 +1749,7 @@ class StrataEngine:
                             if cancel.is_set():
                                 return
                             if not holding:
-                                ok = yield from self._take_control(cancel, len(prompt))
+                                ok = yield from self._take_control(cancel, len(prompt), pack=embeddings is None)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
@@ -1703,7 +1761,7 @@ class StrataEngine:
                         holding = False
                         with self.slot_cv:
                             epoch = self.ctl_epoch
-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, pack=embeddings is None)
                         if not ok:
                             return
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -3814,7 +3872,8 @@ class Service:
             in_slots = sum(1 for x in slots if x["state"] != "idle")
             live.update(parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),
                         waiting=int(getattr(self.engine, "waiting", 0) or 0),
-                        admitting=int(getattr(self.engine, "admitting", 0) or 0))
+                        admitting=int(getattr(self.engine, "admitting", 0) or 0),
+                        pack_gathered=int(getattr(self.engine, "pack_gathered", 0) or 0))
             if running and state == "idle":
                 live["state"] = "generating"
         if hasattr(self.engine, "replica_view"):        # opt-in replicas: each one's state and requests routed to it
