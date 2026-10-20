@@ -548,8 +548,21 @@ void MtpDrafter::record_top2(int j) {
 // A chain step's draft logits (the row `row_top_prob` took its top-1 and its probability from) also come to the host,
 // so a window's verdict can ask what the drafter's runner-up was at the bonus position: the token a tree draft's
 // second branch would have to hit.  Off: no pinned staging, no copy node, the round and step graphs are the old ones.
+// lab/overlap 1.6 (STRATA_OV_TREE=1..3): the tree draft's level.  1 = the second hypothesis for a speculative
+// window's row 0 is built from the chain's runner-up and scored at the verdict (nothing is launched: the tokens stay
+// the ones of today); 2 = its verifier on the first card exists (its arena, graphs, hand-off and snapshot are made);
+// 3 = it is launched speculatively beside the first one and the verdict keeps the branch whose row 0 is right.
+int MtpDrafter::ov_tree() {
+    static const int v = [] { const char* e = std::getenv("STRATA_OV_TREE"); return e != nullptr ? std::atoi(e) : 0; }();
+    return v;
+}
+
 bool MtpDrafter::ov_top2_stat() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_OV_TOP2_STAT"); return v != nullptr && std::atoi(v) != 0; }();
+    // The runner-up's data path: the diagnostic asks for it, and the tree draft cannot pick a second branch without it.
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_OV_TOP2_STAT");
+        return (v != nullptr && std::atoi(v) != 0) || ov_tree() > 0;
+    }();
     return on;
 }
 

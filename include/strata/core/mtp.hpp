@@ -157,7 +157,12 @@ public:
     /// lab/overlap 1.2 (`STRATA_OV_TOP2_STAT=1`, a diagnostic, opt-in and slow): the chain step's runner-up under the
     /// draft head and its probability -- what a tree draft's second branch would have to hit.  Each step's logits are
     /// copied to the host inside its own graph; -1 / 0 when the switch is off or the step has no second token.
+    /// lab/overlap 1.6 (`STRATA_OV_TREE=1..3`): the tree draft needs the same runner-up on the live path, so the tree's
+    /// switch turns this data path on too (the copy node is the only way the second candidate reaches the host).
     static bool ov_top2_stat();
+    /// lab/overlap 1.6: the tree draft's level (0 off, 1 build and score the second hypothesis, 2 its verifier exists,
+    /// 3 it is launched).  Read once, like every other STRATA_ switch.
+    static int ov_tree();
     int32_t chain_top2(int j) const { return j >= 0 && j < 8 ? chain_top2_[j] : -1; }
     float chain_top2_prob(int j) const { return j >= 0 && j < 8 ? chain_top2_prob_[j] : 0.0f; }
 

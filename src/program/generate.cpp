@@ -14900,6 +14900,14 @@ int main(int argc, char** argv) {
                            (cudaStreamQuery(sn.side), true);
                 };
                 PW A, B, D;              // A: the oldest window not verified; B: the next; D: a wrong speculative window
+                // lab/overlap 1.6 (`STRATA_OV_TREE=1`, this step): the tree draft's SECOND hypothesis for B's row 0.
+                // Built here, never launched at this level: `pump0`/the launches know only A, B and D, so the windows
+                // served and the tokens emitted are today's, byte for byte.  What it measures is whether a second
+                // branch would have been the right one - on the live path, with the same chain and the same gate.
+                // Its verifier (level 2) and its launch (level 3) come after: see docs/OVERLAP.md and the design note
+                // in OVERLAP_2026-10-19.md (two speculative windows need a THIRD verifier on stage 0: A's own verifier
+                // must stay free for the commit replay that undoes a wrong branch).
+                PW B2;
                 bool doomed = false;     // D still runs: when it finishes, stage 0 goes back to undo_w's real commit
                 PW undo_w;
                 int undo_keep = 0;
@@ -14972,6 +14980,11 @@ int main(int argc, char** argv) {
                 static const bool ov_top2 = strata::core::MtpDrafter::ov_top2_stat();
                 int64_t ov_n = 0, ov_t1 = 0, ov_t2 = 0, ov_t3 = 0, ov_no2 = 0;
                 double ov_p2 = 0.0;   // the runner-up's probability, summed over the counted windows
+                // lab/overlap 1.6 (STRATA_OV_TREE): the second hypothesis, made / right / lost, and how many of them
+                // would clear the speculative gate (theta) - the number that says whether launching them pays.
+                static const int ov_tree = strata::core::MtpDrafter::ov_tree();
+                int64_t ov2_bm = 0, ov2_made = 0, ov2_whole = 0, ov2_b1 = 0, ov2_b2 = 0, ov2_none = 0, ov2_gate = 0;
+                double ov2_p2 = 0.0, ov2_p1 = 0.0;   // p_on of the second branch / of the first, over the made ones
                 double pl_chain_t0 = 0.0, pl_chain_ms[2] = {0, 0}, pl_chain_n[2] = {0, 0};   // fork: chain -> B latency
                 // fork (Daily 1541e340): the elastic tail beside the windows, at the gaps of stage 0 (see el_gap)
                 int64_t pl_el_shrinks = 0, pl_el_grows = 0;
@@ -15518,6 +15531,33 @@ int main(int argc, char** argv) {
                                     for (int i = 0; i + 1 < A.T; ++i) pa *= A.prob[i];
                                 }
                                 if (!A.sfx) make_b(oc, op, base, k, pa);   // a lookup window's bonus is not the chain's
+                                // lab/overlap 1.6 (STRATA_OV_TREE=1): the tree's SECOND hypothesis for B's row 0 - the
+                                // chain's runner-up at the same position, then the chain's own drafts after it.  Those
+                                // drafts were made following the FIRST candidate, so the second branch's acceptance is
+                                // often shorter (counted below as `short`); the model's own picks still decide at the
+                                // verdict, so a wrong draft costs acceptance, never a wrong token.  Not launched here.
+                                if (ov_tree > 0 && !A.sfx && !A.lookup && B.made && !B2.made && base < k) {
+                                    const int32_t second = mtp.chain_top2(base);
+                                    const float p2 = mtp.chain_top2_prob(base);
+                                    if (second >= 0 && second != oc[base] && p2 > 0.0f) {
+                                        B2 = PW{};
+                                        B2.seq = A.seq;                     // its verifier would be A's parity (level 2/3)
+                                        B2.p = A.p + A.T;
+                                        B2.tok[0] = second;
+                                        B2.T = B.T;
+                                        for (int i = 1; i < B2.T; ++i) {
+                                            B2.tok[i] = oc[base + i];
+                                            B2.prob[i - 1] = op[base + i];
+                                        }
+                                        B2.p_on = pa * p2;
+                                        B2.ready = true;
+                                        B2.made = true;
+                                        ++ov2_made;
+                                        ov2_p2 += (double) B2.p_on;
+                                        ov2_p1 += (double) B.p_on;
+                                        if (B2.p_on >= theta) ++ov2_gate;
+                                    }
+                                }
                                 // stage B now (its PLE rows from the tokens before it as they will be once A is
                                 // committed whole), so its launch behind A is only the graph launch (never while a
                                 // rollback is pending: B's verifier is the one the undo commit reads)
@@ -15711,10 +15751,26 @@ int main(int argc, char** argv) {
                     const bool last = nf || eos || produced_n >= max_new || stop_req.load();
                     const bool on = !nf && B.launched && a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
                     if (B.made) {   // the gate's calibration: would B have been on the path, by its estimate p_on
+                        ++ov2_bm;   // lab/overlap 1.6: the B windows this request made (the tree's denominator)
                         const bool would = a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
                         const int bin = std::min(9, std::max(0, (int) (B.p_on * 10.0f)));
                         cal_n[bin] += 1;
                         cal_on[bin] += would ? 1 : 0;
+                    }
+                    // lab/overlap 1.6 (STRATA_OV_TREE=1): the tree's verdict on paper.  `whole` is the case today's B
+                    // can be used at all; among those, which of the two candidates is the model's own bonus token.
+                    // Level 1 launches nothing, so this only says how often a second branch would have been the right
+                    // one on this path - the same question patch 20/21 answered as a ratio, here per window and with
+                    // the gate (theta) the launch would have to pass.
+                    if (ov_tree > 0 && B2.made) {
+                        const int32_t bonus = outp[(size_t) (A.T - 1)];
+                        if (a == A.T - 1) {
+                            ++ov2_whole;
+                            if (B.made && B.tok[0] == bonus) ++ov2_b1;
+                            else if (B2.tok[0] == bonus) ++ov2_b2;
+                            else ++ov2_none;
+                        }
+                        B2 = PW{};
                     }
                     tre("V", A.seq, a, on ? 1 : (B.launched ? -1 : 0));
                     {
@@ -15887,6 +15943,16 @@ int main(int argc, char** argv) {
                                              "(runner-up non letto %lld, sua probabilita media %.3f)\n",
                                      (long long) ov_t1, (long long) ov_t2, (long long) ov_t3, (long long) ov_n,
                                      (long long) ov_no2, ov_n > 0 ? ov_p2 / (double) ov_n : 0.0);
+                    if (ov_tree > 0)   // lab/overlap 1.6: the second hypothesis, on paper (level 1 launches nothing)
+                        std::fprintf(stderr, "strata overlap tree (STRATA_OV_TREE=%d): seconda ipotesi fatta %lld su %lld "
+                                             "finestre B; finestre intere %lld -> prima scelta giusta %lld, seconda giusta "
+                                             "%lld, nessuna %lld; seconda sopra la soglia %.2f: %lld; p_on media: prima "
+                                             "%.3f, seconda %.3f (niente lanciato a questo livello)\n",
+                                     ov_tree, (long long) ov2_made, (long long) ov2_bm,
+                                     (long long) ov2_whole, (long long) ov2_b1, (long long) ov2_b2, (long long) ov2_none,
+                                     theta, (long long) ov2_gate,
+                                     ov2_made > 0 ? ov2_p1 / (double) ov2_made : 0.0,
+                                     ov2_made > 0 ? ov2_p2 / (double) ov2_made : 0.0);
                     std::fprintf(stderr, "strata pipeline: drafter on CUDA%d: %.3f ms of host time per chain launch (%.3f ms of it "
                                          "staging the source rows, %lld times so far)\n", mtp.device(),
                                  avg(mtp.ms_draft, (double) mtp.rounds), avg(mtp.ms_src, (double) mtp.n_src), (long long) mtp.n_src);
