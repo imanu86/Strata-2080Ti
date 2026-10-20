@@ -9878,22 +9878,24 @@ Anchor:
                                 }
                                 if (!A.sfx) make_b(oc, op, base, k, pa);   // a lookup window's bonus is not the chain's
 ```
-Block (hunk 21 of `src/program/generate.cpp` in the patch, 33 lines):
+Block (hunk 21 of `src/program/generate.cpp` in the patch, 35 lines):
 ```diff
                                      for (int i = 0; i + 1 < A.T; ++i) pa *= A.prob[i];
                                  }
                                  if (!A.sfx) make_b(oc, op, base, k, pa);   // a lookup window's bonus is not the chain's
 +                                // lab/overlap 1.6 (STRATA_OV_TREE=1): the tree's SECOND hypothesis for B's row 0 - the
 +                                // chain's runner-up at the same position, then the chain's own drafts after it.  Those
-+                                // drafts were made following the FIRST candidate, so the second branch's acceptance is
-+                                // often shorter (counted below as `short`); the model's own picks still decide at the
-+                                // verdict, so a wrong draft costs acceptance, never a wrong token.  Not launched here.
++                                // drafts were made following the FIRST candidate, so this branch's acceptance should be
++                                // shorter than the first one's (level 3 will measure it); the model's own picks still
++                                // decide at the verdict, so a wrong draft costs acceptance, never a wrong token.  Not
++                                // launched here.
 +                                if (ov_tree > 0 && !A.sfx && !A.lookup && B.made && !B2.made && base < k) {
 +                                    const int32_t second = mtp.chain_top2(base);
 +                                    const float p2 = mtp.chain_top2_prob(base);
 +                                    if (second >= 0 && second != oc[base] && p2 > 0.0f) {
 +                                        B2 = PW{};
-+                                        B2.seq = A.seq;                     // its verifier would be A's parity (level 2/3)
++                                        B2.seq = A.seq;   // level 3 launches it on the tree lane (`stage_ver_p(st, 2)`),
++                                        //                     never on a parity: see the lane's note above
 +                                        B2.p = A.p + A.T;
 +                                        B2.tok[0] = second;
 +                                        B2.T = B.T;
