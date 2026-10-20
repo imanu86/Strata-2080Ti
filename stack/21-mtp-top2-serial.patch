@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Tue, 20 Oct 2026 02:11:37 +0200
+Subject: [PATCH] QWEN-OVERLAP-Chiama record_top2 nel draft seriale cosi' il
+ conteggio della seconda scelta esiste davvero
+
+Upstream ha STRATA_MTP_TOP2 con MtpDrafter::record_top2, ma record_top2 non e' chiamato da nessuna parte (cuda e
+sycl): il contatore del loop seriale legge mtp.top2(a) sempre -1 e non puo' mai contare un colpo. Ora draft() la
+chiama per ogni passo, nel punto in cui la scelta del passo e' arrivata in host e nessun grafo e' ancora in volo su
+cs_ (draft 0 prima del lancio di step 1, ogni step j prima del lancio di step j+1); nel ramo con min_p = 0, dove
+tutti i passi sono lanciati insieme, la riga 0 della testa di draft contiene ormai solo i logit dell'ultimo passo,
+quindi viene registrato quello e i precedenti restano -1. I passi che il round non ha prodotto vanno a -1 invece di
+lasciare quello che ci aveva messo il draft() precedente. Con la leva spenta: nessuna chiamata, nessun grafo
+cambia, gli stessi token.
+
+La riga di fine richiesta aggiunge il numero che decide: "seconda scelta giusta N di M respinte (%)", cioe' la
+quota di posizioni dove il primo ramo dell'albero aveva sbagliato e il secondo avrebbe preso il token giusto.
+
+Perche' serve qui: le corse DET del 20/10 (DET-ov-*) sono girate sul loop seriale -- nel banco la pipeline non
+era accesa (--pipeline-windows non chiesto, e su CUDA l'auto la lascia spenta) -- quindi la diagnostica
+STRATA_OV_TOP2_STAT della patch 20 non ha stampato nulla e il percorso che queste due schede fanno davvero e'
+questo.
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+
+diff --git a/src/core/mtp.cpp b/src/core/mtp.cpp
+index 58ab9d88..e1e1c9db 100644
+--- a/src/core/mtp.cpp
++++ b/src/core/mtp.cpp
+@@ -1724,6 +1724,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+         drafts[last] = ((volatile int32_t*) h_out_)[last];
+         if (probs) probs[last] = ((volatile float*) h_prob_)[last];
+         prefetch_ple(drafts[last]);
++        // STRATA_MTP_TOP2=1 (lab/overlap 1.2, diagnostic): here every step was launched back to back, so by now the
++        // draft head's row 0 holds the LAST step's logits only - the runner-up is read for that one step and the
++        // earlier ones stay unknown (-1).  Nothing is recorded while a step graph is still in flight.
++        if (top2_env() && !cp) record_top2(last);
+         n = max_steps;
+     } else if (max_steps > 0) {
+         g_dt.init();
+@@ -1755,6 +1759,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+         drafts[0] = ((volatile int32_t*) h_out_)[0];
+         float pj = ((volatile float*) h_prob_)[0];
+         if (probs) probs[0] = pj;
++        // STRATA_MTP_TOP2=1 (lab/overlap 1.2, diagnostic): the draft head's row 0 is this step's logits, and nothing
++        // else is in flight on cs_ until the next launch - so the runner-up is read here, per step, off the measured
++        // path (one blocking copy per step: the diagnostic is slow on purpose, and off it costs nothing).
++        if (top2_env() && !cp) record_top2(0);
+         n = 1;
+         for (int j = 1; j < max_steps && pj >= min_p; ++j) {
+             if (dt) cudaEventRecord(g_dt.eb[j], cs_);
+@@ -1773,6 +1781,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+             drafts[j] = ((volatile int32_t*) h_out_)[j];
+             pj = ((volatile float*) h_prob_)[j];
+             if (probs) probs[j] = pj;
++            if (top2_env() && !cp) record_top2(j);   // STRATA_MTP_TOP2: same point as draft 0's, before the next launch
+             ++n;
+         }
+         prefetch_ple(drafts[n - 1]);
+@@ -1801,6 +1810,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+         }
+     }
+     for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
++    // STRATA_MTP_TOP2 (diagnostic): a draft the round never produced has no runner-up - say so instead of leaving
++    // whatever the previous draft() left in the slot (a window's verdict reads top2(j) for j < its own draft count).
++    if (top2_env() && !top2_.empty())
++        for (int j = n; j < (int) top2_.size(); ++j) top2_[(size_t) j] = -1;
+     if (n_drafts) *n_drafts = n;
+     ms_draft += ms_since(t0);
+     ++rounds;
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 81049261..50180a37 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -16625,11 +16625,17 @@ int main(int argc, char** argv) {
+                              (long long) dp_ok[0], (long long) dp_tested[0], (long long) dp_ok[1], (long long) dp_tested[1],
+                              (long long) dp_ok[2], (long long) dp_tested[2], (long long) dp_ok[3], (long long) dp_tested[3],
+                              (long long) dp_ok[4], (long long) dp_tested[4]);
+-            if (strata::core::MtpDrafter::top2_env())
++            if (strata::core::MtpDrafter::top2_env()) {   // lab/overlap 1.2: the last pair is the ratio a tree draft's
++                // second branch would have recovered, over the positions where its first branch was wrong
++                int64_t t2_r = 0, t2_h = 0;
++                for (int d = 0; d < 4; ++d) { t2_r += t2_rej[d]; t2_h += t2_hit[d]; }
+                 std::fprintf(stderr, "strata serve: mtp top2: rejected/runner-up by depth %lld/%lld %lld/%lld %lld/%lld %lld/%lld "
+-                                     "of %lld windows\n", (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
++                                     "of %lld windows; seconda scelta giusta %lld di %lld respinte (%.1f%%)\n",
++                             (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
+                              (long long) t2_hit[1], (long long) t2_rej[2], (long long) t2_hit[2], (long long) t2_rej[3],
+-                             (long long) t2_hit[3], (long long) dec_windows);
++                             (long long) t2_hit[3], (long long) dec_windows, (long long) t2_h, (long long) t2_r,
++                             t2_r > 0 ? 100.0 * (double) t2_h / (double) t2_r : 0.0);
++            }
+             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
+                 std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
+                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "

@@ -7,7 +7,7 @@
     "tag": "v0.1.45",
     "commit": "477ac13cbe8e582c20484871ce459d20d82df09d"
   },
-  "stack_head": "6caf8fe5b02707012ee5aac4ae36ea00794b5306",
+  "stack_head": "a63f92ab3198db189ca1bc65d241800ebc57126e",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -3293,7 +3293,7 @@
       "switch": "`STRATA_P2_FLUSH_NOSWITCH=1`, `STRATA_P2_FLUSH_US=<us>`, `STRATA_P2_SWITCH_STAT=1`, `STRATA_P2_SMEM=1` (off)",
       "origin": "fork (lab/pipeline2 f6a0b6b2; the polling idea from NTRYourWaifu's v7/v8)",
       "upstream_status": "never proposed",
-      "measured": "13 Oct B-A-B (isolated bench): NOSWITCH removes ~8 100 card switches per request but the gain is below the spread; never promoted (docs/PIPELINE2.md par. 11).",
+      "measured": "not tested as a lever - the 20/10 DET B-A-B (DET-ov-nsw-A1/B1/A2, build-overlap-bc2e87a0, Jump connesso) read -0,3% / +0,3% (mean 0,0%) against a 0,4% A/A dispersion, so nothing was gained; and the switch only exists on the pipelined decode loop, which that bench did not run (no --pipeline-windows, and 0.1.45 leaves it off on CUDA), so the lever was inert there. A verdict needs the same B-A-B with `--pipeline-windows 2`.",
       "docs": "docs/PIPELINE2.md",
       "patch": "17-p2-flush-noswitch.patch",
       "commit": "d06429eeb19f3c2a5b200cf1fab9af5487955cd1",
@@ -3858,7 +3858,7 @@
       "switch": "`STRATA_OV_CHAIN_PRIO=1` (unset / `=0`: the highest priority, exactly as today)",
       "origin": "fork (lab/overlap 19 Oct 2026, from the chain-vs-stage-1 contention measured in docs/PIPELINE2.md)",
       "upstream_status": "never proposed",
-      "measured": "not measured yet - the B-A-B on the forced bench and the `strata pipeline classes` lines are still to run. What it targets is measured: a kind-1 chain takes 0,6-7,5 ms from stage 1.",
+      "measured": "not tested as a lever - the 20/10 DET B-A-B (DET-ov-prio-A1/B1/A2, build-overlap-bc2e87a0, Jump connesso) read -0,7% / +0,9% (mean 0,1%) against a 0,4% A/A dispersion, and that run's own A1/A2 spread was 1,5%: inconclusive. It also tested nothing: the stream's priority is only raised when the chain is the forced (kind 1) one, which needs --pipeline-windows 2, and the bench ran the serial loop. A verdict needs the B-A-B plus the `strata pipeline classes` lines with `--pipeline-windows 2`.",
       "docs": "docs/OVERLAP.md",
       "patch": "19-ov-chain-prio.patch",
       "commit": "3d8b61ce3684c2f3a8781c3fd533248ab2699f6f",
@@ -3887,8 +3887,8 @@
       "summary": "Diagnostic for a tree draft: `STRATA_OV_TOP2_STAT=1` brings every chain step's draft logits to the host (a memcpy node inside that step's own graph) and, for each window accepted whole, reports whether the model's bonus token was the chain's top-1 at that position, its runner-up, or neither.",
       "switch": "`STRATA_OV_TOP2_STAT=1` (off); the line prints with `STRATA_DECODE_TIMING`: `strata overlap top2: bonus=top1 N1, bonus=top2 N2, altro N3 su N`",
       "origin": "fork (lab/overlap 19 Oct 2026)",
-      "upstream_status": "never proposed.  Upstream's `STRATA_MTP_TOP2` counts runner-up hits on the serial loop's windows only, and its `record_top2` is never called anywhere in the tree (cuda or sycl), so its counter reads -1; this one covers the pipelined loop.",
-      "measured": "not measured yet - one DET arm with the same build reads N2/(N2+N3), the share a second branch would recover (below 0,20 the tree draft is closed here). Off: no pinned staging, no node in the round/step graphs, same tokens.",
+      "upstream_status": "never proposed.  Upstream's `STRATA_MTP_TOP2` counts runner-up hits on the serial loop's windows only, and its `record_top2` was never called anywhere in the tree (cuda or sycl), so its counter read -1 until patch 21; this one covers the pipelined loop.",
+      "measured": "no number yet - the 20/10 DET arm (DET-ov-top2, same build, STRATA_OV_TOP2_STAT=1 + STRATA_DECODE_TIMING=1) printed no `strata overlap top2` line at all: the counters live in the pipelined loop's window verdict and that bench ran the serial loop (--pipeline-windows not asked for; 0.1.45's auto leaves it off on CUDA). Off: no pinned staging, no copy node, the round/step graphs and the tokens are unchanged - `force_trace.txt` was 28761 bytes against A0's 28788 (the two arms differ where the bench itself wrote different accepted-draft counts, so byte equality is still to be shown on a pipeline run).",
       "docs": "docs/OVERLAP.md",
       "patch": "20-ov-top2-stat.patch",
       "commit": "b2c2aefd5d07ff93a105a4ae408929a2ddf86471",
@@ -4052,6 +4052,85 @@
       ],
       "files": [
         "include/strata/core/mtp.hpp",
+        "src/core/mtp.cpp",
+        "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "21",
+      "name": "mtp-top2-serial",
+      "summary": "`draft()` calls the diagnostic `record_top2` per draft step, so `STRATA_MTP_TOP2=1` finally fills `top2(j)`: the serial loop's window verdict can ask, at every position where draft j was wrong, whether the draft head's runner-up was the token the model really produced.  Steps the round never produced are set to -1 instead of keeping the previous draft()'s value.",
+      "switch": "`STRATA_MTP_TOP2=1` (off); the line prints at the end of a request: `strata serve: mtp top2: rejected/runner-up by depth ... ; seconda scelta giusta N di M respinte (%)`",
+      "origin": "fork (lab/overlap 20 Oct 2026; upstream already had the switch and the counter, but nothing filled them)",
+      "upstream_status": "not proposed yet - it only completes a diagnostic upstream ships half-connected",
+      "measured": "not measured yet - one DET arm on the serial loop (or the Daily) with `STRATA_MTP_TOP2=1` reads the ratio; below 0,20 the tree draft is closed on this model (PIANO_GLOBALE 2026-10-19 par. 1.2). Off: no call, no graph change, same tokens.",
+      "docs": "docs/OVERLAP.md",
+      "patch": "21-mtp-top2-serial.patch",
+      "commit": "a63f92ab3198db189ca1bc65d241800ebc57126e",
+      "title": "QWEN-OVERLAP-Chiama record_top2 nel draft seriale cosi' il conteggio della seconda scelta esiste davvero",
+      "anchors": [
+        {
+          "block": "21-1",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*",
+          "anchor": [
+            "        drafts[last] = ((volatile int32_t*) h_out_)[last];",
+            "        if (probs) probs[last] = ((volatile float*) h_prob_)[last];",
+            "        prefetch_ple(drafts[last]);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "21-2",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*",
+          "anchor": [
+            "        drafts[0] = ((volatile int32_t*) h_out_)[0];",
+            "        float pj = ((volatile float*) h_prob_)[0];",
+            "        if (probs) probs[0] = pj;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "21-3",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*",
+          "anchor": [
+            "            drafts[j] = ((volatile int32_t*) h_out_)[j];",
+            "            pj = ((volatile float*) h_prob_)[j];",
+            "            if (probs) probs[j] = pj;"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "21-4",
+          "file": "src/core/mtp.cpp",
+          "symbol": "bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*",
+          "anchor": [
+            "        }",
+            "    }",
+            "    for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "21-5",
+          "file": "src/program/generate.cpp",
+          "symbol": "int main(int argc, char** argv) {",
+          "anchor": [
+            "                             (long long) dp_ok[0], (long long) dp_tested[0], (long long) dp_ok[1], (long long) dp_tested[1],",
+            "                             (long long) dp_ok[2], (long long) dp_tested[2], (long long) dp_ok[3], (long long) dp_tested[3],",
+            "                             (long long) dp_ok[4], (long long) dp_tested[4]);"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        }
+      ],
+      "files": [
         "src/core/mtp.cpp",
         "src/program/generate.cpp"
       ]

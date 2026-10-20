@@ -9083,3 +9083,134 @@ Block (hunk 3 of `src/program/generate.cpp` in the patch, 11 lines):
                                           "staging the source rows, %lld times so far)\n", mtp.device(),
                                   avg(mtp.ms_draft, (double) mtp.rounds), avg(mtp.ms_src, (double) mtp.n_src), (long long) mtp.n_src);
 ```
+
+## 21 mtp-top2-serial
+
+`21-mtp-top2-serial.patch` — QWEN-OVERLAP-Chiama record_top2 nel draft seriale cosi' il conteggio della seconda scelta esiste davvero
+
+### 21-1
+
+`src/core/mtp.cpp` · bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+
+Anchor:
+```
+        drafts[last] = ((volatile int32_t*) h_out_)[last];
+        if (probs) probs[last] = ((volatile float*) h_prob_)[last];
+        prefetch_ple(drafts[last]);
+```
+Block (hunk 1 of `src/core/mtp.cpp` in the patch, 10 lines):
+```diff
+         drafts[last] = ((volatile int32_t*) h_out_)[last];
+         if (probs) probs[last] = ((volatile float*) h_prob_)[last];
+         prefetch_ple(drafts[last]);
++        // STRATA_MTP_TOP2=1 (lab/overlap 1.2, diagnostic): here every step was launched back to back, so by now the
++        // draft head's row 0 holds the LAST step's logits only - the runner-up is read for that one step and the
++        // earlier ones stay unknown (-1).  Nothing is recorded while a step graph is still in flight.
++        if (top2_env() && !cp) record_top2(last);
+         n = max_steps;
+     } else if (max_steps > 0) {
+         g_dt.init();
+```
+
+### 21-2
+
+`src/core/mtp.cpp` · bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+
+Anchor:
+```
+        drafts[0] = ((volatile int32_t*) h_out_)[0];
+        float pj = ((volatile float*) h_prob_)[0];
+        if (probs) probs[0] = pj;
+```
+Block (hunk 2 of `src/core/mtp.cpp` in the patch, 10 lines):
+```diff
+         drafts[0] = ((volatile int32_t*) h_out_)[0];
+         float pj = ((volatile float*) h_prob_)[0];
+         if (probs) probs[0] = pj;
++        // STRATA_MTP_TOP2=1 (lab/overlap 1.2, diagnostic): the draft head's row 0 is this step's logits, and nothing
++        // else is in flight on cs_ until the next launch - so the runner-up is read here, per step, off the measured
++        // path (one blocking copy per step: the diagnostic is slow on purpose, and off it costs nothing).
++        if (top2_env() && !cp) record_top2(0);
+         n = 1;
+         for (int j = 1; j < max_steps && pj >= min_p; ++j) {
+             if (dt) cudaEventRecord(g_dt.eb[j], cs_);
+```
+
+### 21-3
+
+`src/core/mtp.cpp` · bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+
+Anchor:
+```
+            drafts[j] = ((volatile int32_t*) h_out_)[j];
+            pj = ((volatile float*) h_prob_)[j];
+            if (probs) probs[j] = pj;
+```
+Block (hunk 3 of `src/core/mtp.cpp` in the patch, 7 lines):
+```diff
+             drafts[j] = ((volatile int32_t*) h_out_)[j];
+             pj = ((volatile float*) h_prob_)[j];
+             if (probs) probs[j] = pj;
++            if (top2_env() && !cp) record_top2(j);   // STRATA_MTP_TOP2: same point as draft 0's, before the next launch
+             ++n;
+         }
+         prefetch_ple(drafts[n - 1]);
+```
+
+### 21-4
+
+`src/core/mtp.cpp` · bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t*
+
+Anchor:
+```
+        }
+    }
+    for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
+```
+Block (hunk 4 of `src/core/mtp.cpp` in the patch, 10 lines):
+```diff
+         }
+     }
+     for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
++    // STRATA_MTP_TOP2 (diagnostic): a draft the round never produced has no runner-up - say so instead of leaving
++    // whatever the previous draft() left in the slot (a window's verdict reads top2(j) for j < its own draft count).
++    if (top2_env() && !top2_.empty())
++        for (int j = n; j < (int) top2_.size(); ++j) top2_[(size_t) j] = -1;
+     if (n_drafts) *n_drafts = n;
+     ms_draft += ms_since(t0);
+     ++rounds;
+```
+
+### 21-5
+
+`src/program/generate.cpp` · int main(int argc, char** argv) {
+
+Anchor:
+```
+                             (long long) dp_ok[0], (long long) dp_tested[0], (long long) dp_ok[1], (long long) dp_tested[1],
+                             (long long) dp_ok[2], (long long) dp_tested[2], (long long) dp_ok[3], (long long) dp_tested[3],
+                             (long long) dp_ok[4], (long long) dp_tested[4]);
+```
+Block (hunk 1 of `src/program/generate.cpp` in the patch, 20 lines):
+```diff
+                              (long long) dp_ok[0], (long long) dp_tested[0], (long long) dp_ok[1], (long long) dp_tested[1],
+                              (long long) dp_ok[2], (long long) dp_tested[2], (long long) dp_ok[3], (long long) dp_tested[3],
+                              (long long) dp_ok[4], (long long) dp_tested[4]);
+-            if (strata::core::MtpDrafter::top2_env())
++            if (strata::core::MtpDrafter::top2_env()) {   // lab/overlap 1.2: the last pair is the ratio a tree draft's
++                // second branch would have recovered, over the positions where its first branch was wrong
++                int64_t t2_r = 0, t2_h = 0;
++                for (int d = 0; d < 4; ++d) { t2_r += t2_rej[d]; t2_h += t2_hit[d]; }
+                 std::fprintf(stderr, "strata serve: mtp top2: rejected/runner-up by depth %lld/%lld %lld/%lld %lld/%lld %lld/%lld "
+-                                     "of %lld windows\n", (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
++                                     "of %lld windows; seconda scelta giusta %lld di %lld respinte (%.1f%%)\n",
++                             (long long) t2_rej[0], (long long) t2_hit[0], (long long) t2_rej[1],
+                              (long long) t2_hit[1], (long long) t2_rej[2], (long long) t2_hit[2], (long long) t2_rej[3],
+-                             (long long) t2_hit[3], (long long) dec_windows);
++                             (long long) t2_hit[3], (long long) dec_windows, (long long) t2_h, (long long) t2_r,
++                             t2_r > 0 ? 100.0 * (double) t2_h / (double) t2_r : 0.0);
++            }
+             for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
+                 std::fprintf(stderr, "strata serve: CUDA%d: %lld expert entries, %lld active layer launches, %.1f MiB returned "
+                                      "(%.1f MiB with full rows) in this request; host %.0f ms staging+launching, %.0f ms "
+```
