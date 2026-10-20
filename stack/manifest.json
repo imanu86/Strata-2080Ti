@@ -7,7 +7,7 @@
     "tag": "v0.1.45",
     "commit": "477ac13cbe8e582c20484871ce459d20d82df09d"
   },
-  "stack_head": "4ee62d0919c3bdb2165132be1b1f53fc3acf3cd2",
+  "stack_head": "8ce275f88728bff3a887d9bb4f36f84ee692c771",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -3858,11 +3858,17 @@
       "upstream_status": "never proposed; 0.2.0-beta (upstream/main f57c0adc) still reads admissions one at a time and has no multi-sequence prefill",
       "measured": "Compiled and run 19 Oct: see docs/MULTICHAT.md (passata unica) - to be filled from the letture_concorrenti bench (4 readers of 2-4k on 40-100k cached + 2 writers, B-A-B) and the replay.",
       "depends_on": "STRATA_PACK_PREFILL / Prefill::run_packed (lab/multichat43 -> lab/multichat45, not an entry of this stack: it is carried on the multi-chat branch) and STRATA_PIPED_CONCURRENT (#2326, in 0.1.45)",
-      "notes": "pk_read is now pk_prepare + Prefill::run_packed + pk_finish; the path without the switch is the three in a row (behaviour unchanged).",
+      "notes": "pk_read is now pk_prepare + Prefill::run_packed + pk_finish; the path without the switch is the three in a row (behaviour unchanged). A follow-up (8cdbcff7) closes the pack on every way out of the concurrent round (reserve_prefill failing, a thread that cannot start, an exception): pk_finish(false) from a guard declared before the reader; a no-op after the normal pk_finish, empty with the switch off.",
       "docs": "docs/MULTICHAT.md",
+      "follow_up_subjects": [
+        "SONNET-PASSATA-Chiude il pacco"
+      ],
       "patch": "21-pack-concurrent.patch",
       "commit": "4ee62d0919c3bdb2165132be1b1f53fc3acf3cd2",
       "title": "FABLE-PASSATA-Pacco di lettura sul thread concorrente (STRATA_PACK_CONCURRENT, opt-in)",
+      "follow_up_commits": [
+        "8cdbcff7cf017691973503fc78af0ff578d106d9"
+      ],
       "anchors": [
         {
           "block": "21-1",
@@ -3987,6 +3993,160 @@
       ],
       "files": [
         "src/program/generate.cpp"
+      ]
+    },
+    {
+      "id": "22",
+      "name": "pack-gather",
+      "summary": "Server side of the concurrent packed read (serve/server.py): the request that takes the control lines holds its own prompt line for STRATA_PACK_WAIT_MS (default 30) so the prompts the others are encoding arrive as BHINT first, and the engine's pk_prepare packs them in ONE pass; the window ends early once as many prompts are ahead as the engine's pack slots (INFO pack_hints=N). Text requests only, from the four resumptions of generate_batched.",
+      "switch": "`STRATA_PACK_CONCURRENT=1` (off) with `STRATA_PACK_WAIT_MS=0..500` (30); with the switch off nothing is counted and the BHINT line is the release one",
+      "origin": "fork (lab/passata-unica, docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md in moe-aggressive-commit)",
+      "upstream_status": "never proposed; depends on patch 21 (and on the pack commits of the multi-chat branch)",
+      "measured": "Python unit tests only (serve/test_pack_gather.py, 9 cases); the engine-side numbers are in docs/MULTICHAT.md (passata unica), to be filled from the B-A-B of 20 Oct.",
+      "depends_on": "21-pack-concurrent",
+      "notes": "The first reader pays up to the window as TTFT (measured, not estimated: STRATA_PACK_WAIT_MS=0 removes it for the comparison arm). A follow-up (8ce275f8) restores the file's LF line endings (the lever commit had converted the whole file to CRLF: 14457 changed lines for 67 real) and clears the stale hint count when a read line is taken without a window. Grep markers: `[strata] pack:` in the server log, `strata pack:` in the engine log.",
+      "docs": "docs/MULTICHAT.md",
+      "follow_up_subjects": [
+        "SONNET-PASSATA-Riporta server.py"
+      ],
+      "patch": "22-pack-gather.patch",
+      "commit": "e29c8065e56aa9019947cd6333e4db295d24902d",
+      "title": "QWEN-PASSATA-Raccogli le letture concorrenti prima della riga di lettura",
+      "follow_up_commits": [
+        "8ce275f88728bff3a887d9bb4f36f84ee692c771"
+      ],
+      "anchors": [
+        {
+          "block": "22-1",
+          "file": "serve/server.py",
+          "symbol": "try:",
+          "anchor": [
+            "except ValueError:",
+            "    ADMIT_SHORT_FIRST = 0",
+            "ADMIT_MAX_WAIT_S = _timeout_env(\"STRATA_ADMIT_MAX_WAIT_S\", 30.0) or 0.0"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "22-2",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "            self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)",
+            "            self.ctl_epoch = 0                          # how often the control lines were taken",
+            "            self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time"
+          ],
+          "status_in_base": "unique",
+          "hunk": 2
+        },
+        {
+          "block": "22-3",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "",
+            "    YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one"
+          ],
+          "status_in_base": "unique",
+          "hunk": 3
+        },
+        {
+          "block": "22-4",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "                    self.wait_lens.remove(entry)",
+            "        with self.slot_cv:",
+            "            self.ctl_epoch += 1"
+          ],
+          "status_in_base": "unique",
+          "hunk": 4
+        },
+        {
+          "block": "22-5",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "    def _pack_hint(self, prompt, embeddings):",
+            "        \"\"\"STRATA_PACK_PREFILL (the engine says INFO pack_hints=N): a request that is about to wait for the control lines",
+            "        sends its prompt ahead (`BHINT <ids>`, no answer), so the engine can read it in the same chunks as the prompt it"
+          ],
+          "status_in_base": "unique",
+          "hunk": 5
+        },
+        {
+          "block": "22-6",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "        reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output",
+            "        carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)",
+            "        self._pack_hint(prompt, embeddings)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 6
+        },
+        {
+          "block": "22-7",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "        try:",
+            "            while True:   # a request in a slot that is left alone goes back to the solo path",
+            "                if not holding:"
+          ],
+          "status_in_base": "unique",
+          "hunk": 7
+        },
+        {
+          "block": "22-8",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "                            if cancel.is_set():",
+            "                                return",
+            "                            if not holding:"
+          ],
+          "status_in_base": "unique",
+          "hunk": 8
+        },
+        {
+          "block": "22-9",
+          "file": "serve/server.py",
+          "symbol": "class StrataEngine:",
+          "anchor": [
+            "                        holding = False",
+            "                        with self.slot_cv:",
+            "                            epoch = self.ctl_epoch"
+          ],
+          "status_in_base": "unique",
+          "hunk": 9
+        },
+        {
+          "block": "22-10",
+          "file": "serve/server.py",
+          "symbol": "class Service:",
+          "anchor": [
+            "            in_slots = sum(1 for x in slots if x[\"state\"] != \"idle\")",
+            "            live.update(parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),",
+            "                        waiting=int(getattr(self.engine, \"waiting\", 0) or 0),"
+          ],
+          "status_in_base": "unique",
+          "hunk": 10
+        },
+        {
+          "block": "22-11",
+          "file": "serve/test_pack_gather.py",
+          "symbol": "(new file)",
+          "anchor": [],
+          "status_in_base": "new-file",
+          "hunk": 0
+        }
+      ],
+      "files": [
+        "serve/server.py",
+        "serve/test_pack_gather.py"
       ]
     }
   ],

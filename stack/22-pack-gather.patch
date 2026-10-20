@@ -1,0 +1,311 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Tue, 20 Oct 2026 06:29:41 +0200
+Subject: [PATCH] QWEN-PASSATA-Raccogli le letture concorrenti prima della riga
+ di lettura
+
+STRATA_PACK_CONCURRENT=1: chi ha le righe di controllo tiene la propria riga di
+prompt per STRATA_PACK_WAIT_MS (default 30, 0 = off) cosi' i prompt che gli altri
+stanno codificando arrivano al motore come BHINT prima che la lettura parta, e
+vengono letti nella stessa passata impacchettata. Finestra chiusa prima quando i
+prompt avanti sono quanti gli slot di pacco (INFO pack_hints=N). Interruttore
+spento: nessun conteggio, nessuna attesa, percorso identico alla release.
+
+Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
+
+Follow-ups squashed into this patch:
+- 8ce275f8 SONNET-PASSATA-Riporta server.py a LF e azzera i BHINT arretrati nelle letture senza finestra
+
+diff --git a/serve/server.py b/serve/server.py
+index 748e88f7..19571381 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -264,6 +264,19 @@ try:
+ except ValueError:
+     ADMIT_SHORT_FIRST = 0
+ ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
++# STRATA_PACK_CONCURRENT=1 (docs/MULTICHAT.md, "Passata unica"): the engine (with STRATA_PACK_PREFILL=N pack slots and
++# STRATA_PIPED_CONCURRENT=1) reads the prompts sent ahead (BHINT) in ONE packed pass on the read's thread while the
++# batch slots keep decoding.  The server's half: the request that took the control lines holds its OWN prompt line for
++# STRATA_PACK_WAIT_MS (default 30, 0 = off) so the prompts the other requests are encoding in the same window reach the
++# engine as BHINT lines *before* the read starts, and are read in that same pass instead of one read after the other.
++# The window ends early when as many prompts are ahead as the engine's pack slots (INFO pack_hints=N): more would not
++# be packed anyway.  Unset or 0 here: none of this runs, the admission path is the one of the last release.
++PACK_CONCURRENT = (os.environ.get("STRATA_PACK_CONCURRENT") or "0").strip() not in ("", "0")
++try:
++    _pack_wait_ms = int(os.environ.get("STRATA_PACK_WAIT_MS") or (30 if PACK_CONCURRENT else 0))
++except ValueError:
++    _pack_wait_ms = 30 if PACK_CONCURRENT else 0
++PACK_WAIT_MS = min(500, max(0, _pack_wait_ms)) if PACK_CONCURRENT else 0
+ STALL_CPU_EPS_S = 0.5       # CPU seconds the engine may use in the whole stall window and still count as frozen
+ STALL_IO_EPS_B = 1 << 20    # bytes read or written in that window
+ 
+@@ -980,6 +993,10 @@ class StrataEngine:
+             self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
+             self.ctl_epoch = 0                          # how often the control lines were taken
+             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
++            # STRATA_PACK_CONCURRENT (the collection window below): how many prompts were sent ahead (BHINT) since the
++            # last read line went out, and how many companions a window actually gathered (reported on /metrics).
++            self.pack_pending = 0
++            self.pack_gathered = 0
+         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
+         self._ctl_erred = False                         # #1059: the control lines ended on an ERR
+         self._yielded = None                            # (slot, tokens read): the last request on them gave way
+@@ -1465,10 +1482,12 @@ class StrataEngine:
+ 
+     YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
+ 
+-    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
++    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False,
++                      pack: bool = False):
+         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
+         `after_epoch`: a request whose read gave way lets the requests waiting then go first.
+-        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these)."""
++        `new`: the request's first admission (STRATA_ADMIT_SHORT_FIRST orders only these).
++        `pack`: the caller sends its whole prompt right after (STRATA_PACK_CONCURRENT's collection window below)."""
+         entry = [plen, time.monotonic(), new]           # (length, arrival, ordered: STRATA_ADMIT_SHORT_FIRST)
+         with self.slot_cv:
+             self.waiting += 1
+@@ -1513,9 +1532,45 @@ class StrataEngine:
+                     self.wait_lens.remove(entry)
+         with self.slot_cv:
+             self.ctl_epoch += 1
++            if PACK_CONCURRENT and not pack:
++                self.pack_pending = 0           # this read line has no window: it takes the queued hints in, so
++                                                # they must not close a later window early (base >= slots)
+             self.slot_cv.notify_all()
++        if pack:
++            self._pack_gather()
+         return True
+ 
++    def _pack_gather(self) -> int:
++        """STRATA_PACK_CONCURRENT=1 (docs/MULTICHAT.md, "Passata unica"): this request holds the control lines and is
++        about to send its own prompt.  Hold that line for STRATA_PACK_WAIT_MS so the prompts the other requests are
++        encoding in the same window reach the engine as `BHINT` lines FIRST: the engine's pk_prepare takes the hints
++        that are already in its queue when the read line arrives, so they are read in ONE packed pass on the read's
++        thread while the batch slots decode, instead of one admission after the other.
++        Ends early once as many prompts are ahead as the engine's pack slots (INFO pack_hints=N): a hint beyond that
++        would wait for the next read anyway.  Counts them (self.pack_gathered, /metrics) and says so once in the log.
++        Off (no STRATA_PACK_CONCURRENT, or STRATA_PACK_WAIT_MS=0): returns 0 without touching anything."""
++        if not PACK_CONCURRENT or PACK_WAIT_MS <= 0:
++            return 0
++        slots = int((self.info or {}).get("pack_hints") or 0)
++        if slots <= 0:
++            return 0                                     # no pack slots in this engine: no hint is ever sent
++        with self.slot_cv:
++            base = self.pack_pending                     # prompts already sent ahead since the last read line
++            if base >= slots:
++                got = base                               # the engine can pack all of them: no reason to wait
++            else:
++                self.slot_cv.wait_for(
++                    lambda: self.pack_pending - base >= slots,   # as many ahead as the engine can pack at once
++                    timeout=PACK_WAIT_MS / 1000.0)
++                got = self.pack_pending
++            self.pack_pending = 0                        # the read line sent next takes them all in
++            if got:
++                self.pack_gathered += got
++        if got > base:
++            print(f"[strata] pack: {got - base} prompt(s) sent ahead in the {PACK_WAIT_MS} ms window before this read "
++                  f"(one packed pass, {slots or '?'} pack slots)", flush=True)
++        return got
++
+     def _admit_next(self):
+         """STRATA_ADMIT_SHORT_FIRST=<tokens> (the caller holds slot_cv): the new request that takes the control lines
+         next - one whose prompt is at most that long (it reads little) before a longer one, in arrival order within
+@@ -1531,13 +1586,19 @@ class StrataEngine:
+     def _pack_hint(self, prompt, embeddings):
+         """STRATA_PACK_PREFILL (the engine says INFO pack_hints=N): a request that is about to wait for the control lines
+         sends its prompt ahead (`BHINT <ids>`, no answer), so the engine can read it in the same chunks as the prompt it
+-        reads next and the request then reads only its last few tokens (docs/MULTICHAT.md).  Text only."""
++        reads next and the request then reads only its last few tokens (docs/MULTICHAT.md).  Text only.
++        STRATA_PACK_CONCURRENT counts the line (the collection window in _pack_gather waits for these)."""
+         if embeddings or not int((self.info or {}).get("pack_hints") or 0) or not self.ctl.locked():
+             return
+         try:
+             self._send("BHINT " + ",".join(str(int(t)) for t in prompt))
+         except EngineDied:
+             pass
++        else:
++            if PACK_CONCURRENT:
++                with self.slot_cv:
++                    self.pack_pending += 1
++                    self.slot_cv.notify_all()      # a reader holding its window sees the prompt arrived
+ 
+     SOLO_AGAIN_MAX = 2      # how often a request left alone in a slot goes back to the solo path
+     SOLO_AGAIN_MIN_LEFT = 32  # ... only with at least this many tokens still allowed (max_tokens)
+@@ -1577,7 +1638,7 @@ class StrataEngine:
+         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
+         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
+         self._pack_hint(prompt, embeddings)
+-        ok = yield from self._take_control(cancel, len(prompt), new=True)
++        ok = yield from self._take_control(cancel, len(prompt), new=True, pack=embeddings is None)
+         if not ok:
+             return
+         holding, born = True, self.gen                  # (the engine it now has the control lines of)
+@@ -1590,7 +1651,7 @@ class StrataEngine:
+         try:
+             while True:   # a request in a slot that is left alone goes back to the solo path
+                 if not holding:
+-                    ok = yield from self._take_control(cancel, len(prompt))
++                    ok = yield from self._take_control(cancel, len(prompt), pack=embeddings is None)
+                     if not ok:
+                         return
+                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
+@@ -1691,7 +1752,7 @@ class StrataEngine:
+                             if cancel.is_set():
+                                 return
+                             if not holding:
+-                                ok = yield from self._take_control(cancel, len(prompt))
++                                ok = yield from self._take_control(cancel, len(prompt), pack=embeddings is None)
+                                 if not ok:
+                                     return
+                                 holding, born = True, self.gen
+@@ -1703,7 +1764,7 @@ class StrataEngine:
+                         holding = False
+                         with self.slot_cv:
+                             epoch = self.ctl_epoch
+-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
++                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, pack=embeddings is None)
+                         if not ok:
+                             return
+                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
+@@ -3814,7 +3875,8 @@ class Service:
+             in_slots = sum(1 for x in slots if x["state"] != "idle")
+             live.update(parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),
+                         waiting=int(getattr(self.engine, "waiting", 0) or 0),
+-                        admitting=int(getattr(self.engine, "admitting", 0) or 0))
++                        admitting=int(getattr(self.engine, "admitting", 0) or 0),
++                        pack_gathered=int(getattr(self.engine, "pack_gathered", 0) or 0))
+             if running and state == "idle":
+                 live["state"] = "generating"
+         if hasattr(self.engine, "replica_view"):        # opt-in replicas: each one's state and requests routed to it
+diff --git a/serve/test_pack_gather.py b/serve/test_pack_gather.py
+new file mode 100644
+index 00000000..4e4538f1
+--- /dev/null
++++ b/serve/test_pack_gather.py
+@@ -0,0 +1,124 @@
++"""STRATA_PACK_CONCURRENT's collection window (serve/server.py): the request that took the control lines holds its own
++prompt line for a few ms so the prompts the others are encoding arrive as BHINT ahead of it and are read in one packed
++pass.  Off (unset / 0) nothing here runs and the admission path is the release one."""
++import threading
++import time
++import unittest
++from unittest.mock import Mock, patch
++
++from serve import server
++from serve.server import StrataEngine
++
++
++class PackGather(unittest.TestCase):
++    def engine(self, slots=3, pending=0):
++        engine = StrataEngine.__new__(StrataEngine)
++        engine.info = {"pack_hints": str(slots)} if slots else {}
++        engine.ctl = threading.Lock()
++        engine.ctl.acquire()                      # this request holds the control lines
++        engine.slot_cv = threading.Condition()
++        engine.pack_pending = pending
++        engine.pack_gathered = 0
++        engine._send = Mock()
++        engine.alive = lambda: True
++        return engine
++
++    def window(self, ms=200):
++        return patch.multiple(server, PACK_CONCURRENT=True, PACK_WAIT_MS=ms)
++
++    def test_off_switch_changes_nothing(self):
++        engine = self.engine()
++        with patch.object(server, "PACK_CONCURRENT", False), patch.object(server, "PACK_WAIT_MS", 0):
++            t0 = time.monotonic()
++            self.assertEqual(engine._pack_gather(), 0)
++            self.assertLess(time.monotonic() - t0, 0.05)     # no window: the release path's timing
++        self.assertEqual(engine.pack_gathered, 0)
++
++    def test_no_pack_slots_no_waiting(self):
++        engine = self.engine(slots=0)
++        with self.window():
++            t0 = time.monotonic()
++            self.assertEqual(engine._pack_gather(), 0)
++            self.assertLess(time.monotonic() - t0, 0.05)     # hints are never sent here: waiting is pointless
++
++    def test_window_collects_the_prompt_that_arrives_late(self):
++        engine = self.engine(slots=1)             # the single pack slot is enough: the window ends right there
++        late = threading.Thread(target=lambda: (time.sleep(0.02), engine._pack_hint([5, 6, 7], None)))
++        late.start()
++        with self.window():
++            t0 = time.monotonic()
++            got = engine._pack_gather()
++            spent = time.monotonic() - t0
++        late.join()
++        self.assertEqual(got, 1)
++        self.assertLess(spent, 0.15)              # left as soon as the companion's prompt was ahead (< 200 ms)
++        engine._send.assert_called_once_with("BHINT 5,6,7")
++
++    def test_a_half_full_window_is_paid_for_the_rest_of_the_slots(self):
++        engine = self.engine(slots=3)             # 1 of 3 slots fed: it waits the window for the others (measured,
++        late = threading.Thread(target=lambda: (time.sleep(0.01), engine._pack_hint([5, 6, 7], None)))
++        late.start()                              # not estimated: STRATA_PACK_WAIT_MS is the knob)
++        with self.window(120):
++            t0 = time.monotonic()
++            got = engine._pack_gather()
++            spent = time.monotonic() - t0
++        late.join()
++        self.assertEqual(got, 1)
++        self.assertGreaterEqual(spent, 0.11)
++        self.assertLess(spent, 0.3)
++
++    def test_window_ends_at_the_pack_slots(self):
++        engine = self.engine(slots=2)
++        with self.window():
++            for ids in ([1, 2], [3, 4]):          # as many prompts ahead as the engine can pack at once
++                engine._pack_hint(ids, None)
++            t0 = time.monotonic()
++            got = engine._pack_gather()
++            spent = time.monotonic() - t0
++        self.assertEqual(got, 2)
++        self.assertLess(spent, 0.05)              # a third would wait for the next read anyway
++        self.assertEqual(engine.pack_gathered, 2)
++
++    def test_a_lone_reader_pays_the_window_once_and_counts_nothing(self):
++        engine = self.engine()
++        with patch.object(server, "PACK_CONCURRENT", True), patch.object(server, "PACK_WAIT_MS", 60):
++            t0 = time.monotonic()
++            got = engine._pack_gather()
++            spent = time.monotonic() - t0
++        self.assertEqual(got, 0)
++        self.assertGreaterEqual(spent, 0.05)      # it did hold the line the window asked for
++        self.assertLess(spent, 0.2)               # and no longer
++        self.assertEqual(engine.pack_gathered, 0)
++
++    def test_the_window_is_consumed_once(self):
++        engine = self.engine(slots=1, pending=1)
++        with self.window(1000):                   # every slot is already fed: no wait, and the prompts belong
++            t0 = time.monotonic()                 # to the read sent next, not to a second one
++            self.assertEqual(engine._pack_gather(), 1)
++            self.assertLess(time.monotonic() - t0, 0.05)
++            self.assertEqual(engine.pack_pending, 0)
++            self.assertEqual(engine.pack_gathered, 1)
++
++    def test_hint_counting_is_off_without_the_switch(self):
++        engine = self.engine()
++        with patch.object(server, "PACK_CONCURRENT", False):
++            engine._pack_hint([1, 42], None)
++        engine._send.assert_called_once_with("BHINT 1,42")   # the advisory line is the release one
++        self.assertEqual(engine.pack_pending, 0)             # nothing was counted, no Condition touched
++
++    def test_a_read_without_window_drops_the_stale_hints(self):
++        engine = self.engine(slots=1, pending=1)  # a hint counted while nobody held the window to gather it
++        engine.ctl.release()
++        engine.waiting, engine.wait_lens, engine.ctl_epoch = 0, [], 0
++        with self.window(1000):
++            list(engine._take_control(threading.Event(), 10, pack=False))
++            self.assertEqual(engine.pack_pending, 0)         # it must not close a later window early
++        engine.ctl.release()
++        engine.pack_pending = 1
++        with self.window(1000):
++            list(engine._take_control(threading.Event(), 10, pack=True))
++            self.assertEqual(engine.pack_pending, 0)         # a window consumes what it found (as before)
++
++
++if __name__ == "__main__":
++    unittest.main()

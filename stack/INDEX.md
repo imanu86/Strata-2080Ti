@@ -8,7 +8,7 @@ Patches 18-20 (19 Oct 2026, branch `lab/multichat45b`) are upstream pull request
 
 Patch 21 (19 Oct 2026, branch `lab/passata-unica` from `lab/multichat45b`) makes the packed prefill of the multi-chat branch run beside the concurrent read (`STRATA_PACK_CONCURRENT`); it depends on the pack commits of that branch, which are not entries of this stack.
 
-Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `4ee62d09`. 21 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `8ce275f8`. 22 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -60,6 +60,7 @@ Reference configuration environment (the fork's 0.1.43 Daily r2, config `strata-
 | 19 | [pf-fused-native-sm75](#19-pf-fused-native-sm75) | The fused int8 prompt experts for the native i-quant packs (gate/up IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_XS; down Q2_0 or IQ4_NL) also on sm_75 (Turing), with the qualified 128-row shape. Pairs not covered stay on MMQ. Changes the bits of the prompt (rounding). | `STRATA_PF_FUSED=1 STRATA_PF_FUSED_SM75=1 STRATA_PF_FUSED_NATIVE_SM75=1` (off). `STRATA_PF_FUSED=1` also switches on the existing sm_86 native path of the first stage. | upstream PR #3104 (rebased from #1581; supersedes #3085, the same idea with another gate) | PR #3104 open (and #3085); in 0.1.45 `STRATA_PF_FUSED_SM75` only covers the Q2_0 pack, so on our IQ3_XXS pack it did nothing | Compiled and run 19 Oct (build ecaad907, fixed `--expert-cache 1500`, 3 prompts of ~300 and ~3000 tokens): TTFT median 1.83 s (control 1.77-1.84) at ~300 tokens and 6.55 s (control 5.72-5.89) at ~3000, i.e. +11% slower on the long prompts; first-token logits against the control KL 3e-5..6e-4, inside the control-to-control spread (1e-4..1.3e-3, the bench is not deterministic). The 300-token texts differ from a control as often as two controls differ. No gain on this pack and card pair; kept opt-in. Installed no. |
 | 20 | [pf-diretto](#20-pf-diretto) | Short prompt chunks (below `stream_all_min`): resident experts used by at most `STRATA_PF_DIRETTO_MAX` rows (8) leave MMQ's list and run on the decode's grouped kernel (`native_expert_grouped` for native packs) straight from the compressed blob; also `STRATA_PF_ROUTE_PRIOR=lambda` (router push toward resident experts, off). Changes the bits of short prompts. | `STRATA_PF_DIRETTO=1`, `STRATA_PF_DIRETTO_MAX=<rows>` (off here; the PR has it on), `STRATA_PF_ROUTE_PRIOR=<lambda>` (off) | upstream PR #2774 (apatassini); default turned to opt-in in this fork | PR #2774 open; not in 0.1.45 | Compiled and run 19 Oct (build ecaad907): needed a fix (the PR's scratch was one static, allocated on the first stage's card and read by the second: stall at layer 16, then an illegal memory access); with one scratch per device it runs. TTFT median 1.81 s at ~300 tokens (control 1.77-1.84) and 5.81 s at ~3000 (control 5.72-5.89): no gain. Logits: bitwise equal to the control on the prompts above stream_all_min, KL 8e-5..1e-3 on the three ~300-token ones (the control-to-control spread is of the same size). Installed no. |
 | 21 | [pack-concurrent](#21-pack-concurrent) | The packed prefill (STRATA_PACK_PREFILL: the prompts sent ahead by waiting requests read with this one in the same chunks, the experts streamed once for all of them) also beside STRATA_PIPED_CONCURRENT: the prefixes go into the pack slots on the host thread with nothing in flight, Prefill::run_packed runs on the read's thread while the slot groups keep decoding, the pack slots' checkpoints are taken after the drain. Without it the concurrent read returned before pk_read and never packed. | `STRATA_PACK_CONCURRENT=1` (off), with `STRATA_PACK_PREFILL=N` and `STRATA_PIPED_CONCURRENT=1`; a packed read takes no BYIELD | fork (lab/passata-unica, docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md in moe-aggressive-commit) | never proposed; 0.2.0-beta (upstream/main f57c0adc) still reads admissions one at a time and has no multi-sequence prefill | Compiled and run 19 Oct: see docs/MULTICHAT.md (passata unica) - to be filled from the letture_concorrenti bench (4 readers of 2-4k on 40-100k cached + 2 writers, B-A-B) and the replay. |
+| 22 | [pack-gather](#22-pack-gather) | Server side of the concurrent packed read (serve/server.py): the request that takes the control lines holds its own prompt line for STRATA_PACK_WAIT_MS (default 30) so the prompts the others are encoding arrive as BHINT first, and the engine's pk_prepare packs them in ONE pass; the window ends early once as many prompts are ahead as the engine's pack slots (INFO pack_hints=N). Text requests only, from the four resumptions of generate_batched. | `STRATA_PACK_CONCURRENT=1` (off) with `STRATA_PACK_WAIT_MS=0..500` (30); with the switch off nothing is counted and the BHINT line is the release one | fork (lab/passata-unica, docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md in moe-aggressive-commit) | never proposed; depends on patch 21 (and on the pack commits of the multi-chat branch) | Python unit tests only (serve/test_pack_gather.py, 9 cases); the engine-side numbers are in docs/MULTICHAT.md (passata unica), to be filled from the B-A-B of 20 Oct. |
 
 ## Retired
 
@@ -2066,7 +2067,7 @@ Insertion points (7):
 - **Upstream**: never proposed; 0.2.0-beta (upstream/main f57c0adc) still reads admissions one at a time and has no multi-sequence prefill
 - **Measured**: Compiled and run 19 Oct: see docs/MULTICHAT.md (passata unica) - to be filled from the letture_concorrenti bench (4 readers of 2-4k on 40-100k cached + 2 writers, B-A-B) and the replay.
 - **Depends on**: STRATA_PACK_PREFILL / Prefill::run_packed (lab/multichat43 -> lab/multichat45, not an entry of this stack: it is carried on the multi-chat branch) and STRATA_PIPED_CONCURRENT (#2326, in 0.1.45)
-- **Notes**: pk_read is now pk_prepare + Prefill::run_packed + pk_finish; the path without the switch is the three in a row (behaviour unchanged).
+- **Notes**: pk_read is now pk_prepare + Prefill::run_packed + pk_finish; the path without the switch is the three in a row (behaviour unchanged). A follow-up (8cdbcff7) closes the pack on every way out of the concurrent round (reserve_prefill failing, a thread that cannot start, an exception): pk_finish(false) from a guard declared before the reader; a no-op after the normal pk_finish, empty with the switch off.
 - **Docs**: docs/MULTICHAT.md
 - **Files**: `src/program/generate.cpp`
 
@@ -2132,3 +2133,80 @@ Insertion points (10):
                           sp.stop_at_chunk = nullptr;
                           in_prompt_read = false;
   ```
+
+## 22 pack-gather
+
+`22-pack-gather.patch` — QWEN-PASSATA-Raccogli le letture concorrenti prima della riga di lettura
+
+- **What**: Server side of the concurrent packed read (serve/server.py): the request that takes the control lines holds its own prompt line for STRATA_PACK_WAIT_MS (default 30) so the prompts the others are encoding arrive as BHINT first, and the engine's pk_prepare packs them in ONE pass; the window ends early once as many prompts are ahead as the engine's pack slots (INFO pack_hints=N). Text requests only, from the four resumptions of generate_batched.
+- **Switch (default)**: `STRATA_PACK_CONCURRENT=1` (off) with `STRATA_PACK_WAIT_MS=0..500` (30); with the switch off nothing is counted and the BHINT line is the release one
+- **Origin**: fork (lab/passata-unica, docs/porto/strata_adattivo/PASSATA_UNICA_2026-10-19.md in moe-aggressive-commit)
+- **Upstream**: never proposed; depends on patch 21 (and on the pack commits of the multi-chat branch)
+- **Measured**: Python unit tests only (serve/test_pack_gather.py, 9 cases); the engine-side numbers are in docs/MULTICHAT.md (passata unica), to be filled from the B-A-B of 20 Oct.
+- **Depends on**: 21-pack-concurrent
+- **Notes**: The first reader pays up to the window as TTFT (measured, not estimated: STRATA_PACK_WAIT_MS=0 removes it for the comparison arm). A follow-up (8ce275f8) restores the file's LF line endings (the lever commit had converted the whole file to CRLF: 14457 changed lines for 67 real) and clears the stale hint count when a read line is taken without a window. Grep markers: `[strata] pack:` in the server log, `strata pack:` in the engine log.
+- **Docs**: docs/MULTICHAT.md
+- **Files**: `serve/server.py`, `serve/test_pack_gather.py`
+
+Insertion points (11):
+
+- `serve/server.py` · `try:` → [22-1](BLOCKS.md#22-1)
+  ```
+  except ValueError:
+      ADMIT_SHORT_FIRST = 0
+  ADMIT_MAX_WAIT_S = _timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0) or 0.0
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-2](BLOCKS.md#22-2)
+  ```
+              self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
+              self.ctl_epoch = 0                          # how often the control lines were taken
+              self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-3](BLOCKS.md#22-3)
+  ```
+  
+      YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-4](BLOCKS.md#22-4)
+  ```
+                      self.wait_lens.remove(entry)
+          with self.slot_cv:
+              self.ctl_epoch += 1
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-5](BLOCKS.md#22-5)
+  ```
+      def _pack_hint(self, prompt, embeddings):
+          """STRATA_PACK_PREFILL (the engine says INFO pack_hints=N): a request that is about to wait for the control lines
+          sends its prompt ahead (`BHINT <ids>`, no answer), so the engine can read it in the same chunks as the prompt it
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-6](BLOCKS.md#22-6)
+  ```
+          reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
+          carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
+          self._pack_hint(prompt, embeddings)
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-7](BLOCKS.md#22-7)
+  ```
+          try:
+              while True:   # a request in a slot that is left alone goes back to the solo path
+                  if not holding:
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-8](BLOCKS.md#22-8)
+  ```
+                              if cancel.is_set():
+                                  return
+                              if not holding:
+  ```
+- `serve/server.py` · `class StrataEngine:` → [22-9](BLOCKS.md#22-9)
+  ```
+                          holding = False
+                          with self.slot_cv:
+                              epoch = self.ctl_epoch
+  ```
+- `serve/server.py` · `class Service:` → [22-10](BLOCKS.md#22-10)
+  ```
+              in_slots = sum(1 for x in slots if x["state"] != "idle")
+              live.update(parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),
+                          waiting=int(getattr(self.engine, "waiting", 0) or 0),
+  ```
+- `serve/test_pack_gather.py` — (new file) → [22-11](BLOCKS.md#22-11)

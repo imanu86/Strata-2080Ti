@@ -13,8 +13,11 @@ Compilato no, provato no.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 
+Follow-ups squashed into this patch:
+- 8cdbcff7 SONNET-PASSATA-Chiude il pacco su ogni uscita del ramo concorrente (STRATA_PACK_CONCURRENT)
+
 diff --git a/src/program/generate.cpp b/src/program/generate.cpp
-index 98b1002d..31dce0ea 100644
+index 98b1002d..ca08c15f 100644
 --- a/src/program/generate.cpp
 +++ b/src/program/generate.cpp
 @@ -14290,9 +14290,35 @@ int main(int argc, char** argv) {
@@ -252,7 +255,7 @@ index 98b1002d..31dce0ea 100644
                  return true;
              };
              // STRATA_PACK_PREFILL: prompts sent ahead are waiting (the queued lines are taken in first)
-@@ -14696,12 +14736,24 @@ int main(int argc, char** argv) {
+@@ -14696,12 +14736,32 @@ int main(int argc, char** argv) {
                      return true;
                  }();
                  if (piped && pr_conc && req_imgs.empty()) {   // (with no slot decoding it only watches for a BYIELD)
@@ -267,6 +270,14 @@ index 98b1002d..31dce0ea 100644
 +                    }();
 +                    if (pack_conc && !pks.empty() && !planned && !pk_prepare(a0, b0, e)) return false;
 +                    const bool pk_on = pk_run.active;
++                    // every way out of this round with the pack still open (an early `return false` below, a thread
++                    // that could not start, an exception): the pack is closed - on_pack_rows cleared (it captures
++                    // pk_run, which does not outlive this iteration), the slots taken dropped.  After the normal
++                    // pk_finish below it is a no-op.  Declared before the reader, so it runs after the reader joined.
++                    struct PkClose {
++                        std::function<void()> fn;
++                        ~PkClose() { if (fn) fn(); }
++                    } pk_close{pk_on ? std::function<void()>([&] { pk_finish(false, 0); }) : std::function<void()>()};
 +                    const int64_t Cc = pk_on ? std::max<int64_t>(sp.chunk(), 1) : C;   // (the pack's loan may relayout)
                      // the drafter's prompt pass captures its graphs and grows its records at first use, and the
                      // prompt path's pinned upload slots grow at their first larger upload: done here, with nothing in
@@ -279,7 +290,7 @@ index 98b1002d..31dce0ea 100644
                          std::fprintf(stderr, "strata batch: the prompt path's pinned upload slots could not be "
                                               "reserved (they grow at first use)\n");
                      // where the read's thread and the doorbell thread run: on Linux a thread inherits its creator's
-@@ -14830,12 +14882,17 @@ int main(int argc, char** argv) {
+@@ -14830,12 +14890,17 @@ int main(int argc, char** argv) {
                          bool read_ok = true;
                          std::string read_err;
                          in_prompt_read = true;
@@ -300,7 +311,7 @@ index 98b1002d..31dce0ea 100644
                              } catch (const std::exception& x) {
                                  read_ok = false;
                                  read_err = std::string("the prompt read failed: ") + x.what();
-@@ -14886,12 +14943,14 @@ int main(int argc, char** argv) {
+@@ -14886,12 +14951,14 @@ int main(int argc, char** argv) {
                          reader.join();   // (a failed window leaves the read to finish: it is not stopped mid-run)
                          sp.stop_at_chunk = nullptr;
                          in_prompt_read = false;
