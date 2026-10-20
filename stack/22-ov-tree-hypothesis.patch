@@ -30,6 +30,7 @@ Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>
 
 Follow-ups squashed into this patch:
 - bf03aeac QWEN-OVERLAP-Da' una corsia in piu' al loop in pipeline per la seconda ipotesi (STRATA_OV_TREE=2)
+- 3d3f0441 QWEN-OVERLAP-Corregge due commenti della seconda ipotesi dell'albero
 
 diff --git a/include/strata/core/mtp.hpp b/include/strata/core/mtp.hpp
 index d0d8841f..1d76b2dc 100644
@@ -76,7 +77,7 @@ index e1e1c9db..2b2d6e87 100644
  }
  
 diff --git a/src/program/generate.cpp b/src/program/generate.cpp
-index 50180a37..874b2348 100644
+index 50180a37..595b6d4c 100644
 --- a/src/program/generate.cpp
 +++ b/src/program/generate.cpp
 @@ -1337,6 +1337,7 @@ struct GpuStage {
@@ -406,21 +407,23 @@ index 50180a37..874b2348 100644
                  strata::core::diag_pipeline_fn().store(&pl_diag_print);
                  auto pw_bits = [](const PW& w) {
                      return (w.ready ? 1 : 0) | (w.launched ? 2 : 0) | (w.finished ? 4 : 0) | (w.com != 0 ? 8 : 0) |
-@@ -15518,6 +15633,33 @@ int main(int argc, char** argv) {
+@@ -15518,6 +15633,35 @@ int main(int argc, char** argv) {
                                      for (int i = 0; i + 1 < A.T; ++i) pa *= A.prob[i];
                                  }
                                  if (!A.sfx) make_b(oc, op, base, k, pa);   // a lookup window's bonus is not the chain's
 +                                // lab/overlap 1.6 (STRATA_OV_TREE=1): the tree's SECOND hypothesis for B's row 0 - the
 +                                // chain's runner-up at the same position, then the chain's own drafts after it.  Those
-+                                // drafts were made following the FIRST candidate, so the second branch's acceptance is
-+                                // often shorter (counted below as `short`); the model's own picks still decide at the
-+                                // verdict, so a wrong draft costs acceptance, never a wrong token.  Not launched here.
++                                // drafts were made following the FIRST candidate, so this branch's acceptance should be
++                                // shorter than the first one's (level 3 will measure it); the model's own picks still
++                                // decide at the verdict, so a wrong draft costs acceptance, never a wrong token.  Not
++                                // launched here.
 +                                if (ov_tree > 0 && !A.sfx && !A.lookup && B.made && !B2.made && base < k) {
 +                                    const int32_t second = mtp.chain_top2(base);
 +                                    const float p2 = mtp.chain_top2_prob(base);
 +                                    if (second >= 0 && second != oc[base] && p2 > 0.0f) {
 +                                        B2 = PW{};
-+                                        B2.seq = A.seq;                     // its verifier would be A's parity (level 2/3)
++                                        B2.seq = A.seq;   // level 3 launches it on the tree lane (`stage_ver_p(st, 2)`),
++                                        //                     never on a parity: see the lane's note above
 +                                        B2.p = A.p + A.T;
 +                                        B2.tok[0] = second;
 +                                        B2.T = B.T;
@@ -440,7 +443,7 @@ index 50180a37..874b2348 100644
                                  // stage B now (its PLE rows from the tokens before it as they will be once A is
                                  // committed whole), so its launch behind A is only the graph launch (never while a
                                  // rollback is pending: B's verifier is the one the undo commit reads)
-@@ -15711,11 +15853,27 @@ int main(int argc, char** argv) {
+@@ -15711,11 +15855,27 @@ int main(int argc, char** argv) {
                      const bool last = nf || eos || produced_n >= max_new || stop_req.load();
                      const bool on = !nf && B.launched && a == A.T - 1 && B.tok[0] == outp[(size_t) A.T - 1];
                      if (B.made) {   // the gate's calibration: would B have been on the path, by its estimate p_on
@@ -468,7 +471,7 @@ index 50180a37..874b2348 100644
                      tre("V", A.seq, a, on ? 1 : (B.launched ? -1 : 0));
                      {
                          const double now = ms_now();
-@@ -15838,7 +15996,10 @@ int main(int argc, char** argv) {
+@@ -15838,7 +15998,10 @@ int main(int argc, char** argv) {
                      }
                  }
                  // the odd windows' counters and GPU profiles into the verifiers that report them
@@ -480,7 +483,7 @@ index 50180a37..874b2348 100644
                  if (!pl_adapt_ok) {
                      std::printf("ERR an adaptive refill failed\n");
                      return 1;
-@@ -15887,6 +16048,16 @@ int main(int argc, char** argv) {
+@@ -15887,6 +16050,16 @@ int main(int argc, char** argv) {
                                               "(runner-up non letto %lld, sua probabilita media %.3f)\n",
                                       (long long) ov_t1, (long long) ov_t2, (long long) ov_t3, (long long) ov_n,
                                       (long long) ov_no2, ov_n > 0 ? ov_p2 / (double) ov_n : 0.0);

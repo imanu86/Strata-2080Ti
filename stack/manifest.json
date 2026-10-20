@@ -7,7 +7,7 @@
     "tag": "v0.1.45",
     "commit": "477ac13cbe8e582c20484871ce459d20d82df09d"
   },
-  "stack_head": "168d3fa5154470156c707d1c612e3d4a34d7f07b",
+  "stack_head": "3d3f04413fac40a354591bb53e593eaad8bb4e81",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -4147,11 +4147,13 @@
       "commit": "299650a9b9457d910d3835e704ccc3e6935a2ec2",
       "title": "QWEN-OVERLAP-Costruisce e conta la seconda ipotesi di B (STRATA_OV_TREE=1) senza lanciarla",
       "follow_up_subjects": [
-        "QWEN-OVERLAP-Da' una corsia in piu'"
+        "QWEN-OVERLAP-Da' una corsia in piu'",
+        "QWEN-OVERLAP-Corregge due commenti"
       ],
       "patch": "22-ov-tree-hypothesis.patch",
       "follow_up_commits": [
-        "bf03aeac8c111078764205fe13170921a3fa55f1"
+        "bf03aeac8c111078764205fe13170921a3fa55f1",
+        "3d3f04413fac40a354591bb53e593eaad8bb4e81"
       ],
       "anchors": [
         {
