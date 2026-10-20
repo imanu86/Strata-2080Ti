@@ -4,7 +4,7 @@ The patches this fork (imanu86/Strata-2080Ti) carries on top of upstream Strata,
 
 Rebased on upstream v0.1.45 on 18 Oct 2026 (branch `lab/upsync-main`, diary `docs/UPSYNC_MAIN.md`): upstream took five of our levers as opt-in (B6 MMVQ rows, ATTN_DAILY, EXPDEC, QSA_ROWS, the 16-byte dequant) plus SIDE_MIXER, the direct PLE default and #1852; they are in the Retired table. The levers added after the 0.1.43 registry (13-18) come from lab/struct-a, lab/ttft43, lab/pipeline2 and the 0.1.43 Daily's hc16 (18). The two levers 19-20 come from lab/overlap (19 Oct 2026): the chain's priority beside stage 1, and the runner-up diagnostic behind a tree draft (docs/OVERLAP.md).
 
-Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `bf03aeac`. 22 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.1.45** (`477ac13c`). Stack head: `284c2be2`. 22 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
