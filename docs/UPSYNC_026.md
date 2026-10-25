@@ -4,7 +4,7 @@ Branch `lab/upsync-026` del fork `imanu86/Strata-2080Ti`, da `v0.2.6` (commit 4b
 (cherry-pick da `lab/upsync-020`, uno per leva) + `stack/`. Metodo e comandi di build/banco: `docs/UPSYNC_020.md`.
 Il braccio "pura" sta nel worktree `Strata-wt/upsync-026-pure` (branch `lab/upsync-026-pure`, = v0.2.6 senza modifiche).
 
-**Stato: patch portate si (18 di 18, pushate), compilato si (sm_75+86, entrambe), installato no, provato no, misurato no** (il banco non e' partito: vedi par. 3).
+**Stato: patch portate si (18 di 18, pushate), compilato si (sm_75+86, entrambe), installato no, provato no, misurato si (par. 4).**
 
 ## 1. Esito per patch (nessuna ritirata)
 
@@ -35,9 +35,16 @@ Da riguardare riga per riga alla prova (applicate in 3-way senza conflitto, ness
   `moe-aggressive-commit\docs\porto\strata_adattivo\corse_2080ti\20261004_routed_keep\`. `strata-vision.exe` copiato dalla Daily 0.1.43 (non ricompilato), `source\` con serve, tools, strata_control, strata_cli.
 - Config in `corse_2080ti\20261025_upsync026\`: `config-A-pura-default.json` (Daily senza `--elastic`, senza `--prompt-cache-file`, senza nessuna `STRATA_*`; resta `CUDA_VISIBLE_DEVICES=1,0`),
   `config-B-pila-daily.json` (Daily, senza le env inerti NODECUT/TOPK_GRID/B6_HEAD_MINB/QFUSE_HC, con `STRATA_HC16_SM75=1` al posto dell'hc16 che nella Daily 0.1.43 era di serie). `run_all.sh` fa Daily, A, B, Daily.
-- **Banco non eseguito**: `D:\ds4_work\strata\lab_locks\bench.lock` e' tenuto da `LC-a1` dal 20/10 08:05, senza `strata.exe` ne' altro processo del banco in vita; il runner aspetterebbe all'infinito e il lock non va cancellato da un agente.
-  Sbloccato il lock (o con il nome del suo titolare), `bash run_all.sh` (guardie: pausa, `strata.exe` in vita, `STRATA_NO_PRESET=1`).
+- Banco eseguito il 25/10 (18:00-18:53, bench.lock di un agente morto rimosso dal coordinatore), Jump Desktop e OktoCGControl aperti, `run_all.sh`.
 
-## 4. Misure
+## 4. Misure (mediane prompt tok/s | decode tok/s, 4K / 32K / 128K)
 
-Nessuna (vedi par. 3).
+| config | 4K | 32K | 128K |
+|---|---|---|---|
+| Daily 0.1.43, corsa 1 | 494 / 39,2 | 1038 / 40,6 | 1172 / 40,1 |
+| A: 0.2.6 pura, default due schede | 540 / 33,4 | 630 / 39,5 | 681 / 21,8 |
+| B: 0.2.6 + pila, config Daily + `STRATA_HC16_SM75=1` | 507 / 34,9 | 998 / 33,0 | 1236 / 34,6 |
+| Daily 0.1.43, corsa 2 | 481 / 37,9 | 966 / 36,7 | 1171 / 39,6 |
+
+Il PC era circa a meta' della velocita' del 19/10 (Daily r2: 75,9/70,4/75,3 decode): VRAM gia' occupata dal desktop (B parte con 31 MiB liberi su CUDA1, A con 62, il Daily con 1,3 GB), paging WDDM.
+Valgono solo i confronti fra righe di oggi. A e' sotto il Daily (prompt 32K/128K -40%, decode 128K instabile 18-50); B pareggia il prompt a 128K ma il decode e' -8/-15%. Da ripetere a VRAM libera; token e accettazione bozze non confrontati.
