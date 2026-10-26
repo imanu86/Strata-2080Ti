@@ -81,8 +81,11 @@ class ModelCardSampling(unittest.TestCase):
 
     def test_request_wins_and_zero_is_greedy(self):
         k = self.keys(temperature=0)
-        self.assertNotIn("temperature", k)
-        self.assertIn("top_k=20", k)
+        self.assertEqual(k, "")                          # pure greedy: the card's top_p/top_k/penalty are not merged
+        k = self.keys(temperature=0, reasoning_effort="none")
+        self.assertEqual(k, "")
+        k = self.keys(temperature=0, top_k=5)            # what the request itself says is still sent
+        self.assertEqual(k, " top_k=5")
         k = self.keys(temperature=0.3, top_p=0.5)
         self.assertIn("temperature=0.3", k)
         self.assertIn("top_p=0.5", k)
