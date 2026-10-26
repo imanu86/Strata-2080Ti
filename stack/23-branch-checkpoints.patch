@@ -1,0 +1,3175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Mon, 26 Oct 2026 14:18:20 +0100
+Subject: [PATCH] SONNET-LEVE-Porta da upstream #2527+#2528+#2843 checkpoint di
+ ramo e righe attive per le richieste secondarie (opt-in)
+
+Net diff della PR #2843 (che contiene #2527 e #2528): STRATA_PIPELINE_ACTIVE_ROWS=1, STRATA_SLOT_CACHE_AFFINITY=1,
+STRATA_SLOT_CHECKPOINTS=N, STRATA_BRANCH_CHECKPOINT=<margine>, STRATA_CACHE_TRACE=1. Quattro conflitti in generate.cpp
+con #4121: le righe attive e STRATA_PIPED_MTP si escludono (le righe attive restano spente se STRATA_PIPED_MTP e'
+acceso, ognuno dei due ha le sue righe di finestra); i due blocchi del checkpoint di ramo e di STRATA_CONV_DISK restano.
+Spento di default. Compilato no, installato no, provato no.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 7e432327..45f3b98b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1592,6 +1592,9 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
+   add_executable(message_boundary_test src/program/message_boundary_test.cpp)
+   target_include_directories(message_boundary_test PRIVATE include)
+   add_test(NAME message_boundary_test COMMAND message_boundary_test)
++  add_executable(slot_checkpoints_test src/program/slot_checkpoints_test.cpp)
++  target_include_directories(slot_checkpoints_test PRIVATE include)
++  add_test(NAME slot_checkpoints_test COMMAND slot_checkpoints_test)
+   # a layer split's ring override and the lend slots sized with it: the RAM copy must keep every borrowed slot (CPU)
+   add_executable(split_ring_test src/program/split_ring_test.cpp)
+   target_include_directories(split_ring_test PRIVATE include)
+@@ -1628,6 +1631,9 @@ if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)
+   add_executable(batch_groups_test src/program/batch_groups_test.cpp)
+   target_include_directories(batch_groups_test PRIVATE include)
+   add_test(NAME batch_groups_test COMMAND batch_groups_test)
++  add_executable(pipeline_rows_test tests/core/pipeline_rows_test.cpp)
++  target_include_directories(pipeline_rows_test PRIVATE include)
++  add_test(NAME pipeline_rows_test COMMAND pipeline_rows_test)
+ endif()
+ 
+ add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
+diff --git a/docs/BATCHING.md b/docs/BATCHING.md
+index c8514aa2..ebb12402 100644
+--- a/docs/BATCHING.md
++++ b/docs/BATCHING.md
+@@ -185,7 +185,8 @@ about 10-25% speed per request on this card". `--parallel N` is honoured as aske
+   engine copies its state back (50-60 ms for a short conversation) instead of reading the history again - also for
+   a client that drops the reply's thinking from the history (the checkpoint matches up to the new turn). A new
+   conversation takes an empty slot, else the one used longest ago.
+-- Slots are assigned so that consecutive requests land in different pipeline groups (`--batch-groups`).
++- Slots are assigned so that consecutive requests land in different pipeline groups (`--batch-groups`) - with
++  `STRATA_SLOT_CACHE_AFFINITY=1`, by the conversations they hold (below).
+ - A client that disconnects stops its slot (`BSTOP`); the others go on.
+ 
+ ## Reading a prompt beside pipelined groups (experimental, opt-in)
+@@ -352,6 +353,219 @@ one cold 64K prompt joining four streams: `STRATA_BATCH_DECODE_SHARE=2.0` 2.4 s
+ s and 13.8 s. Pieces of one chunk (`PIECE=8192`) cost the long prompt the most. Not measured: other GPU pairs, three or
+ more stages, HIP and SYCL (built for CUDA only), sampled decoding, prompts with pictures.
+ 
++## Keeping conversations in pipelined slots (opt-in)
++
++With a layer split, `--batch` runs the slots in pipeline groups (`--batch-groups`). A group's batch window spans its
++slots up to its last active one, and an idle slot below an active one runs as a pad row that writes its state. So in
++a pipelined group a finished slot is not a reliable conversation cache, and the server places requests by the groups
++alone. Agent clients (Claude Code, Codex) send long conversations - tens of thousands of tokens - in many short turns,
++with short side requests in between, and whatever is lost between two turns is read again.
++
++What that cost on one machine: the engine log of 3 x RTX A4000 16 GB (layer split, `--batch` 3-6 in 3 groups,
++Qwen3.8-Flash-Next IQ3_S, 200K context), two people working with Claude Code and Codex, 2026-10-09 to 2026-10-14.
++Of 3,027 prompts of 8K tokens or more, 538 reused less than half of their previous turn, and 40.7M prompt tokens
++were read again. By prompt lengths (the log has no content, so this is a heuristic):
++
++| Why the previous turn was gone | Prompts | Tokens read again |
++| --- | ---: | ---: |
++| it was in a batch slot that another conversation took | 170 | 16.4M |
++| it ran on the solo path, and the next request (often a short side request) replaced the main session | 244 | 15.0M |
++| the client changed the history (not addressed here) | 63 | 6.1M |
++| no earlier turn (a first turn, or a restart) | 66 | 3.1M |
++
++At this machine's ~2,900 tok/s for long prompts, the first two rows are about three hours of prompt reading in six
++days. What follows addresses them: the engine keeps idle slots and parks the solo path's conversation, the server
++places requests by what the slots hold, and a placement policy (`serve/slot_policy.py`) decides which history to give
++up. Each part is opt-in.
++
++### Engine: only the active slots in a window (`STRATA_PIPELINE_ACTIVE_ROWS=1`)
++
++With `STRATA_PIPELINE_ACTIVE_ROWS=1` (a layer split with `--batch` and more than one group), a group's window lists
++only its active slots (`include/strata/program/pipeline_rows.hpp`, `Verifier::batch_launch_rows`): there is no pad
++row, an idle slot keeps its conversation, and `INFO` says `slot_padding_safe=1`. After restoring a prompt's prefix the
++engine says where it came from: `CACHE_SOURCE <slot> <tokens>` (-1: the main session, a checkpoint or the
++conversation cache).
++
++Measured on the machine above (the same binary with the variable off / on, `tools/serve_load.py`, 6 clients x 2048
++tokens at temperature 0, one run each): 177.4 / 173.5 tok/s in total (-2.2%), first token p50 2.4 / 3.7 s; one client
++67.3 / 66.7 tok/s. With all six slots busy the windows hold the same rows either way; runs of this configuration with
++other builds measured 173.9-178.2 tok/s, so this is close to the spread between runs, but it was not repeated.
++
++### Engine: keep the solo path's conversation (`park=B`)
++
++A request alone runs on the solo path, whose state is the engine's main session, not a slot. When the next request is
++another conversation - an agent's short side request between two turns of a long one - the main session is
++overwritten. With `STRATA_PIPELINE_ACTIVE_ROWS=1` the engine takes `park=B` on `GEN` / `BGEN` (`INFO slot_park=1`):
++when the prompt is another conversation (it does not share what the main session holds up to its last turn - the
++last `<|im_start|>`, where its latest reply begins), it first copies the main session's conversation (and its last
++checkpoint) into idle slot B - never the slot it restores from or is admitted to - and says
++`PARKED B <tokens>`. Copying 36-37K tokens took 414-451 ms (five runs, the machine above).
++
++### Engine: more than one checkpoint per slot (`STRATA_SLOT_CHECKPOINTS=N`)
++
++A slot that receives the main session's conversation (`park=B`, an admission that continues in its slot) keeps one
++checkpoint of it: the deepest. A client that rewrites the end of its history every time leaves that one behind:
++Claude Code's safety classifier inserts each query's new tool calls before the closing text of its transcript, so
++the next query branches a few dozen tokens before the end, and its whole prompt was read again (42-74K tokens,
++15.6-27.4 s per query on the machine above). The two switches are apart:
++
++- `STRATA_BRANCH_CHECKPOINT` (below) alone decides whether the slot keeps the deepest branch checkpoint of that
++  conversation, where the next query of such a client resumes.
++- `STRATA_SLOT_CHECKPOINTS=N` (unset: 1, as before) alone decides how many it keeps of the others, one per length:
++  the deepest, then the deepest others, the branch one counted in N.
++
++| | without `STRATA_BRANCH_CHECKPOINT` | with it |
++| --- | --- | --- |
++| N = 1 | the deepest (the turn checkpoint), as before | the turn and the branch one (one when there is none yet) |
++| N = 2 | the two deepest (the second the turn before or a periodic one) | two: the turn and the branch one, or else the next deepest |
++
++A restore from a slot checkpoint brings the slot's shallower ones back with it, and the engine logs `slot 2 keeps 2
++checkpoints (at 43340 43372; 227.5 MiB)` (each is a whole running state, about 114 MiB on Qwen3.8-Flash-Next). Without a
++branch checkpoint such a query resumes at the last periodic checkpoint (`--prompt-cache-every`, up to 16K tokens before
++the branch).
++
++N = 2 helps where there is no branch checkpoint: an ordinary chat, and the first query of a classifier transcript
++(nothing to branch from yet), whose next query then resumes at the periodic checkpoint instead of reading the whole
++transcript again when the main session has moved on. It costs one more running state per slot, none with the move
++below (it leaves the main session's chain).
++
++With `STRATA_SLOT_CKPT_MOVE=1` an admission moves them all into the slot instead of copying them (`, all moved` at the
++end of that line), except the chain's root and a pinned prefix, which every new conversation of the client starts
++from. A copy would buy no second chance: the main session keeps only checkpoints of the conversation it holds, so it
++drops them at the next request of another conversation - and a request of another conversation is what takes the slot.
++While the main session still holds their tokens (the conversation's next query comes first) it restores one from the
++slot as from its own chain. A slot that gives back all it holds (the request continues its whole conversation)
++gives back these checkpoints with it, moved, so the admission that follows keeps them again: they are the only ones
++(without this the main session lost them there, and a next turn sent back without its thinking read its prompt
++again: 19,342 tokens in 8.5 s against 154 in 0.66 s). Without the switch they are copied, into dropped checkpoints'
++storage with `STRATA_CKPT_POOL=1`; a slot that gives back all it holds then copies them back only when it keeps more
++than one (N above 1 or `STRATA_BRANCH_CHECKPOINT`), or moves them when the request continues in that slot.
++
++### Engine: a checkpoint where the prompt branches (`STRATA_BRANCH_CHECKPOINT=<margin>`)
++
++Before reading, the engine measures how far the prompt runs along each conversation it holds - the main session's
++and every idle slot's - before leaving it. When the deepest such point is at least `<margin>` tokens past where the
++read starts and before the turn boundary, the read stops there for one more checkpoint (as at the root and turn
++boundaries; on a layer split too, and without `--batch`), logged as `branch checkpoint at 43340: the prompt leaves
++slot 2's conversation there (read from 32768)`. The next query, which leaves this one later, resumes there. Measured
++on the machine above (`--batch 6`; a 43-45K-token classifier transcript growing by about 250 tokens per query, an
++agent conversation taking the main session between the queries), without and with `STRATA_BRANCH_CHECKPOINT=1024`
++(the slot keeping the turn and the branch checkpoint):
++
++| Query | without: reused + read, ms | with: reused + read, ms |
++| --- | ---: | ---: |
++| 1 | 0 + 43,379, 14,146 | 0 + 43,379, 14,255 |
++| 2 | 0 + 43,624, 14,112 | 32,768 + 10,856, 7,577 (checkpoint at 43,340) |
++| 3 | 0 + 43,874, 14,277 | 43,340 + 534, 1,253 |
++| 4 | 0 + 44,134, 14,399 | 43,340 + 794, 1,430 |
++| 5 | 0 + 44,400, 14,535 | 43,340 + 1,060, 1,652 |
++| 6 | 0 + 44,669, 14,596 | 43,340 + 1,329, 1,818 |
++
++The extra part costs 0.8-0.9 s (the same 11,110 tokens from 32,768: 5.9 s straight, 6.8 s with the cut; alone, 6.5 /
++7.3 s). For a transcript growing by g tokens per query, a margin M costs about 0.9 s x g / M per query in cuts and
++M / 2 tokens more per read (0.7 ms each): g = 250-500 puts the best M at 800-1,100. Single user 63.7 / 63.9 tok/s,
++6 concurrent x 2048 tokens 178.7 / 179.3 tok/s without / with both (`tools/serve_load.py`).
++
++The restored state is the one the read had at that point, but the cut changes the chunks of the read after it (as
++`pin=` or a resume from an earlier turn checkpoint does), so a prompt read through a branch checkpoint can round
++differently from one read without it. With the exactness settings below, 160-token greedy answers: 11 of 12 equal;
++the twelfth differed from its first token, and the same way for a read that only stopped there (no restore).
++
++### Server: placement by what the slots hold (`STRATA_SLOT_CACHE_AFFINITY=1`)
++
++With `"env": {"STRATA_SLOT_CACHE_AFFINITY": "1"}` in the server config and pipelined groups, `pick_slot` asks the
++placement policy in `serve/slot_policy.py` instead of placing by the groups alone. The server side is the same for any
++policy:
++
++- The policy gets each slot's state: busy, the tokens it holds, when it was last used (counted from the request's real
++  end, `BDONE`), whether its state is intact, the spreading order, the group size, the observed prompt rate and
++  whether the engine runs active slots only (`slot_padding_safe=1`). Without that engine capability the server tracks
++  from the `BADM` / `BT` / `BDONE` lines which idle slot a later window of its group has padded over, and marks it.
++- With `INFO slot_park=1` the server tracks what the main session holds; when a request is another conversation (as
++  the engine decides it, with `INFO turn_token`), it asks the policy for a slot and sends `park=B`; `PARKED` updates that slot's state. A claim
++  the engine did not use is released.
++
++The policy's interface is `place`, `park_destination`, `cache_state`, `superseded_slots`, `reliable_flags`,
++`configure` / `settings` (their docstrings say what they answer). The policy is described below.
++
++`/metrics` shows what happened: `live.cache_events` (the last 96: allocation, admission with the tokens reused and
++read, resume and cache source, park claims and `parked`, expiries), each request's key, client
++address, slot and cache source in `requests[]`, `live.peer_ip` and `live.solo_*` (the request on the solo path and
++where its cache came from), and for slots the client of the conversation each one holds; with
++`STRATA_SLOT_CACHE_AFFINITY=1` also each idle slot's protection and scores and `live.slot_policy`; with
++`STRATA_CACHE_TRACE=1` each request's snapshot of how long a start every slot shared with its prompt (lengths only,
++`serve/cache_trace.py`). The client address is the socket's (behind a reverse proxy, the proxy's); `X-Forwarded-For`
++and request fields are not used. No prompt text or token ids are recorded.
++
++### The placement policy (`serve/slot_policy.py`)
++
++Rules alone cannot tell which history to give up when a new conversation needs a slot and none is free of value: the
++one used longest ago may be a 90K-token conversation whose user is reading the answer, the newest a side request's 300
++tokens. The policy weighs length and age, and every threshold is a parameter:
++
++- **Protection grows with length**: 0.1 s at 500 tokens, 2 s at 2K, 10 s at 8K, 45 s at 32K, 65 s at 50K, 90 s at
++  100K, 120 s at 262144 (piecewise linear; `STRATA_SLOT_TTL_MAX_S`, default 120, scales the whole curve). A side
++  request's history is free again almost at once; a long conversation outlasts the time its user reads and types.
++- **Retention score** = (n / 50000)^0.7 x (n / (n + 2000))^2 x (0.25 + 0.75 x freshness), freshness = 1 - age / TTL,
++  and 0 once expired; overwrite score = 1 / (1 + retention). A fresh 50K history is worth about 1, a 500-token one
++  0.002; a fresh 50K history outweighs a 150K one about to expire.
++- **Blank slots** - empty, known invalid, or a superseded copy (its history is the start of another idle slot's: the
++  conversation went on there) - count as expired and worth nothing.
++- **A continued conversation** (an idle slot's whole history is the start of the prompt; matches within 2% of the
++  longest, one second of the prompt rate and 4096 tokens count too) runs in its slot or in a blank slot of a less
++  loaded group - the engine copies it there, so moving costs nothing - and **never in a slot that holds another
++  conversation**, expired or not. On the machine above an earlier version that put group balance first moved two Claude
++  Code conversations, idle for minutes between turns, into each other's slot on every turn, and each turn read 60-100K
++  tokens from token 0.
++- **An expired history is not deleted**: it still matches until it is overwritten. A new conversation takes a blank
++  expired or blank slot: first one not worth keeping (blank, or its score at freshness 0 below
++  `STRATA_SLOT_EXPIRED_KEEP_SCORE`, default 0.01 - about 2.5K tokens), then by group load, a blank slot before a
++  history, and the lowest score.
++- **An older version of the same conversation** - an idle history that shares at least
++  `STRATA_SLOT_SIBLING_SHARE` (default 98%; 0: off) of its own length with the prompt but is not its start (the client
++  rewrote its end) - is replaced in place, protected or not, when no slot's history continues the prompt. Claude
++  Code's safety classifier inserts each query's new tool calls before the closing text of its transcript, so no
++  query continues the previous one; kept side by side, the versions took 4-5 of the 6 slots on the machine above and
++  pushed the other conversations out.
++- **No wait**: when every idle history is still protected, the request overwrites the one that loses least at once
++  (losses within 10% go by group load). An earlier version waited up to 5 s first, once per request; with more
++  requests than slots each wait ran its full 5 s, the slot idle meanwhile, and ended in the same overwrite (7 of 7 in
++  a 15-minute test on the machine above), so it was removed.
++- **Expired value decays**: after its protection an expired history is worth its score at freshness 0 times
++  `1 - x^2`, where x runs from 0 at the end of its protection to 1 at a total idle age of
++  `STRATA_SLOT_IDLE_VALUE_ZERO_S` (default 1800 s; 0 disables decay). Reclaiming and parking use this value; it never
++  changes whether a history can match.
++- **Park** (with `slot_padding_safe=1`): not when the main session's conversation's value at its idle age is below
++  `STRATA_SLOT_PARK_MIN_VALUE` (default 0.01, about 2.6K tokens at expiry; no separate length cut-off), or when a slot
++  holds `STRATA_SLOT_PARK_KEPT_SHARE` (default 98%) of it already. Then its own older copy, else an older version of
++  it (`STRATA_SLOT_SIBLING_SHARE` above, protected or not; the most shared first), else an idle expired slot
++  in the reclaim order above (not worth keeping first, then group load, then the lowest value); a history worth
++  keeping is taken only when the main session's conversation is worth at least `STRATA_SLOT_PARK_VALUE_RATIO` (default
++  2) times more. Never another conversation's protected slot. The parked copy keeps the main session's last-use time.
++- A busy slot is never matched or overwritten. On an engine without `slot_padding_safe=1`, a slot that would pad
++  over a protected idle history below it costs that history's retention too.
++
++Measured on the machine above (0.1.44.1, `--batch 6` in 3 groups, `STRATA_PIPELINE_ACTIVE_ROWS=1`):
++
++- Park: a 37,359-token conversation, a short side request, then its next turn. Without `park=`: 0 tokens reused, the
++  turn took 14 s; with it: 37,352 reused, about 1 s, and the same greedy output (temperature 0) as before the side
++  request.
++- Retention under load: conversation A (37K tokens) parked, two clients generating 1,500-token answers in a loop (so
++  batch mode stays on), conversations B (9K) and C (7.9K) taking turns about every 30 s - past their protection of
++  about 11 and 10 s. Tokens reused on turns 1-3:
++
++| Ordering of expired histories | B | C |
++| --- | --- | --- |
++| by group load first (an earlier version) | 0 every turn | 0 every turn |
++| + one still worth keeping goes last (this policy) | all but the ~20 new | 0 every turn |
++| + wait for a cheaper slot about to leave its protection (removed) | all but the ~20 new | all but the ~20 new |
++
++In the first row a new turn took the other conversation's expired slot for group balance, so B and C overwrote each
++other; in the second, C went to a side request that arrived a second after another one finished, while that one's
++1.5K-token history was about to leave its protection. The third row waited for that protection to end, under the
++same one-per-request wait as above; it went with that wait. The policy accepts this case: a protected history is
++not overwritten while an expired one can be.
++
+ ## The VRAM expert tier keeps adapting in batch windows
+ 
+ Batch windows count which experts they route to, and every `--adapt-every` windows (default 4) the engine swaps the
+@@ -627,6 +841,11 @@ On top of `GEN` / `GENI`:
+ | `BYIELD <slot>` | in | the prompt being read gives way at its next chunk boundary; its part read waits in `<slot>` (the admission's own, or a free slot for a solo request) |
+ | `YIELDED <slot> <tokens>` | out | before the `DONE cancel` of a read that gave way: the request is sent again later and goes on from there |
+ | `INFO ... batch_slots=N` | out | the slots the engine runs (only with `--batch`) |
++| `INFO ... slot_padding_safe=1` | out | `STRATA_PIPELINE_ACTIVE_ROWS=1`: a pipelined group's window runs its active slots only; an idle slot keeps its conversation; with it `slot_park=1` and `turn_token=<id>` (the token a turn begins with) |
++| `CACHE_SOURCE <slot> <tokens>` | out | `STRATA_PIPELINE_ACTIVE_ROWS=1`, after a prompt's restore: the idle slot its reused prefix came from (-1: the main session, a checkpoint or the conversation cache) and how long it is |
++| `park=B` (a key of `GEN` / `BGEN`) | in | with `INFO slot_park=1`: before a different conversation replaces the main session's, copy that one into idle slot B |
++| `PARKED <slot> <tokens>` | out | `park=` copied that many tokens into the slot (0: the copy failed, the slot holds nothing usable) |
++| `BCHECKS <slot> <tokens> <lengths>` | out | `STRATA_SLOT_CHECKPOINTS` > 1 or `STRATA_BRANCH_CHECKPOINT`: after `PARKED`, `BADM 1` and `BYIELD`, what the slot holds and the lengths of the checkpoints it keeps (the server's placement hint, `/metrics` `checkpoint_tokens`) |
+ 
+ `tools/batch_test.py` drives the engine directly: the same prompts alone, then together, compared token by token,
+ and the aggregate rate.
+diff --git a/include/strata/core/conversation_cache.hpp b/include/strata/core/conversation_cache.hpp
+index 935de225..0c72acd5 100644
+--- a/include/strata/core/conversation_cache.hpp
++++ b/include/strata/core/conversation_cache.hpp
+@@ -29,6 +29,9 @@ struct ConversationCheckpoint {
+     // from, so retention never evicts it (conv_cache.hpp) and a parked conversation holding it stays parked.  A run-time
+     // mark only: it is not in the session file, a request that pins the same prefix again sets it.
+     bool pinned = false;
++    // STRATA_BRANCH_CHECKPOINT: taken where the prompt left a conversation the engine held - the point a client that
++    // rewrites the end of its history continues from next, so a batch slot keeps its deepest one.  Run-time only.
++    bool branch = false;
+     // --prefill-pipe on a layer split: the plan a prompt segment [from, to) is read in - its chunk (0: none), the loan
+     // its buffers were laid out for (which experts the prompt reads in place and which it streams: that sets bits
+     // too), the pipe value it was planned with, whether it is one chunk and whether the plan changed the buffers'
+diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
+index 964b54fd..21cdce20 100644
+--- a/include/strata/core/verify.hpp
++++ b/include/strata/core/verify.hpp
+@@ -231,6 +231,8 @@ public:
+     // a window in flight from one thread (batch_poll does not block).  Stage k can then run group g while stage k+1
+     // runs group g-1.  Rows of group `base` use hand-off rows [base, base + S), so groups never share a hand-off row.
+     bool batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err);
++    // STRATA_PIPELINE_ACTIVE_ROWS=1: packed active rows bind actual slot states; hand-off storage still starts at base.
++    bool batch_launch_rows(int base, int S, const int* rows, const int32_t* tokens, const int64_t* pos, std::string& err);
+     /// 1 = this stage's window and commit are done (the last stage's picks are in batch_out), 0 = still running,
+     /// -1 = an error (err).  Serves every layer that has rung so far.
+     int batch_poll(PoolMultiFn pool, void* user, std::string& err);
+diff --git a/include/strata/program/pipeline_rows.hpp b/include/strata/program/pipeline_rows.hpp
+new file mode 100644
+index 00000000..99969726
+--- /dev/null
++++ b/include/strata/program/pipeline_rows.hpp
+@@ -0,0 +1,16 @@
++// STRATA_PIPELINE_ACTIVE_ROWS=1: active-row packing; unlisted slot state is never submitted to the verifier.
++#pragma once
++#include <cstdint>
++#include <cstddef>
++namespace strata::program::pipeline_rows {
++template<class Slots>
++int pack(const Slots& slots, int base, int count, int* rows, int32_t* tokens, int64_t* pos) {
++    int n = 0;
++    for (int b = base; b < base + count; ++b) {
++        const auto& slot = slots[(std::size_t) b];
++        if (!slot.active) continue;
++        rows[n] = b; tokens[n] = slot.x; pos[n] = slot.p; ++n;
++    }
++    return n;
++}
++}  // namespace strata::program::pipeline_rows
+diff --git a/include/strata/program/slot_checkpoints.hpp b/include/strata/program/slot_checkpoints.hpp
+new file mode 100644
+index 00000000..ece5c662
+--- /dev/null
++++ b/include/strata/program/slot_checkpoints.hpp
+@@ -0,0 +1,80 @@
++#pragma once
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++namespace strata::program {
++
++// STRATA_SLOT_CHECKPOINTS: which of the main session's checkpoints a batch slot keeps with the conversation it takes
++// (BADM) or keeps (park=B): the deepest `keep` that are a strict start of `held`, shallowest first, one per length
++// (the first of equal ones, as the single deepest one was picked before).
++template <class Checkpoint>
++std::vector<const Checkpoint*> deepest_prefix_checkpoints(const std::vector<Checkpoint>& checks,
++                                                         const std::vector<int32_t>& held, std::size_t keep) {
++    std::vector<const Checkpoint*> out;
++    for (const Checkpoint& c : checks)
++        if (c.ids.size() < held.size() && std::equal(c.ids.begin(), c.ids.end(), held.begin())) out.push_back(&c);
++    std::stable_sort(out.begin(), out.end(),
++                     [](const Checkpoint* a, const Checkpoint* b) { return a->ids.size() < b->ids.size(); });
++    out.erase(std::unique(out.begin(), out.end(),
++                          [](const Checkpoint* a, const Checkpoint* b) { return a->ids.size() == b->ids.size(); }),
++              out.end());
++    if (out.size() > keep) out.erase(out.begin(), out.end() - (std::ptrdiff_t) keep);
++    return out;
++}
++
++// The ones a slot keeps of the strict starts of `held` (one per length), shallowest first: the deepest (the turn
++// checkpoint); with `branch` (STRATA_BRANCH_CHECKPOINT) the deepest `branch` one - where a client that rewrites the end
++// of its history leaves it next, also when a periodic checkpoint lies between it and the turn - whatever `keep` is;
++// then the deepest others up to `keep` (STRATA_SLOT_CHECKPOINTS) in all.  So keep 1: the turn and the branch one when
++// there is one; keep 2: two, the second the branch one or else the next deepest (a periodic one).
++template <class Checkpoint>
++std::vector<const Checkpoint*> slot_checkpoint_picks(const std::vector<Checkpoint>& checks,
++                                                     const std::vector<int32_t>& held, std::size_t keep, bool branch) {
++    const std::vector<const Checkpoint*> all = deepest_prefix_checkpoints(checks, held, checks.size());
++    std::vector<char> take(all.size(), 0);
++    std::size_t n = 0;
++    if (keep > 0 && !all.empty()) {
++        take.back() = 1;
++        ++n;
++    }
++    if (branch)
++        for (std::size_t i = all.size() - (n > 0 ? 1 : 0); i-- > 0;)
++            if (all[i]->branch) {
++                take[i] = 1;
++                ++n;
++                break;
++            }
++    for (std::size_t i = all.size(); n < keep && i-- > 0;)
++        if (!take[i]) {
++            take[i] = 1;
++            ++n;
++        }
++    std::vector<const Checkpoint*> out;
++    for (std::size_t i = 0; i < all.size(); ++i)
++        if (take[i]) out.push_back(all[i]);
++    return out;
++}
++
++// How many leading tokens a prompt and a held conversation share.
++inline int64_t shared_prefix(const std::vector<int64_t>& prompt, const std::vector<int32_t>& held) {
++    const std::size_t n = std::min(prompt.size(), held.size());
++    std::size_t i = 0;
++    while (i < n && prompt[i] == (int64_t) held[i]) ++i;
++    return (int64_t) i;
++}
++
++// STRATA_BRANCH_CHECKPOINT=<margin>: the read stops for a checkpoint at `shared`, where the prompt leaves a
++// conversation the engine holds (the client rewrote what came after it), so the next prompt that branches from this
++// one later still finds a state to continue from.  -1 for none: only `margin` tokens or more past where the read
++// starts, and before the turn boundary (whose checkpoint is taken anyway) or, without one, the last prompt token.
++inline int64_t branch_checkpoint_boundary(int64_t shared, int64_t read_from, int64_t turn_at, int64_t n,
++                                          int64_t margin) {
++    const int64_t end = turn_at > 0 ? turn_at : n - 1;
++    if (margin <= 0 || shared <= 0 || shared - read_from < margin || shared >= end) return -1;
++    return shared;
++}
++
++} // namespace strata::program
+diff --git a/serve/cache_trace.py b/serve/cache_trace.py
+new file mode 100644
+index 00000000..23bb7d50
+--- /dev/null
++++ b/serve/cache_trace.py
+@@ -0,0 +1,18 @@
++"""Metadata-only cache prefix inspection; no prompt text or token IDs are recorded."""
++from . import slot_policy
++
++def snapshot(prompt, held, busy, valid, used, now):
++    rows=[]
++    for b,h in enumerate(held):
++        hi=min(len(prompt),len(h));lo=0
++        if h[:hi]==prompt[:hi]:lo=hi
++        else:
++            while lo<hi:
++                middle=(lo+hi+1)//2
++                if h[:middle]==prompt[:middle]:lo=middle
++                else:hi=middle-1
++        state=slot_policy.cache_state(len(h),used[b],now,valid[b])
++        rows.append({"slot":b,"held_tokens":len(h),"busy":bool(busy[b]),
++                     "valid_hint":bool(valid[b]),"expired":state["expired"],
++                     "common_prefix_tokens":lo,"full_prefix_match":bool(h) and lo==len(h) and len(h)<len(prompt)})
++    return {"prompt_tokens":len(prompt),"slots":rows}
+diff --git a/serve/server.py b/serve/server.py
+index 2fe3c381..cb2a8419 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -78,6 +78,7 @@ from strata_control import gpu_roles  # noqa: E402
+ from serve import ready as ready_file  # noqa: E402
+ from serve import owner_guard  # noqa: E402
+ from serve import launch_identity  # noqa: E402
++from serve import slot_policy  # noqa: E402
+ from serve import logit_bias as bias_api  # noqa: E402
+ from serve import lifeline  # noqa: E402
+ from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
+@@ -985,6 +986,10 @@ class StrataEngine:
+                  env: dict | None = None, lazy: bool = False, cpus: list[int] | None = None, _attempt: int = 0):
+         self.spawn = (exe, list(args), cwd, log, env, False, cpus)   # to start it again after it died (issue #27)
+         self.session_save_reclaim = '--session-save-reclaim' in args
++        # Opt-in Python scheduling only; preserved by restart() through spawn's environment.
++        self.slot_cache_trace = (env if env is not None else os.environ).get("STRATA_CACHE_TRACE") == "1"
++        self.slot_cache_affinity = (env if env is not None else os.environ).get("STRATA_SLOT_CACHE_AFFINITY") == "1"
++        self.slot_policy_settings = slot_policy.configure(env if env is not None else os.environ)
+         paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack")}
+         self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
+         self.log_path = log
+@@ -1149,10 +1154,11 @@ class StrataEngine:
+         self.slot_group = [b // gs if gs else 0 for b in range(self.batch)]   # each slot's pipeline group
+         self.slot_groups = groups
+         # pipelined groups (the engine says how many it runs: INFO batch_groups; older engines: the args).  A pipelined
+-        # group's window spans its slots up to its last busy one, and the engine keeps no pipelined slot as a
+-        # conversation cache - see pick_slot
++        # group's window spans its slots up to its last busy one. Finished slots can retain a conversation,
++        # but later padding rows can invalidate it; the engine validates reuse independently - see pick_slot.
+         groups_run = int(self.info.get("batch_groups") or groups)
+         self.slot_gs = gs if groups > 1 and groups_run > 1 else 0
++        self.slot_padding_safe = self.info.get("slot_padding_safe") in (1, "1")
+         self.slot_q = [queue.Queue() for _ in range(self.batch)]
+         self.slot_busy = [False] * self.batch
+         # #1603: who owns a busy flag.  slot_claims: slots a request of this server picked or reserved and has not
+@@ -1165,6 +1171,23 @@ class StrataEngine:
+         # the slot that has its start (the engine checks it again); when the slot was last used
+         self.slot_held: list[list[int]] = [[] for _ in range(self.batch)]
+         self.slot_used = [0.0] * self.batch
++        # engine BCHECKS (STRATA_SLOT_CHECKPOINTS > 1 or STRATA_BRANCH_CHECKPOINT): the lengths of each slot's
++        # checkpoints, for the placement hint
++        self.slot_checks: list[tuple[int, ...]] = [() for _ in range(self.batch)]
++        # park=: what the engine's main (solo) session holds, as far as this server knows, and slots claimed for a
++        # park= copy of it until the engine says PARKED
++        self.main_held: list[int] = []
++        self.main_peer = None
++        self.main_used = 0.0    # last actual use; a park copies this age instead of refreshing it
++        self._park_claims: set[int] = set()
++        self.slot_cache_peer = [None] * self.batch
++        self._cache_expiry_seen = [None] * self.batch
++        self._cache_events = collections.deque(maxlen=96)
++        self._cache_event_lock = threading.Lock()
++        self.slot_cache_valid = [False] * self.batch
++        self._slot_native_active = [False] * self.batch
++        self._slot_steps = [0] * self.batch
++        self._slot_valid_until = [{} for _ in range(self.batch)]
+         self.slot_live: list[dict | None] = [None] * self.batch   # /metrics: the request in each slot
+         # #1012: the admission state belongs to the server, not to one engine process.  restart() runs this again
+         # while requests still wait on it (they hold these very objects), so it is made once and kept: new ones
+@@ -1189,6 +1212,12 @@ class StrataEngine:
+         slot_q = self.slot_q
+         line = None
+         for line in proc.stdout:
++            if line.startswith("BCHECKS "):            # information only: never a control or slot line
++                if self.proc is proc:
++                    self._observe_checks(line)
++                continue
++            if self.proc is proc and self.slot_cache_affinity and line.startswith(("BT ", "BDONE ", "BADM ")):
++                self._observe_cache_line(line)
+             # checked before batch routing: a fatal line is never a slot's own
+             if line.startswith(FATAL_PREFIXES):
+                 # release_gpu_waits invalidates the verifier, even if the native
+@@ -1226,6 +1255,79 @@ class StrataEngine:
+         for q in slot_q:
+             q.put(None)
+ 
++    def cache_event(self, kind, **fields):
++        """Bounded metadata only; never record prompt contents or credentials."""
++        tl = getattr(self, "_tl", None)
++        if kind not in ("expired", "padding_invalidated"):
++            for key in ("request_key", "peer_ip"):
++                value = getattr(tl, key, None)
++                if value is not None: fields.setdefault(key, value)
++        lock = self.__dict__.setdefault("_cache_event_lock", threading.Lock())
++        with lock:
++            events = self.__dict__.setdefault("_cache_events", collections.deque(maxlen=96))
++            events.append({"time": time.time(), "kind": kind, **fields})
++
++    def cache_events_view(self):
++        lock = self.__dict__.setdefault("_cache_event_lock", threading.Lock())
++        with lock:
++            return list(getattr(self, "_cache_events", ()))[::-1]
++
++    def _observe_cache_line(self, line: str) -> None:
++        """Remember observed padding invalidation without treating held tokens as native truth.
++
++        The lower row's BDONE precedes the higher row's BT in that SAME window. Allow
++        that BT; a later higher-row window pads over the now-idle lower cache.
++        """
++        gs = getattr(self, "slot_gs", 0)
++        if not gs:
++            return
++        f = line.split()
++        try:
++            b = int(f[1])
++            if not 0 <= b < self.batch:
++                return
++            with self.slot_cv:
++                if f[0] == "BADM":
++                    self._slot_native_active[b] = f[2] == "1"
++                    self.slot_cache_valid[b] = False
++                elif f[0] == "BDONE":
++                    self._slot_native_active[b] = False
++                    self.slot_cache_valid[b] = f[3] != "nonfinite"
++                    self._slot_valid_until[b] = {x: self._slot_steps[x] + int(self._slot_native_active[x])
++                                                for x in range(b + 1, b - b % gs + gs)}
++                    self.slot_used[b] = time.time()
++                elif f[0] == "BT":
++                    self._slot_native_active[b] = True
++                    self._slot_steps[b] += 1
++                    for x in ([] if self.slot_padding_safe else range(b - b % gs, b)):
++                        if (not self._slot_native_active[x] and self.slot_cache_valid[x] and
++                                self._slot_steps[b] > self._slot_valid_until[x].get(b, 0)):
++                            self.slot_cache_valid[x] = False
++                            self.cache_event("padding_invalidated", slot=x, by_slot=b)
++                self.slot_cv.notify_all()
++        except (IndexError, ValueError):
++            return
++
++    def _observe_checks(self, line: str) -> None:
++        """BCHECKS <slot> <tokens held> <checkpoint lengths...>: where the engine's checkpoints of what <slot> now
++        holds are.  Only the placement hint reads them; the engine checks the tokens again when it reuses one."""
++        f = line.split()
++        try:
++            b, held, at = int(f[1]), int(f[2]), sorted(int(x) for x in f[3:])
++        except (IndexError, ValueError):
++            return
++        checks = getattr(self, "slot_checks", None)
++        if checks is not None and 0 <= b < len(checks):
++            with self.slot_cv:
++                checks[b] = tuple(p for p in at if 0 < p < held)
++
++    def _forget_checks(self, b) -> None:
++        """The engine is about to overwrite slot b (an admission, a park, a read giving way into it): its reported
++        checkpoints no longer describe it until its next BCHECKS."""
++        checks = getattr(self, "slot_checks", None)
++        if checks is not None and b is not None and 0 <= b < len(checks):
++            checks[b] = ()
++
+     def death_note(self) -> str:
+         """Why the engine most likely ended, from the end of its log: its own watchdog (issue #29), else RAM."""
+         if getattr(self, "silent_note", None):          # #481: the server ended it, not the OS or the engine itself
+@@ -1507,6 +1609,11 @@ class StrataEngine:
+                     self._send("STOP")
+                     stopped = True
+                 yield False                              # a token is pending (not a heartbeat)
++            elif line.startswith("RESUME "):
++                reused = int(line.split()[1])
++                self.reused = reused
++                if self._ctl_mode == "solo": self.solo_cache_reused_tokens = reused
++                self.cache_event("resume", reused_tokens=reused, path=self._ctl_mode)
+             elif line.startswith("PP "):
+                 f = line.split()
+                 if len(f) >= 3 and f[1].isdigit() and f[2].isdigit():
+@@ -1522,6 +1629,22 @@ class StrataEngine:
+             elif line.startswith("DONE"):
+                 self._parse_done(line)
+                 self._last_done = line
++            elif line.startswith("PARKED "):
++                f = line.split()
++                if len(f) == 3 and f[1].isdigit() and f[2].isdigit():
++                    self._on_parked(int(f[1]), int(f[2]))
++            elif line.startswith("CACHE_SOURCE "):
++                f = line.split()
++                if len(f) == 3 and f[1].lstrip("-").isdigit() and f[2].isdigit():
++                    source, reused = int(f[1]), int(f[2])
++                    source_tl = self.__dict__.setdefault("_tl", threading.local())
++                    source_tl.cache_source_slot = source if source >= 0 else None
++                    source_tl.cache_source_kind = "slot" if source >= 0 else "main_or_checkpoint"
++                    if self._ctl_mode == "solo":
++                        self.solo_cache_source_slot = source if source >= 0 else None
++                        self.solo_cache_reused_tokens = reused if source >= 0 else None
++                    self.cache_event("cache_source", slot=source if source >= 0 else None,
++                                     reused_tokens=reused, path=self._ctl_mode)
+             elif line.startswith("BADM "):
+                 f = line.split()
+                 self._ctl_result = ("badm", len(f) >= 3 and f[2] == "1")
+@@ -1600,6 +1723,7 @@ class StrataEngine:
+         except EngineDied:
+             pass
+         q, busy, held = self.slot_q[slot], self.slot_busy, self.slot_held   # this process's: restart() replaces them
++        used, affinity = self.slot_used, self.slot_cache_affinity
+         releasing = self.slot_releasing
+         releasing.add(slot)
+ 
+@@ -1625,6 +1749,8 @@ class StrataEngine:
+                     break
+             held[slot] = tail[:-1] if stream and tail else []
+             with self.slot_cv:
++                if affinity:
++                    used[slot] = time.time()             # TTL begins when the request actually finishes
+                 busy[slot] = False
+                 releasing.discard(slot)
+                 self.slot_cv.notify_all()
+@@ -1675,6 +1801,11 @@ class StrataEngine:
+             self.slot_cv.notify_all()
+         return freed
+ 
++    def _solo_ended(self):
++        """/metrics: no request on the solo path now (its key and cache source would otherwise stay until the next one)."""
++        self.solo_peer_ip = self.solo_request_key = None
++        self.solo_cache_source_slot = self.solo_cache_reused_tokens = None
++
+     YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
+ 
+     def _take_control(self, cancel, plen: int, after_epoch: int | None = None, new: bool = False):
+@@ -1782,7 +1913,20 @@ class StrataEngine:
+         out: list[int] = []
+         pending: list[int] = []
+         prompt, left = list(ids), int(max_new)
++        tl = self.__dict__.setdefault("_tl", threading.local())
++        request_key = getattr(tl, "api_request_key", None) or f"{self.gen}:{time.monotonic_ns()}"
++        tl.request_key = request_key
++        if not getattr(tl, "api_request_key", None):
++            tl.cache_debug = None
++        if getattr(self, "slot_cache_trace", False) and getattr(tl, "cache_debug", None) is None:
++            from serve.cache_trace import snapshot
++            with self.slot_cv:
++                tl.cache_debug = snapshot(ids, self.slot_held, self.slot_busy,
++                    getattr(self, "slot_cache_valid", [True] * self.batch), self.slot_used, time.time())
++            self.cache_event("request_start", prompt_tokens=len(ids), cache_debug=tl.cache_debug)
++        peer_ip = getattr(self.__dict__.setdefault("_tl", threading.local()), "peer_ip", None)
+         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
++        first_read = None   # that read's cache source and placement hint, for the record: a continued leg's hint counts it too
+         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
+         ok = yield from self._take_control(cancel, len(prompt), new=True)
+         if not ok:
+@@ -1794,6 +1938,15 @@ class StrataEngine:
+         stop_sent = False
+         yields, solo_again, refused = 0, 0, 0
+         admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
++        slot_plan = None    # this request's own placement plan (slot_last_plan is shared: another request's pick can follow)
++        park_slot = None    # a slot claimed for the engine park= copy of the main session
++        solo_leg = None     # (prompt, len(out)) of a solo leg in flight - what the main session will hold
++
++        def choose_slot():
++            nonlocal slot_plan
++            chosen = self.pick_slot(prompt)
++            slot_plan = getattr(self, "slot_last_plan", None)   # (the caller holds slot_cv)
++            return chosen
+         try:
+             while True:   # a request in a slot that is left alone goes back to the solo path
+                 if not holding:
+@@ -1804,7 +1957,17 @@ class StrataEngine:
+                 with self.slot_cv:
+                     alone = not any(self.slot_busy) and self.waiting == 0
+                 if alone and left > 1:
+-                    head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
++                    if park_slot is not None:
++                        self._release_park(park_slot)
++                        park_slot = None
++                    park = self._claim_park(prompt)
++                    if park:
++                        park_slot = int(park.split("=")[1])
++                    head = f"GENI {left}{keys}{park} {embeddings}" if embeddings else f"GEN {left}{keys}{park}"
++                    solo_leg = (list(prompt), len(out))
++                    self.solo_cache_source_slot = None
++                    self.solo_cache_reused_tokens = None
++                    self.solo_request_key = request_key
+                     self._last_done = None                  # (#879: this request's DONE decides below)
+                     deadline = getattr(cancel, "_strata_queue_deadline", None)
+                     if deadline is not None and time.monotonic() >= deadline:
+@@ -1816,6 +1979,7 @@ class StrataEngine:
+                     if started is not None:
+                         started()
+                     phase = "solo"
++                    self.solo_peer_ip = peer_ip
+                     self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
+                     self._ctl_erred = False
+                     def others():
+@@ -1823,14 +1987,16 @@ class StrataEngine:
+                             return self.waiting > 0
+ 
+                     def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
+-                        nonlocal reserved
++                        nonlocal reserved, slot_plan
+                         if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
+                                 self._shorter_waiting(len(prompt))):
+                             with self.slot_cv:          # the slot the part read will wait in
+                                 reserved = self.pick_slot(prompt)
++                                slot_plan = getattr(self, "slot_last_plan", None)
+                                 if reserved is not None:
+                                     self.slot_busy[reserved] = True
+                                     self.slot_claims.add(reserved)
++                                    self._forget_checks(reserved)
+                             if reserved is not None:
+                                 self._send(f"BYIELD {reserved}")
+                     for x in self._control(cancel, pending.append, stop_when=others, on_quiet=give_way):
+@@ -1841,11 +2007,19 @@ class StrataEngine:
+                         if x is None:                       # a heartbeat (False: a token, flushed above)
+                             give_way()
+                             yield None
++                    self._solo_ended()
+                     phase = "none"                          # its DONE is read
+                     while pending:
+                         t = pending.pop(0)
+                         out.append(t)
+                         yield t
++                    if park_slot is not None:               # no PARKED line: the engine kept nothing there
++                        self._release_park(park_slot)
++                        park_slot = None
++                    # the main session now holds this leg's conversation (a read that gave way did not finish)
++                    self.main_held = [] if self._yielded is not None else solo_leg[0] + out[solo_leg[1]:]
++                    self.main_used = time.time()
++                    self.main_peer, solo_leg = peer_ip, None
+                     if self._done_finish() == "nonfinite":    # #879 (never promoted to a slot)
+                         raise EngineNonFinite("the engine's logits became non-finite (#879)")
+                     if self._yielded is not None and reserved is not None and self._yielded[0] == reserved:
+@@ -1863,6 +2037,8 @@ class StrataEngine:
+                             return
+                         if reused0 is None:
+                             reused0 = (self.last or {}).get("reused")
++                        if first_read is None:
++                            first_read = (getattr(tl, "cache_source_slot", None), getattr(tl, "cache_match_hint", None))
+                         carry_leg(carry, self.last)         # #1869: the solo leg's figures; the slot's admission (a copy of
+                                                             # the held prefix: prompt_read 1) and BDONE replace them
+                         prompt = list(ids) + out            # promoted: it continues in a batch slot from here
+@@ -1878,7 +2054,7 @@ class StrataEngine:
+                             if deadline is not None and time.monotonic() >= deadline:
+                                 raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                             with self.slot_cv:
+-                                slot = self.pick_slot(prompt)
++                                slot = choose_slot()
+                                 if slot is not None:
+                                     self.slot_busy[slot] = True
+                                     self.slot_claims.add(slot)
+@@ -1893,7 +2069,7 @@ class StrataEngine:
+                                 self.ctl.release()
+                                 holding = False
+                             with self.slot_cv:
+-                                if self.pick_slot(prompt) is None:
++                                if choose_slot() is None:
+                                     if (ENGINE_STALL_S or 0) > 0 and time.monotonic() - admit_since >= ENGINE_STALL_S:
+                                         # the stall check of #1317 only watches a request on the control lines; one
+                                         # waiting here is covered by looking for a slot nobody owns, and by saying so
+@@ -1904,7 +2080,7 @@ class StrataEngine:
+                                                   f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
+                                                   f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
+                                     self._reap_orphan_slots()
+-                                if self.pick_slot(prompt) is None:
++                                if choose_slot() is None:
+                                     wait_remaining = deadline - time.monotonic() if deadline is not None else 1.0
+                                     self.slot_cv.wait(timeout=min(1.0, max(0, wait_remaining)))
+                             if cancel.is_set():
+@@ -1928,15 +2104,36 @@ class StrataEngine:
+                         holding, born = True, self.gen                  # (the engine it now has the control lines of)
+                     while not self.slot_q[slot].empty():
+                         self.slot_q[slot].get_nowait()
+-                    head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
+-                    live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
+-                            "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
+-                            "started": time.time(), "first_token": None}
+                     deadline = getattr(cancel, "_strata_queue_deadline", None)
+                     if deadline is not None and time.monotonic() >= deadline:
+                         raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
++                    if park_slot is not None:
++                        self._release_park(park_slot)
++                        park_slot = None
++                    park = self._claim_park(prompt, exclude=(slot,))
++                    if park:
++                        park_slot = int(park.split("=")[1])
++                    head = (f"BGENI {slot} {left}{keys}{park} {embeddings}" if embeddings
++                            else f"BGEN {slot} {left}{keys}{park}")
++                    self.main_held = []                     # the admission reads on the main session
++                    live = {"slot": slot, "request_id": getattr(cancel, "_strata_request_id", None),
++                            "state": "reading", "prompt_tokens": len(prompt), "prompt_read": 0, "generated": 0,
++                            "started": time.time(), "first_token": None, "peer_ip": peer_ip, "request_key": request_key}
++                    if hasattr(self, "slot_cache_peer"):
++                        self.slot_cache_peer[slot] = peer_ip
++                    plan = slot_plan if self.slot_cache_affinity else None
++                    if plan is not None:
++                        live.update(cache_match_hint=plan.reused_hint, cache_source_hint=plan.source_hint,
++                                    placement_reason=plan.reason)
++                    self.cache_event("allocation", slot=slot, peer_ip=peer_ip,
++                                     reason=getattr(plan, "reason", "upstream"),
++                                     source_hint=getattr(plan, "source_hint", None),
++                                     matched_tokens_hint=getattr(plan, "reused_hint", None))
++                    tl.executed_slot = slot
++                    tl.cache_match_hint = getattr(plan, "reused_hint", None)
+                     self.slot_live[slot] = live
+                     self._last_done = None                  # (#879: this admission's DONE decides below)
++                    self._forget_checks(slot)
+                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
+                     if deadline is not None:
+                         cancel._strata_queue_deadline = None
+@@ -1989,7 +2186,18 @@ class StrataEngine:
+                         self._park_slot(slot)
+                         slot = None
+                         continue
+-                    cont = bool(self._ctl_result and self._ctl_result[1])
++                    if self._last_done is not None:
++                        admission = self.last or {}
++                        live.update(cache_reused_tokens=admission.get("reused"),
++                                    cache_read_tokens=admission.get("prompt_read"))
++                        self.cache_event("admission", slot=slot, peer_ip=peer_ip,
++                                         reused_tokens=admission.get("reused"),
++                                         read_tokens=admission.get("prompt_read"))
++                    if park_slot is not None:               # no PARKED line: the engine kept nothing there
++                        self._release_park(park_slot)
++                        park_slot = None
++                    self.main_held = []                     # the main session read this admission, which
++                    cont = bool(self._ctl_result and self._ctl_result[1])   # lives on in its slot
+                     phase = "slot" if cont else "none"
+                     while pending:
+                         t = pending.pop(0)
+@@ -2056,6 +2264,9 @@ class StrataEngine:
+                             slot, gen0 = None, None
+                             if reused0 is None:
+                                 reused0 = (self.last or {}).get("reused")
++                            if first_read is None:
++                                first_read = (getattr(tl, "cache_source_slot", None),
++                                              getattr(tl, "cache_match_hint", None))
+                             prompt, left = list(ids) + out, int(max_new) - len(out)
+                             solo_again += 1
+                             btrace("back to the solo path")
+@@ -2086,9 +2297,20 @@ class StrataEngine:
+                     bdone_in = True
+             if reused0 is not None and isinstance(self.last, dict):
+                 self.last = {**self.last, "reused": reused0}
++            if first_read is not None:
++                tl.cache_source_slot, tl.cache_match_hint = first_read
+             if carry and isinstance(self.last, dict):
+                 self.last = add_carry(carry, self.last)
++            if park_slot is not None:
++                self._release_park(park_slot)
++            if solo_leg is not None:
++                # the consumer stopped mid-leg (usually right after the last token): the main session holds
++                # the leg all the same; a read that gave way (YIELDED) went into its slot instead
++                self.main_held = [] if self._yielded is not None else solo_leg[0] + out[solo_leg[1]:]
++                self.main_used = time.time()
++                self.main_peer = peer_ip
+             if holding:
++                self._solo_ended()
+                 self.ctl.release()
+             if admit_wait:
+                 with self.slot_cv:
+@@ -2120,17 +2342,87 @@ class StrataEngine:
+                         self.slot_cv.notify_all()
+ 
+     slot_groups = 1         # --batch-groups (set when the engine starts)
++    slot_padding_safe = False  # only native INFO capability enables padding-safe policy
++    slot_cache_affinity = False   # STRATA_SLOT_CACHE_AFFINITY=1: preserve cached histories in pipelined groups
+     SLOT_PREFIX_MIN = 512   # a held prefix shorter than this is not worth unbalancing the pipeline's groups
+     TURN_ID = 248045        # <|im_start|>: the engine's default --turn-token (its turn checkpoint sits at the last one)
+ 
++
++    def _claim_park(self, prompt, exclude=()) -> str:
++        """With engine INFO slot_park=1: when `prompt` is another conversation than the one the main session holds,
++        claim an idle slot to keep that one in (engine key park=B).  Returns the key text, or ""."""
++        if not (self.slot_cache_affinity and getattr(self, "slot_gs", 0) and self.slot_padding_safe and
++                (self.info or {}).get("slot_park") in (1, "1")):
++            return ""
++        main = getattr(self, "main_held", None) or []
++        # the same conversation shares the main session's history up to its last turn (the last <|im_start|>, where its
++        # latest reply begins): a next turn without that reply's thinking, or the reply regenerated (as the engine checks)
++        try:
++            turn_token = int((self.info or {}).get("turn_token", -1))
++        except (TypeError, ValueError):
++            turn_token = -1
++        turn = next((i for i in range(len(main) - 1, 0, -1) if main[i] == turn_token), len(main))
++        if prompt[:turn] == main[:turn]:
++            return ""          # nothing held, or the same conversation: nothing to keep
++        now = time.time()
++        main_used = getattr(self, "main_used", 0.0)
++        value = slot_policy.stale_retention(len(main), max(0.0, now - main_used))
++        if value <= 0 or value < slot_policy.PARK_MIN_VALUE:
++            self.cache_event("park_skip", reason="main_low_value", held_tokens=len(main), value=value)
++            return ""          # an unused main history need not be copied into a slot just to be reclaimed
++        with self.slot_cv:
++            b = slot_policy.park_destination(main, self.slot_busy, self.slot_held, self.slot_used, self.slot_order,
++                                             self.slot_gs, now, getattr(self, "slot_cache_valid", None),
++                                             self.slot_padding_safe, exclude, main_value=value)
++            if b is not None:
++                self.slot_busy[b] = True
++                self.slot_claims.add(b)
++                self._park_claims.add(b)
++                self._forget_checks(b)
++                self._park_main, self._park_peer = list(main), getattr(self, "main_peer", None)
++                self._park_used = main_used
++        # outside slot_cv: cache_event takes its own lock
++        self.cache_event("park_claim" if b is not None else "park_skip", slot=b, held_tokens=len(main))
++        return f" park={b}" if b is not None else ""
++
++    def _release_park(self, b) -> None:
++        with self.slot_cv:
++            if b in self._park_claims:
++                self._park_claims.discard(b)
++                self.slot_busy[b] = False
++                self.slot_claims.discard(b)
++                self.slot_cv.notify_all()
++
++    def _on_parked(self, b: int, n: int) -> None:
++        """PARKED <slot> <tokens>: the engine copied the main session's conversation (its first <tokens>) into <slot>
++        (0: the copy failed and the slot holds nothing usable)."""
++        main = getattr(self, "_park_main", None) or []
++        with self.slot_cv:
++            if 0 <= b < self.batch:
++                self.slot_held[b] = list(main[:n]) if n > 0 else []   # the engine may hold a few more tail tokens
++                self.slot_used[b] = getattr(self, "_park_used", 0.0)
++                if hasattr(self, "slot_cache_valid"):
++                    self.slot_cache_valid[b] = n > 0
++                if hasattr(self, "slot_cache_peer"):
++                    self.slot_cache_peer[b] = getattr(self, "_park_peer", None)
++        self.cache_event("parked", slot=b, held_tokens=n)
++        self._release_park(b)
++
+     def pick_slot(self, prompt: list[int]) -> int | None:
+         """A free slot for `prompt` (the caller holds slot_cv): the one whose held tokens are the longest start of the
+         prompt (the engine then reads only the rest), else an empty one, else the one used longest ago - so the
+         conversations other slots hold stay for their next turns.  None: every slot is busy."""
++        gs = getattr(self, "slot_gs", 0)
++        if gs and self.slot_cache_affinity:
++            self.slot_last_plan = slot_policy.place(prompt, self.slot_busy, self.slot_held, self.slot_used,
++                self.slot_order, gs, time.time(), valid=getattr(self, "slot_cache_valid", None),
++                prefill_rate=getattr(self, "prefill_tok_s_mean", None), padding_safe=self.slot_padding_safe,
++                checks=getattr(self, "slot_checks", None))
++            return self.slot_last_plan.slot
++
+         free = [b for b in self.slot_order if not self.slot_busy[b]]
+         if not free:
+             return None
+-        gs = getattr(self, "slot_gs", 0)
+         if gs > 1:
+             # pipelined groups of several slots: the engine keeps no idle slot below a busy one as a conversation cache
+             # (its pad row writes the slot), so nothing is worth keeping free for a next turn.  A group's window spans
+@@ -2171,13 +2463,41 @@ class StrataEngine:
+     def slots_view(self) -> list[dict]:
+         """/metrics: each batch slot - idle (with the tokens it holds for a next turn), reading or decoding."""
+         now, view = time.time(), []
++        superseded = set()
++        if self.slot_cache_affinity and getattr(self, "slot_gs", 0):
++            superseded = slot_policy.superseded_slots(self.slot_held, self.slot_busy, getattr(
++                self, "slot_cache_valid", [True] * self.batch))
+         for b in range(self.batch):
+             r = self.slot_live[b]
+             if r is None:
+-                view.append({"slot": b, "state": "idle", "held_tokens": len(self.slot_held[b])})
++                row = {"slot": b, "state": "idle", "held_tokens": len(self.slot_held[b])}
++                if getattr(self, "slot_checks", None):
++                    row["checkpoint_tokens"] = list(self.slot_checks[b])
++                if self.slot_cache_affinity and getattr(self, "slot_gs", 0):
++                    validity = getattr(self, "slot_cache_valid", [True] * self.batch)[b]
++                    c = slot_policy.cache_state(len(self.slot_held[b]), self.slot_used[b], now,
++                                                validity and b not in superseded)
++                    row["cache_superseded"] = b in superseded
++                    row.update(cache_expired=c["expired"], cache_ttl_s=round(c["ttl_s"], 3),
++                               cache_age_s=round(c["age_s"], 3), cache_valid_hint=c["valid"],
++                               cache_retention_score=round(c["retention"], 6),
++                               cache_overwrite_score=round(c["overwrite_score"], 6))
++                if hasattr(self, "slot_cache_peer"):
++                    row["cache_peer_ip"] = self.slot_cache_peer[b]
++                if row.get("cache_expired") and row["held_tokens"]:
++                    seen = self.__dict__.setdefault("_cache_expiry_seen", [None] * self.batch)
++                    signature = (self.slot_used[b], row["held_tokens"])
++                    with self.slot_cv:
++                        if seen[b] != signature:
++                            seen[b] = signature
++                            self.cache_event("expired", slot=b, held_tokens=row["held_tokens"],
++                                             eligible_at=self.slot_used[b] + row["cache_ttl_s"])
++                view.append(row)
+                 continue
+             ft = r.get("first_token")
+-            view.append({"slot": b, "state": r["state"], "prompt_tokens": r["prompt_tokens"],
++            view.append({**{k: r[k] for k in ("request_key", "peer_ip", "cache_reused_tokens", "cache_read_tokens",
++                         "cache_match_hint", "cache_source_hint", "placement_reason") if k in r},
++                         "slot": b, "state": r["state"], "prompt_tokens": r["prompt_tokens"],
+                          "prompt_read": r.get("prompt_read") if r["state"] == "reading" else None,
+                          "generated": r["generated"], "elapsed_s": round(now - r["started"], 1),
+                          "tok_s": round(r["generated"] / max(1e-6, now - ft), 1) if ft else None})
+@@ -4623,6 +4943,7 @@ class Service:
+                 "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
+                 "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
+                 "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
++        live["peer_ip"] = s.get("peer_ip") if s.get("busy") else None
+         if state == "reading" and progress:
+             live["prompt_read"], live["prompt_total"] = progress
+         par = int(getattr(self.engine, "batch", 0) or 0)
+@@ -4632,13 +4953,21 @@ class Service:
+             slots = self.engine.slots_view() if hasattr(self.engine, "slots_view") else []
+             # the requests in flight that are not in a slot: the one alone on the solo path, or waiting their turn
+             in_slots = sum(1 for x in slots if x["state"] != "idle")
+-            live.update(parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),
++            live.update(solo_peer_ip=getattr(self.engine, "solo_peer_ip", None),
++                        solo_cache_source_slot=getattr(self.engine, "solo_cache_source_slot", None),
++                        solo_cache_reused_tokens=getattr(self.engine, "solo_cache_reused_tokens", None),
++                        solo_request_key=getattr(self.engine, "solo_request_key", None),
++                        parallel=par, running=running, slots=slots, outside_slots=max(0, running - in_slots),
+                         waiting=int(getattr(self.engine, "waiting", 0) or 0),
+                         admitting=int(getattr(self.engine, "admitting", 0) or 0))
+             if running and state == "idle":
+                 live["state"] = "generating"
+         if hasattr(self.engine, "replica_view"):        # opt-in replicas: each one's state and requests routed to it
+             live["replicas"] = self.engine.replica_view()
++        if hasattr(self.engine, "cache_events_view"):
++            live["cache_events"] = self.engine.cache_events_view()
++        if getattr(self.engine, "slot_cache_affinity", False):   # the slot policy tunables in force
++            live["slot_policy"] = slot_policy.settings()
+         engine = {"model": self.model, "max_context": self.reported_ctx(), "images": self.vision is not None,
+                   **dict(getattr(self.engine, "info", {}) or {})}
+         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
+@@ -5163,6 +5492,16 @@ class Service:
+         segments = []
+         timed_out = False
+         trace = getattr(self.request_trace, "record", None)
++        peer_ip = getattr(self.request_trace, "peer_ip", None)
++        api_request_key = f"req-{time.time_ns():x}"
++        if isinstance(self.engine, StrataEngine):
++            context = self.engine.__dict__.setdefault("_tl", threading.local())
++            context.peer_ip = peer_ip
++            context.api_request_key = api_request_key
++            context.cache_debug = None
++            context.executed_slot = None
++            context.cache_source_slot = None
++            context.cache_match_hint = None
+         waiting = time.perf_counter()
+         first_engine_token_s = None  # this request, from entering the engine queue; includes queue/prefill
+         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
+@@ -5247,7 +5586,7 @@ class Service:
+                             queued_counted = False
+                             self.terminal_requests[request_id].update(state="waiting", admitted_at=time.time())
+                             self._terminal_event_locked(request_id, "admitted")
+-                        st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
++                        st.update(busy=True, peer_ip=peer_ip, phase="reading the prompt", prompt_tokens=len(ids),
+                                   generated=0, started=time.time(), first_token=None, tool=None, tail="",
+                                   max_tokens=max_new, reasoning_recoveries=0, thinking_budget=budget)
+                         if par:
+@@ -5510,7 +5849,12 @@ class Service:
+                                 "id": request_id,
+                                 "projection": (sampling or {}).get("experimental_speed_projection") is not False
+                                 if loaded else None,
+-                                "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
++                                "request_key": api_request_key,
++                                "slot": getattr(getattr(self.engine, "_tl", None), "executed_slot", None),
++                                "cache_source_slot": getattr(getattr(self.engine, "_tl", None), "cache_source_slot", None),
++                                "cache_match_hint": getattr(getattr(self.engine, "_tl", None), "cache_match_hint", None),
++                                "cache_debug": getattr(getattr(self.engine, "_tl", None), "cache_debug", None),
++                                "peer_ip": peer_ip, "time": started, "duration_s": round(time.time() - started, 1), "finish": finish,
+                                 "prompt_tokens": seen, "reused": last.get("reused"), "output_tokens": n,
+                                 "first_engine_token_s": first_engine_token_s,
+                                 # the request's whole prompt, and the tokens read of it (None: an older engine)
+@@ -6824,6 +7168,7 @@ def make_handler(svc: Service):
+                         self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                     return
+                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
++                    svc.request_trace.peer_ip = self.client_address[0]
+                     self.record = svc.begin_request(path, req)
+                 if path == "/v1/responses":
+                     self._responses(req)
+@@ -6895,6 +7240,7 @@ def make_handler(svc: Service):
+             finally:
+                 if reserved:
+                     svc.release_inference()
++                svc.request_trace.peer_ip = None
+                 svc.drop_embeddings()                        # the images' file of a request that never got to run()
+                 if self.watch_done is not None:
+                     self.watch_done.set()
+diff --git a/serve/slot_policy.py b/serve/slot_policy.py
+new file mode 100644
+index 00000000..effb0326
+--- /dev/null
++++ b/serve/slot_policy.py
+@@ -0,0 +1,309 @@
++"""Cache retention and pipelined placement policy for STRATA_SLOT_CACHE_AFFINITY=1; no engine or I/O."""
++from __future__ import annotations
++
++import math
++from dataclasses import dataclass
++
++MAX_CACHE_TOKENS = 262144
++# Tunables (environment, read by configure() when the engine starts; the menu sets them per profile under
++# config_overrides.env).  Defaults are the values the policy was specified with.
++EXPIRED_KEEP_SCORE = 0.01    # STRATA_SLOT_EXPIRED_KEEP_SCORE: an expired history scoring at least this (retention at
++                             # expiry, then decayed; 0.01 is about 2.5K tokens at expiry) goes last
++PARK_VALUE_RATIO = 2.0       # STRATA_SLOT_PARK_VALUE_RATIO: a park takes an expired history worth keeping only when the
++                             # main session's conversation is worth at least this many times more; 0: never
++IDLE_VALUE_ZERO_S = 1800.0  # STRATA_SLOT_IDLE_VALUE_ZERO_S: idle age when expired value reaches zero; 0 disables decay
++PARK_KEPT_SHARE = 0.98       # STRATA_SLOT_PARK_KEPT_SHARE: a slot holding at least this share of the main session's
++                             # conversation already keeps it (no park); the rest is read again when it comes back
++SIBLING_SHARE = 0.98         # STRATA_SLOT_SIBLING_SHARE: an idle history that shares at least this share of its own
++                             # length with the conversation being placed or parked is an older version of it (the
++                             # client rewrote its end: a classifier query inserts before its closing text); it is
++                             # replaced in place, even while protected; 0: off
++PARK_MIN_VALUE = 0.01        # STRATA_SLOT_PARK_MIN_VALUE: the main session's conversation is parked only while its
++                             # value (stale_retention at its idle age) is at least this; 0.01 is EXPIRED_KEEP_SCORE's
++                             # default
++TTL_MAX_S = 120.0            # STRATA_SLOT_TTL_MAX_S: protection at 262144 tokens; the whole curve scales with it
++_TTL_SHAPE = ((0, 0.0), (500, 0.1), (2000, 2.0), (8000, 10.0),
++              (32000, 45.0), (50000, 65.0), (100000, 90.0), (MAX_CACHE_TOKENS, 120.0))
++TTL_POINTS = _TTL_SHAPE
++
++
++def configure(env) -> dict:
++    """Read the tunables from `env` (the engine's environment); bad or missing values keep the defaults."""
++    global TTL_MAX_S, TTL_POINTS, EXPIRED_KEEP_SCORE, IDLE_VALUE_ZERO_S, \
++        PARK_VALUE_RATIO, PARK_MIN_VALUE, PARK_KEPT_SHARE, SIBLING_SHARE
++
++    def value(name, default):
++        try:
++            v = float((env or {}).get(name, default))
++            return v if math.isfinite(v) and v >= 0 else default
++        except (TypeError, ValueError):
++            return default
++    TTL_MAX_S = value("STRATA_SLOT_TTL_MAX_S", 120.0)
++    EXPIRED_KEEP_SCORE = value("STRATA_SLOT_EXPIRED_KEEP_SCORE", 0.01)
++    IDLE_VALUE_ZERO_S = value("STRATA_SLOT_IDLE_VALUE_ZERO_S", 1800.0)
++    TTL_POINTS = tuple((n, s * TTL_MAX_S / 120.0) for n, s in _TTL_SHAPE)
++    PARK_VALUE_RATIO = value("STRATA_SLOT_PARK_VALUE_RATIO", 2.0)
++    PARK_MIN_VALUE = value("STRATA_SLOT_PARK_MIN_VALUE", 0.01)
++    PARK_KEPT_SHARE = value("STRATA_SLOT_PARK_KEPT_SHARE", 0.98)
++    SIBLING_SHARE = value("STRATA_SLOT_SIBLING_SHARE", 0.98)
++    return settings()
++
++
++def settings() -> dict:
++    return {"ttl_max_s": TTL_MAX_S, "expired_keep_score": EXPIRED_KEEP_SCORE,
++            "idle_value_zero_s": IDLE_VALUE_ZERO_S, "park_value_ratio": PARK_VALUE_RATIO,
++            "park_min_value": PARK_MIN_VALUE, "park_kept_share": PARK_KEPT_SHARE, "sibling_share": SIBLING_SHARE}
++
++
++def cache_ttl(tokens: int) -> float:
++    n = min(MAX_CACHE_TOKENS, max(0, tokens))
++    for (lo, a), (hi, b) in zip(TTL_POINTS, TTL_POINTS[1:]):
++        if n <= hi:
++            return a + (b - a) * (n - lo) / (hi - lo)
++    return TTL_POINTS[-1][1]
++
++
++def stale_retention(tokens: int, age_s: float = 0.0) -> float:
++    """Value at expiry times (1 - x*x), x = (age - TTL) / (IDLE_VALUE_ZERO_S - TTL), clamped to [0, 1].
++
++    Age is time since last actual use, including protection. Loss per second increases until value reaches zero.
++    Before expiry this is the projected value at expiry; zero disables decay. Protection takes precedence if a
++    configured zero age is shorter than the TTL. Replacement priority never changes whether a history can match.
++    """
++    n = min(MAX_CACHE_TOKENS, max(0, tokens))
++    base = (n / 50000.0) ** 0.7 * (n / (n + 2000.0)) ** 2 * 0.25
++    ttl = cache_ttl(tokens)
++    if IDLE_VALUE_ZERO_S == 0 or age_s < ttl:
++        return base
++    if age_s >= IDLE_VALUE_ZERO_S:
++        return 0.0
++    x = max(0.0, (age_s - ttl) / (IDLE_VALUE_ZERO_S - ttl))
++    return base * (1.0 - x * x)
++
++
++def cache_state(tokens: int, last_used: float, now: float, valid: bool = True) -> dict:
++    age = max(0.0, now - last_used)
++    ttl = cache_ttl(tokens)
++    expired = tokens == 0 or age >= ttl or not valid
++    # A 50K history has substantial value. The additional small-history factor makes
++    # tiny probes much cheaper to replace without flattening all medium histories.
++    n = min(MAX_CACHE_TOKENS, max(0, tokens))
++    freshness = max(0.0, 1.0 - age / ttl) if ttl else 0.0
++    retention = 0.0 if expired else (n / 50000.0) ** 0.7 * (n / (n + 2000.0)) ** 2 * (0.25 + 0.75 * freshness)
++    return {"tokens": tokens, "ttl_s": ttl, "age_s": age, "expired": expired,
++            "valid": valid, "retention": retention, "overwrite_score": 1.0 / (1.0 + retention)}
++
++
++@dataclass(frozen=True)
++class Placement:
++    slot: int | None
++    source_hint: int | None = None
++    reused_hint: int = 0
++    near_tokens: int = 0
++    reason: str = "busy"
++
++
++def reliable_flags(busy: list[bool], valid: list[bool] | None, group_size: int, padding_safe: bool) -> list[bool]:
++    """Whether each slot's held tokens are still a usable cache.  Without the native active-row engine, an idle row
++    below a busy row of its group is a pad row: its state is being overwritten."""
++    gs = max(1, group_size)
++    validity = valid if valid is not None else [True] * len(busy)
++    return [bool(validity[b]) and (padding_safe or not any(busy[x] for x in range(b + 1, b - b % gs + gs)))
++            for b in range(len(busy))]
++
++
++def superseded_slots(held: list[list[int]], busy: list[bool], reliable: list[bool]) -> set[int]:
++    """Idle histories that are the start of another idle slot's history: the conversation moved on in that other
++    slot, so this copy saves nothing it does not.  They count as empty (no protection, no wait)."""
++    out = set()
++    for b, h in enumerate(held):
++        if h and not busy[b]:
++            for y, other in enumerate(held):
++                if (y != b and not busy[y] and reliable[y] and
++                        (len(other) > len(h) or (len(other) == len(h) and y < b)) and other[:len(h)] == h):
++                    out.add(b)
++                    break
++    return out
++
++
++def common_prefix(a: list[int], b: list[int]) -> int:
++    """How many leading tokens `a` and `b` share (each step compares only the part not yet known to match)."""
++    lo, hi = 0, min(len(a), len(b))
++    while lo < hi:
++        mid = (lo + hi + 1) // 2
++        if a[lo:mid] == b[lo:mid]:
++            lo = mid
++        else:
++            hi = mid - 1
++    return lo
++
++
++def siblings(tokens: list[int], held: list[list[int]], slots) -> dict[int, int]:
++    """The slots among `slots` whose history is an older version of `tokens`: it shares at least SIBLING_SHARE of
++    its own length with them but is not their start (a start is a cache source, or the conversation's own older
++    copy).  Slot -> shared tokens."""
++    if SIBLING_SHARE <= 0:
++        return {}
++    out = {}
++    for b in slots:
++        h = held[b]
++        if h and not (len(h) < len(tokens) and tokens[:len(h)] == h):
++            c = common_prefix(tokens, h)
++            if c < len(h) and c >= SIBLING_SHARE * len(h):
++                out[b] = c
++    return out
++
++
++def checkpoint_hint(prompt: list[int], held: list[list[int]], slots, checks) -> tuple[int | None, int]:
++    """The deepest checkpoint a slot reported (engine BCHECKS, `checks[b]`: lengths) that is still a start of `prompt`:
++    (slot, tokens), (None, 0) for none.  A hint: the engine checks the tokens again, and it may also continue from
++    the main session's own checkpoints, which are not reported."""
++    src, best = None, 0
++    for b in slots if checks else ():
++        at = [p for p in (checks[b] if b < len(checks) else ()) if best < p < len(prompt) and p <= len(held[b])]
++        if at:
++            c = common_prefix(prompt, held[b])
++            p = max((p for p in at if p <= c), default=0)
++            if p > best:
++                src, best = b, p
++    return src, best
++
++
++def _blank(held, busy, used, now, reliable):
++    superseded = superseded_slots(held, busy, reliable)
++    states = [cache_state(len(h), used[b], now, reliable[b] and b not in superseded) for b, h in enumerate(held)]
++    # Nothing worth keeping: no tokens, known invalid, or a superseded copy.  An expired history counts as empty for
++    # the protection rules, but it is still a cache (it can match until overwritten), so it is overwritten only after
++    # these - the one with the lowest score first.
++    blank = {b for b in range(len(held)) if not held[b] or not reliable[b] or b in superseded}
++    return states, blank
++
++
++def _slot_values(held, states, blank) -> dict[int, float]:
++    """Each slot's current value: 0 for a blank slot, else its value decayed with its idle age."""
++    return {b: 0.0 if b in blank else stale_retention(len(h), states[b]["age_s"]) for b, h in enumerate(held)}
++
++
++def _worth_keeping(value: float) -> bool:
++    return value >= EXPIRED_KEEP_SCORE and value > 0
++
++
++def reclaim_slot(candidates, values, blank, rank, positions) -> int | None:
++    """The reclaim order place() and park_destination() share, over idle expired slots (blank ones included): the
++    slots not worth keeping (blank, or a value below EXPIRED_KEEP_SCORE) before histories worth keeping; then `rank`
++    (the group's load); then the lowest value, a blank slot first at an equal value; then the slot order."""
++    if not candidates:
++        return None
++    return min(candidates, key=lambda b: (_worth_keeping(values[b]), *rank(b), values[b], b not in blank,
++                                          positions[b]))
++
++
++def park_destination(main: list[int], busy: list[bool], held: list[list[int]], used: list[float],
++                     order: list[int], group_size: int, now: float, valid: list[bool] | None = None,
++                     padding_safe: bool = False, exclude=(), main_value: float = 0.0) -> int | None:
++    """An idle slot to keep the main session's conversation in before another request replaces it (engine park=):
++    its own older copy, else an older version of it (siblings(): the same conversation with another end, protected
++    or not), else an expired slot in place()'s reclaim order (reclaim_slot), where a history worth keeping counts
++    only when `main_value` (the main session's current value) is at least PARK_VALUE_RATIO times its own.  Never
++    another conversation's protected slot.  None: nowhere to keep it (or it is already kept)."""
++    if not padding_safe or not main:
++        return None
++    gs = max(1, group_size)
++    reliable = reliable_flags(busy, valid, gs, padding_safe)
++    for b, h in enumerate(held):   # already kept (all but a short tail) - in an idle slot or one decoding it
++        if (h and reliable[b] and len(h) >= PARK_KEPT_SHARE * len(main) and
++                (main[:len(h)] == h or h[:len(main)] == main)):
++            return None
++    states, blank = _blank(held, busy, used, now, reliable)
++    positions = {b: i for i, b in enumerate(order)}
++    loads = {g: sum(busy[g:g + gs]) for g in range(0, len(busy), gs)}
++    own = [b for b in order if not busy[b] and b not in exclude and held[b] and reliable[b] and
++           len(held[b]) < len(main) and main[:len(held[b])] == held[b]]
++    if own:
++        return max(own, key=lambda b: (len(held[b]), -positions[b]))
++    older = siblings(main, held, [b for b in order if not busy[b] and b not in exclude and reliable[b]])
++    if older:
++        return max(older, key=lambda b: (older[b], -positions[b]))
++    values = _slot_values(held, states, blank)
++    candidates = [b for b in order if not busy[b] and b not in exclude and states[b]["expired"] and
++                  (not _worth_keeping(values[b]) or
++                   (PARK_VALUE_RATIO > 0 and main_value >= PARK_VALUE_RATIO * values[b]))]
++    return reclaim_slot(candidates, values, blank, lambda b: (loads[b - b % gs],), positions)
++
++
++def place(prompt: list[int], busy: list[bool], held: list[list[int]], used: list[float],
++          order: list[int], group_size: int, now: float, valid: list[bool] | None = None,
++          prefill_rate: float | None = None, padding_safe: bool = False, checks=None) -> Placement:
++    free = [b for b in order if not busy[b]]
++    if not free:
++        return Placement(None)
++    gs = max(1, group_size)
++    validity = valid if valid is not None else [True] * len(busy)
++    # Conservative current-window check plus remembered native-line invalidations.
++    reliable = reliable_flags(busy, validity, gs, padding_safe)
++    states, blank = _blank(held, busy, used, now, reliable)
++    matches = {b: len(held[b]) for b in free if reliable[b] and held[b] and
++               len(held[b]) < len(prompt) and prompt[:len(held[b])] == held[b]}
++    best = max(matches.values(), default=0)
++    # Near = at most 2% of the best prefix, 1 second of observed prefill, and 4096 tokens.
++    rate = prefill_rate if prefill_rate and math.isfinite(prefill_rate) and prefill_rate > 0 else 1000.0
++    near = int(min(best * 0.02, rate, 4096))
++    sources = [b for b, n in matches.items() if best - n <= near]
++    loads = {g: sum(busy[g:g + gs]) for g in range(0, len(busy), gs)}
++    positions = {b: i for i, b in enumerate(order)}
++
++    def collateral(b):
++        if padding_safe:
++            return 0.0
++        # Starting an upper row can pad over a lower idle protected history. A matching
++        # ancestor is the same conversation, so its displacement does not lose another chat.
++        return sum(states[x]["retention"] for x in range(b - b % gs, b)
++                   if not busy[x] and x not in matches)
++
++    def loss(b):
++        return (0.0 if b in matches else states[b]["retention"]) + collateral(b)
++
++    def pipeline(b):
++        g0 = b - b % gs
++        high = max([x - g0 for x in range(g0, g0 + gs) if busy[x]] + [-1])
++        extra_rows = 1 if padding_safe else max(0, b - g0 - high)
++        return loads[g0], extra_rows, positions[b]
++
++    if sources:
++        # Cache source and execution destination are separate: the native engine restores the longest valid
++        # prefix from any idle slot, then copies the conversation into the destination (it copies even when they
++        # are the same slot, so moving costs nothing extra).  Move only into a blank slot, and only for a less
++        # loaded group; never over another conversation's history, expired or not (2026-10-14: two chats moved
++        # into each other's expired slot on every turn and re-read 60-100K tokens each time).
++        candidates = sources + [b for b in free if b not in sources and b in blank and collateral(b) == 0]
++        slot = min(candidates, key=lambda b: (loss(b), *pipeline(b)[:2], b not in sources, positions[b]))
++        source = max(sources, key=lambda b: (matches[b], -positions[b]))
++        return Placement(slot, source, best, near, "reuse")
++
++    # An older version of this conversation (siblings(): its client rewrote the end) is replaced in place, protected
++    # or not: kept beside it, each version of a classifier query took a slot of its own and pushed other conversations
++    # out (2026-10-16: 4-5 of 6 slots).  The longest shared part first, then group load.
++    older = siblings(prompt, held, [b for b in free if reliable[b] and collateral(b) == 0])
++    # no slot continues the prompt: what the engine can still resume from is a slot's checkpoint (hint only)
++    ck_source, ck_tokens = checkpoint_hint(prompt, held, [b for b in free if reliable[b]], checks)
++    if older:
++        slot = min(older, key=lambda b: (-older[b], *pipeline(b)[:2], positions[b]))
++        return Placement(slot, ck_source, ck_tokens, reason="sibling")
++
++    safe = [b for b in free if states[b]["expired"] and collateral(b) == 0]
++
++    values = _slot_values(held, states, blank)
++
++    if safe:
++        # Expired = empty for protection, but an expired history can still match until it is overwritten: one that
++        # still scores EXPIRED_KEEP_SCORE goes only when no blank or worthless slot is free (else a new chat in the
++        # idle group overwrote the other chat every turn - GPU run 2026-10-15).  Then group load; then the lowest score.
++        slot = reclaim_slot(safe, values, blank, lambda b: pipeline(b)[:2], positions)
++        return Placement(slot, ck_source, ck_tokens, reason="reclaim")
++    # Every idle history is protected: no wait (it cost a free slot 5 s per request when requests were queued, and
++    # ended in the same overwrite) - the history that loses least goes now.
++    cheapest = min(loss(b) for b in free)
++    # Loss scores within 10% are close enough to let group load/padding break the tie.
++    candidates = [b for b in free if loss(b) <= cheapest * 1.10 + 1e-12]
++    return Placement(min(candidates, key=lambda b: (*pipeline(b), loss(b), used[b])), ck_source, ck_tokens,
++                     reason="evict")
+diff --git a/serve/test_cache_trace.py b/serve/test_cache_trace.py
+new file mode 100644
+index 00000000..30222523
+--- /dev/null
++++ b/serve/test_cache_trace.py
+@@ -0,0 +1,44 @@
++import unittest
++from serve.cache_trace import snapshot
++
++class CacheTrace(unittest.TestCase):
++    def test_prefix_boundary_busy_and_expired(self):
++        result=snapshot([1,2,3,4], [[1,2],[1,7],[1,2,3,4,5],[]],
++                        [False,True,False,False],[True,True,False,True],[0,99,99,0],100)
++        self.assertEqual([r['common_prefix_tokens'] for r in result['slots']], [2,1,4,0])
++        self.assertEqual([r['full_prefix_match'] for r in result['slots']], [True,False,False,False])
++        self.assertTrue(result['slots'][0]['expired'])
++        self.assertTrue(result['slots'][1]['busy'])
++        self.assertFalse(result['slots'][2]['valid_hint'])
++        self.assertNotIn('prompt', result)
++    def test_matches_equal_prefixes_at_every_boundary(self):
++        held=list(range(300))
++        for i in range(301):
++            prompt=held[:i]+[-1]
++            result=snapshot(prompt,[held],[False],[True],[0],100)
++            self.assertEqual(result['slots'][0]['common_prefix_tokens'],i)
++
++    def test_resume_after_main_source_is_actual_reuse(self):
++        import queue, threading
++        from serve.server import StrataEngine
++        engine=object.__new__(StrataEngine)
++        engine.lines=queue.Queue()
++        engine._ctl_mode='solo'
++        engine._tl=threading.local()
++        engine._tl.request_key='request-a'
++        engine._parse_done=lambda line: None
++        for line in ['CACHE_SOURCE -1 900', 'RESUME 700', 'DONE']:
++            engine.lines.put(line)
++        list(engine._control(threading.Event(), lambda token: None))
++        self.assertEqual(engine.solo_cache_reused_tokens,700)
++        self.assertIsNone(engine.solo_cache_source_slot)
++        self.assertEqual(engine.cache_events_view()[0]['request_key'],'request-a')
++        self.assertEqual(engine.cache_events_view()[0]['reused_tokens'],700)
++    def test_global_expiry_does_not_inherit_request(self):
++        import threading
++        from serve.server import StrataEngine
++        engine=object.__new__(StrataEngine)
++        engine._tl=threading.local()
++        engine._tl.request_key='request-a'
++        engine.cache_event('expired',slot=0)
++        self.assertNotIn('request_key',engine.cache_events_view()[0])
+diff --git a/serve/test_parallel.py b/serve/test_parallel.py
+index 627cdc98..accb7c29 100644
+--- a/serve/test_parallel.py
++++ b/serve/test_parallel.py
+@@ -5,6 +5,7 @@ real StrataEngine and Service, so the server's side is tested without a GPU: req
+ wait for a slot, /metrics shows the slots, each request's history row is its own, and a conversation's next turn
+ goes back to the slot that holds it."""
+ import json
++import os
+ import sys
+ import tempfile
+ import threading
+@@ -19,6 +20,7 @@ from serve.frontend import ChatTemplate
+ from serve.server import ByteTokenizer, Service, StrataEngine, engine_args, parallel_args, serve
+ from strata_cli import bench
+ from strata_cli.client import Endpoint
++from serve import slot_policy
+ 
+ # The fake engine: one token every STEP seconds per active slot (a "window" serves every active slot at once);
+ # GEN (solo) streams T lines; BGEN reads the prompt (one T line, DONE), answers BADM and continues in the slot.
+@@ -110,6 +112,8 @@ while True:
+             stopped.add(b)
+         continue
+     if line.startswith(("GEN ", "BGEN ")):
++        if "--source-trace" in args:
++            print("CACHE_SOURCE 1 3", flush=True)
+         f = line.split()
+         slot = int(f[1]) if f[0] == "BGEN" else None
+         max_new = int(f[2] if f[0] == "BGEN" else f[1])
+@@ -321,7 +325,7 @@ class FakeEngineCase(unittest.TestCase):
+     """The real StrataEngine and Service over HTTP, the fake engine behind them."""
+ 
+     def start(self, slots, fit=None, slot_cache=False, fail=False, reuse=False, says_groups=0,
+-              more=(), stage_plan=False, batch_sample=False, stage_sample=False):
++              more=(), stage_plan=False, batch_sample=False, stage_sample=False, affinity=False):
+         import serve.server as server
+         self.tmp = tempfile.TemporaryDirectory()
+         script = Path(self.tmp.name) / "fake_strata.py"
+@@ -339,7 +343,8 @@ class FakeEngineCase(unittest.TestCase):
+         extra += list(more)
+         with mock.patch.object(server.subprocess, "Popen",
+                                lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)):
+-            self.engine = StrataEngine("strata", extra, log=str(Path(self.tmp.name) / "engine.log") if stage_plan else None)
++            self.engine = StrataEngine("strata", extra, log=str(Path(self.tmp.name) / "engine.log") if stage_plan else None,
++                                       env={**os.environ, "STRATA_SLOT_CACHE_AFFINITY": "1"} if affinity else None)
+         tok = ByteTokenizer()
+         self.svc = Service(self.engine, tok, ChatTemplate(Path(__file__).parent / "chat_template.jinja"))
+         self.httpd = serve(self.svc, port=0)
+@@ -408,6 +413,68 @@ class ParallelService(FakeEngineCase):
+     """The real StrataEngine and Service over HTTP, the fake engine behind them: slots, queues, benchmarks, telemetry.
+     The yielding, restart and failure tests are in serve/test_parallel_yield.py (this file alone ran past 100 s)."""
+ 
++    def test_expiry_state_and_event_are_visible_in_same_metrics_response(self):
++        self.start(4, says_groups=2, affinity=True)
++        self.engine.slot_held[0] = [1] * 500
++        self.engine.slot_used[0] = time.time() - 1
++        self.engine.slot_cache_valid[0] = True
++        metrics = self.get("/metrics")["live"]
++        self.assertTrue(metrics["slots"][0]["cache_expired"])
++        self.assertTrue(any(event["kind"] == "expired" and event["slot"] == 0
++                            for event in metrics["cache_events"]))
++
++    def test_solo_native_source_is_forwarded_without_reserving_batch_slot(self):
++        self.start(2, more=["--source-trace"])
++        out = {}
++        worker = threading.Thread(target=lambda: out.update(reply=self.chat("LONGREPLY please")))
++        worker.start()
++        deadline = time.time() + 5
++        observed = None
++        while time.time() < deadline:
++            live = self.get("/metrics")["live"]
++            if live.get("solo_cache_source_slot") == 1:
++                observed = live
++                break
++            time.sleep(.01)
++        worker.join(10)
++        self.assertIsNotNone(observed)
++        self.assertEqual(observed["solo_cache_reused_tokens"], 3)
++        self.assertTrue(observed["solo_request_key"])
++        self.assertTrue(all(s["state"] == "idle" for s in observed["slots"]))
++        self.assertIn("reply", out)
++        # once it is answered, /metrics shows no solo request: no key or cache source left from it
++        live = self.get("/metrics")["live"]
++        self.assertEqual([live[k] for k in ("solo_peer_ip", "solo_request_key", "solo_cache_source_slot",
++                                            "solo_cache_reused_tokens")], [None] * 4)
++
++    def test_solo_completion_records_actual_last_use_of_main_cache(self):
++        self.start(2, says_groups=2, affinity=True)
++        self.engine.main_used = time.time() - 3600
++        before = time.time()
++        self.chat('hello', max_tokens=8)
++        self.assertTrue(self.engine.main_held)
++        self.assertGreaterEqual(self.engine.main_used, before)
++        self.assertLessEqual(self.engine.main_used, time.time())
++
++    def test_http_peer_is_recorded_without_trusting_forwarded_ip(self):
++        self.start(2, says_groups=2, affinity=True)
++        body = {"messages": [{"role": "user", "content": "hello"}],
++                "max_tokens": 16, "reasoning_effort": "none", "peer_ip": "192.0.2.99"}
++        req = urllib.request.Request(self.base + "/v1/chat/completions", data=json.dumps(body).encode(),
++                                     headers={"Content-Type": "application/json", "X-Forwarded-For": "192.0.2.99"})
++        with urllib.request.urlopen(req, timeout=30) as response:
++            self.assertEqual(response.status, 200)
++            response.read()
++        history = self.get("/metrics")["requests"]
++        self.assertEqual(history[0]["peer_ip"], "127.0.0.1")
++        self.assertIsNone(self.get("/metrics")["live"]["peer_ip"])
++        out = self._two_at_once("another")
++        self.assertEqual(out["b"][0], "ok", out)
++        events = self.get("/metrics")["live"]["cache_events"]
++        allocations = [x for x in events if x["kind"] == "allocation"]
++        self.assertTrue(allocations)
++        self.assertTrue(all(x["peer_ip"] == "127.0.0.1" for x in allocations))
++
+     def test_bgen_refused_by_the_engine_is_retried_not_a_400(self):
+         """#1994: the engine refuses a BGEN ("no such free slot") although the server saw the slot free: the request
+         goes to another slot (or waits) and is answered; the same conversation's next turn works too."""
+diff --git a/serve/test_parallel_yield.py b/serve/test_parallel_yield.py
+index eeabe383..9a3248d8 100644
+--- a/serve/test_parallel_yield.py
++++ b/serve/test_parallel_yield.py
+@@ -286,6 +286,34 @@ class ParallelServiceYield(tp.FakeEngineCase):
+         self.assertEqual(t["cache_n"], 3, t)                          # the first read's reuse only
+         self.assertGreater(t["predicted_ms"], 60.0, t)
+ 
++    def test_a_continued_leg_keeps_the_records_cache_source_and_hint(self):
++        """A request that read its prompt on the solo path and went on in a slot: its record keeps that first read's
++        cache source and placement hint, as it keeps its reuse (#1869).  The slot admission's hint counts the
++        request's own output (its prompt there is the prompt and the reply so far), so the record said more could
++        be resumed than its prompt had."""
++        from serve.slot_policy import Placement
++        self.start(2, slot_cache=True, reuse=True, affinity=True, more=("--source-trace",))
++        e, pick = self.engine, self.engine.pick_slot
++
++        def resume_all(prompt):                            # a plan that resumes the whole prompt it is given
++            b = pick(prompt)
++            e.slot_last_plan = Placement(slot=b, source_hint=b, reused_hint=len(prompt), reason="reuse")
++            return b
++        e.pick_slot = resume_all
++        res = {}
++        long = threading.Thread(target=lambda: res.setdefault("long", self.chat("LONGREPLY please", max_tokens=200)))
++        long.start()
++        time.sleep(0.25)                                   # a few solo tokens first
++        self.chat("short", max_tokens=200)
++        long.join(30)
++        kinds = [x.split()[0] for x in self.log.read_text().splitlines()]
++        self.assertEqual(kinds[:2], ["GEN", "BGEN"], kinds)           # solo, then continued in a slot
++        rows = sorted(self.svc.history, key=lambda h: h["output_tokens"])
++        short, longest = rows[0], rows[-1]
++        self.assertEqual(short["cache_match_hint"], short["prompt_tokens"], short)   # its one read, in a slot
++        self.assertIsNone(longest["cache_match_hint"], longest)       # its first read was on the solo path
++        self.assertEqual(longest["cache_source_slot"], 1, longest)    # that read's CACHE_SOURCE
++
+     def test_a_leaked_busy_slot_does_not_hang_the_next_request(self):
+         """#1603: a slot whose busy flag has no owner (no request holds it, no BDONE wait is running) kept every later
+         request waiting for a slot nothing would free: running 0, queued 0, and the frozen-engine check never looked.
+diff --git a/serve/test_slot_alloc.py b/serve/test_slot_alloc.py
+index b2b4d35b..404e8b4f 100644
+--- a/serve/test_slot_alloc.py
++++ b/serve/test_slot_alloc.py
+@@ -7,10 +7,14 @@ from __future__ import annotations
+ import random
+ import sys
+ import unittest
++import threading
++import time
++from unittest import mock
+ from pathlib import Path
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ from serve.server import StrataEngine  # noqa: E402
++from serve import slot_policy  # noqa: E402
+ 
+ 
+ def engine(batch, groups, pipelined=True):
+@@ -60,12 +64,108 @@ class Pipelined(unittest.TestCase):
+                 e.slot_busy[b] = True
+ 
+     def test_held_tokens_are_ignored(self):
+-        # the engine keeps no pipelined slot as a cache: a held prefix must not pull a request into a hole-making slot
++        # Affinity is opt-in: the default still prioritizes pipeline placement over held prefixes.
+         e = engine(6, 3)
+         e.slot_held[5] = [1, 2]
+         self.assertEqual(e.pick_slot([1, 2, 3]), 0)
+ 
+ 
++class CacheAffinity(unittest.TestCase):
++    def engine(self):
++        e = engine(6, 3)
++        e.slot_cache_affinity = True
++        e.slot_used = [time.time()] * 6
++        return e
++
++    def test_environment_survives_lazy_restart_setup(self):
++        e = StrataEngine("missing", [], env={"STRATA_SLOT_CACHE_AFFINITY": "1"}, lazy=True)
++        self.assertTrue(e.slot_cache_affinity)
++        restarted = StrataEngine(*e.spawn[:5], lazy=True, cpus=e.spawn[6])
++        self.assertTrue(restarted.slot_cache_affinity)
++        self.assertFalse(StrataEngine("missing", [], env={}, lazy=True).slot_cache_affinity)
++
++    def test_two_long_histories_stay_in_their_slots_over_alternating_turns(self):
++        e = self.engine()
++        a, b = list(range(1000)), list(range(2000, 3000))
++        e.slot_held[0], e.slot_held[2] = list(a), list(b)
++        for turn in range(8):
++            for slot, history in ((2, b), (0, a)):
++                history.append(4000 + turn)
++                self.assertEqual(e.pick_slot(history), slot)
++                e.slot_held[slot] = list(history)
++
++    def test_longest_available_prefix_beats_group_spreading(self):
++        e = self.engine()
++        e.slot_held[0] = list(range(600))
++        e.slot_held[5] = list(range(900))
++        e.pick_slot(list(range(1000)))
++        self.assertEqual(e.slot_last_plan.source_hint, 5)
++        e.slot_busy[5] = True
++        self.assertEqual(e.pick_slot(list(range(1000))), 0)
++
++    def test_new_helper_uses_empty_group_without_padding_old_histories(self):
++        e = self.engine()
++        e.slot_held[0], e.slot_held[2] = list(range(600)), list(range(2000, 2600))
++        self.assertEqual(e.pick_slot([9999]), 4)
++        e.slot_busy[4] = True
++        self.assertEqual(e.pick_slot([9999]), 5)
++
++    def test_all_expired_histories_are_logically_empty(self):
++        e = self.engine()
++        e.slot_held = [[100 + b] for b in range(6)]
++        e.slot_used = [8, 7, 6, 5, 1, 3]
++        self.assertEqual(e.pick_slot([9999]), 0)
++
++    def test_short_and_equal_histories_do_not_force_affinity(self):
++        e = self.engine()
++        e.slot_held[5] = [1, 2]
++        self.assertEqual(e.pick_slot([1, 2, 3]), 0)
++        e.slot_held[5] = list(range(900))
++        self.assertEqual(e.pick_slot(list(range(900))), 0)
++
++    def test_full_load_waits_and_empty_slots_still_spread(self):
++        e = self.engine()
++        got = []
++        for _ in range(6):
++            slot = e.pick_slot([9999])
++            got.append(slot)
++            e.slot_busy[slot] = True
++        self.assertEqual(got, [0, 2, 4, 1, 3, 5])
++        self.assertIsNone(e.pick_slot([9999]))
++
++    def test_cold_request_uses_idle_group_before_filling_busy_group(self):
++        e = self.engine()
++        e.slot_busy[3] = e.slot_busy[5] = True
++        # Every free slot has historical tokens, as in the reported live 2/3/5 placement.
++        e.slot_held = [[100 + b] for b in range(6)]
++        e.slot_used = [90, 90, 1, 90, 2, 90]
++        self.assertEqual(e.pick_slot([9999]), 0)
++
++    def test_padding_threatened_prefix_does_not_override_idle_group(self):
++        e = self.engine()
++        e.slot_busy[3] = e.slot_busy[5] = True
++        e.slot_held = [[100 + b] for b in range(6)]
++        e.slot_held[2] = list(range(1000))
++        e.slot_used = [0] * 6
++        self.assertEqual(e.pick_slot(list(range(1001))), 0)
++
++    def test_valid_match_still_beats_group_load(self):
++        e = self.engine()
++        e.slot_busy[2] = True
++        e.slot_held[3] = list(range(1000))
++        # An upper slot's history is not padded by a lower busy slot.
++        e.pick_slot(list(range(1001)))
++        self.assertEqual(e.slot_last_plan.source_hint, 3)
++
++    def test_cold_requests_spread_when_a_group_has_a_leading_hole(self):
++        e = self.engine()
++        e.slot_busy[3] = e.slot_busy[5] = True
++        self.assertEqual(e.pick_slot([9999]), 0)
++        e.slot_busy[0] = True
++        # Now all groups have one request: filling a leading hole beats another row.
++        self.assertEqual(e.pick_slot([9999]), 2)
++
++
+ class OneGroup(unittest.TestCase):
+     def test_reuse_then_least_recently_used(self):
+         e = engine(4, 1, pipelined=False)
+@@ -104,5 +204,723 @@ class OneSlotGroups(unittest.TestCase):
+         self.assertEqual(e.pick_slot(hist + [T, 5, 6] + list(range(3000, 3050))), 0)
+ 
+ 
++class RetentionPolicy(unittest.TestCase):
++    NOW = 1000.0
++
++    def e(self):
++        e = engine(6, 3)
++        e.slot_cache_affinity = True
++        e.slot_used = [self.NOW] * 6
++        return e
++
++    def place(self, e, prompt, **kw):
++        return slot_policy.place(prompt, e.slot_busy, e.slot_held, e.slot_used,
++                                 e.slot_order, e.slot_gs, self.NOW, **kw)
++
++    def test_ttl_curve_anchors_cap_and_monotonicity(self):
++        for n, seconds in ((500, 0.1), (50000, 65), (100000, 90), (262144, 120), (900000, 120)):
++            self.assertAlmostEqual(slot_policy.cache_ttl(n), seconds)
++        curve = [slot_policy.cache_ttl(n) for n in range(0, 300000, 137)]
++        self.assertEqual(curve, sorted(curve))
++
++    def test_expiry_is_virtual_and_expired_history_still_matches(self):
++        e = self.e()
++        h = list(range(500))
++        e.slot_held[2] = h
++        e.slot_used[2] -= 10
++        plan = self.place(e, h + [9999])
++        self.assertEqual(plan.source_hint, 2)
++        self.assertEqual(plan.reused_hint, 500)
++        self.assertEqual(e.slot_held[2], h)  # no token deletion on expiry
++
++    def test_short_prompt_is_far_cheaper_than_fifty_k(self):
++        tiny = slot_policy.cache_state(500, self.NOW, self.NOW)
++        medium = slot_policy.cache_state(50000, self.NOW, self.NOW)
++        long = slot_policy.cache_state(150000, self.NOW, self.NOW)
++        self.assertLess(tiny['retention'], medium['retention'] / 100)
++        self.assertGreater(medium['retention'], 0.5)
++        self.assertLess(medium['retention'], long['retention'])
++
++    def test_fresh_medium_outweighs_nearly_expired_long_history(self):
++        a = slot_policy.cache_state(50000, self.NOW, self.NOW)
++        b = slot_policy.cache_state(150000, self.NOW - 97, self.NOW)
++        self.assertGreater(a['retention'], b['retention'])
++
++    def test_expired_value_loses_more_each_interval_and_reaches_zero_at_total_idle_limit(self):
++        ttl = slot_policy.cache_ttl(50000)
++        base = slot_policy.stale_retention(50000)
++        self.assertAlmostEqual(base, slot_policy.cache_state(50000, 0, ttl - 1e-8)['retention'])
++        for age in (0, ttl / 2, ttl):
++            self.assertEqual(slot_policy.stale_retention(50000, age), base)
++        values = [slot_policy.stale_retention(50000, ttl + (1800 - ttl) * i / 4) for i in range(5)]
++        self.assertAlmostEqual(values[2], base * 0.75)
++        losses = [values[i] - values[i + 1] for i in range(4)]
++        self.assertTrue(all(losses[i] < losses[i + 1] for i in range(3)))
++        self.assertEqual(values[-1], 0)
++        self.assertEqual(slot_policy.cache_ttl(50000), ttl)
++        self.assertEqual(slot_policy.stale_retention(50000, 1e12), 0)
++        self.assertEqual(slot_policy.stale_retention(0, 1e12), 0)
++
++    def test_approved_lengths_cross_the_keep_threshold_before_thirty_minutes(self):
++        for n, crossing in ((8000, 1585), (16000, 1697), (32000, 1745), (50000, 1762),
++                            (100000, 1778), (200000, 1787), (262144, 1789)):
++            with self.subTest(tokens=n):
++                self.assertGreater(slot_policy.stale_retention(n, crossing - 1), 0.01)
++                self.assertLess(slot_policy.stale_retention(n, crossing + 1), 0.01)
++                self.assertEqual(slot_policy.stale_retention(n, 1800), 0)
++                self.assertEqual(slot_policy.stale_retention(n, 1801), 0)
++        for n in (500, 2000):
++            self.assertLess(slot_policy.stale_retention(n), 0.01)
++
++    def test_old_long_history_yields_before_a_recent_shorter_one_even_in_busier_group(self):
++        e = self.e()
++        e.slot_held = [[b] * 50000 for b in range(6)]
++        e.slot_busy[1] = True
++        e.slot_held[0], e.slot_used[0] = [0] * 150000, self.NOW - 1800
++        e.slot_held[4], e.slot_used[4] = [4] * 8000, self.NOW - 15
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 0)
++        # A use refreshes the age: the long history is protected again and the expired shorter one yields.
++        e.slot_used[0] = self.NOW
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 4)
++
++    def test_long_unused_history_still_matches_after_its_value_falls_below_keep_score(self):
++        e = self.e()
++        e.slot_held = [[b] * 50000 for b in range(6)]
++        e.slot_held[2] = list(range(100000))
++        e.slot_used[2] = self.NOW - 3600
++        self.assertEqual(slot_policy.stale_retention(100000, self.NOW - e.slot_used[2]), 0)
++        plan = self.place(e, list(range(100001)), padding_safe=True)
++        self.assertEqual((plan.slot, plan.source_hint, plan.reused_hint), (2, 2, 100000))
++        self.assertEqual(len(e.slot_held[2]), 100000)
++
++    def test_decayed_history_is_reclaimed_while_a_side_request_is_protected(self):
++        e = self.e()
++        e.slot_held = [[b] * 50000 for b in range(6)]
++        e.slot_used[0] = self.NOW - 1800
++        e.slot_held[2], e.slot_used[2] = [2] * 1500, self.NOW - 0.5
++        plan = self.place(e, [9999], padding_safe=True)
++        self.assertEqual((plan.slot, plan.reason), (0, 'reclaim'))
++
++    def test_unexpired_fifty_k_is_selected_before_similarly_fresh_150k(self):
++        e = self.e()
++        e.slot_held = [[b] * (50000 if b == 2 else 150000) for b in range(6)]
++        self.assertEqual(self.place(e, [9999]).slot, 2)
++
++    def test_expired_short_helper_is_reclaimed_without_touching_long_histories(self):
++        e = self.e()
++        e.slot_held = [[b] * 100000 for b in range(6)]
++        e.slot_held[4] = [4] * 500
++        e.slot_used[4] -= 0.11
++        self.assertEqual(self.place(e, [9999]).slot, 4)
++
++    def test_cache_source_can_be_restored_into_another_pipeline_group(self):
++        e = self.e()
++        e.slot_busy[0] = True
++        e.slot_held[1] = list(range(10000))
++        plan = self.place(e, list(range(10001)))
++        self.assertEqual(plan.source_hint, 1)
++        self.assertEqual(plan.slot, 2)
++
++    def test_close_matches_use_group_load_without_forcing_shorter_native_reuse(self):
++        e = self.e()
++        e.slot_busy[0] = True
++        e.slot_held = [[b] * 50000 for b in range(6)]
++        e.slot_held[1] = list(range(10000))
++        e.slot_held[2] = list(range(9850))
++        plan = self.place(e, list(range(10001)), prefill_rate=3000)
++        self.assertEqual(plan.near_tokens, 200)
++        self.assertEqual(plan.slot, 2)
++        self.assertEqual(plan.reused_hint, 10000)
++        e.slot_held[2] = list(range(9000))       # a superseded copy of slot 1: blank, in a less loaded group
++        plan = self.place(e, list(range(10001)), prefill_rate=3000)
++        self.assertEqual((plan.slot, plan.source_hint), (2, 1))
++        e.slot_held[2] = [2] * 50000              # another chat: never overwritten just to balance groups
++        self.assertEqual(self.place(e, list(range(10001)), prefill_rate=3000).slot, 1)
++
++    def test_two_idle_conversations_do_not_overwrite_each_other(self):
++        # Production 2026-10-14: A (slot 2) and B (slot 0), idle past their TTL between turns.  A was moved into
++        # B's expired slot 0 and B back into slot 0 over A, so every turn re-read 60-100K tokens from 0.
++        for safe in (False, True):
++            e = self.e()
++            a, b = [1] * 92000, [2] * 61000
++            e.slot_held[2], e.slot_held[0] = list(a), list(b)
++            e.slot_used[2] = e.slot_used[0] = self.NOW - 300
++            for turn in range(6):
++                for slot, h in ((2, a), (0, b)):
++                    h += [3] * 500
++                    plan = self.place(e, h + [4], padding_safe=safe)
++                    self.assertEqual((plan.slot, plan.source_hint), (slot, slot), (safe, turn))
++                    e.slot_held[slot] = list(h)
++                    e.slot_used[slot] = self.NOW - 300
++
++    def test_an_older_version_of_the_prompt_is_replaced_in_place_even_while_protected(self):
++        # 2026-10-16: each Claude Code classifier query inserts its new tool calls before the closing text of the
++        # last one's transcript, so it is no slot's continuation; every version took a blank slot of its own
++        e = self.e()
++        transcript = [1] * 42000
++        e.slot_held[3] = transcript + [8] * 60 + [9] * 40        # the last query, protected (just used)
++        e.slot_held[0] = [2] * 30000                              # another chat
++        prompt = transcript + [8] * 60 + [7] * 300 + [9] * 40
++        plan = self.place(e, prompt, padding_safe=True)
++        self.assertEqual((plan.slot, plan.reason), (3, "sibling"))
++        other = [1] * 20000 + [5] * 22000                         # shares under 98% of slot 3: a blank slot
++        self.assertEqual(self.place(e, other, padding_safe=True).reason, "reclaim")
++        self.assertEqual(self.place(e, prompt + [4], padding_safe=True).slot, 3)
++        e.slot_held[5] = transcript[:40000]                       # a full-prefix source still decides first
++        self.assertEqual(self.place(e, prompt, padding_safe=True).reason, "reuse")
++        e.slot_held[5] = []
++        e.slot_busy[3] = True                                     # a busy slot is never replaced
++        self.assertEqual(self.place(e, prompt, padding_safe=True).reason, "reclaim")
++        e.slot_busy[3] = False
++        slot_policy.configure({"STRATA_SLOT_SIBLING_SHARE": "0"})
++        try:
++            self.assertEqual(self.place(e, prompt, padding_safe=True).reason, "reclaim")   # 0: off
++        finally:
++            slot_policy.configure({})
++
++    def test_reported_checkpoints_give_the_hint_where_no_slot_continues_the_prompt(self):
++        e = self.e()
++        transcript = [1] * 42000
++        e.slot_held[3] = transcript + [8] * 60 + [9] * 40
++        e.slot_held[1] = [1] * 20000 + [6] * 5000                 # another chat sharing 20000 tokens
++        checks = [()] * 6
++        checks[3] = (32768, 42000)                                # periodic + the branch point of the last query
++        checks[1] = (16384, 24990)
++        prompt = transcript + [8] * 60 + [7] * 300 + [9] * 40
++        plan = self.place(e, prompt, padding_safe=True, checks=checks)
++        self.assertEqual((plan.slot, plan.reason, plan.source_hint, plan.reused_hint), (3, "sibling", 3, 42000))
++        plan = self.place(e, [1] * 30000 + [2] * 10, padding_safe=True, checks=checks)
++        self.assertEqual((plan.reason, plan.source_hint, plan.reused_hint), ("reclaim", 1, 16384))   # 24990: not a start
++        checks[3] = (32768, 42000, 99999)                         # a length past what the slot holds is ignored
++        self.assertEqual(self.place(e, prompt, padding_safe=True, checks=checks).reused_hint, 42000)
++        e.slot_busy[3] = True                                     # a busy slot is no source
++        plan = self.place(e, prompt, padding_safe=True, checks=checks)
++        self.assertEqual((plan.source_hint, plan.reused_hint), (1, 16384))
++        self.assertEqual(self.place(e, prompt, padding_safe=True).reused_hint, 0)   # nothing reported: no hint
++
++    def test_common_prefix(self):
++        for a, b, n in (([], [1], 0), ([1, 2, 3], [1, 2, 3], 3), ([1, 2, 3], [1, 2], 2), ([1, 2, 3], [1, 5, 3], 1),
++                        (list(range(100000)), list(range(77777)) + [0], 77777)):
++            self.assertEqual(slot_policy.common_prefix(a, b), n)
++            self.assertEqual(slot_policy.common_prefix(b, a), n)
++
++    def test_match_moves_only_into_a_blank_slot_of_a_less_loaded_group(self):
++        e = self.e()
++        e.slot_busy[0] = True
++        e.slot_held[1] = list(range(10000))
++        e.slot_held[2] = [2] * 50000
++        e.slot_used[2] = self.NOW - 999            # expired, but still another chat's cache
++        plan = self.place(e, list(range(10001)), padding_safe=True)
++        self.assertEqual((plan.slot, plan.source_hint), (4, 1))   # blank slot 4, not expired slot 2
++        e.slot_held[4], e.slot_held[5] = [4] * 50000, [5] * 50000
++        e.slot_held[3] = [3] * 50000
++        plan = self.place(e, list(range(10001)), padding_safe=True)
++        self.assertEqual(plan.slot, 1)            # no blank slot elsewhere: stay in the busy group
++
++    def test_superseded_copy_is_blank_and_reclaimed_before_protected_histories(self):
++        e = self.e()
++        e.slot_held = [[b] * 50000 for b in range(6)]   # all fresh: every other one is protected
++        e.slot_held[0] = list(range(9000))              # where the conversation was before it moved
++        e.slot_held[4] = list(range(10000))             # where it is now
++        self.assertEqual(slot_policy.superseded_slots(e.slot_held, e.slot_busy, [True] * 6), {0})
++        plan = self.place(e, [9999])
++        self.assertEqual((plan.slot, plan.reason), (0, "reclaim"))
++
++    def test_reclaim_overwrites_expired_history_only_after_blank_slots(self):
++        e = self.e()
++        e.slot_held = [[b] * 50000 for b in range(6)]
++        e.slot_held[2] = [2] * 80000
++        e.slot_held[3] = [3] * 40000
++        e.slot_used[2] = e.slot_used[3] = self.NOW - 999      # both expired
++        e.slot_held[5] = []
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 5)
++        e.slot_held[5] = [5] * 50000
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 3)   # shorter expired history first
++
++    def test_protected_history_is_kept_and_expired_ones_go_lowest_score_first(self):
++        # Under the TTL rules an expired history is reclaimable and a protected one is not, whatever their lengths;
++        # among expired ones the retention at expiry, decayed by time past expiry, decides.
++        e = self.e()
++        e.slot_busy[1] = e.slot_busy[4] = e.slot_busy[5] = True
++        e.slot_held[0], e.slot_used[0] = [0] * 37365, self.NOW - 300   # expired
++        e.slot_held[2], e.slot_used[2] = [2] * 1526, self.NOW - 1       # still inside its TTL: protected
++        e.slot_held[3], e.slot_used[3] = [3] * 7848, self.NOW - 13      # expired
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 3)
++        self.assertLess(slot_policy.stale_retention(7848), slot_policy.stale_retention(37365))
++
++    def test_new_chat_takes_a_worthless_slot_in_a_busier_group_before_an_expired_conversation(self):
++        # GPU run 2026-10-15 on 0.1.44.1: B (slot 1, 9K, past its 11 s TTL) sat in the idle group; new chat C took
++        # slot 1 on group load and the two overwrote each other every turn.  Old 1.5K filler histories were free.
++        e = self.e()
++        e.slot_busy[2] = e.slot_busy[4] = True
++        e.slot_held[0], e.slot_used[0] = [0] * 37365, self.NOW - 100   # parked A, expired
++        e.slot_held[1], e.slot_used[1] = [1] * 8970, self.NOW - 20     # B, expired
++        e.slot_held[3], e.slot_used[3] = [3] * 1526, self.NOW - 30     # filler leftovers, expired
++        e.slot_held[5], e.slot_used[5] = [5] * 1526, self.NOW - 30
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 3)
++        slot_policy.configure({"STRATA_SLOT_EXPIRED_KEEP_SCORE": "1"})      # keep nothing expired: load decides
++        try:
++            self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 1)
++        finally:
++            slot_policy.configure({})
++
++    def test_no_wait_for_a_side_request_slot_about_to_expire(self):
++        # GPU run 2026-10-15: a filler arriving 1 s after another filler finished overwrote expired 7.8K chat C,
++        # while the finished filler's 1.5K history left its 1.4 s protection a moment later.  A wait for it was
++        # removed (2026-10-16): the protection rules decide, so C goes while the filler slot is protected.
++        e = self.e()
++        e.slot_busy[1] = e.slot_busy[5] = True
++        e.slot_held[0], e.slot_used[0] = [0] * 37365, self.NOW - 300   # expired, worthy
++        e.slot_held[3], e.slot_used[3] = [3] * 7848, self.NOW - 15      # C: expired, worthy
++        e.slot_held[2], e.slot_used[2] = [2] * 1526, self.NOW - 0.5     # filler: protected for under 1 s more
++        e.slot_held[4], e.slot_used[4] = [4] * 1526, self.NOW - 0.2
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 3)
++        e.slot_used[2] = self.NOW - 2                                     # the filler slot expired
++        self.assertEqual(self.place(e, [9999], padding_safe=True).slot, 2)
++
++    def test_near_match_budget_respects_one_second_and_4096_cap(self):
++        e = self.e()
++        e.slot_held[0] = list(range(260000))
++        p = list(range(260001))
++        self.assertEqual(self.place(e, p, prefill_rate=500).near_tokens, 500)
++        self.assertEqual(self.place(e, p, prefill_rate=10000).near_tokens, 4096)
++
++    def test_busy_slots_never_match_or_get_overwritten(self):
++        e = self.e()
++        e.slot_busy = [True] * 6
++        e.slot_held[2] = list(range(500))
++        self.assertIsNone(self.place(e, list(range(501))).slot)
++
++    def test_padding_loss_counts_a_protected_history_in_a_lower_row(self):
++        e = self.e()
++        e.slot_held[0] = [77] * 100000
++        e.slot_busy[2:] = [True] * 4
++        # Slot 1 is empty, but using it would pad over the protected history at 0: the same loss as taking slot 0.
++        self.assertEqual(self.place(e, [9999]).slot, 0)
++
++    def test_padding_invalidity_survives_completion_of_higher_row(self):
++        e = self.e()
++        e.slot_cv = threading.Condition()
++        e.slot_cache_valid = [False] * 6
++        e._slot_native_active = [False] * 6
++        e._slot_steps = [0] * 6
++        e._slot_valid_until = [{} for _ in range(6)]
++        e._observe_cache_line('BADM 2 1')
++        e._observe_cache_line('BADM 3 1')
++        e._observe_cache_line('BT 2 99')
++        e._observe_cache_line('BDONE 2 2 stop 1')
++        e._observe_cache_line('BT 3 88')  # same window: row 2 was not padding
++        self.assertTrue(e.slot_cache_valid[2])
++        e._observe_cache_line('BT 3 87')  # next window: row 2 was padding
++        self.assertFalse(e.slot_cache_valid[2])
++        e._observe_cache_line('BDONE 3 3 stop 1')
++        self.assertFalse(e.slot_cache_valid[2])
++        self.assertTrue(e.slot_cache_valid[3])
++        # A later real request can restore the lower row's validity.
++        e._observe_cache_line('BADM 2 1')
++        e._observe_cache_line('BDONE 2 2 stop 1')
++        self.assertTrue(e.slot_cache_valid[2])
++
++    def test_new_higher_row_invalidates_lower_cache_on_its_first_window(self):
++        e = self.e()
++        e.slot_cv = threading.Condition()
++        e.slot_cache_valid = [False] * 6
++        e._slot_native_active = [False] * 6
++        e._slot_steps = [0] * 6
++        e._slot_valid_until = [{} for _ in range(6)]
++        e._observe_cache_line('BADM 2 1')
++        e._observe_cache_line('BDONE 2 2 stop 1')
++        self.assertTrue(e.slot_cache_valid[2])
++        e._observe_cache_line('BADM 3 1')  # row 3 was absent from row 2's final window
++        e._observe_cache_line('BT 3 88')
++        e._observe_cache_line('BDONE 3 2 stop 1')
++        self.assertFalse(e.slot_cache_valid[2])
++
++
++class ParkMainSession(unittest.TestCase):
++    """Engine park=: before a side request replaces the main (solo) session, its conversation is copied into a slot."""
++    NOW = 100000.0
++
++    def setUp(self):
++        clock = mock.patch('serve.server.time.time', return_value=self.NOW)
++        clock.start()
++        self.addCleanup(clock.stop)
++
++    def e(self):
++        e = engine(6, 3)
++        e.slot_cache_affinity = True
++        e.slot_padding_safe = True
++        e.info = {"slot_park": 1}
++        e.slot_used = [self.NOW] * 6
++        e.slot_cv = threading.Condition()
++        e.slot_cache_valid = [True] * 6
++        e.slot_cache_peer = [None] * 6
++        e._park_claims, e.slot_claims = set(), set()
++        e.main_held = [7] * 50000
++        e.main_peer = "192.0.2.9"
++        e.main_used = self.NOW
++        return e
++
++    def dest(self, e, exclude=(), main_value=0.0):
++        return slot_policy.park_destination(e.main_held, e.slot_busy, e.slot_held, e.slot_used, e.slot_order,
++                                            e.slot_gs, self.NOW, e.slot_cache_valid, True, exclude, main_value)
++
++    def test_another_conversation_is_told_by_the_main_history_up_to_its_last_turn(self):
++        # main: system (turn 1 at 0), user turn at 20000, reply turn at 29000; a prompt that shares all of it up to
++        # the reply's turn is the same conversation, one that diverges earlier is another (here: only the 20K system
++        # prompt and tools in common, which is more than half of the 30K held)
++        T = 248045
++        e = self.e()
++        e.info = {"slot_park": "1", "turn_token": str(T)}
++        main = [T] + [5] * 19999 + [T] + [6] * 8999 + [T] + [8] * 999
++        e.main_held = list(main)
++        same = main[:29000] + [T] + [9] * 50 + [T] + [1] * 10      # its reply without the thinking, and a next turn
++        self.assertEqual(e._claim_park(same), "")
++        self.assertEqual(e._claim_park(main[:29001]), "")           # the reply regenerated
++        other = main[:20000] + [T] + [3] * 500                      # another chat of the same client
++        self.assertTrue(e._claim_park(other).startswith(" park="))  # another conversation: parked
++        e.info = {"slot_park": "1"}                                 # an engine that does not say: any difference counts
++        self.assertTrue(e._claim_park(same).startswith(" park="))
++
++    def test_side_request_claims_a_blank_slot_and_parked_line_records_it(self):
++        e = self.e()
++        e.slot_busy[0] = True
++        e.slot_held[2] = [2] * 30000                      # another chat: never a park target
++        key = e._claim_park([1] * 60)
++        self.assertEqual(key, " park=4")                  # blank slot of the least loaded group
++        self.assertTrue(e.slot_busy[4])
++        e._on_parked(4, 49999)
++        self.assertEqual((len(e.slot_held[4]), e.slot_busy[4], e.slot_cache_peer[4]), (49999, False, "192.0.2.9"))
++        self.assertEqual(e.cache_events_view()[0]["kind"], "parked")
++        e._claim_park([1] * 60)                             # the engine held two tail tokens more than we know
++        e._on_parked(e._park_claims and next(iter(e._park_claims)) or 0, 50002)
++        self.assertIn(50000, [len(h) for h in e.slot_held])
++
++    def test_continuing_low_value_or_already_kept_conversations_are_not_parked(self):
++        e = self.e()
++        self.assertEqual(e._claim_park(e.main_held + [1, 2, 3]), "")    # the same conversation continues
++        e.main_held = [7] * 2000
++        self.assertEqual(e._claim_park([1] * 60), "")                    # worth less than PARK_MIN_VALUE (no length cut)
++        self.assertEqual(e.cache_events_view()[0]["reason"], "main_low_value")
++        e.main_held = [7] * 5000                                         # short, but worth more: parked
++        self.assertTrue(e._claim_park([1] * 60).startswith(" park="))
++        e = self.e()
++        e.main_held = [7] * 50000
++        e.slot_held[3] = [7] * 49000                                     # a slot holds 98% of it already
++        self.assertEqual(e._claim_park([1] * 60), "")
++        e.slot_held[3] = [7] * 48000                                     # 96%: the copy is cheaper than the 2K tail
++        self.assertEqual(e._claim_park([1] * 60), " park=3")             # into its own older copy
++
++    def test_parking_inherits_the_main_history_last_use_and_does_not_renew_its_value(self):
++        e = self.e()
++        e.main_used = self.NOW - 1700
++        value = slot_policy.stale_retention(50000, 1700)
++        key = e._claim_park([1] * 60)
++        b = int(key.split('=')[1])
++        # The main session may begin a new request before PARKED is processed; the snapshot owns this age.
++        e.main_used = self.NOW
++        e._on_parked(b, 49999)
++        self.assertEqual(e.slot_used[b], self.NOW - 1700)
++        self.assertAlmostEqual(slot_policy.stale_retention(len(e.slot_held[b]), self.NOW - e.slot_used[b]), value,
++                               delta=0.00001)
++        e.slot_live = [None] * 6
++        with mock.patch('serve.server.time.time', return_value=self.NOW + 30):
++            e.slots_view()
++        self.assertEqual(e.slot_used[b], self.NOW - 1700)   # observation cannot renew the cache either
++
++    def test_main_below_keep_threshold_is_not_parked_even_when_slots_are_blank(self):
++        e = self.e()
++        for age in (1770, 1800, 3600):
++            e.main_used = self.NOW - age
++            self.assertEqual(e._claim_park([1] * 60), '')
++            self.assertFalse(any(e.slot_busy))
++            self.assertFalse(e._park_claims)
++            self.assertEqual(e.main_held, [7] * 50000)   # a skipped park does not itself erase the main cache
++            self.assertEqual(e.cache_events_view()[0]['reason'], 'main_low_value')
++
++    def test_main_above_keep_threshold_is_parked_with_its_old_age(self):
++        e = self.e()
++        e.main_used = self.NOW - 1760
++        key = e._claim_park([1] * 60)
++        self.assertTrue(key.startswith(' park='))
++        b = int(key.split('=')[1])
++        e._on_parked(b, 49999)
++        self.assertEqual(e.slot_used[b], self.NOW - 1760)
++
++    def test_park_min_value_is_its_own_threshold(self):
++        # a 50K conversation idle for 25 minutes is worth about 0.07, for 20 minutes about 0.13
++        slot_policy.configure({"STRATA_SLOT_PARK_MIN_VALUE": "0.1"})
++        try:
++            self.assertEqual(slot_policy.EXPIRED_KEEP_SCORE, 0.01)      # slot reclaim keeps its own threshold
++            e = self.e()
++            e.main_used = self.NOW - 1500
++            self.assertLess(slot_policy.stale_retention(50000, 1500), 0.1)
++            self.assertGreater(slot_policy.stale_retention(50000, 1500), slot_policy.EXPIRED_KEEP_SCORE)
++            self.assertEqual(e._claim_park([1] * 60), '')
++            self.assertEqual(e.cache_events_view()[0]['reason'], 'main_low_value')
++            self.assertFalse(any(e.slot_busy))
++            e = self.e()
++            e.main_used = self.NOW - 1200
++            self.assertGreater(slot_policy.stale_retention(50000, 1200), 0.1)
++            self.assertTrue(e._claim_park([1] * 60).startswith(' park='))
++        finally:
++            slot_policy.configure({})
++
++    def test_zero_value_main_can_still_continue_without_a_park_or_deletion(self):
++        e = self.e()
++        e.main_used = self.NOW - 3600
++        self.assertEqual(slot_policy.stale_retention(len(e.main_held), 3600), 0)
++        self.assertEqual(e._claim_park(e.main_held + [1, 2, 3]), '')
++        self.assertEqual(e.main_held, [7] * 50000)
++        self.assertFalse(e._park_claims)
++        self.assertEqual(e.cache_events_view(), [])   # no low-value rejection of a continued conversation
++
++    def test_an_invalid_copy_does_not_count_as_already_kept(self):
++        e = self.e()
++        e.slot_held[3] = [7] * 49000                      # 98% of the main conversation, but no longer usable
++        e.slot_cache_valid[3] = False
++        self.assertIsNotNone(self.dest(e))
++        e.slot_cache_valid[3] = True
++        self.assertIsNone(self.dest(e))                   # a usable copy: nothing to park
++
++    def test_own_older_copy_is_refreshed_before_using_a_blank_slot(self):
++        e = self.e()
++        e.slot_held[5] = [7] * 30000                      # this conversation, a few turns back
++        self.assertEqual(self.dest(e), 5)
++
++    def test_an_older_version_is_replaced_by_the_park_protected_or_not(self):
++        # the main session ran a classifier query; slot 2 holds the previous one (the same transcript with another
++        # end), worth about as much as the main one, so the value ratio would never let the park take it
++        e = self.e()
++        e.slot_held = [[b] * 40000 for b in range(6)]                 # every slot holds another fresh conversation
++        e.slot_held[2] = e.main_held[:49900] + [3] * 80
++        self.assertEqual(self.dest(e), 2)
++        e.slot_held[4] = e.main_held[:49950] + [3] * 30               # the version sharing more goes first
++        self.assertEqual(self.dest(e), 4)
++        self.assertEqual(self.dest(e, exclude=(4,)), 2)
++        e.slot_held[1] = e.main_held[:30000]                          # its own older copy is still preferred
++        self.assertEqual(self.dest(e), 1)
++        e.slot_held[1] = [1] * 40000
++        e.slot_held[2] = e.main_held[:40000] + [3] * 9000             # 82%: another conversation
++        e.slot_held[4] = e.main_held[:40000] + [4] * 9000
++        self.assertIsNone(self.dest(e))
++        e.slot_held[2] = e.main_held[:49900] + [3] * 80
++        slot_policy.configure({"STRATA_SLOT_SIBLING_SHARE": "0"})
++        try:
++            self.assertIsNone(self.dest(e))                           # 0: off
++        finally:
++            slot_policy.configure({})
++
++    def test_engine_checkpoint_lines_are_kept_per_slot_and_forgotten_before_an_overwrite(self):
++        e = self.e()
++        e.slot_checks = [()] * 6
++        e._observe_checks("BCHECKS 2 42729 32768 42000\n")
++        e._observe_checks("BCHECKS 4 9000 9000 12000 512\n")      # only lengths inside what the slot holds
++        e._observe_checks("BCHECKS x 1 2\n")                        # malformed: ignored
++        e._observe_checks("BCHECKS 9 100 50\n")                     # no such slot
++        self.assertEqual((e.slot_checks[2], e.slot_checks[4]), ((32768, 42000), (512,)))
++        e.slot_held = [[b] * 40000 for b in range(6)]
++        e.slot_held[2] = e.main_held[:49900] + [3] * 80               # an older version: the park takes it
++        self.assertEqual(e._claim_park([1] * 60), " park=2")
++        self.assertEqual(e.slot_checks[2], ())                      # the engine overwrites it now
++        self.assertEqual(e.slot_checks[4], (512,))
++        e.slot_busy[2] = False
++        e._observe_checks("BCHECKS 2 50000 32768 49900\n")
++        e.slot_held[2] = list(e.main_held)
++        e.slot_live = [None] * 6
++        view = {r["slot"]: r for r in e.slots_view()}
++        self.assertEqual(view[2]["checkpoint_tokens"], [32768, 49900])
++
++    def test_nowhere_to_park_without_evicting(self):
++        e = self.e()
++        e.slot_held = [[b] * 40000 for b in range(6)]     # every slot holds another fresh conversation
++        self.assertIsNone(self.dest(e))
++        self.assertEqual(e._claim_park([1] * 60), "")
++        self.assertFalse(any(e.slot_busy))
++
++    def test_an_expired_history_worth_less_than_the_keep_score_takes_the_park(self):
++        e = self.e()
++        e.slot_held = [[b] * 40000 for b in range(6)]     # every slot holds another conversation
++        e.slot_used = [self.NOW - 100] * 6                 # all expired, still worth keeping
++        self.assertIsNone(self.dest(e))                    # each still worth keeping: nowhere to park
++        e.slot_held[1] = [1] * 1000                        # a short side chat, below EXPIRED_KEEP_SCORE
++        e.slot_held[4] = [4] * 2000
++        e.slot_busy[0] = True
++        self.assertEqual(self.dest(e), 4)                  # the less loaded group (slot 1 shares one with busy 0)
++        e.slot_busy[0] = False
++        self.assertEqual(self.dest(e), 1)                  # same load: the lowest score
++        e.slot_used[1] = self.NOW                          # protected: not a park target
++        self.assertEqual(self.dest(e), 4)
++
++    def test_park_uses_the_reclaim_order_a_lighter_group_before_a_blank_slot(self):
++        e = self.e()
++        e.slot_held = [[b] * 40000 for b in range(6)]
++        e.slot_used = [self.NOW - 100] * 6                 # expired, worth keeping
++        e.slot_held[1] = []                                # blank, in the group of busy slot 0
++        e.slot_busy[0] = True
++        e.slot_held[4] = [4] * 1000                        # not worth keeping, in an idle group
++        self.assertEqual(self.dest(e), 4)                  # group load first, as place() does
++        e.slot_busy[0] = False
++        self.assertEqual(self.dest(e), 1)                  # the same load: the lower value (a blank slot is 0)
++
++    def test_a_history_worth_keeping_takes_a_park_only_at_the_value_ratio(self):
++        e = self.e()
++        e.slot_held = [[b] * 40000 for b in range(6)]
++        e.slot_used = [self.NOW - 100] * 6                 # all expired, worth keeping
++        worth = slot_policy.stale_retention(40000, 100)
++        self.assertIsNone(self.dest(e, main_value=worth * 1.9))      # less than twice as much: every one is kept
++        self.assertEqual(self.dest(e, main_value=worth * 2), 0)      # twice as much: the slot order breaks the tie
++        e.slot_busy[0] = True
++        e.slot_used[3] = self.NOW - 1000                   # worth less than the others
++        self.assertEqual(self.dest(e, main_value=worth * 2), 3)      # least loaded group, then the lowest value
++        cheap = slot_policy.stale_retention(40000, 1000)
++        self.assertEqual(self.dest(e, main_value=cheap * 2), 3)      # only slot 3 is cheap enough
++        self.assertIsNone(self.dest(e, main_value=cheap * 1.5))
++        slot_policy.configure({"STRATA_SLOT_PARK_VALUE_RATIO": "0"})
++        try:
++            self.assertIsNone(self.dest(e, main_value=100.0))         # 0: a park never takes one
++        finally:
++            slot_policy.configure({})
++
++    def test_a_long_unused_history_can_take_a_park_but_busy_and_excluded_slots_cannot(self):
++        e = self.e()
++        e.slot_held = [[b] * 40000 for b in range(6)]
++        e.slot_used = [self.NOW - 100] * 6
++        self.assertIsNone(self.dest(e))
++        e.slot_used[4] = self.NOW - 1800
++        self.assertEqual(self.dest(e), 4)
++        self.assertIsNone(self.dest(e, exclude=(4,)))
++        e.slot_busy[4] = True
++        self.assertIsNone(self.dest(e))
++        e.slot_busy[4] = False
++        e.slot_used[4] = self.NOW
++        self.assertIsNone(self.dest(e))
++
++    def test_admission_slot_is_never_the_park_slot_and_claim_is_released(self):
++        e = self.e()
++        self.assertNotEqual(self.dest(e, exclude=(0,)), 0)
++        key = e._claim_park([1] * 60, exclude=(0,))
++        b = int(key.split("=")[1])
++        e._release_park(b)
++        self.assertFalse(e.slot_busy[b])
++        self.assertEqual(e.slot_held[b], [])
++
++    def test_off_without_engine_capability_or_padding_safety(self):
++        e = self.e()
++        e.info = {}
++        self.assertEqual(e._claim_park([1] * 60), "")
++        e.info = {"slot_park": 1}
++        e.slot_padding_safe = False
++        self.assertEqual(e._claim_park([1] * 60), "")
++
++
++class PolicyTunables(unittest.TestCase):
++    def tearDown(self):
++        slot_policy.configure({})
++
++    def test_environment_overrides_and_bad_values_keep_defaults(self):
++        got = slot_policy.configure({"STRATA_SLOT_TTL_MAX_S": "240", "STRATA_SLOT_PARK_MIN_VALUE": "x"})
++        self.assertEqual(got, {"ttl_max_s": 240.0,
++                               "expired_keep_score": 0.01, "idle_value_zero_s": 1800.0, "park_value_ratio": 2.0,
++                               "park_min_value": 0.01, "park_kept_share": 0.98,
++                               "sibling_share": 0.98})
++        self.assertAlmostEqual(slot_policy.cache_ttl(100000), 180.0)     # the whole curve doubles
++        self.assertAlmostEqual(slot_policy.cache_ttl(10 ** 6), 240.0)
++        self.assertEqual(slot_policy.configure({})["ttl_max_s"], 120.0)
++        self.assertAlmostEqual(slot_policy.cache_ttl(100000), 90.0)
++
++    def test_engine_reads_them_from_its_environment(self):
++        e = StrataEngine("missing", [], env={"STRATA_SLOT_PARK_MIN_VALUE": "0.2"}, lazy=True)
++        self.assertEqual(e.slot_policy_settings["park_min_value"], 0.2)
++
++    def test_idle_limit_override_disable_and_invalid_values(self):
++        ttl = slot_policy.cache_ttl(50000)
++        base = slot_policy.stale_retention(50000)
++        slot_policy.configure({"STRATA_SLOT_IDLE_VALUE_ZERO_S": "3600"})
++        self.assertEqual(slot_policy.stale_retention(50000, 3600), 0)
++        self.assertAlmostEqual(slot_policy.stale_retention(50000, (ttl + 3600) / 2), base * 0.75)
++        slot_policy.configure({"STRATA_SLOT_IDLE_VALUE_ZERO_S": "0"})
++        self.assertEqual(slot_policy.stale_retention(50000, ttl + 3600), base)
++        for bad in ("nan", "inf", "-1", "bad"):
++            got = slot_policy.configure({"STRATA_SLOT_IDLE_VALUE_ZERO_S": bad})
++            self.assertEqual(got["idle_value_zero_s"], 1800)
++
++    def test_a_configured_idle_limit_cannot_shorten_protection(self):
++        slot_policy.configure({"STRATA_SLOT_IDLE_VALUE_ZERO_S": "30"})
++        base = slot_policy.stale_retention(50000)
++        self.assertEqual(slot_policy.stale_retention(50000, 64), base)
++        self.assertEqual(slot_policy.stale_retention(50000, 65), 0)
++
++
++class NativePaddingSafety(unittest.TestCase):
++    def test_padding_safe_engine_keeps_lower_match_available(self):
++        e = engine(6, 3)
++        e.slot_busy[3] = True
++        e.slot_held[2] = list(range(1000))
++        p = list(range(1001))
++        legacy = slot_policy.place(p, e.slot_busy, e.slot_held, e.slot_used, e.slot_order, 2, 1000)
++        safe = slot_policy.place(p, e.slot_busy, e.slot_held, e.slot_used, e.slot_order, 2, 1000,
++                                 padding_safe=True)
++        self.assertEqual(legacy.reused_hint, 0)
++        self.assertEqual(safe.source_hint, 2)
++        self.assertEqual(safe.reused_hint, 1000)
++
++    def test_safe_native_steps_do_not_invalidate_finished_lower_slot(self):
++        e = engine(6, 3)
++        e.slot_padding_safe = True
++        e.slot_cv = threading.Condition()
++        e.slot_cache_valid = [False] * 6
++        e._slot_native_active = [False] * 6
++        e._slot_steps = [0] * 6
++        e._slot_valid_until = [{} for _ in range(6)]
++        e._observe_cache_line('BADM 2 1')
++        e._observe_cache_line('BADM 3 1')
++        e._observe_cache_line('BDONE 2 2 stop 1')
++        for _ in range(3):
++            e._observe_cache_line('BT 3 88')
++        e._observe_cache_line('BDONE 3 4 stop 1')
++        self.assertTrue(e.slot_cache_valid[2])
++        self.assertTrue(e.slot_cache_valid[3])
++
++
++
++class CacheObservability(unittest.TestCase):
++    def test_expiry_is_reported_once_and_does_not_erase_match(self):
++        e = engine(6, 3)
++        e.slot_cache_affinity = True
++        e.slot_live = [None] * 6
++        e.slot_cv = threading.Condition()
++        e.slot_cache_valid = [True] * 6
++        e.slot_cache_peer = ["192.0.2.8"] * 6
++        e.slot_held[0] = [1] * 500
++        e.slot_used[0] = time.time() - 1
++        for _ in range(3):
++            row = e.slots_view()[0]
++            self.assertTrue(row["cache_expired"])
++            self.assertEqual(row["cache_peer_ip"], "192.0.2.8")
++            self.assertEqual(row["held_tokens"], 500)
++        self.assertEqual([x["kind"] for x in e.cache_events_view()], ["expired"])
++        self.assertIsNotNone(e.pick_slot([1] * 500 + [2]))
++        self.assertEqual(e.slot_last_plan.reused_hint, 500)
++
++    def test_busy_view_keeps_actual_reuse_separate_from_hint_and_peer(self):
++        e = engine(2, 1)
++        e.slot_cache_affinity = True
++        e.slot_live = [{"state": "decoding", "prompt_tokens": 1000, "generated": 3,
++                        "started": time.time(), "first_token": None, "peer_ip": "2001:db8::7",
++                        "cache_reused_tokens": 0, "cache_match_hint": 900}, None]
++        row = e.slots_view()[0]
++        self.assertEqual((row["cache_reused_tokens"], row["cache_match_hint"]), (0, 900))
++        self.assertEqual(row["peer_ip"], "2001:db8::7")
++
++    def test_event_ring_is_bounded_and_returns_snapshot(self):
++        e = engine(2, 1)
++        for n in range(120):
++            e.cache_event("allocation", slot=n % 2)
++        events = e.cache_events_view()
++        self.assertEqual(len(events), 96)
++        events.clear()
++        self.assertEqual(len(e.cache_events_view()), 96)
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index 5a455c5b..23132d8b 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -4221,10 +4221,15 @@ bool Verifier::sample_rows(int S, std::string& err) {
+ }
+ 
+ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err) {
+-    const OnDevice on_device(device_);
+-    if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
+     int rows[8] = {};
+     for (int t = 0; t < S && t < 8; ++t) rows[t] = base + t;
++    return batch_launch_rows(base, S, rows, tokens, pos, err);
++}
++
++bool Verifier::batch_launch_rows(int base, int S, const int* rows, const int32_t* tokens,
++                                 const int64_t* pos, std::string& err) {
++    const OnDevice on_device(device_);
++    if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
+     if (pre_launch_ && !pre_launch_(cs_, err)) return false;
+     if (!stage_batch(rows, S, base, tokens, pos, err)) return false;
+     cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, base)], cs_);
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 8325edf3..cb4e2af0 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -87,11 +87,13 @@
+ #include "strata/program/prefill_plan.hpp"
+ #include "strata/program/draft_kv_plan.hpp"
+ #include "strata/program/message_boundary.hpp"
++#include "strata/program/slot_checkpoints.hpp"
+ #include "strata/spec/draft_policy.hpp"
+ #include "strata/spec/draft_source.hpp"
+ #include "strata/spec/suffix_drafter.hpp"
+ #include "strata/spec/spec_start.hpp"
+ #include "strata/program/batch_groups.hpp"
++#include "strata/program/pipeline_rows.hpp"
+ #include "strata/kernels/cvec.hpp"
+ #include "strata/core/progress.hpp"
+ #include "strata/core/device.hpp"
+@@ -1929,7 +1931,7 @@ public:
+     }
+ private:
+     static void clear_marks(ConvCheckpoint& c) {
+-        c.ids.clear(); c.imgs.clear(); c.used = 0; c.pinned = false;
++        c.ids.clear(); c.imgs.clear(); c.used = 0; c.pinned = false; c.branch = false;
+         for (ConvCheckpoint& part : c.stage_parts) clear_marks(part);
+     }
+     bool on_;
+@@ -12047,6 +12049,9 @@ int main(int argc, char** argv) {
+                                  (long long) (later_reserve + 768 - sf_mib));
+             }
+         }
++        const char* active_rows_env = std::getenv("STRATA_PIPELINE_ACTIVE_ROWS");
++        const bool pipeline_active_rows = o.batch > 0 && o.batch_groups > 1 && !stages.empty() && !piped_mtp &&
++                                          active_rows_env != nullptr && std::strcmp(active_rows_env, "1") == 0;
+         // what the server's Monitor tab shows (servers before 0.1.8 skip unknown lines until READY)
+         {
+             size_t free_b = 0, total_b = 0;
+@@ -12093,7 +12098,10 @@ int main(int argc, char** argv) {
+                         strata::prefill::Prefill::pipe_setting(),
+                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
+                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
+-                                       " batch_groups=" + std::to_string(o.batch_groups)).c_str() : "");
++                                       " batch_groups=" + std::to_string(o.batch_groups) +
++                                       (pipeline_active_rows ? " slot_padding_safe=1 slot_park=1 turn_token=" +
++                                                                   std::to_string(o.turn_token) : std::string())).c_str()
++                                    : "");
+         }
+         // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
+         // a flag nobody will raise - end the engine with where it was, so the server starts it again instead of the
+@@ -12458,6 +12466,74 @@ int main(int argc, char** argv) {
+             }
+             return true;
+         };
++        // STRATA_SLOT_CHECKPOINTS=N (unset: 1 as before): how many of the main session's checkpoints of the
++        // conversation it takes (BADM) or keeps (park=B) a slot keeps - the deepest, then the deepest others.  Apart
++        // from it, STRATA_BRANCH_CHECKPOINT: the slot keeps the deepest branch checkpoint whatever N is, counted in N
++        // (slot_checkpoint_picks: N 1, the turn and the branch one; N 2, two, the second the branch one or else the
++        // next deepest).  A client that rewrites the end of its history (Claude Code's safety classifier inserts each
++        // query's tool calls before the closing text of its transcript) branches before the deepest, the turn
++        // checkpoint, and the branch one is then what its next query continues from - kept only in the main session
++        // otherwise, which drops it at the next request of another conversation.
++        static const int slot_checkpoints = [] {
++            const char* v = std::getenv("STRATA_SLOT_CHECKPOINTS");
++            return v != nullptr && v[0] != '\0' ? std::max(1, std::atoi(v)) : 1;
++        }();
++        static const bool slot_keeps_branch = [] {
++            const char* v = std::getenv("STRATA_BRANCH_CHECKPOINT");
++            return v != nullptr && std::atoll(v) > 0;
++        }();
++        // a slot may hold more than the one checkpoint it held before: the paths that keep, give back, report several
++        static const bool slot_multi = slot_checkpoints > 1 || slot_keeps_branch;
++        // `move` (STRATA_SLOT_CKPT_MOVE, an admission): they move into the slot instead of being copied - not the
++        // chain's root (its first, which every conversation of the client shares) or a pinned prefix.  The main session
++        // would drop them at the next request of another conversation, and while it still holds their tokens it
++        // restores one from the slot as from its own chain (lent_slot).  The copies go into dropped checkpoints'
++        // storage with STRATA_CKPT_POOL.  Returns how many moved
++        auto keep_slot_checkpoints = [&](int b, bool move = false) -> size_t {
++            BSlot& sl = bs[(size_t) b];
++            size_t bytes = 0;
++            std::string at;
++            std::vector<size_t> moving;   // places in `checks`, moved after the copies (an erase shifts the rest)
++            for (const ConvCheckpoint* c : strata::program::slot_checkpoint_picks(checks, sl.ids,
++                                                                                  (size_t) slot_checkpoints,
++                                                                                  slot_keeps_branch)) {
++                bytes += c->bytes();
++                at += (at.empty() ? "" : " ") + std::to_string(c->ids.size());
++                const size_t i = (size_t) (c - checks.data());
++                if (move && i > 0 && !c->pinned) {
++                    moving.push_back(i);
++                } else if (ckpt_pool.on()) {
++                    ConvCheckpoint k = ckpt_pool.take();
++                    k = *c;
++                    sl.checks.push_back(std::move(k));
++                } else {
++                    sl.checks.push_back(*c);
++                }
++            }
++            std::sort(moving.begin(), moving.end(), [](size_t x, size_t y) { return x > y; });
++            for (const size_t i : moving) {
++                sl.checks.push_back(std::move(checks[i]));
++                checks.erase(checks.begin() + (std::ptrdiff_t) i);
++            }
++            std::stable_sort(sl.checks.begin(), sl.checks.end(), [](const ConvCheckpoint& x, const ConvCheckpoint& y) {
++                return x.ids.size() < y.ids.size();
++            });
++            if (slot_multi)
++                std::fprintf(stderr, "strata batch: slot %d keeps %zu checkpoint%s (at %s; %.1f MiB)%s\n", b,
++                             sl.checks.size(), sl.checks.size() == 1 ? "" : "s", at.empty() ? "-" : at.c_str(),
++                             bytes / 1048576.0, moving.empty() ? "" : moving.size() == 1 ? ", 1 moved" : ", all moved");
++            return moving.size();
++        };
++        // ... and then says where they are: `BCHECKS <slot> <tokens held> <checkpoint lengths...>` after the slot's
++        // conversation changed (BADM, PARKED, a read that gave way), for the server's placement hint only (what a
++        // slot's checkpoints still cover of a prompt that is no continuation of it); the engine decides the reuse
++        auto say_checks = [&](int b) {
++            if (!slot_multi) return;
++            const BSlot& sl = bs[(size_t) b];
++            std::string at;
++            for (const ConvCheckpoint& c : sl.checks) at += " " + std::to_string(c.ids.size());
++            std::printf("BCHECKS %d %zu%s\n", b, sl.ids.size(), at.c_str());
++        };
+         // slot b's sessions -> the main ones (the reverse of copy_to_slot): a request that continues the
+         // conversation an idle slot holds reads on from there.  Every stage, the same calls.
+         // `at`: one of the slot's checkpoints - only the K/V up to it is copied and its state restored instead
+@@ -12761,7 +12837,8 @@ int main(int argc, char** argv) {
+             int32_t tok[strata::kernels::kVerifyMaxT] = {};
+             int64_t pos[strata::kernels::kVerifyMaxT] = {};
+             int64_t since = 0;              ///< tick it started waiting (fairness)
+-            int S = 0;                      ///< slots in its window: up to its last active one (idle ones cost rows)
++            int rows[strata::kernels::kVerifyMaxT] = {};  ///< packed slot IDs, immutable while in flight
++            int S = 0;                      ///< legacy span, or packed active-row count
+             int active = 0;                  ///< live slots at launch; S can also include idle padding rows
+             Clock::time_point started;       ///< the group window's first stage launch
+             // STRATA_PIPED_MTP (pmtp): S counts ROWS - each of the group's slots' token, then that slot's proposals - at
+@@ -12987,14 +13064,15 @@ int main(int argc, char** argv) {
+                 const int32_t* outb = vk.batch_out();
+                 if (pmtp && !pmtp_verdict(G, vk, outb)) return false;
+                 for (int t = 0; t < G.S && !pmtp; ++t) {
+-                    BSlot& sl = bs[(size_t) (gi * GS + t)];
++                    const int slot = pipeline_active_rows ? G.rows[t] : gi * GS + t;
++                    BSlot& sl = bs[(size_t) slot];
+                     if (!sl.active) continue;
+                     if (vk.nonfinite_in(t)) {   // #879: the slot ends, nothing emitted
+                         std::fprintf(stderr, "strata batch: non-finite logits (#879) in slot %d at position %lld: it "
+                                              "ends (BDONE nonfinite) and the next request reads its prompt from token 0\n",
+-                                     gi * GS + t, (long long) sl.p);
++                                     slot, (long long) sl.p);
+                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
+-                        std::printf("BDONE %d %lld nonfinite %.1f\n", gi * GS + t, (long long) sl.produced, ms);
++                        std::printf("BDONE %d %lld nonfinite %.1f\n", slot, (long long) sl.produced, ms);
+                         sl.active = false;
+                         sl.cached = false;
+                         sl.checks.clear();
+@@ -13002,7 +13080,7 @@ int main(int argc, char** argv) {
+                         continue;
+                     }
+                     const int32_t y = outb[t];
+-                    std::printf("BT %d %d\n", gi * GS + t, (int) y);
++                    std::printf("BT %d %d\n", slot, (int) y);
+                     ++sl.produced;
+                     ++bt_rows;
+                     ++pipe_rows;
+@@ -13012,7 +13090,7 @@ int main(int argc, char** argv) {
+                     sl.ids.push_back(sl.x);
+                     if (fin != nullptr) {
+                         const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
+-                        std::printf("BDONE %d %lld %s %.1f\n", gi * GS + t, (long long) sl.produced, fin, ms);
++                        std::printf("BDONE %d %lld %s %.1f\n", slot, (long long) sl.produced, fin, ms);
+                         sl.active = false;
+                         // a pipelined slot is a cache again (#857: a request left alone in its slot goes back to the solo path with its
+                         // drafts): its state is final once its last window has left the last stage.  A later group window whose pad
+@@ -13088,7 +13166,11 @@ int main(int argc, char** argv) {
+                             }
+                         }
+                         if (G.S == 0) { G.inflight = false; continue; }   // every slot of the group went idle
++} else if (pipeline_active_rows) {
++                        G.S = strata::program::pipeline_rows::pack(bs, pick * GS, GS, G.rows, G.tok, G.pos);
++                        G.active = G.S;
+                     } else {
++                        G.S = 0;
+                         G.active = 0;
+                         for (int t = 0; t < GS; ++t) if (bs[(size_t) (pick * GS + t)].active) {
+                             G.S = t + 1;
+@@ -13116,8 +13198,10 @@ int main(int argc, char** argv) {
+                 PGroup& G = pg[(size_t) pick];
+                 strata::core::progress().busy.store(true);
+                 if (batch_telemetry_enabled) stage_in_flight.launch(k, Clock::now());
+-                if (!(pmtp ? stage_verifier(k).batch_launch_rows(G.rows, G.S, G.hbase, G.tok, G.pos, err)
+-                           : stage_verifier(k).batch_launch(pick * GS, G.S, G.tok, G.pos, err))) {
++                const bool launched = pmtp ? stage_verifier(k).batch_launch_rows(G.rows, G.S, G.hbase, G.tok, G.pos, err)
++                    : pipeline_active_rows ? stage_verifier(k).batch_launch_rows(pick * GS, G.S, G.rows, G.tok, G.pos, err)
++                    : stage_verifier(k).batch_launch(pick * GS, G.S, G.tok, G.pos, err);
++                if (!launched) {
+                     std::printf("ERR %s\n", err.c_str());
+                     return false;
+                 }
+@@ -13677,6 +13761,10 @@ int main(int argc, char** argv) {
+             // a parked conversation holding it stays parked) and a later request that resumes from it does not park the
+             // branch it leaves: N queries cost one prefix, not N.  Absent = as before.
+             int64_t req_pin = 0;
++            // STRATA_PIPELINE_ACTIVE_ROWS=1: park=B - when this request replaces the main session with another
++            // conversation, first copy the outgoing one into idle batch slot B (chosen by the server), so a short side
++            // request between two turns of a long solo conversation does not cost that conversation its cache
++            int req_park = -1;
+             // tuning keys (setup's calibration measures settings without restarting the engine): the PCIe share of
+             // the missed experts and the draft-probability floor, for this request only
+             double req_pcie_frac = o.pcie_frac, req_spec_min_p = o.spec_min_p;
+@@ -13703,6 +13791,7 @@ int main(int argc, char** argv) {
+                     else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
+                     else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
+                     else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
++                    else if (key == "park") req_park = std::atoi(tok.c_str() + eq + 1);
+                     else if (key == "temperature") req_temperature = fv;
+                     else if (key == "top_p") req_top_p = fv;
+                     else if (key == "top_k") req_top_k = std::atoi(tok.c_str() + eq + 1);
+@@ -13983,6 +14072,7 @@ int main(int argc, char** argv) {
+             // active slot's checkpoints too (its windows write its cells from p on, so the ones below a checkpoint still
+             // hold its prompt; the groups have finished before a request is read)
+             int slot_source = -1;
++            int observed_slot_source = -1;
+             int64_t slot_tokens = 0;
+             bool resumed_from0 = false;   // a prompt read parked in a slot (BYIELD) that had started at token 0
+             // --prefill-pipe: the plan of the segment a read goes on in (a BYIELD park, a periodic checkpoint), and
+@@ -14045,6 +14135,29 @@ int main(int argc, char** argv) {
+                                  k + 1, (long long) (k < now.size() ? now[k].start : -1));
+                 }
+             }
++            // STRATA_BRANCH_CHECKPOINT (the read cuts below): how far this prompt runs along a conversation the engine
++            // holds - the main session's or a slot's - before it leaves it.  Measured here, before the park and the
++            // restore change what they hold.
++            static const int64_t branch_margin = [] {
++                const char* v = std::getenv("STRATA_BRANCH_CHECKPOINT");
++                return v != nullptr ? std::max<int64_t>(0, std::atoll(v)) : (int64_t) 0;
++            }();
++            int64_t branch_shared = 0;
++            int branch_from = -2;   // the slot it leaves, -1: the main session's conversation
++            if (branch_margin > 0 && o.prompt_cache > 0 && req_imgs.empty()) {
++                auto leaves = [&](const std::vector<int32_t>& held, int from) {
++                    const int64_t c = strata::program::shared_prefix(ids, held);
++                    if (c < (int64_t) held.size() && c > branch_shared) {
++                        branch_shared = c;
++                        branch_from = from;
++                    }
++                };
++                if (live_ok && live_imgs.empty() && cvec_cached == want_cvec) leaves(live, -1);
++                for (int b = 0; b < (int) bs.size(); ++b) {
++                    const BSlot& sl = bs[(size_t) b];
++                    if ((sl.cached || sl.active) && !sl.img && sl.cvec == want_cvec) leaves(sl.ids, b);
++                }
++            }
+             const auto parked = conversations.best(ids, req_imgs, want_cvec);
+             std::optional<strata::core::SavedConversation> incoming;
+             // A checkpoint inside ANOTHER parked conversation (a sibling subagent's system prompt and tools, say) is
+@@ -14202,6 +14315,49 @@ int main(int argc, char** argv) {
+                 resume == req_pin && live_ok)
+                 for (const ConvCheckpoint& c : checks)
+                     if ((int64_t) c.ids.size() == resume && c.pinned) pin_sibling = true;
++            // park=B (see req_park).  Only when this prompt is another conversation: it does not share what the main
++            // session holds up to its last turn (the last <|im_start|>, where its latest reply begins - a next turn
++            // without that reply's thinking, or the reply regenerated, still shares it).  Never into the slot this
++            // request restores from or runs in.
++            int64_t park_turn = (int64_t) live.size();
++            if (o.turn_token >= 0)
++                for (int64_t i = (int64_t) live.size() - 1; i > 0; --i)
++                    if (live[(size_t) i] == o.turn_token) { park_turn = i; break; }
++            const bool other_conversation = (int64_t) ids.size() < park_turn ||
++                !std::equal(live.begin(), live.begin() + park_turn, ids.begin());
++            if (pipeline_active_rows && req_park >= 0 && req_park < (int) bs.size() && !bs[(size_t) req_park].active &&
++                req_park != admit_slot && req_park != slot_source && live_ok && !live.empty() &&
++                other_conversation && (!from_live || incoming || slot_source >= 0) && !pin_sibling) {
++                const auto t0 = Clock::now();
++                BSlot& sl = bs[(size_t) req_park];
++                if (copy_to_slot(req_park, live, err)) {
++                    sl = BSlot{};
++                    sl.cached = true;
++                    sl.ids = live;
++                    sl.cvec = cvec_cached;
++                    sl.img = !live_imgs.empty();   // pictures: not matched again by tokens alone
++                    if (!sl.img) keep_slot_checkpoints(req_park);
++                    std::fprintf(stderr, "strata batch: slot %d keeps the previous conversation (%zu tokens, copied in "
++                                         "%.1f ms)\n", req_park, live.size(),
++                                 std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
++                    std::printf("PARKED %d %zu\n", req_park, sl.img ? (size_t) 0 : live.size());
++                    if (!sl.img) say_checks(req_park);
++                } else {
++                    std::fprintf(stderr, "strata batch: parking into slot %d failed (%s)\n", req_park, err.c_str());
++                    err.clear();
++                    sl.cached = false;   // its sessions may be half written
++                    sl.checks.clear();
++                    std::printf("PARKED %d 0\n", req_park);
++                }
++                std::fflush(stdout);
++            } else if (req_park >= 0) {
++                std::fprintf(stderr, "strata batch: park=%d not used (rows=%d live_ok=%d live=%zu turn=%lld other=%d "
++                                     "resume=%lld from_live=%d source=%d admit=%d active=%d)\n", req_park,
++                             pipeline_active_rows ? 1 : 0, live_ok ? 1 : 0, live.size(), (long long) park_turn,
++                             other_conversation ? 1 : 0, (long long) resume,
++                             from_live ? 1 : 0, slot_source, admit_slot,
++                             req_park < (int) bs.size() && bs[(size_t) req_park].active ? 1 : 0);
++            }
+             // --conversation-cache-park-gain N: a park now would supersede the entry parked_prefix_tokens() reports (the copy
+             // this conversation wrote last), so a conversation that advanced fewer than N tokens since then keeps it:
+             // it still holds this conversation's prefix, and re-parking writes the whole snapshot only for the next
+@@ -14266,6 +14422,14 @@ int main(int argc, char** argv) {
+                     }
+                     if (slot_ck != nullptr) {
+                         live = slot_ck->ids;
++                        // STRATA_SLOT_CHECKPOINTS: the slot's shallower checkpoints of the same conversation come
++                        // along (oldest first, for the LRU): a later query that branches before this one finds them
++                        if (slot_multi)
++                            for (const ConvCheckpoint& c : bs[(size_t) slot_source].checks)
++                                if (c.ids.size() < live.size() && std::equal(c.ids.begin(), c.ids.end(), live.begin())) {
++                                    checks.push_back(c);
++                                    checks.back().used = ++check_clock;
++                                }
+                         if (slot_ckpt_move_env() && admit_slot == slot_source) {
+                             // STRATA_SLOT_CKPT_MOVE: the slot this request continues in drops its checkpoints at the
+                             // admission, so this one moves (and moves on into the slot then: moved_in)
+@@ -14281,9 +14445,44 @@ int main(int argc, char** argv) {
+                         checks.back().used = ++check_clock;
+                     } else {
+                         live = bs[(size_t) slot_source].ids;
++                        // its checkpoints of this conversation come back with it: moved into the slot at its admission
++                        // (STRATA_SLOT_CKPT_MOVE), they are the chain's only ones, and the admission below keeps them
++                        // again - a later turn that rewrites the end of this one (its thinking dropped) resumes there
++                        const bool move = slot_ckpt_move_env() || admit_slot == slot_source;
++                        if (checks.empty() && (move || slot_multi)) {
++                            std::vector<ConvCheckpoint>& sc = bs[(size_t) slot_source].checks;
++                            std::vector<ConvCheckpoint> rest;
++                            for (ConvCheckpoint& c : sc) {
++                                if (c.ids.size() > live.size() ||
++                                    !std::equal(c.ids.begin(), c.ids.end(), live.begin())) {
++                                    rest.push_back(std::move(c));
++                                    continue;
++                                }
++                                if (move) {
++                                    checks.push_back(std::move(c));
++                                } else if (ckpt_pool.on()) {
++                                    ConvCheckpoint k = ckpt_pool.take();
++                                    k = c;
++                                    checks.push_back(std::move(k));
++                                    rest.push_back(std::move(c));
++                                } else {
++                                    checks.push_back(c);
++                                    rest.push_back(std::move(c));
++                                }
++                                checks.back().used = ++check_clock;
++                            }
++                            sc = std::move(rest);
++                            if (!checks.empty()) {
++                                std::fprintf(stderr, "strata batch: slot %d gave back %zu checkpoint%s with it (%s)\n",
++                                             slot_source, checks.size(), checks.size() == 1 ? "" : "s",
++                                             move ? "moved" : "copied");
++                                if (move) say_checks(slot_source);
++                            }
++                        }
+                     }
+                     live_imgs.clear();
+                     resume = slot_tokens;
++                    observed_slot_source = slot_source;
+                     from_live = true;
+                     std::fprintf(stderr, "strata batch: slot %d gave back %lld tokens of this conversation (%s) in "
+                                  "%.1f ms\n", slot_source, (long long) slot_tokens,
+@@ -14398,6 +14597,12 @@ int main(int argc, char** argv) {
+                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                              conversations.size(), conversations.bytes());
+             }
++            // Optional protocol metadata, emitted only after a successful restore.
++            // It describes the source, never a batch execution-slot reservation.
++            if (pipeline_active_rows) {
++                std::printf("CACHE_SOURCE %d %lld\n", observed_slot_source, (long long) resume);
++                std::fflush(stdout);
++            }
+             if (want_cvec != cvec_cached) {
+                 live_ok = false;
+                 checks.clear();
+@@ -15002,6 +15207,7 @@ int main(int argc, char** argv) {
+                                 sl.checks.push_back(c);
+                         yielded_at = q;
+                         yielded_slot = ys;
++                        say_checks(ys);
+                         std::fprintf(stderr, "strata batch: the prompt read gives way at %lld of %lld tokens; slot %d "
+                                              "holds it (copied in %.1f ms)\n", (long long) q, (long long) n, ys,
+                                      std::chrono::duration<double, std::milli>(Clock::now() - ty).count());
+@@ -15531,11 +15737,28 @@ int main(int argc, char** argv) {
+                     std::fprintf(stderr, "strata serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
+                                  "%lld)\n", (long long) req_pin, (long long) read_from);
+             }
++            // STRATA_BRANCH_CHECKPOINT=<margin> (opt-in): one more place the prompt is read to and checkpointed -
++            // where it leaves a conversation the engine holds (branch_shared above), when that is at least <margin>
++            // tokens past where the read starts and before the turn boundary.  A client that rewrites the end of its
++            // history every time (Claude Code's safety classifier inserts each query's tool calls before the closing
++            // text of its transcript) leaves the last query a few dozen tokens before its end: its turn checkpoint is
++            // past that point, so each query read its whole transcript (2026-10-16: 42-74K tokens, 15-27 s).  With a
++            // checkpoint at the point it left, the next query - which leaves this one later - reads only the rest.
++            const int64_t branch_at = req_ckpt ? strata::program::branch_checkpoint_boundary(branch_shared, read_from,
++                                                                                            turn_at, n, branch_margin)
++                                               : -1;
++            if (branch_at >= 0) {
++                char from_txt[32];
++                std::snprintf(from_txt, sizeof(from_txt), branch_from >= 0 ? "slot %d's" : "the main session's",
++                              branch_from);
++                std::fprintf(stderr, "strata serve: branch checkpoint at %lld: the prompt leaves %s conversation there "
++                                     "(read from %lld)\n", (long long) branch_at, from_txt, (long long) read_from);
++            }
+             std::vector<int64_t> cuts = {reread_to, root_at, message_at, turn_at, n - 1};
+-            if (pin_at >= 0) {
+-                cuts.push_back(pin_at);
++            if (pin_at >= 0) cuts.push_back(pin_at);
++            if (branch_at >= 0) cuts.push_back(branch_at);
++            if (pin_at >= 0 || branch_at >= 0)
+                 std::sort(cuts.begin(), cuts.end());   // the skipped -1s first, n - 1 still last
+-            }
+             int64_t at = read_from;
+             // STRATA_ADMIT_MERGE_FIRST: the last part, when it goes through the windows, leaves its last tokens (up to
+             // max_t with the last prompt token) to the first window, which starts at merge_at (-1: the first window
+@@ -15631,8 +15854,9 @@ int main(int argc, char** argv) {
+                     break;
+                 }
+                 at = to;
+-                if ((to == turn_at || to == root_at || to == message_at || to == pin_at) &&
+-                    !checkpoint_at(to, nullptr, to == message_at && to != turn_at && to != root_at && to != pin_at)) {   // the tail kind leaves first
++                if ((to == turn_at || to == root_at || to == message_at || to == pin_at || to == branch_at) &&
++                    !checkpoint_at(to, nullptr, to == message_at && to != turn_at && to != root_at && to != pin_at &&
++                                                to != branch_at)) {   // the tail kind leaves first
+                     std::printf("ERR saving a conversation checkpoint failed%s\n", ckpt_why.c_str());
+                     return 1;
+                 }
+@@ -15641,6 +15865,9 @@ int main(int argc, char** argv) {
+                     conv_root_len = -1;
+                     for (int64_t i = 1; i < to; ++i) if (ids[size_t(i)] == o.turn_token) { conv_root_len = i; break; }
+                 }
++                if (to == branch_at)   // marked: a slot that takes this conversation keeps it (slot_checkpoint_picks)
++                    for (ConvCheckpoint& k : checks)
++                        if ((int64_t) k.ids.size() == branch_at) k.branch = true;
+                 if (to == pin_at && !pin_checkpoint(pin_at))
+                     std::fprintf(stderr, "strata serve: pin=%lld: its checkpoint was not kept\n", (long long) pin_at);
+                 if (trace && to == message_at)
+@@ -17568,13 +17795,17 @@ int main(int argc, char** argv) {
+                             }
+                     // STRATA_SLOT_CKPT_MOVE: this request's own turn checkpoint (or the one it moved out of this slot)
+                     // moves into the slot; a pinned prefix, a root and any other the chain shares are copied as before
+-                    const bool move_best = slot_ckpt_move_env() && best != nullptr && !best_lent && !sl.img &&
+-                                           !best->pinned && ((turn_at > 0 && (int64_t) best->ids.size() == turn_at) ||
++                    const bool move_best = !slot_multi && slot_ckpt_move_env() && best != nullptr &&
++                                           !best_lent && !sl.img && !best->pinned &&
++                                           ((turn_at > 0 && (int64_t) best->ids.size() == turn_at) ||
+                                             (int64_t) best->ids.size() == moved_in);
+                     const auto tc3 = Clock::now();
++                    bool moved = move_best;
+                     if (move_best) {
+                         sl.checks.push_back(std::move(checks[best_at]));
+                         checks.erase(checks.begin() + (std::ptrdiff_t) best_at);
++                    } else if (slot_multi) {
++                        if (!sl.img) moved = keep_slot_checkpoints(admit_slot, slot_ckpt_move_env()) > 0;
+                     } else if (best != nullptr && !sl.img) {
+                         if (ckpt_pool.on()) {   // a copy into a dropped checkpoint's vectors (their pages are in)
+                             ConvCheckpoint c = ckpt_pool.take();
+@@ -17599,10 +17830,11 @@ int main(int argc, char** argv) {
+                                      req_times.read_ms, req_times.windows_ms, req_times.ckpts, ck, req_times.sync_ms,
+                                      req_times.save_ms, req_times.evict_ms,
+                                      prompt_ms - req_times.read_ms - req_times.windows_ms - ck, decode_ms, span(tc0, tc1),
+-                                     span(tc1, tc2), span(tc3, tc4), move_best ? " (moved)" : "");
++                                     span(tc1, tc2), span(tc3, tc4), moved ? " (moved)" : "");
+                     }
+                 }
+                 std::printf("BADM %d %d\n", admit_slot, cont ? 1 : 0);
++                if (cont && !bs[(size_t) admit_slot].img) say_checks(admit_slot);
+                 if (trace && piped && cont) {
+                     rows_wait = "the admission";
+                     rows_wait_t = Clock::now();
+diff --git a/src/program/slot_checkpoints_test.cpp b/src/program/slot_checkpoints_test.cpp
+new file mode 100644
+index 00000000..ea5e59e3
+--- /dev/null
++++ b/src/program/slot_checkpoints_test.cpp
+@@ -0,0 +1,88 @@
++#include "strata/program/slot_checkpoints.hpp"
++
++#include <cstdio>
++
++namespace {
++struct Ck {
++    std::vector<int32_t> ids;
++    int tag = 0;
++    bool branch = false;
++};
++std::vector<int32_t> run(int32_t from, int32_t n) {
++    std::vector<int32_t> v;
++    for (int32_t i = 0; i < n; ++i) v.push_back(from + i);
++    return v;
++}
++} // namespace
++
++int main() {
++    using strata::program::branch_checkpoint_boundary;
++    using strata::program::deepest_prefix_checkpoints;
++    using strata::program::shared_prefix;
++    using strata::program::slot_checkpoint_picks;
++    int checks = 0;
++    auto expect = [&](bool ok, const char* what) {
++        ++checks;
++        if (!ok) std::fprintf(stderr, "slot_checkpoints_test: %s\n", what);
++        return ok;
++    };
++    const std::vector<int32_t> held = run(0, 50000);
++    std::vector<int32_t> other = run(0, 20000);
++    other[19000] = -1;
++    // root 8192 (twice: the first counts), periodic 16384 and 32768, turn 49990, the whole conversation (not a strict
++    // start), another conversation's checkpoint
++    const std::vector<Ck> cks = {{run(0, 32768), 1}, {run(0, 8192), 2}, {run(0, 49990), 3}, {run(0, 8192), 4},
++                                 {run(0, 16384), 5}, {held, 6}, {other, 7}};
++    auto tags = [&](std::size_t keep) {
++        std::vector<int> t;
++        for (const Ck* c : deepest_prefix_checkpoints(cks, held, keep)) t.push_back(c->tag);
++        return t;
++    };
++    bool ok = expect(tags(1) == std::vector<int>{3}, "keep 1 = the single deepest (as before)") &&
++              expect(tags(2) == std::vector<int>{1, 3}, "keep 2, shallowest first") &&
++              expect(tags(4) == std::vector<int>{2, 5, 1, 3}, "keep 4: one per length, the first of equal ones") &&
++              expect(tags(9) == std::vector<int>{2, 5, 1, 3}, "keep more than there are") &&
++              expect(tags(0).empty(), "keep 0") &&
++              expect(deepest_prefix_checkpoints(cks, run(0, 100), 3).empty(), "none is a start of a short history") &&
++              expect(deepest_prefix_checkpoints(std::vector<Ck>{}, held, 2).empty(), "no checkpoints");
++    // the picks: root 8192, periodic 16384, a branch at 40000, periodic 49152, the turn 49990
++    std::vector<Ck> bks = {{run(0, 8192), 1}, {run(0, 16384), 2}, {run(0, 40000), 3, true}, {run(0, 49152), 4},
++                           {run(0, 49990), 5}, {other, 6}};
++    auto picks = [&](const std::vector<Ck>& v, std::size_t keep, bool branch) {
++        std::vector<int> t;
++        for (const Ck* c : slot_checkpoint_picks(v, held, keep, branch)) t.push_back(c->tag);
++        return t;
++    };
++    ok = ok && expect(picks(bks, 1, true) == std::vector<int>{3, 5}, "1 + branch: turn, branch past a periodic") &&
++         expect(picks(bks, 1, false) == std::vector<int>{5}, "1 without branch: the turn only (as before)") &&
++         expect(picks(bks, 2, true) == std::vector<int>{3, 5}, "2 + branch: the turn and the branch, two in all") &&
++         expect(picks(bks, 2, false) == std::vector<int>{4, 5}, "2 without branch: the two deepest, branch or not") &&
++         expect(picks(bks, 3, true) == std::vector<int>{3, 4, 5}, "3 + branch: then the deepest other") &&
++         expect(picks(bks, 9, true) == std::vector<int>{1, 2, 3, 4, 5}, "keep more than there are") &&
++         expect(picks(bks, 0, false).empty(), "keep 0");
++    bks[2].branch = false;
++    ok = ok && expect(picks(bks, 1, true) == std::vector<int>{5}, "1, no branch one yet: the turn (first query)") &&
++         expect(picks(bks, 2, true) == std::vector<int>{4, 5}, "2, no branch one yet: the turn and a periodic one");
++    bks[0].branch = true;
++    ok = ok && expect(picks(bks, 1, true) == std::vector<int>{1, 5}, "the deepest branch, however shallow");
++    bks[4].branch = true;
++    ok = ok && expect(picks(bks, 1, true) == std::vector<int>{1, 5}, "the turn marked too: not taken twice");
++    std::vector<int64_t> prompt(held.begin(), held.end());
++    prompt[49940] = -5;
++    ok = ok && expect(shared_prefix(prompt, held) == 49940, "shared prefix at the rewrite") &&
++         expect(shared_prefix(std::vector<int64_t>(prompt.begin(), prompt.begin() + 100), held) == 100, "prompt ends") &&
++         expect(shared_prefix(prompt, run(0, 10)) == 10, "held ends") &&
++         expect(shared_prefix({}, held) == 0, "empty prompt");
++    // a classifier query: resume 32768, a sibling shares 49940, the turn at 50300, 50310 tokens
++    ok = ok && expect(branch_checkpoint_boundary(49940, 32768, 50300, 50310, 2048) == 49940, "a deep branch") &&
++         expect(branch_checkpoint_boundary(49940, 48000, 50300, 50310, 2048) == -1, "too close to the read start") &&
++         expect(branch_checkpoint_boundary(49940, 47892, 50300, 50310, 2048) == 49940, "exactly the margin") &&
++         expect(branch_checkpoint_boundary(50300, 0, 50300, 50310, 2048) == -1, "at the turn: taken anyway") &&
++         expect(branch_checkpoint_boundary(50305, 0, 50300, 50310, 2048) == -1, "past the turn") &&
++         expect(branch_checkpoint_boundary(50308, 0, -1, 50310, 2048) == 50308, "no turn: before the last token") &&
++         expect(branch_checkpoint_boundary(50309, 0, -1, 50310, 2048) == -1, "no turn: the last token") &&
++         expect(branch_checkpoint_boundary(49940, 0, 50300, 50310, 0) == -1, "margin 0: off") &&
++         expect(branch_checkpoint_boundary(0, 0, 50300, 50310, 1) == -1, "nothing shared");
++    if (!ok) return 1;
++    std::printf("slot_checkpoints_test OK (%d checks)\n", checks);
++}
+diff --git a/sycl/include/strata/core/verify.hpp b/sycl/include/strata/core/verify.hpp
+index b38249f4..7d0c30da 100644
+--- a/sycl/include/strata/core/verify.hpp
++++ b/sycl/include/strata/core/verify.hpp
+@@ -168,6 +168,8 @@ public:
+     // a window in flight from one thread (batch_poll does not block).  Stage k can then run group g while stage k+1
+     // runs group g-1.  Rows of group `base` use hand-off rows [base, base + S), so groups never share a hand-off row.
+     bool batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err);
++    // STRATA_PIPELINE_ACTIVE_ROWS=1: packed active rows bind actual slot states; hand-off storage still starts at base.
++    bool batch_launch_rows(int base, int S, const int* rows, const int32_t* tokens, const int64_t* pos, std::string& err);
+     /// 1 = this stage's window and commit are done (the last stage's picks are in batch_out), 0 = still running,
+     /// -1 = an error (err).  Serves every layer that has rung so far.
+     int batch_poll(PoolMultiFn pool, void* user, std::string& err);
+diff --git a/sycl/src/core/verify.cpp b/sycl/src/core/verify.cpp
+index a2020862..c84e45ce 100644
+--- a/sycl/src/core/verify.cpp
++++ b/sycl/src/core/verify.cpp
+@@ -3387,12 +3387,16 @@ catch (sycl::exception const &exc) {
+   std::exit(1);
+ }
+ 
+-bool Verifier::batch_launch(int base, int S, const int32_t *tokens,
+-                            const int64_t *pos, std::string &err) try {
+-    const OnDevice on_device(device_);
+-    if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
++bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err) {
+     int rows[8] = {};
+     for (int t = 0; t < S && t < 8; ++t) rows[t] = base + t;
++    return batch_launch_rows(base, S, rows, tokens, pos, err);
++}
++
++bool Verifier::batch_launch_rows(int base, int S, const int* rows, const int32_t* tokens,
++                                 const int64_t* pos, std::string& err) try {
++    const OnDevice on_device(device_);
++    if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
+     if (!stage_batch(rows, S, base, tokens, pos, err)) return false;
+     dpct::err0 le = DPCT_CHECK_ERROR(
+         (cs_)->ext_oneapi_graph(*exec_bm_[bkey(rows, S, base)]));
+diff --git a/tests/core/pipeline_rows_test.cpp b/tests/core/pipeline_rows_test.cpp
+new file mode 100644
+index 00000000..f0f08984
+--- /dev/null
++++ b/tests/core/pipeline_rows_test.cpp
+@@ -0,0 +1,59 @@
++// include/strata/program/pipeline_rows.hpp: a pipelined group's window lists its active slots only, in order, with
++// their tokens and positions; idle slots are untouched; the packed rows stay as they were when a slot changes later.
++// Header-only, CPU.  Checks do not depend on assert (they hold in Release builds too).
++#include "strata/program/pipeline_rows.hpp"
++
++#include <array>
++#include <cstdint>
++#include <cstdio>
++
++namespace {
++int failures = 0;
++void check(bool ok, const char* what, int count, int mask, int base) {
++    if (!ok) {
++        std::fprintf(stderr, "FAIL: %s (slots %d, active mask %d, base %d)\n", what, count, mask, base);
++        ++failures;
++    }
++}
++struct Slot {
++    bool active;
++    int32_t x;
++    int64_t p;
++    bool cached;
++};
++}  // namespace
++
++int main() {
++    for (int count : {2, 4, 8})
++        for (int mask = 0; mask < (1 << count); ++mask) {
++            std::array<Slot, 8> slots{};
++            for (int b = 0; b < count; ++b) slots[(size_t) b] = {(mask & (1 << b)) != 0, 100 + b, 10000 + b, true};
++            const auto before = slots;
++            for (int gs : {1, 2, 4})
++                for (int base = 0; base + gs <= count; base += gs) {
++                    int rows[8]{};
++                    int32_t tokens[8]{};
++                    int64_t pos[8]{};
++                    const int n = strata::program::pipeline_rows::pack(slots, base, gs, rows, tokens, pos);
++                    int k = 0;
++                    for (int b = base; b < base + gs; ++b)
++                        if (slots[(size_t) b].active) {
++                            check(k < n && rows[k] == b && tokens[k] == slots[(size_t) b].x &&
++                                      pos[k] == slots[(size_t) b].p, "active slot packed in order", count, mask, base);
++                            ++k;
++                        }
++                    check(k == n, "only the active slots", count, mask, base);
++                    bool untouched = true;
++                    for (int b = 0; b < count; ++b) untouched = untouched && slots[(size_t) b].cached == before[(size_t) b].cached;
++                    check(untouched, "idle slots keep their cache flag", count, mask, base);
++                    if (n > 0) {        // a slot that changes after the window was packed does not move its rows
++                        const int first = rows[0];
++                        slots[(size_t) first].active = !slots[(size_t) first].active;
++                        check(rows[0] == first, "packed rows are the window's own copy", count, mask, base);
++                        slots = before;
++                    }
++                }
++        }
++    if (failures == 0) std::printf("pipeline_rows_test: all checks passed\n");
++    return failures == 0 ? 0 : 1;
++}

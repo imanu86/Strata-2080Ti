@@ -1,0 +1,266 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Mon, 26 Oct 2026 14:17:18 +0100
+Subject: [PATCH] SONNET-LEVE-Porta da upstream #4010 STRATA_PIPE_ADAPT_EVERY:
+ i gruppi in pipeline adattano il livello VRAM (opt-in)
+
+Net diff della PR (base 7dd5cf18). Due conflitti in generate.cpp con #4121 risolti a mano: le due lambda
+(pmtp_settle e pa_due) restano entrambe, la riga di tempi stampa sia le bozze MTP tenute sia il giro adattivo.
+Spento di default (STRATA_PIPE_ADAPT_EVERY non impostata o 0). Compilato no, installato no, provato no.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/docs/BATCHING.md b/docs/BATCHING.md
+index 08efeb92..c8514aa2 100644
+--- a/docs/BATCHING.md
++++ b/docs/BATCHING.md
+@@ -363,7 +363,32 @@ between decoding windows (the prompt may hold a loan of cache slots). The `strat
+ GPU-reach wait and pool time, and how many routed entries the VRAM tier, the PCIe share and the CPU served per window.
+ Swaps move experts between the GPU and the CPU, which round differently, so greedy outputs can differ from run to run;
+ `--adapt-every 1000000` keeps the tier fixed (as in the exactness settings below). The pipelined `--batch-groups` path
+-does not adapt.
++does not adapt by default: its windows count the routing, but no round starts while groups are in flight, so the tier
++moves only when the slots go back to the solo path.
++
++`STRATA_PIPE_ADAPT_EVERY=N` (opt-in; unset or 0 keeps the old behaviour) lets the pipelined path adapt: after N group
++windows it starts no new group, lets the groups in flight finish, runs one round as the serial batch loop does (nothing
++in flight reads a cache slot, and the swapped-in experts land before the next launch), and goes on. It stands still while
++a prompt is read beside the slots, and does nothing with `--adapt-async 1`. The engine says so at start, and the
++`strata batch (pipelined ...)` line adds the rounds, the experts swapped in and the time spent. Measured on 2x RTX 5090
++(layer split 25, Swift-Qwen3.8-Flash-Next IQ3_S, `--batch 6 --batch-groups 2`, resident experts, a profile-filled cache,
++`--adapt-every 16`), six streams of 1,024 greedy tokens from `tools/serve_load.py`, the engine's rows/s of eight bursts
++right after start, two fresh engines per setting:
++
++| `STRATA_PIPE_ADAPT_EVERY` | bursts 1-8, rows/s | mean | experts swapped before burst 8 |
++| --- | --- | ---: | ---: |
++| unset (stock 0.2.4.1) | 246, 257, 291, 292, 335, 338, 356, 355 | 309 | 287 |
++| unset (this branch) | 249, 242, 297, 296, 333, 336, 372, 362 | 311 | 288 |
++| 128 | 363, 415, 414, 420, 420, 411, 415, 420 | 410 | 6,181 |
++| 128 | 359, 407, 416, 422, 419, 417, 404, 411 | 407 | 6,294 |
++| 32 | 375, 405, 408, 405, 409, 390, 405, 409 | 402 | 5,957 |
++| 32 | 384, 414, 404, 402, 401, 412, 406, 401 | 403 | 5,678 |
++
++Without it the tier swaps 96 experts every burst or two (only when a burst ends) and the engine was still speeding up
++after eight bursts; with 128 it reached about 415 rows/s from the second burst, the speed an engine without the switch
++showed only after thousands of swaps had come from other traffic. 32 empties the pipeline four times as often and ends a
++little lower. One machine, one model and one configuration; not measured on one GPU (no pipelined path there) or with
++more than two stages.
+ 
+ With `--adapt-async 1` (needs the resident RAM mode) the round does not hold a window up: each batch window moves the
+ round on one step (table changes and uploads on the main thread, the copies on a helper thread and the cards' refill
+@@ -472,6 +497,7 @@ counter-based draw (Philox(seed, position)).
+   boundary, and not for pictures.
+ - Admissions are one at a time: two new long prompts are read one after the other.
+ - `--batch-groups` needs every stage on its own GPU. A pipelined slot is a conversation cache again (0.1.41): a request left alone in its slot goes back to the solo path with its drafts, as on one GPU.
++- The pipelined `--batch-groups` path adapts the VRAM tier only with `STRATA_PIPE_ADAPT_EVERY` (above).
+ - The slot sessions take VRAM (above) and, with KV streaming, pinned RAM.
+ 
+ ## Measured
+diff --git a/include/strata/program/batch_groups.hpp b/include/strata/program/batch_groups.hpp
+index 15d0095b..2ef736a5 100644
+--- a/include/strata/program/batch_groups.hpp
++++ b/include/strata/program/batch_groups.hpp
+@@ -10,11 +10,41 @@
+ // the serial windows with the slots' drafts (the 0.1.42/0.1.43 behaviour).  A number or `auto` given on the command line
+ // is honoured as before.
+ //
++// The pipelined path starts no round of the adaptive VRAM tier on its own (the serial batch windows start one every
++// `--adapt-every` windows): opt-in, STRATA_PIPE_ADAPT_EVERY=N lets it run one after every N group windows, once the groups
++// in flight have finished (pipe_adapt_every / pipe_adapt_due below).
++//
+ // Pure (no GPU, no environment read): generate.cpp passes in what it knows.
+ #pragma once
+ 
++#include <cstdlib>
++
+ namespace strata::program::batch_groups {
+ 
++/// STRATA_PIPE_ADAPT_EVERY's value -> the interval in group windows; 0 (off: the pipelined path adapts nothing, as before)
++/// when unset, empty, not a number, 0 or negative.
++inline int pipe_adapt_every(const char* value) {
++    if (value == nullptr) return 0;
++    const int n = std::atoi(value);
++    return n > 0 ? n : 0;
++}
++
++/// What the pipelined loop knows when it decides on a round.
++struct PipeAdapt {
++    int every = 0;               ///< pipe_adapt_every()
++    bool tier_on = false;        ///< the adaptive tier counts the routing here (it is on and not the whole model)
++    bool async_tier = false;     ///< --adapt-async 1 runs its own rounds
++    bool prompt_read = false;    ///< a prompt is read beside the slots (it may hold a loan of cache slots)
++    bool swaps_pending = false;  ///< the last round's copies have not landed yet
++    long long windows = 0;       ///< group windows completed so far
++    long long last = 0;          ///< `windows` when the last round ran
++};
++
++/// A round is due: the loop starts no new group, and runs the round once nothing is in flight.
++inline bool pipe_adapt_due(const PipeAdapt& p) {
++    return p.every > 0 && p.tier_on && !p.async_tier && !p.prompt_read && !p.swaps_pending && p.windows - p.last >= p.every;
++}
++
+ /// What kept `auto` from pipelining.
+ enum class Serial { None, BatchMtp, AdaptAsync, TwoCardsSerialFaster };
+ 
+diff --git a/src/program/batch_groups_test.cpp b/src/program/batch_groups_test.cpp
+index aa563a84..71dde769 100644
+--- a/src/program/batch_groups_test.cpp
++++ b/src/program/batch_groups_test.cpp
+@@ -5,7 +5,9 @@
+ //   3. --batch-mtp (or --adapt-async 1) turns that default into one group, and says which feature did it;
+ //      with STRATA_PIPED_MTP and one slot per group, --batch-mtp keeps the pipeline and drafts in it;
+ //   4. a number or `auto` given explicitly is honoured, with or without those features;
+-//   5. no layer split: the number given (1) stays.
++//   5. no layer split: the number given (1) stays;
++//   6. STRATA_PIPE_ADAPT_EVERY: off unless a positive number; a round is due after N group windows, never with the tier
++//      off, beside --adapt-async, while a prompt is read or while the last round's copies are in flight.
+ #include "strata/program/batch_groups.hpp"
+ 
+ #include <cstdio>
+@@ -173,6 +175,41 @@ int main() {
+         check(bg::resolve(i).groups == 2, "an explicit number without a split is returned (the engine warns)");
+     }
+ 
++    // STRATA_PIPE_ADAPT_EVERY
++    check(bg::pipe_adapt_every(nullptr) == 0 && bg::pipe_adapt_every("") == 0 && bg::pipe_adapt_every("0") == 0,
++          "pipe adapt: unset, empty or 0 is off");
++    check(bg::pipe_adapt_every("-5") == 0 && bg::pipe_adapt_every("off") == 0, "pipe adapt: negative or not a number is off");
++    check(bg::pipe_adapt_every("128") == 128 && bg::pipe_adapt_every("1") == 1, "pipe adapt: a positive number is the interval");
++    {
++        bg::PipeAdapt p;
++        p.every = 128;
++        p.tier_on = true;
++        p.windows = 127;
++        check(!bg::pipe_adapt_due(p), "pipe adapt: not before N group windows");
++        p.windows = 128;
++        check(bg::pipe_adapt_due(p), "pipe adapt: due after N group windows");
++        p.last = 128;
++        p.windows = 200;
++        check(!bg::pipe_adapt_due(p), "pipe adapt: counted again from the last round");
++        p.windows = 256;
++        check(bg::pipe_adapt_due(p), "pipe adapt: due N windows after the last round");
++        bg::PipeAdapt q = p;
++        q.every = 0;
++        check(!bg::pipe_adapt_due(q), "pipe adapt: never when off");
++        q = p;
++        q.tier_on = false;
++        check(!bg::pipe_adapt_due(q), "pipe adapt: never with the adaptive tier off");
++        q = p;
++        q.async_tier = true;
++        check(!bg::pipe_adapt_due(q), "pipe adapt: never beside --adapt-async 1");
++        q = p;
++        q.prompt_read = true;
++        check(!bg::pipe_adapt_due(q), "pipe adapt: never while a prompt is read beside the slots");
++        q = p;
++        q.swaps_pending = true;
++        check(!bg::pipe_adapt_due(q), "pipe adapt: never while the last round's copies are in flight");
++    }
++
+     std::printf("%s\n", g_fail == 0 ? "batch_groups_test: all passed" : "batch_groups_test: FAILED");
+     return g_fail == 0 ? 0 : 1;
+ }
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 1cc3020f..c2ba804d 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -8406,6 +8406,15 @@ int main(int argc, char** argv) {
+                         : nullptr;
+         if (why != nullptr) adapt_async_off(why);
+     }
++    // STRATA_PIPE_ADAPT_EVERY (batch_groups.hpp; the rounds run in the pipelined loop below): said once here, with the
++    // other start-up lines, before READY
++    if (o.serve && o.batch > 0 && o.batch_groups > 1 && multi_gpu) {
++        const int every = strata::program::batch_groups::pipe_adapt_every(std::getenv("STRATA_PIPE_ADAPT_EVERY"));
++        if (every > 0)
++            std::fprintf(stderr, "strata batch: STRATA_PIPE_ADAPT_EVERY=%d: the pipelined groups run an adaptive-tier round "
++                                 "every %d group windows (the pipeline empties for it)%s\n", every, every,
++                         o.adapt_every <= 0 || o.adapt_swaps <= 0 ? " - but the adaptive tier is off" : "");
++    }
+     // #340 / STRATA_SPLIT_RING: a layer split's streamed-ring override, decided from the stage caches' residency.  It
+     // has to be in place BEFORE the split's lend regions are sized (Prefill::bytes_needed counts the ring): they were
+     // sized with the default ring and the override applied afterwards, so a ring of 384 borrowed 5396 slots and the RAM
+@@ -12914,6 +12923,28 @@ int main(int argc, char** argv) {
+             }
+             return true;
+         };
++        // STRATA_PIPE_ADAPT_EVERY=N (opt-in; unset or 0: off, as before): the pipelined groups start no adaptive-tier round
++        // of their own (batch_step starts one every --adapt-every windows; pump below never does), so under steady parallel
++        // load the VRAM tier only moves when the slots go back to the solo path, and a fresh engine keeps its start-up
++        // profile for minutes.  With N > 0, after N group windows the pipeline starts no new group, lets the ones in flight
++        // finish, and runs one round there as batch_step runs it between serial windows (nothing in flight reads a cache
++        // slot; the swapped-in experts land before the next launch), then goes on.  Never while a prompt is read beside
++        // the slots (its loan of cache slots), nor with --adapt-async (its own ticks).
++        // (the rule: batch_groups.hpp pipe_adapt_every / pipe_adapt_due, tested in batch_groups_test)
++        const int pipe_adapt_every = strata::program::batch_groups::pipe_adapt_every(std::getenv("STRATA_PIPE_ADAPT_EVERY"));
++        int64_t pa_windows = 0, pa_last = 0, pa_rounds = 0, pa_swaps = 0;
++        double pa_ms = 0;
++        auto pa_due = [&] {
++            strata::program::batch_groups::PipeAdapt p;
++            p.every = pipe_adapt_every;
++            p.tier_on = !drive.d.usage.empty();
++            p.async_tier = (bool) ajob;
++            p.prompt_read = in_prompt_read;
++            p.swaps_pending = !pending.empty();
++            p.windows = pa_windows;
++            p.last = pa_last;
++            return strata::program::batch_groups::pipe_adapt_due(p);
++        };
+         // one turn: serve every running stage, hand finished groups on, start what can start
+         auto pump = [&](bool may_start) -> bool {
+             ++pipe_tick;
+@@ -12980,6 +13011,7 @@ int main(int argc, char** argv) {
+                     rows_wait = nullptr;
+                 }
+                 ++bt_windows;
++                ++pa_windows;
+                 G.inflight = false;
+                 report_batch_window(G.S, G.active, !pipe_inflight() && !batch_on(), G.started);
+             }
+@@ -12994,7 +13026,7 @@ int main(int argc, char** argv) {
+                             pick = gi;
+                     if (pick < 0) continue;
+                 } else {
+-                    if (!may_start) continue;
++                    if (!may_start || pa_due()) continue;   // STRATA_PIPE_ADAPT_EVERY: a round is due, the pipeline empties first
+                     for (int j = 0; j < (int) pg.size() && pick < 0; ++j) {
+                         const int gi = (int) ((rr + j) % (int64_t) pg.size());
+                         if (pg[(size_t) gi].inflight || !group_active(gi)) continue;
+@@ -13080,6 +13112,18 @@ int main(int argc, char** argv) {
+                 }
+             }
+             if (drive.d.failed) { std::printf("ERR %s\n", drive.d.fail ? drive.d.fail : "the expert pool failed"); return false; }
++            if (pa_due() && !pipe_inflight()) {   // STRATA_PIPE_ADAPT_EVERY: the pipeline is empty - one round, as batch_step
++                const Clock::time_point ta = Clock::now();
++                pa_last = pa_windows;
++                if (!adapt()) {
++                    std::printf("ERR an adaptive refill failed\n");
++                    return false;
++                }
++                ++pa_rounds;
++                pa_swaps += (int64_t) pending.size();
++                apply_pending(true);   // the copies land and the tables follow (the next launch plans from them)
++                pa_ms += std::chrono::duration<double, std::milli>(Clock::now() - ta).count();
++            }
+             if (batch_telemetry_enabled) {
+                 const auto sample = stage_in_flight.sample(Clock::now(), !pipe_inflight() && !batch_on());
+                 if (sample) {
+@@ -13093,12 +13137,18 @@ int main(int argc, char** argv) {
+             if (pmtp && !pipe_inflight() && !batch_on() && !pmtp_settle()) return false;
+             if (!pipe_inflight() && !batch_on() && bt_windows > 0) {   // all idle: the timing line, as batch_step
+                 const double w = (double) bt_windows, wall = std::chrono::duration<double, std::milli>(Clock::now() - bt_start).count();
++                char pa_txt[160] = "";
++                if (pipe_adapt_every > 0)
++                    std::snprintf(pa_txt, sizeof pa_txt, "; adaptive tier (STRATA_PIPE_ADAPT_EVERY): %lld rounds, %lld experts "
++                                  "swapped in, %.0f ms", (long long) pa_rounds, (long long) pa_swaps, pa_ms);
+                 std::fprintf(stderr, "strata batch (pipelined, %d groups of %d): %lld group-steps, %lld rows in %.0f ms = "
+                                      "%.1f rows/s (admissions included)", o.batch_groups, GS, (long long) bt_windows,
+                              (long long) bt_rows, wall, 1000.0 * bt_rows / std::max(wall, 1e-9));
+                 if (pmtp)
+                     std::fprintf(stderr, ", %lld of %lld MTP proposals kept", (long long) bt_accepted, (long long) bt_tokens);
+-                std::fprintf(stderr, "\n");
++                std::fprintf(stderr, "%s\n", pa_txt);
++                pa_rounds = pa_swaps = 0;
++                pa_ms = 0;
+                 for (int k = 0; k < n_pipe; ++k) {
+                     const std::string pr = stage_verifier(k).profile_report();
+                     if (!pr.empty()) std::fprintf(stderr, "strata batch GPU stages, stage %d (ms/window):%s\n", k + 1, pr.c_str());

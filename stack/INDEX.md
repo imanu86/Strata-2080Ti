@@ -8,7 +8,9 @@ Rebased on upstream 0.2.0-beta (`main` f57c0adc, 9 commits past the tag `v0.2.0-
 
 Rebased on upstream v0.2.6 (engine 0.1.51) on 25 Oct 2026 (branch `lab/upsync-026`, diary `docs/UPSYNC_026.md`): all 18 patches carried, none retired (no lever of ours reached upstream between 0.2.0-beta and 0.2.6). Three needed a manual look: 04 (`adapt_iv(rounds)` replaces `adapt_every` in the pipeline's adapt gate), 05 (the conversation cache is now sized from the free RAM by default, #3493: `conversation_cache_mib = -1`), 06 (docs/DETAILS.md rewritten: the doc paragraph is dropped, code unchanged). Compiled/installed/measured: see UPSYNC_026.md.
 
-Base: upstream `Niko1221/Strata` **v0.2.6** (`4b9e05a2`). Stack head: `0083469d`. 19 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Branch `lab/leve-026` (26 Oct 2026) adds four opt-in levers from open upstream PRs on top of the 19 patches (20-23: STRATA_PIPED_MTP #4121, STRATA_PIPE_ADAPT_EVERY #4010, STRATA_PW_WITH_BATCH #3095, the branch checkpoints of #2527/#2528/#2843). All off by default: a run without their variables is the 0.2.6 + 19-patch Daily. Compiled and measured: see the LEVE_026.md of the measurement folder.
+
+Base: upstream `Niko1221/Strata` **v0.2.6** (`4b9e05a2`). Stack head: `d47c46ef`. 23 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -60,6 +62,10 @@ New in 0.2.0, does not fire here: the sm_86 table (`src/core/nv_defaults.cpp`: A
 | 17 | [p2-flush-noswitch](#17-p2-flush-noswitch) | Pipeline polling without switching card: `STRATA_P2_FLUSH_NOSWITCH` (service, done and the chain read their mapped flags with no OnDevice), `STRATA_P2_FLUSH_US` (flush period), `STRATA_P2_SWITCH_STAT` (host time in the window launches), `STRATA_P2_SMEM` (config cache to shared). | `STRATA_P2_FLUSH_NOSWITCH=1`, `STRATA_P2_FLUSH_US=<us>`, `STRATA_P2_SWITCH_STAT=1`, `STRATA_P2_SMEM=1` (off) | fork (lab/pipeline2 f6a0b6b2; the polling idea from NTRYourWaifu's v7/v8) | never proposed | 13 Oct B-A-B (isolated bench): NOSWITCH removes ~8 100 card switches per request but the gain is below the spread; never promoted (docs/PIPELINE2.md par. 11). |
 | 18 | [hc16-sm75](#18-hc16-sm75) | The hyper-connection projections (down, up, inject) and ssm_alpha / ssm_beta of the prompt on FP16 tensor cores on an sm_75 card: each BF16 weight is re-encoded to FP16 once per call into a 6.55 MB staging buffer, the activations are written as the FP16 image of the FP32 value (`f16img` 2 in the `gr_*` writers, 1 in `gr_silu`). The draft layer stays BF16. | `STRATA_HC16_SM75=1` (off; sm_75 only, not part of `STRATA_SM75_PERF`) | fork (pr/prefill-hc16-sm75 626d324c, the 0.1.43 Daily's hc16, rewritten on 0.1.45's kernels) | never proposed. Overlaps upstream's `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091), which sends every BF16 GEMM through FP16 with per-call conversion buffers; hc16 is the narrow version (these call sites only, a 6.55 MB buffer allocated and priced with the prompt path, the draft layer untouched) | 0.1.43 Daily: -19.5% of the GPU prompt time on the 2080 Ti (131k prefill 100 -> 75 s together with SELECT_SIMT). Not bitwise (FP16 activations). On 0.1.45: docs/UPSYNC_MAIN.md par. 8; on 0.2.0: docs/UPSYNC_020.md. |
 | 19 | [greedy-temp0](#19-greedy-temp0) | A request that explicitly asks for temperature <= 0 is not given the model card's top_p / top_k / presence_penalty (upstream a8091f4d, #2685, merges them under every request that sends no sampling fields). The engine stays on the pure argmax path; without the patch a temperature-0 request from the community bench ran at about -12% decode. Config block and Chat settings still apply; every other request is unchanged. | none (always on; a request with `temperature` <= 0) | fork (lab/upsync-026, bisection of 25-26 Oct 2026) | never proposed | docs/porto/strata_adattivo/corse_2080ti/20261025_bisezione/SAMPLING.md in moe-aggressive-commit (measurement pending) |
+| 20 | [piped-mtp](#20-piped-mtp) | --batch-mtp's MTP drafts inside the pipelined slot groups: a group's window carries each of its slots' rows (token plus up to N proposals), the commits run after the verdict, the proposals are drafted as an asynchronous chain on the drafter's stream. Without it, --batch-mtp with --batch-groups above 1 drops the drafts (the groups run serial). | `STRATA_PIPED_MTP=N` (off; N = proposals per slot and window, at most --spec - 1; needs --batch-mtp) | PR #4121 (Niko1221), net diff over v0.2.6 | PR #4121 open (26 Oct 2026); not in 0.2.6 | not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md) |
+| 21 | [pipe-adapt-every](#21-pipe-adapt-every) | The pipelined slot groups run an adaptive-tier round (VRAM expert swaps) every N group windows: the pipeline starts no new group, lets the ones in flight finish, swaps, goes on. Without it the tier only moves when the slots go back to the solo path. | `STRATA_PIPE_ADAPT_EVERY=N` (off) | PR #4010 (Niko1221 tracker), net diff | PR #4010 open (26 Oct 2026); not in 0.2.6 | not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md) |
+| 22 | [pw-with-batch](#22-pw-with-batch) | With --batch the solo path keeps --pipeline-windows (both parities' verifiers share the stage's session) and the slot drafters follow the solo drafter on the first card (mtp_first). Without it --batch switches --pipeline-windows off and a request alone loses its overlap. | `STRATA_PW_WITH_BATCH=1` (off) | PR #3095 (Niko1221 tracker), re-used from lab/multichat45b 890bbca5 | PR #3095 open (26 Oct 2026); not in 0.2.6 | not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md) |
+| 23 | [branch-checkpoints](#23-branch-checkpoints) | Branch checkpoints for the secondary requests of Claude Code (one cumulative patch of upstream PRs #2527, #2528 and #2843): active-row pipeline windows, cache-aware slot placement behind a policy interface (serve/slot_policy.py), a slot keeps the main session's deepest N checkpoints, a checkpoint where a prompt leaves a conversation the engine holds, BCHECKS telling the server where a slot's checkpoints are. | `STRATA_PIPELINE_ACTIVE_ROWS=1`, `STRATA_SLOT_CACHE_AFFINITY=1`, `STRATA_SLOT_CHECKPOINTS=N`, `STRATA_BRANCH_CHECKPOINT=<margin>`, `STRATA_CACHE_TRACE=1` (all off) | PRs #2527 + #2528 + #2843 (Niko1221 tracker), net diff of the last | PRs #2527, #2528, #2843 open (26 Oct 2026, stacked); not in 0.2.6 | not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md) |
 
 ## Retired
 
@@ -2066,3 +2072,826 @@ Insertion points (2):
       def test_request_wins_and_zero_is_greedy(self):
           k = self.keys(temperature=0)
   ```
+
+## 20 piped-mtp
+
+`20-piped-mtp.patch` — SONNET-LEVE-Porta da upstream #4121 STRATA_PIPED_MTP: bozze MTP nei gruppi di slot in pipeline (opt-in)
+
+- **What**: --batch-mtp's MTP drafts inside the pipelined slot groups: a group's window carries each of its slots' rows (token plus up to N proposals), the commits run after the verdict, the proposals are drafted as an asynchronous chain on the drafter's stream. Without it, --batch-mtp with --batch-groups above 1 drops the drafts (the groups run serial).
+- **Switch (default)**: `STRATA_PIPED_MTP=N` (off; N = proposals per slot and window, at most --spec - 1; needs --batch-mtp)
+- **Origin**: PR #4121 (Niko1221), net diff over v0.2.6
+- **Upstream**: PR #4121 open (26 Oct 2026); not in 0.2.6
+- **Measured**: not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md)
+- **Notes**: Clean 3-way on v0.2.6. Excludes STRATA_PIPELINE_ACTIVE_ROWS (patch 23) while set.
+- **Docs**: docs/BATCHING.md
+- **Files**: `docs/BATCHING.md`, `include/strata/core/verify.hpp`, `include/strata/program/batch_groups.hpp`, `src/core/verify.cpp`, `src/program/batch_groups_test.cpp`, `src/program/generate.cpp`
+
+Insertion points (31):
+
+- `docs/BATCHING.md` · `compares the tier as a whole, not "batch windows only": the solo decode speed mo` → [20-1](BLOCKS.md#20-1)
+  ```
+  more varied workload the gain may be smaller (not measured). Upstream main runs no tier in batch windows, and this
+  was not measured against an upstream binary.
+  ```
+- `docs/BATCHING.md` · `counter-based draw (Philox(seed, position)).` → [20-2](BLOCKS.md#20-2)
+  ```
+  - By default, batch windows carry no MTP drafts: a conversation in a slot decodes one token per window (the solo
+    path keeps its drafts, which is why a request alone is not put in a slot, and goes back to it when left alone).
+  - `--batch-mtp` uses one proposal per slot. With a layer split it needs each stage on its own GPU, does not combine
+  ```
+- `include/strata/core/verify.hpp` · `public:` → [20-3](BLOCKS.md#20-3)
+  ```
+      /// -1 = an error (err).  Serves every layer that has rung so far.
+      int batch_poll(PoolMultiFn pool, void* user, std::string& err);
+      bool batch_busy() const { return b_running_.load(std::memory_order_acquire); }
+  ```
+- `include/strata/core/verify.hpp` · `private:` → [20-4](BLOCKS.md#20-4)
+  ```
+      void* arena_b_ = nullptr;
+      int64_t last_pos_b_[8] = {};
+      bool capture_batch(const int* rows, int S, int hbase, std::string& err);
+  ```
+- `include/strata/program/batch_groups.hpp` · `struct Input {` → [20-5](BLOCKS.md#20-5)
+  ```
+      bool adapt_async = false;  ///< --adapt-async 1 was asked for
+      bool mtp_serial = false;   ///< STRATA_BATCH_MTP_SERIAL=1: --batch-mtp with no --batch-groups runs one serial group (0.1.43)
+      bool nv_serial_faster = false;   ///< PROPOSED (0.2.1, owner decides): NVIDIA build, STRATA_BATCH_GROUPS_NV_SERIAL not 0 - two cards run faster in serial windows (z440 2x A4000, aggregate tok/s: +16% at 2 slots, +12% at 4, +15% at 8)
+  ```
+- `include/strata/program/batch_groups.hpp` · `struct Result {` → [20-6](BLOCKS.md#20-6)
+  ```
+      Serial serial = Serial::None;      ///< `auto` would have pipelined, but this feature needs the serial windows
+      int would_be = 1;                  ///< what `auto` would have picked without it (== groups unless `serial`)
+      bool mtp_dropped = false;          ///< --batch-mtp met the default pipeline: the pipeline wins, --batch-mtp is off
+  ```
+- `include/strata/program/batch_groups.hpp` · `inline Result resolve(const Input& in) {` → [20-7](BLOCKS.md#20-7)
+  ```
+      r.groups = in.given;
+      r.would_be = in.given;
+      const bool defaulted = !in.set && in.later_stages > 0 && in.batch > 1;   // the 0.1.41 default
+  ```
+- `src/core/verify.cpp` · `Verifier::~Verifier() {` → [20-8](BLOCKS.md#20-8)
+  ```
+          if (kv.second) cudaGraphExecDestroy(kv.second);
+      if (arena_b_) cudaFree(arena_b_);
+      if (h_commitb_) cudaFreeHost(h_commitb_);
+  ```
+- `src/core/verify.cpp` · `bool Verifier::capture_commit_batch(const int* rows, int S, int hbase, std::stri` → [20-9](BLOCKS.md#20-9)
+  ```
+      return made;
+  }
+  ```
+- `src/core/verify.cpp` · `bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tok` → [20-10](BLOCKS.md#20-10)
+  ```
+          !evict_batch_graph(key, evicted, err))
+          return false;
+      bm_used_[key] = ++bm_tick_;
+  ```
+- `src/program/batch_groups_test.cpp` · `(file scope)` → [20-11](BLOCKS.md#20-11)
+  ```
+  //   1. `auto` picks the most groups, at most one per stage, that divide the slots;
+  //   2. a layer split with --batch >= 2 and no --batch-groups means `auto` (0.1.41);
+  //   3. --batch-mtp (or --adapt-async 1) turns that default into one group, and says which feature did it;
+  ```
+- `src/program/batch_groups_test.cpp` · `int main() {` → [20-12](BLOCKS.md#20-12)
+  ```
+                "STRATA_BATCH_MTP_SERIAL: one group, because of --batch-mtp");
+          check(bg::serial_what(r.serial)[0] == '-', "the reason names the feature");
+      }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-13](BLOCKS.md#20-13)
+  ```
+  #if !defined(STRATA_USE_HIP)
+          { const char* nv = std::getenv("STRATA_BATCH_GROUPS_NV_SERIAL"); bin.nv_serial_faster = nv == nullptr || nv[0] != '0'; }   // PROPOSED 0.2.1 default (NVIDIA, 2 cards)
+  #endif
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-14](BLOCKS.md#20-14)
+  ```
+                          : o.spec < 2 ? "it needs --spec T (T >= 2)" : split_same
+                          ? "it needs each stage of a layer split on its own GPU"
+                          : !o.serve ? "it needs --serve" : nullptr;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-15](BLOCKS.md#20-15)
+  ```
+              batch_mtp = false;
+          }
+      }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-16](BLOCKS.md#20-16)
+  ```
+              // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).
+              for (int b = 0; b < o.batch; ++b) {
+                  auto d = std::make_unique<strata::core::MtpDrafter>();
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-17](BLOCKS.md#20-17)
+  ```
+          if (n_stages > 1) {
+              // pipelined slot groups write their rows at hbase = group * rows-per-group, so with more than
+              // kVerifyMaxT slots in groups the hand-off holds one row per slot (otherwise kVerifyMaxT, as before)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-18](BLOCKS.md#20-18)
+  ```
+                      // --batch-mtp: every stage runs the same 2-rows-per-slot windows as the first (up to kVerifyMaxT
+                      // rows, the hand-off's size) and bounds its captured batch layouts like the first (below)
+                      if (batch_mtp) gs.ver.set_batch_graph_limit(64);
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-19](BLOCKS.md#20-19)
+  ```
+          if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
+          if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
+          if (!ver.init(wt, g, ss, vh, native_head.loaded() || prefill_head_alias_bound ? &native_head : nullptr,
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-20](BLOCKS.md#20-20)
+  ```
+                  }
+                  slot_mtp_rows.emplace_back(r, free_slot_mtp_rows);
+                  if (!slot_mtp[(size_t) b]->bind(last_st ? last_st->wt : wt, last_st ? &last_st->head : &native_head, r, err,
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-21](BLOCKS.md#20-21)
+  ```
+                      std::fprintf(stderr, "strata serve: --batch, stage %zu: %s\n", k + 1, err.c_str());
+                      return 1;
+                  }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-22](BLOCKS.md#20-22)
+  ```
+              int32_t x = 0;                 ///< the token the next window feeds (not yet in the slot's state)
+              std::array<int32_t, strata::kernels::kVerifyMaxT> draft{}; ///< the slot's next MTP proposal
+              bool draft_ready = false;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-23](BLOCKS.md#20-23)
+  ```
+          const int n_pipe = (int) stages.size() + 1;
+          const bool piped = o.batch > 0 && o.batch_groups > 1 && n_pipe > 1;
+          strata::core::StageInFlightSampler stage_in_flight(n_pipe, piped && batch_telemetry_enabled);
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-24](BLOCKS.md#20-24)
+  ```
+              int S = 0;                      ///< slots in its window: up to its last active one (idle ones cost rows)
+              int active = 0;                  ///< live slots at launch; S can also include idle padding rows
+              Clock::time_point started;       ///< the group window's first stage launch
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-25](BLOCKS.md#20-25)
+  ```
+          std::mutex bell_mu;
+          std::condition_variable bell_cv;
+          std::atomic<bool> bell_waiting{false};
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-26](BLOCKS.md#20-26)
+  ```
+                  if (k + 1 < n_pipe) { G.stage = k + 1; G.since = pipe_tick; continue; }
+                  // the last stage: the group's picks
+                  const int32_t* outb = vk.batch_out();
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-27](BLOCKS.md#20-27)
+  ```
+                      if (!may_start) continue;
+                      for (int j = 0; j < (int) pg.size() && pick < 0; ++j) {
+                          const int gi = (int) ((rr + j) % (int64_t) pg.size());
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-28](BLOCKS.md#20-28)
+  ```
+                  PGroup& G = pg[(size_t) pick];
+                  strata::core::progress().busy.store(true);
+                  if (batch_telemetry_enabled) stage_in_flight.launch(k, Clock::now());
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-29](BLOCKS.md#20-29)
+  ```
+                      std::fflush(stdout);
+                  }
+              }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-30](BLOCKS.md#20-30)
+  ```
+          auto pipe_drain = [&]() -> bool {
+              while (pipe_inflight())
+                  if (!pump(false)) return false;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [20-31](BLOCKS.md#20-31)
+  ```
+                      sl.t0 = Clock::now();
+                      sl.ids = live;
+                      if (batch_mtp) {
+  ```
+
+## 21 pipe-adapt-every
+
+`21-pipe-adapt-every.patch` — SONNET-LEVE-Porta da upstream #4010 STRATA_PIPE_ADAPT_EVERY: i gruppi in pipeline adattano il livello VRAM (opt-in)
+
+- **What**: The pipelined slot groups run an adaptive-tier round (VRAM expert swaps) every N group windows: the pipeline starts no new group, lets the ones in flight finish, swaps, goes on. Without it the tier only moves when the slots go back to the solo path.
+- **Switch (default)**: `STRATA_PIPE_ADAPT_EVERY=N` (off)
+- **Origin**: PR #4010 (Niko1221 tracker), net diff
+- **Upstream**: PR #4010 open (26 Oct 2026); not in 0.2.6
+- **Measured**: not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md)
+- **Notes**: Two conflicts in generate.cpp with patch 20 resolved by hand (both lambdas and both log fragments kept).
+- **Docs**: docs/BATCHING.md
+- **Files**: `docs/BATCHING.md`, `include/strata/program/batch_groups.hpp`, `src/program/batch_groups_test.cpp`, `src/program/generate.cpp`
+
+Insertion points (11):
+
+- `docs/BATCHING.md` · `between decoding windows (the prompt may hold a loan of cache slots). The `strat` → [21-1](BLOCKS.md#21-1)
+  ```
+  GPU-reach wait and pool time, and how many routed entries the VRAM tier, the PCIe share and the CPU served per window.
+  Swaps move experts between the GPU and the CPU, which round differently, so greedy outputs can differ from run to run;
+  `--adapt-every 1000000` keeps the tier fixed (as in the exactness settings below). The pipelined `--batch-groups` path
+  ```
+- `docs/BATCHING.md` · `counter-based draw (Philox(seed, position)).` → [21-2](BLOCKS.md#21-2)
+  ```
+    boundary, and not for pictures.
+  - Admissions are one at a time: two new long prompts are read one after the other.
+  - `--batch-groups` needs every stage on its own GPU. A pipelined slot is a conversation cache again (0.1.41): a request left alone in its slot goes back to the solo path with its drafts, as on one GPU.
+  ```
+- `include/strata/program/batch_groups.hpp` · `(file scope)` → [21-3](BLOCKS.md#21-3)
+  ```
+  // the serial windows with the slots' drafts (the 0.1.42/0.1.43 behaviour).  A number or `auto` given on the command line
+  // is honoured as before.
+  //
+  ```
+- `src/program/batch_groups_test.cpp` · `(file scope)` → [21-4](BLOCKS.md#21-4)
+  ```
+  //   3. --batch-mtp (or --adapt-async 1) turns that default into one group, and says which feature did it;
+  //      with STRATA_PIPED_MTP and one slot per group, --batch-mtp keeps the pipeline and drafts in it;
+  //   4. a number or `auto` given explicitly is honoured, with or without those features;
+  ```
+- `src/program/batch_groups_test.cpp` · `int main() {` → [21-5](BLOCKS.md#21-5)
+  ```
+          check(bg::resolve(i).groups == 2, "an explicit number without a split is returned (the engine warns)");
+      }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-6](BLOCKS.md#21-6)
+  ```
+                          : nullptr;
+          if (why != nullptr) adapt_async_off(why);
+      }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-7](BLOCKS.md#21-7)
+  ```
+          // one turn: serve every running stage, hand finished groups on, start what can start
+          auto pump = [&](bool may_start) -> bool {
+              ++pipe_tick;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-8](BLOCKS.md#21-8)
+  ```
+                      rows_wait = nullptr;
+                  }
+                  ++bt_windows;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-9](BLOCKS.md#21-9)
+  ```
+                              pick = gi;
+                      if (pick < 0) continue;
+                  } else {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-10](BLOCKS.md#21-10)
+  ```
+                  }
+              }
+              if (drive.d.failed) { std::printf("ERR %s\n", drive.d.fail ? drive.d.fail : "the expert pool failed"); return false; }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [21-11](BLOCKS.md#21-11)
+  ```
+              if (pmtp && !pipe_inflight() && !batch_on() && !pmtp_settle()) return false;
+              if (!pipe_inflight() && !batch_on() && bt_windows > 0) {   // all idle: the timing line, as batch_step
+                  const double w = (double) bt_windows, wall = std::chrono::duration<double, std::milli>(Clock::now() - bt_start).count();
+  ```
+
+## 22 pw-with-batch
+
+`22-pw-with-batch.patch` — SONNET-LEVE-Porta da upstream #3095 STRATA_PW_WITH_BATCH: la richiesta sola tiene --pipeline-windows accanto a --batch (opt-in)
+
+- **What**: With --batch the solo path keeps --pipeline-windows (both parities' verifiers share the stage's session) and the slot drafters follow the solo drafter on the first card (mtp_first). Without it --batch switches --pipeline-windows off and a request alone loses its overlap.
+- **Switch (default)**: `STRATA_PW_WITH_BATCH=1` (off)
+- **Origin**: PR #3095 (Niko1221 tracker), re-used from lab/multichat45b 890bbca5
+- **Upstream**: PR #3095 open (26 Oct 2026); not in 0.2.6
+- **Measured**: not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md)
+- **Notes**: On 0.2.6 the rejection line uses batch_blocks_pw only (no batch_pipe variable any more).
+- **Docs**: docs/BATCHING.md
+- **Files**: `src/program/generate.cpp`
+
+Insertion points (6):
+
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-1](BLOCKS.md#22-1)
+  ```
+          return o.mtp_draft_vocab.empty() ? std::filesystem::exists(std::filesystem::path(o.mtp) / "draft_vocab.bin", ec)
+                                           : std::filesystem::exists(o.mtp_draft_vocab, ec);
+      }();
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-2](BLOCKS.md#22-2)
+  ```
+          on = false;
+  #endif
+          const bool helpers_a = o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-3](BLOCKS.md#22-3)
+  ```
+                          : split_devs.size() > 1 && o.pipeline_windows == 1 ? "--pipeline-windows 1 needs exactly two stages"
+                          : split_devs.size() > 1 && o.adapt_async ? "not with --adapt-async on three or more stages"
+                          : o.mtp.empty() || o.spec < 2 ? "it needs the MTP drafter (--mtp, --spec)"
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-4](BLOCKS.md#22-4)
+  ```
+      // streams share the card and each takes ~2x as long (stage-1 window 11 -> 25 ms, chain 7 -> 21 ms, 2x R9700).  The chain's
+      // source rows are copied over once per chain (stage_source_R), the draft head's rows once at load.
+      const bool mtp_first = [&] {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-5](BLOCKS.md#22-5)
+  ```
+                  // STRATA_PIPED_MTP: the slot's proposal is drafted as an asynchronous chain (chain_launch), so the
+                  // pipeline goes on while it runs: the chain graphs carry the forcing kernel (a no-op here)
+                  if (piped_mtp) d->set_force_capture(true);
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [22-6](BLOCKS.md#22-6)
+  ```
+                      return 1;
+                  }
+                  slot_mtp_rows.emplace_back(r, free_slot_mtp_rows);
+  ```
+
+## 23 branch-checkpoints
+
+`23-branch-checkpoints.patch` — SONNET-LEVE-Porta da upstream #2527+#2528+#2843 checkpoint di ramo e righe attive per le richieste secondarie (opt-in)
+
+- **What**: Branch checkpoints for the secondary requests of Claude Code (one cumulative patch of upstream PRs #2527, #2528 and #2843): active-row pipeline windows, cache-aware slot placement behind a policy interface (serve/slot_policy.py), a slot keeps the main session's deepest N checkpoints, a checkpoint where a prompt leaves a conversation the engine holds, BCHECKS telling the server where a slot's checkpoints are.
+- **Switch (default)**: `STRATA_PIPELINE_ACTIVE_ROWS=1`, `STRATA_SLOT_CACHE_AFFINITY=1`, `STRATA_SLOT_CHECKPOINTS=N`, `STRATA_BRANCH_CHECKPOINT=<margin>`, `STRATA_CACHE_TRACE=1` (all off)
+- **Origin**: PRs #2527 + #2528 + #2843 (Niko1221 tracker), net diff of the last
+- **Upstream**: PRs #2527, #2528, #2843 open (26 Oct 2026, stacked); not in 0.2.6
+- **Measured**: not measured yet (queue in moe-aggressive-commit docs/porto/strata_adattivo/corse_2080ti/20261026_leve/LEVE_026.md)
+- **Notes**: Four conflicts in generate.cpp with patch 20: the active rows stay off while STRATA_PIPED_MTP is set; the branch-checkpoint mark and the STRATA_CONV_DISK block both stay.
+- **Docs**: docs/BATCHING.md
+- **Files**: `CMakeLists.txt`, `docs/BATCHING.md`, `include/strata/core/conversation_cache.hpp`, `include/strata/core/verify.hpp`, `include/strata/program/pipeline_rows.hpp`, `include/strata/program/slot_checkpoints.hpp`, `serve/cache_trace.py`, `serve/server.py`, `serve/slot_policy.py`, `serve/test_cache_trace.py`, `serve/test_parallel.py`, `serve/test_parallel_yield.py`, `serve/test_slot_alloc.py`, `src/core/verify.cpp`, `src/program/generate.cpp`, `src/program/slot_checkpoints_test.cpp`, `sycl/include/strata/core/verify.hpp`, `sycl/src/core/verify.cpp`, `tests/core/pipeline_rows_test.cpp`
+
+Insertion points (86):
+
+- `CMakeLists.txt` · `if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)` → [23-1](BLOCKS.md#23-1)
+  ```
+    add_executable(message_boundary_test src/program/message_boundary_test.cpp)
+    target_include_directories(message_boundary_test PRIVATE include)
+    add_test(NAME message_boundary_test COMMAND message_boundary_test)
+  ```
+- `CMakeLists.txt` · `if(STRATA_BUILD_TESTS OR STRATA_BUILD_CONVERSATION_TESTS)` → [23-2](BLOCKS.md#23-2)
+  ```
+    add_executable(batch_groups_test src/program/batch_groups_test.cpp)
+    target_include_directories(batch_groups_test PRIVATE include)
+    add_test(NAME batch_groups_test COMMAND batch_groups_test)
+  ```
+- `docs/BATCHING.md` · `about 10-25% speed per request on this card". `--parallel N` is honoured as aske` → [23-3](BLOCKS.md#23-3)
+  ```
+    engine copies its state back (50-60 ms for a short conversation) instead of reading the history again - also for
+    a client that drops the reply's thinking from the history (the checkpoint matches up to the new turn). A new
+    conversation takes an empty slot, else the one used longest ago.
+  ```
+- `docs/BATCHING.md` · `one cold 64K prompt joining four streams: `STRATA_BATCH_DECODE_SHARE=2.0` 2.4 s` → [23-4](BLOCKS.md#23-4)
+  ```
+  s and 13.8 s. Pieces of one chunk (`PIECE=8192`) cost the long prompt the most. Not measured: other GPU pairs, three or
+  more stages, HIP and SYCL (built for CUDA only), sampled decoding, prompts with pictures.
+  ```
+- `docs/BATCHING.md` · `On top of `GEN` / `GENI`:` → [23-5](BLOCKS.md#23-5)
+  ```
+  | `BYIELD <slot>` | in | the prompt being read gives way at its next chunk boundary; its part read waits in `<slot>` (the admission's own, or a free slot for a solo request) |
+  | `YIELDED <slot> <tokens>` | out | before the `DONE cancel` of a read that gave way: the request is sent again later and goes on from there |
+  | `INFO ... batch_slots=N` | out | the slots the engine runs (only with `--batch`) |
+  ```
+- `include/strata/core/conversation_cache.hpp` · `struct ConversationCheckpoint {` → [23-6](BLOCKS.md#23-6)
+  ```
+      // from, so retention never evicts it (conv_cache.hpp) and a parked conversation holding it stays parked.  A run-time
+      // mark only: it is not in the session file, a request that pins the same prefix again sets it.
+      bool pinned = false;
+  ```
+- `include/strata/core/verify.hpp` · `public:` → [23-7](BLOCKS.md#23-7)
+  ```
+      // a window in flight from one thread (batch_poll does not block).  Stage k can then run group g while stage k+1
+      // runs group g-1.  Rows of group `base` use hand-off rows [base, base + S), so groups never share a hand-off row.
+      bool batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err);
+  ```
+- `include/strata/program/pipeline_rows.hpp` — (new file) → [23-8](BLOCKS.md#23-8)
+- `include/strata/program/slot_checkpoints.hpp` — (new file) → [23-9](BLOCKS.md#23-9)
+- `serve/cache_trace.py` — (new file) → [23-10](BLOCKS.md#23-10)
+- `serve/server.py` · `from strata_control import gpu_roles  # noqa: E402` → [23-11](BLOCKS.md#23-11)
+  ```
+  from serve import ready as ready_file  # noqa: E402
+  from serve import owner_guard  # noqa: E402
+  from serve import launch_identity  # noqa: E402
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-12](BLOCKS.md#23-12)
+  ```
+                   env: dict | None = None, lazy: bool = False, cpus: list[int] | None = None, _attempt: int = 0):
+          self.spawn = (exe, list(args), cwd, log, env, False, cpus)   # to start it again after it died (issue #27)
+          self.session_save_reclaim = '--session-save-reclaim' in args
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-13](BLOCKS.md#23-13)
+  ```
+          self.slot_group = [b // gs if gs else 0 for b in range(self.batch)]   # each slot's pipeline group
+          self.slot_groups = groups
+          # pipelined groups (the engine says how many it runs: INFO batch_groups; older engines: the args).  A pipelined
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-14](BLOCKS.md#23-14)
+  ```
+          # the slot that has its start (the engine checks it again); when the slot was last used
+          self.slot_held: list[list[int]] = [[] for _ in range(self.batch)]
+          self.slot_used = [0.0] * self.batch
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-15](BLOCKS.md#23-15)
+  ```
+          slot_q = self.slot_q
+          line = None
+          for line in proc.stdout:
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-16](BLOCKS.md#23-16)
+  ```
+          for q in slot_q:
+              q.put(None)
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-17](BLOCKS.md#23-17)
+  ```
+                      self._send("STOP")
+                      stopped = True
+                  yield False                              # a token is pending (not a heartbeat)
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-18](BLOCKS.md#23-18)
+  ```
+              elif line.startswith("DONE"):
+                  self._parse_done(line)
+                  self._last_done = line
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-19](BLOCKS.md#23-19)
+  ```
+          except EngineDied:
+              pass
+          q, busy, held = self.slot_q[slot], self.slot_busy, self.slot_held   # this process's: restart() replaces them
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-20](BLOCKS.md#23-20)
+  ```
+                      break
+              held[slot] = tail[:-1] if stream and tail else []
+              with self.slot_cv:
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-21](BLOCKS.md#23-21)
+  ```
+              self.slot_cv.notify_all()
+          return freed
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-22](BLOCKS.md#23-22)
+  ```
+          out: list[int] = []
+          pending: list[int] = []
+          prompt, left = list(ids), int(max_new)
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-23](BLOCKS.md#23-23)
+  ```
+          stop_sent = False
+          yields, solo_again, refused = 0, 0, 0
+          admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-24](BLOCKS.md#23-24)
+  ```
+                  with self.slot_cv:
+                      alone = not any(self.slot_busy) and self.waiting == 0
+                  if alone and left > 1:
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-25](BLOCKS.md#23-25)
+  ```
+                      if started is not None:
+                          started()
+                      phase = "solo"
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-26](BLOCKS.md#23-26)
+  ```
+                              return self.waiting > 0
+  
+                      def give_way():   # at a PP line, and between two far apart (the engine takes it at its next boundary)
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-27](BLOCKS.md#23-27)
+  ```
+                          if x is None:                       # a heartbeat (False: a token, flushed above)
+                              give_way()
+                              yield None
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-28](BLOCKS.md#23-28)
+  ```
+                              return
+                          if reused0 is None:
+                              reused0 = (self.last or {}).get("reused")
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-29](BLOCKS.md#23-29)
+  ```
+                              if deadline is not None and time.monotonic() >= deadline:
+                                  raise QueueWaitExpired("the inference queue wait deadline expired; retry later")
+                              with self.slot_cv:
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-30](BLOCKS.md#23-30)
+  ```
+                                  self.ctl.release()
+                                  holding = False
+                              with self.slot_cv:
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-31](BLOCKS.md#23-31)
+  ```
+                                                    f"for a free slot (busy: {busy}, in use: {sorted(self.slot_claims)}, "
+                                                    f"ending: {sorted(self.slot_releasing)}) (issue #1603)", flush=True)
+                                      self._reap_orphan_slots()
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-32](BLOCKS.md#23-32)
+  ```
+                          holding, born = True, self.gen                  # (the engine it now has the control lines of)
+                      while not self.slot_q[slot].empty():
+                          self.slot_q[slot].get_nowait()
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-33](BLOCKS.md#23-33)
+  ```
+                          self._park_slot(slot)
+                          slot = None
+                          continue
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-34](BLOCKS.md#23-34)
+  ```
+                              slot, gen0 = None, None
+                              if reused0 is None:
+                                  reused0 = (self.last or {}).get("reused")
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-35](BLOCKS.md#23-35)
+  ```
+                      bdone_in = True
+              if reused0 is not None and isinstance(self.last, dict):
+                  self.last = {**self.last, "reused": reused0}
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-36](BLOCKS.md#23-36)
+  ```
+                          self.slot_cv.notify_all()
+  
+      slot_groups = 1         # --batch-groups (set when the engine starts)
+  ```
+- `serve/server.py` · `class StrataEngine:` → [23-37](BLOCKS.md#23-37)
+  ```
+      def slots_view(self) -> list[dict]:
+          """/metrics: each batch slot - idle (with the tokens it holds for a next turn), reading or decoding."""
+          now, view = time.time(), []
+  ```
+- `serve/server.py` · `class Service:` → [23-38](BLOCKS.md#23-38)
+  ```
+                  "tok_s_mean": round(self._tok_s_mean(), 1) if state == "generating" else None,
+                  "prefill_tok_s_mean": getattr(self.engine, "prefill_tok_s_mean", None) if s.get("busy") else None,
+                  "tok_s_window_s": RATE_WINDOW_S if state == "generating" else None}
+  ```
+- `serve/server.py` · `class Service:` → [23-39](BLOCKS.md#23-39)
+  ```
+              slots = self.engine.slots_view() if hasattr(self.engine, "slots_view") else []
+              # the requests in flight that are not in a slot: the one alone on the solo path, or waiting their turn
+              in_slots = sum(1 for x in slots if x["state"] != "idle")
+  ```
+- `serve/server.py` · `class Service:` → [23-40](BLOCKS.md#23-40)
+  ```
+          segments = []
+          timed_out = False
+          trace = getattr(self.request_trace, "record", None)
+  ```
+- `serve/server.py` · `class Service:` → [23-41](BLOCKS.md#23-41)
+  ```
+                              queued_counted = False
+                              self.terminal_requests[request_id].update(state="waiting", admitted_at=time.time())
+                              self._terminal_event_locked(request_id, "admitted")
+  ```
+- `serve/server.py` · `class Service:` → [23-42](BLOCKS.md#23-42)
+  ```
+                                  "id": request_id,
+                                  "projection": (sampling or {}).get("experimental_speed_projection") is not False
+                                  if loaded else None,
+  ```
+- `serve/server.py` · `def make_handler(svc: Service):` → [23-43](BLOCKS.md#23-43)
+  ```
+                          self._json(503, {"error": {"type": "server_error", "message": str(e)}})
+                      return
+                  if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses"):
+  ```
+- `serve/server.py` · `def make_handler(svc: Service):` → [23-44](BLOCKS.md#23-44)
+  ```
+              finally:
+                  if reserved:
+                      svc.release_inference()
+  ```
+- `serve/slot_policy.py` — (new file) → [23-45](BLOCKS.md#23-45)
+- `serve/test_cache_trace.py` — (new file) → [23-46](BLOCKS.md#23-46)
+- `serve/test_parallel.py` · `real StrataEngine and Service, so the server's side is tested without a GPU: req` → [23-47](BLOCKS.md#23-47)
+  ```
+  wait for a slot, /metrics shows the slots, each request's history row is its own, and a conversation's next turn
+  goes back to the slot that holds it."""
+  import json
+  ```
+- `serve/test_parallel.py` · `from serve.frontend import ChatTemplate` → [23-48](BLOCKS.md#23-48)
+  ```
+  from serve.server import ByteTokenizer, Service, StrataEngine, engine_args, parallel_args, serve
+  from strata_cli import bench
+  from strata_cli.client import Endpoint
+  ```
+- `serve/test_parallel.py` · `while True:` → [23-49](BLOCKS.md#23-49)
+  ```
+              stopped.add(b)
+          continue
+      if line.startswith(("GEN ", "BGEN ")):
+  ```
+- `serve/test_parallel.py` · `class FakeEngineCase(unittest.TestCase):` → [23-50](BLOCKS.md#23-50)
+  ```
+      """The real StrataEngine and Service over HTTP, the fake engine behind them."""
+  
+      def start(self, slots, fit=None, slot_cache=False, fail=False, reuse=False, says_groups=0,
+  ```
+- `serve/test_parallel.py` · `class FakeEngineCase(unittest.TestCase):` → [23-51](BLOCKS.md#23-51)
+  ```
+          extra += list(more)
+          with mock.patch.object(server.subprocess, "Popen",
+                                 lambda cmd, **kw: real([sys.executable, str(script), *cmd[1:]], **kw)):
+  ```
+- `serve/test_parallel.py` · `class ParallelService(FakeEngineCase):` → [23-52](BLOCKS.md#23-52)
+  ```
+      """The real StrataEngine and Service over HTTP, the fake engine behind them: slots, queues, benchmarks, telemetry.
+      The yielding, restart and failure tests are in serve/test_parallel_yield.py (this file alone ran past 100 s)."""
+  ```
+- `serve/test_parallel_yield.py` · `class ParallelServiceYield(tp.FakeEngineCase):` → [23-53](BLOCKS.md#23-53)
+  ```
+          self.assertEqual(t["cache_n"], 3, t)                          # the first read's reuse only
+          self.assertGreater(t["predicted_ms"], 60.0, t)
+  ```
+- `serve/test_slot_alloc.py` · `from __future__ import annotations` → [23-54](BLOCKS.md#23-54)
+  ```
+  import random
+  import sys
+  import unittest
+  ```
+- `serve/test_slot_alloc.py` · `class Pipelined(unittest.TestCase):` → [23-55](BLOCKS.md#23-55)
+  ```
+                  e.slot_busy[b] = True
+  
+      def test_held_tokens_are_ignored(self):
+  ```
+- `serve/test_slot_alloc.py` · `class OneSlotGroups(unittest.TestCase):` → [23-56](BLOCKS.md#23-56)
+  ```
+          self.assertEqual(e.pick_slot(hist + [T, 5, 6] + list(range(3000, 3050))), 0)
+  ```
+- `src/core/verify.cpp` · `bool Verifier::sample_rows(int S, std::string& err) {` → [23-57](BLOCKS.md#23-57)
+  ```
+  }
+  
+  bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err) {
+  ```
+- `src/program/generate.cpp` · `(file scope)` → [23-58](BLOCKS.md#23-58)
+  ```
+  #include "strata/program/prefill_plan.hpp"
+  #include "strata/program/draft_kv_plan.hpp"
+  #include "strata/program/message_boundary.hpp"
+  ```
+- `src/program/generate.cpp` · `public:` → [23-59](BLOCKS.md#23-59)
+  ```
+      }
+  private:
+      static void clear_marks(ConvCheckpoint& c) {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-60](BLOCKS.md#23-60)
+  ```
+                                   (long long) (later_reserve + 768 - sf_mib));
+              }
+          }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-61](BLOCKS.md#23-61)
+  ```
+                          strata::prefill::Prefill::pipe_setting(),
+                          o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
+                                         " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-62](BLOCKS.md#23-62)
+  ```
+          // slot b's sessions -> the main ones (the reverse of copy_to_slot): a request that continues the
+          // conversation an idle slot holds reads on from there.  Every stage, the same calls.
+          // `at`: one of the slot's checkpoints - only the K/V up to it is copied and its state restored instead
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-63](BLOCKS.md#23-63)
+  ```
+              int32_t tok[strata::kernels::kVerifyMaxT] = {};
+              int64_t pos[strata::kernels::kVerifyMaxT] = {};
+              int64_t since = 0;              ///< tick it started waiting (fairness)
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-64](BLOCKS.md#23-64)
+  ```
+                  const int32_t* outb = vk.batch_out();
+                  if (pmtp && !pmtp_verdict(G, vk, outb)) return false;
+                  for (int t = 0; t < G.S && !pmtp; ++t) {
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-65](BLOCKS.md#23-65)
+  ```
+                          continue;
+                      }
+                      const int32_t y = outb[t];
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-66](BLOCKS.md#23-66)
+  ```
+                      sl.ids.push_back(sl.x);
+                      if (fin != nullptr) {
+                          const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-67](BLOCKS.md#23-67)
+  ```
+                              }
+                          }
+                          if (G.S == 0) { G.inflight = false; continue; }   // every slot of the group went idle
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-68](BLOCKS.md#23-68)
+  ```
+                  PGroup& G = pg[(size_t) pick];
+                  strata::core::progress().busy.store(true);
+                  if (batch_telemetry_enabled) stage_in_flight.launch(k, Clock::now());
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-69](BLOCKS.md#23-69)
+  ```
+              // a parked conversation holding it stays parked) and a later request that resumes from it does not park the
+              // branch it leaves: N queries cost one prefix, not N.  Absent = as before.
+              int64_t req_pin = 0;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-70](BLOCKS.md#23-70)
+  ```
+                      else if (key == "cvec") req_cvec = std::atoi(tok.c_str() + eq + 1);
+                      else if (key == "ckpt") req_ckpt = std::atoi(tok.c_str() + eq + 1) != 0;
+                      else if (key == "pin") req_pin = std::max<long long>(0, std::atoll(tok.c_str() + eq + 1));
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-71](BLOCKS.md#23-71)
+  ```
+              // active slot's checkpoints too (its windows write its cells from p on, so the ones below a checkpoint still
+              // hold its prompt; the groups have finished before a request is read)
+              int slot_source = -1;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-72](BLOCKS.md#23-72)
+  ```
+                                   k + 1, (long long) (k < now.size() ? now[k].start : -1));
+                  }
+              }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-73](BLOCKS.md#23-73)
+  ```
+                  resume == req_pin && live_ok)
+                  for (const ConvCheckpoint& c : checks)
+                      if ((int64_t) c.ids.size() == resume && c.pinned) pin_sibling = true;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-74](BLOCKS.md#23-74)
+  ```
+                      }
+                      if (slot_ck != nullptr) {
+                          live = slot_ck->ids;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-75](BLOCKS.md#23-75)
+  ```
+                          checks.back().used = ++check_clock;
+                      } else {
+                          live = bs[(size_t) slot_source].ids;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-76](BLOCKS.md#23-76)
+  ```
+                               std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                               conversations.size(), conversations.bytes());
+              }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-77](BLOCKS.md#23-77)
+  ```
+                                  sl.checks.push_back(c);
+                          yielded_at = q;
+                          yielded_slot = ys;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-78](BLOCKS.md#23-78)
+  ```
+                      std::fprintf(stderr, "strata serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
+                                   "%lld)\n", (long long) req_pin, (long long) read_from);
+              }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-79](BLOCKS.md#23-79)
+  ```
+                      break;
+                  }
+                  at = to;
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-80](BLOCKS.md#23-80)
+  ```
+                      conv_root_len = -1;
+                      for (int64_t i = 1; i < to; ++i) if (ids[size_t(i)] == o.turn_token) { conv_root_len = i; break; }
+                  }
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-81](BLOCKS.md#23-81)
+  ```
+                              }
+                      // STRATA_SLOT_CKPT_MOVE: this request's own turn checkpoint (or the one it moved out of this slot)
+                      // moves into the slot; a pinned prefix, a root and any other the chain shares are copied as before
+  ```
+- `src/program/generate.cpp` · `int main(int argc, char** argv) {` → [23-82](BLOCKS.md#23-82)
+  ```
+                                       req_times.read_ms, req_times.windows_ms, req_times.ckpts, ck, req_times.sync_ms,
+                                       req_times.save_ms, req_times.evict_ms,
+                                       prompt_ms - req_times.read_ms - req_times.windows_ms - ck, decode_ms, span(tc0, tc1),
+  ```
+- `src/program/slot_checkpoints_test.cpp` — (new file) → [23-83](BLOCKS.md#23-83)
+- `sycl/include/strata/core/verify.hpp` · `public:` → [23-84](BLOCKS.md#23-84)
+  ```
+      // a window in flight from one thread (batch_poll does not block).  Stage k can then run group g while stage k+1
+      // runs group g-1.  Rows of group `base` use hand-off rows [base, base + S), so groups never share a hand-off row.
+      bool batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err);
+  ```
+- `sycl/src/core/verify.cpp` · `catch (sycl::exception const &exc) {` → [23-85](BLOCKS.md#23-85)
+  ```
+  bool Verifier::batch_launch(int base, int S, const int32_t *tokens,
+                              const int64_t *pos, std::string &err) try {
+      const OnDevice on_device(device_);
+  ```
+- `tests/core/pipeline_rows_test.cpp` — (new file) → [23-86](BLOCKS.md#23-86)
