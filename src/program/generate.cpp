@@ -12842,8 +12842,7 @@ int main(int argc, char** argv) {
             int active = 0;                  ///< live slots at launch; S can also include idle padding rows
             Clock::time_point started;       ///< the group window's first stage launch
             // STRATA_PIPED_MTP (pmtp): S counts ROWS - each of the group's slots' token, then that slot's proposals - at
-            // hand-off rows [hbase, hbase + S)
-            int rows[strata::kernels::kVerifyMaxT] = {};
+            // hand-off rows [hbase, hbase + S); `rows` above is each row's slot (also for the active-row windows)
             int hbase = 0;
         };
         std::vector<PGroup> pg((size_t) (piped ? o.batch_groups : 0));
