@@ -7,7 +7,7 @@
     "tag": "v0.2.6",
     "commit": "4b9e05a2a806a3fe24f7b2560d98626c37dade35"
   },
-  "stack_head": "d47c46ef2077e0f320a0fc8ebd6262798a7e053c",
+  "stack_head": "eb3602c52c519cb2832a3a658dea5632f50150cf",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -5552,6 +5552,12 @@
         "sycl/include/strata/core/verify.hpp",
         "sycl/src/core/verify.cpp",
         "tests/core/pipeline_rows_test.cpp"
+      ],
+      "follow_up_subjects": [
+        "SONNET-LEVE-Corregge"
+      ],
+      "follow_up_commits": [
+        "eb3602c52c519cb2832a3a658dea5632f50150cf"
       ]
     }
   ],

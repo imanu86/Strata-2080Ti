@@ -10,7 +10,7 @@ Rebased on upstream v0.2.6 (engine 0.1.51) on 25 Oct 2026 (branch `lab/upsync-02
 
 Branch `lab/leve-026` (26 Oct 2026) adds four opt-in levers from open upstream PRs on top of the 19 patches (20-23: STRATA_PIPED_MTP #4121, STRATA_PIPE_ADAPT_EVERY #4010, STRATA_PW_WITH_BATCH #3095, the branch checkpoints of #2527/#2528/#2843). All off by default: a run without their variables is the 0.2.6 + 19-patch Daily. Compiled and measured: see the LEVE_026.md of the measurement folder.
 
-Base: upstream `Niko1221/Strata` **v0.2.6** (`4b9e05a2`). Stack head: `d47c46ef`. 23 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.2.6** (`4b9e05a2`). Stack head: `eb3602c5`. 23 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 

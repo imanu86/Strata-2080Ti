@@ -12063,7 +12063,7 @@ Anchor:
             int64_t pos[strata::kernels::kVerifyMaxT] = {};
             int64_t since = 0;              ///< tick it started waiting (fairness)
 ```
-Block (hunk 6 of `src/program/generate.cpp` in the patch, 9 lines):
+Block (hunk 6 of `src/program/generate.cpp` in the patch, 15 lines):
 ```diff
              int32_t tok[strata::kernels::kVerifyMaxT] = {};
              int64_t pos[strata::kernels::kVerifyMaxT] = {};
@@ -12074,6 +12074,12 @@ Block (hunk 6 of `src/program/generate.cpp` in the patch, 9 lines):
              int active = 0;                  ///< live slots at launch; S can also include idle padding rows
              Clock::time_point started;       ///< the group window's first stage launch
              // STRATA_PIPED_MTP (pmtp): S counts ROWS - each of the group's slots' token, then that slot's proposals - at
+-            // hand-off rows [hbase, hbase + S)
+-            int rows[strata::kernels::kVerifyMaxT] = {};
++            // hand-off rows [hbase, hbase + S); `rows` above is each row's slot (also for the active-row windows)
+             int hbase = 0;
+         };
+         std::vector<PGroup> pg((size_t) (piped ? o.batch_groups : 0));
 ```
 
 ### 23-64
