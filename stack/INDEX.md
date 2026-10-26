@@ -8,7 +8,7 @@ Rebased on upstream 0.2.0-beta (`main` f57c0adc, 9 commits past the tag `v0.2.0-
 
 Rebased on upstream v0.2.6 (engine 0.1.51) on 25 Oct 2026 (branch `lab/upsync-026`, diary `docs/UPSYNC_026.md`): all 18 patches carried, none retired (no lever of ours reached upstream between 0.2.0-beta and 0.2.6). Three needed a manual look: 04 (`adapt_iv(rounds)` replaces `adapt_every` in the pipeline's adapt gate), 05 (the conversation cache is now sized from the free RAM by default, #3493: `conversation_cache_mib = -1`), 06 (docs/DETAILS.md rewritten: the doc paragraph is dropped, code unchanged). Compiled/installed/measured: see UPSYNC_026.md.
 
-Base: upstream `Niko1221/Strata` **v0.2.6** (`4b9e05a2`). Stack head: `a785d7ef`. 18 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
+Base: upstream `Niko1221/Strata` **v0.2.6** (`4b9e05a2`). Stack head: `0083469d`. 19 patches, applied in this order with `git am stack/*.patch` (or one at a time with `git apply --3way`). Check a new upstream with `python stack/check_anchors.py --check <repo> --rev <tag>`.
 
 ## Reading this file
 
@@ -59,6 +59,7 @@ New in 0.2.0, does not fire here: the sm_86 table (`src/core/nv_defaults.cpp`: A
 | 16 | [conv-disk](#16-conv-disk) | `STRATA_CONV_DISK=<s>`: after a request, once the engine has been idle that long, the live conversation at its last turn boundary goes to a keyed file; a request looks for the longest saved boundary among its own. | `STRATA_CONV_DISK=<idle seconds>`, `STRATA_CONV_DISK_MIN` (4096) (off; needs `--prompt-cache-file` and `STRATA_PREFIX_DISK_MULTI`, no `--batch`) | fork (lab/ttft43 abd685c5) | never proposed | a 130k conversation restarts from its file instead of the system turn alone (65-80 s of prefill); 13 Oct: a restart took 277 s with it on, later shown not to come from CONV_DISK (TTFT43.md). |
 | 17 | [p2-flush-noswitch](#17-p2-flush-noswitch) | Pipeline polling without switching card: `STRATA_P2_FLUSH_NOSWITCH` (service, done and the chain read their mapped flags with no OnDevice), `STRATA_P2_FLUSH_US` (flush period), `STRATA_P2_SWITCH_STAT` (host time in the window launches), `STRATA_P2_SMEM` (config cache to shared). | `STRATA_P2_FLUSH_NOSWITCH=1`, `STRATA_P2_FLUSH_US=<us>`, `STRATA_P2_SWITCH_STAT=1`, `STRATA_P2_SMEM=1` (off) | fork (lab/pipeline2 f6a0b6b2; the polling idea from NTRYourWaifu's v7/v8) | never proposed | 13 Oct B-A-B (isolated bench): NOSWITCH removes ~8 100 card switches per request but the gain is below the spread; never promoted (docs/PIPELINE2.md par. 11). |
 | 18 | [hc16-sm75](#18-hc16-sm75) | The hyper-connection projections (down, up, inject) and ssm_alpha / ssm_beta of the prompt on FP16 tensor cores on an sm_75 card: each BF16 weight is re-encoded to FP16 once per call into a 6.55 MB staging buffer, the activations are written as the FP16 image of the FP32 value (`f16img` 2 in the `gr_*` writers, 1 in `gr_silu`). The draft layer stays BF16. | `STRATA_HC16_SM75=1` (off; sm_75 only, not part of `STRATA_SM75_PERF`) | fork (pr/prefill-hc16-sm75 626d324c, the 0.1.43 Daily's hc16, rewritten on 0.1.45's kernels) | never proposed. Overlaps upstream's `STRATA_BF16_TC=1` + `STRATA_XN_F16` (#655 / #2091), which sends every BF16 GEMM through FP16 with per-call conversion buffers; hc16 is the narrow version (these call sites only, a 6.55 MB buffer allocated and priced with the prompt path, the draft layer untouched) | 0.1.43 Daily: -19.5% of the GPU prompt time on the 2080 Ti (131k prefill 100 -> 75 s together with SELECT_SIMT). Not bitwise (FP16 activations). On 0.1.45: docs/UPSYNC_MAIN.md par. 8; on 0.2.0: docs/UPSYNC_020.md. |
+| 19 | [greedy-temp0](#19-greedy-temp0) | A request that explicitly asks for temperature <= 0 is not given the model card's top_p / top_k / presence_penalty (upstream a8091f4d, #2685, merges them under every request that sends no sampling fields). The engine stays on the pure argmax path; without the patch a temperature-0 request from the community bench ran at about -12% decode. Config block and Chat settings still apply; every other request is unchanged. | none (always on; a request with `temperature` <= 0) | fork (lab/upsync-026, bisection of 25-26 Oct 2026) | never proposed | docs/porto/strata_adattivo/corse_2080ti/20261025_bisezione/SAMPLING.md in moe-aggressive-commit (measurement pending) |
 
 ## Retired
 
@@ -2036,4 +2037,32 @@ Insertion points (29):
       }
       check("gr_write_cvec_norm_rs");
   }
+  ```
+
+## 19 greedy-temp0
+
+`19-greedy-temp0.patch` — SONNET-SAMPLING-Temperatura 0 esplicita resta greedy puro senza scheda modello
+
+- **What**: A request that explicitly asks for temperature <= 0 is not given the model card's top_p / top_k / presence_penalty (upstream a8091f4d, #2685, merges them under every request that sends no sampling fields). The engine stays on the pure argmax path; without the patch a temperature-0 request from the community bench ran at about -12% decode. Config block and Chat settings still apply; every other request is unchanged.
+- **Switch (default)**: none (always on; a request with `temperature` <= 0)
+- **Origin**: fork (lab/upsync-026, bisection of 25-26 Oct 2026)
+- **Upstream**: never proposed
+- **Measured**: docs/porto/strata_adattivo/corse_2080ti/20261025_bisezione/SAMPLING.md in moe-aggressive-commit (measurement pending)
+- **Notes**: Server only (serve/server.py `_run`); the C++ engine is unchanged. serve/test_model_card_sampling.py covers it.
+- **Docs**: docs/UPSYNC_026.md
+- **Files**: `serve/server.py`, `serve/test_model_card_sampling.py`
+
+Insertion points (2):
+
+- `serve/server.py` · `class Service:` → [19-1](BLOCKS.md#19-1)
+  ```
+          `force` (forced_call): the opening of the call the reply must make - see prepare()."""
+          # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
+          # apps; the request's own fields win over all of them
+  ```
+- `serve/test_model_card_sampling.py` · `class ModelCardSampling(unittest.TestCase):` → [19-2](BLOCKS.md#19-2)
+  ```
+  
+      def test_request_wins_and_zero_is_greedy(self):
+          k = self.keys(temperature=0)
   ```

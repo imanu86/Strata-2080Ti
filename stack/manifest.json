@@ -7,7 +7,7 @@
     "tag": "v0.2.6",
     "commit": "4b9e05a2a806a3fe24f7b2560d98626c37dade35"
   },
-  "stack_head": "a785d7ef2a7a001310368fe2d2b57b50603fc12c",
+  "stack_head": "0083469ddfc8a21adc430b42b79fdda9c4da3827",
   "skip_subjects": [
     "FABLE-STRATA-Riporta docs/UPSYNC.md"
   ],
@@ -3836,6 +3836,50 @@
         "src/prefill/kernels.cu",
         "src/prefill/prefill.cpp",
         "sycl/src/prefill/kernels.dp.cpp"
+      ]
+    },
+    {
+      "id": "19",
+      "name": "greedy-temp0",
+      "summary": "A request that explicitly asks for temperature <= 0 is not given the model card's top_p / top_k / presence_penalty (upstream a8091f4d, #2685, merges them under every request that sends no sampling fields). The engine stays on the pure argmax path; without the patch a temperature-0 request from the community bench ran at about -12% decode. Config block and Chat settings still apply; every other request is unchanged.",
+      "switch": "none (always on; a request with `temperature` <= 0)",
+      "origin": "fork (lab/upsync-026, bisection of 25-26 Oct 2026)",
+      "upstream_status": "never proposed",
+      "measured": "docs/porto/strata_adattivo/corse_2080ti/20261025_bisezione/SAMPLING.md in moe-aggressive-commit (measurement pending)",
+      "notes": "Server only (serve/server.py `_run`); the C++ engine is unchanged. serve/test_model_card_sampling.py covers it.",
+      "docs": "docs/UPSYNC_026.md",
+      "patch": "19-greedy-temp0.patch",
+      "commit": "0083469ddfc8a21adc430b42b79fdda9c4da3827",
+      "title": "SONNET-SAMPLING-Temperatura 0 esplicita resta greedy puro senza scheda modello",
+      "anchors": [
+        {
+          "block": "19-1",
+          "file": "serve/server.py",
+          "symbol": "class Service:",
+          "anchor": [
+            "        `force` (forced_call): the opening of the call the reply must make - see prepare().\"\"\"",
+            "        # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with",
+            "        # apps; the request's own fields win over all of them"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        },
+        {
+          "block": "19-2",
+          "file": "serve/test_model_card_sampling.py",
+          "symbol": "class ModelCardSampling(unittest.TestCase):",
+          "anchor": [
+            "",
+            "    def test_request_wins_and_zero_is_greedy(self):",
+            "        k = self.keys(temperature=0)"
+          ],
+          "status_in_base": "unique",
+          "hunk": 1
+        }
+      ],
+      "files": [
+        "serve/server.py",
+        "serve/test_model_card_sampling.py"
       ]
     }
   ],

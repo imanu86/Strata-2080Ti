@@ -8642,3 +8642,60 @@ Block (hunk 5 of `sycl/src/prefill/kernels.dp.cpp` in the patch, 8 lines):
          auto exp_props = sycl::ext::oneapi::experimental::properties{
              sycl::ext::oneapi::experimental::use_root_sync};
 ```
+
+## 19 greedy-temp0
+
+`19-greedy-temp0.patch` — SONNET-SAMPLING-Temperatura 0 esplicita resta greedy puro senza scheda modello
+
+### 19-1
+
+`serve/server.py` · class Service:
+
+Anchor:
+```
+        `force` (forced_call): the opening of the call the reply must make - see prepare()."""
+        # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
+        # apps; the request's own fields win over all of them
+```
+Block (hunk 1 of `serve/server.py` in the patch, 12 lines):
+```diff
+         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
+         # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
+         # apps; the request's own fields win over all of them
+-        defaults = {**model_card_sampling(self.model_arch, thinking), **self.sampling_defaults, **self.shared}
++        card = model_card_sampling(self.model_arch, thinking)
++        req_t = (sampling or {}).get("temperature")
++        if isinstance(req_t, (int, float)) and not isinstance(req_t, bool) and req_t <= 0:
++            card = {}                  # a request that asks for temperature 0 is pure greedy: no card top_p/top_k/penalty
++        defaults = {**card, **self.sampling_defaults, **self.shared}
+         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
+             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
+             sampling = {**defaults, **req_values}
+```
+
+### 19-2
+
+`serve/test_model_card_sampling.py` · class ModelCardSampling(unittest.TestCase):
+
+Anchor:
+```
+
+    def test_request_wins_and_zero_is_greedy(self):
+        k = self.keys(temperature=0)
+```
+Block (hunk 1 of `serve/test_model_card_sampling.py` in the patch, 13 lines):
+```diff
+
+     def test_request_wins_and_zero_is_greedy(self):
+         k = self.keys(temperature=0)
+-        self.assertNotIn("temperature", k)
+-        self.assertIn("top_k=20", k)
++        self.assertEqual(k, "")                          # pure greedy: the card's top_p/top_k/penalty are not merged
++        k = self.keys(temperature=0, reasoning_effort="none")
++        self.assertEqual(k, "")
++        k = self.keys(temperature=0, top_k=5)            # what the request itself says is still sent
++        self.assertEqual(k, " top_k=5")
+         k = self.keys(temperature=0.3, top_p=0.5)
+         self.assertIn("temperature=0.3", k)
+         self.assertIn("top_p=0.5", k)
+```

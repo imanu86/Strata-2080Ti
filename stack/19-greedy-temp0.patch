@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Strata-2080Ti stack <stack@noreply.github.com>
+Date: Mon, 26 Oct 2026 03:50:16 +0100
+Subject: [PATCH] SONNET-SAMPLING-Temperatura 0 esplicita resta greedy puro
+ senza scheda modello
+
+Una richiesta con temperature <= 0 non riceve piu' top_p/top_k/presence_penalty della scheda modello
+(a8091f4d, #2685): il motore resta sul percorso argmax. Gli altri casi non cambiano.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/serve/server.py b/serve/server.py
+index 76b5a2c7..2fe3c381 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -5081,7 +5081,11 @@ class Service:
+         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
+         # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
+         # apps; the request's own fields win over all of them
+-        defaults = {**model_card_sampling(self.model_arch, thinking), **self.sampling_defaults, **self.shared}
++        card = model_card_sampling(self.model_arch, thinking)
++        req_t = (sampling or {}).get("temperature")
++        if isinstance(req_t, (int, float)) and not isinstance(req_t, bool) and req_t <= 0:
++            card = {}                  # a request that asks for temperature 0 is pure greedy: no card top_p/top_k/penalty
++        defaults = {**card, **self.sampling_defaults, **self.shared}
+         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
+             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
+             sampling = {**defaults, **req_values}
+diff --git a/serve/test_model_card_sampling.py b/serve/test_model_card_sampling.py
+index ee491506..292630bc 100644
+--- a/serve/test_model_card_sampling.py
++++ b/serve/test_model_card_sampling.py
+@@ -81,8 +81,11 @@ class ModelCardSampling(unittest.TestCase):
+ 
+     def test_request_wins_and_zero_is_greedy(self):
+         k = self.keys(temperature=0)
+-        self.assertNotIn("temperature", k)
+-        self.assertIn("top_k=20", k)
++        self.assertEqual(k, "")                          # pure greedy: the card's top_p/top_k/penalty are not merged
++        k = self.keys(temperature=0, reasoning_effort="none")
++        self.assertEqual(k, "")
++        k = self.keys(temperature=0, top_k=5)            # what the request itself says is still sent
++        self.assertEqual(k, " top_k=5")
+         k = self.keys(temperature=0.3, top_p=0.5)
+         self.assertIn("temperature=0.3", k)
+         self.assertIn("top_p=0.5", k)
