@@ -5081,7 +5081,11 @@ class Service:
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
         # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
         # apps; the request's own fields win over all of them
-        defaults = {**model_card_sampling(self.model_arch, thinking), **self.sampling_defaults, **self.shared}
+        card = model_card_sampling(self.model_arch, thinking)
+        req_t = (sampling or {}).get("temperature")
+        if isinstance(req_t, (int, float)) and not isinstance(req_t, bool) and req_t <= 0:
+            card = {}                  # a request that asks for temperature 0 is pure greedy: no card top_p/top_k/penalty
+        defaults = {**card, **self.sampling_defaults, **self.shared}
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**defaults, **req_values}
