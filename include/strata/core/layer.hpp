@@ -271,6 +271,10 @@ struct QsaState {
     /// copy and give back the overlap the doorbell protocol exists for.
     int32_t* host_step = nullptr;    ///< (kStepCount + 1,) pinned; final element is attention status
     int32_t* host_pos = nullptr;     ///< (n_head,) pinned
+    /// fork lab/batch-dyn: the KV streaming host copy's own allocation (kv_host_alloc) and size, so a session that is
+    /// freed while the process lives (STRATA_BATCH_DYNAMIC's slot sessions) can give its pinned RAM back
+    uint8_t* host_base = nullptr;
+    uint64_t host_bytes = 0;
 };
 
 /// Plan v0.3 P7: the RoPE cos/sin table (max_cells x n_rot/2 x 2 floats, 64 MiB at 262K) is identical in every
@@ -325,6 +329,9 @@ inline int qsa_kv_format(const QsaState& st) {
 }
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
                         const QsaState* share_rope = nullptr, int64_t ring_cells = 0);
+/// fork lab/batch-dyn: the pinned host memory qsa_state_init took (the KV streaming copy, the step staging) back to the
+/// driver.  Only for a state whose device memory is about to be freed and that nothing reads any more.
+void qsa_state_free_host(QsaState& st);
 /// KV streaming: the pools a reader sees (the VRAM slots) and, when streamed, make the selection's blocks resident.
 strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st);
 void qsa_kv_resolve(const QsaState& st, const ModelGeometry& g, const int32_t* ids, const int32_t* steps, int64_t n_q,
