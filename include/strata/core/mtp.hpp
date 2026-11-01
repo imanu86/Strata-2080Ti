@@ -175,7 +175,7 @@ public:
     /// The first cell whose K/V the draft layer can still read: the window's start for this prompt, and never below
     /// the KVA floor (cells built from approximated rows are not read, so they are not built either).
     int64_t first_needed() const {
-        const int64_t w = (window_ > 0 && prompt_len_ > 0) ? prompt_len_ - window_ - 64 : 0;
+        const int64_t w = (window_ > 0 && prompt_len_ > 0 && !full_prefix_) ? prompt_len_ - window_ - 64 : 0;
         return std::max<int64_t>(w, cell_floor_);
     }
     /// The cells the draft layer attends to (0 = every cell), as load() settled it.
@@ -191,6 +191,9 @@ public:
         if (m_floor_ != nullptr) *(volatile int32_t*) h_floor_ = (int32_t) std::min<int64_t>(cell_floor_, 0x7fffffff);
     }
     int64_t cell_floor() const { return cell_floor_; }
+    /// this prompt's root goes to the prefix file: K/V for every cell, also those the window will not reach again
+    /// (a saved prefix must serve later prompts of any length)
+    void set_full_prefix(bool on) { full_prefix_ = on; }
     int device() const { return device_; }
     bool idle(std::string& err) {
         if (cs_ && cudaStreamSynchronize(cs_) != cudaSuccess) { err = "mtp: its stream failed"; return false; }
@@ -299,6 +302,7 @@ private:
     bool floor_on_ = false;     // enable_cell_floor: the attention goes through window_ids_floor
     int32_t *h_floor_ = nullptr, *m_floor_ = nullptr;   // the floor, mapped: the kernel reads it when it runs
     int64_t prompt_len_ = 0;
+    bool full_prefix_ = false;
     const int32_t* rr_res_ = nullptr;
     float rr_margin_ = 0.0f;
     int rr_lo_ = 6, rr_hi_ = 9;
