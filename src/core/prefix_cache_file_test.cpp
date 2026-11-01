@@ -582,6 +582,44 @@ int main() {
     reject_split_write("split-above-token-cap", over_cap);
   }
 
+  {   // fork (TTFT): one file per prefix, least recently used out past the cap
+    const fs::path base = temp.path / "multi" / "prefix.bin";
+    fs::create_directories(base.parent_path());
+    const std::vector<int32_t> a = {1, 2, 3}, b = {1, 2, 4};
+    const auto ka = prefix_cache_keyed_path(base, a, 7);
+    check(ka == prefix_cache_keyed_path(base, a, 7), "keyed path is stable");
+    check(ka != prefix_cache_keyed_path(base, b, 7) &&
+              ka != prefix_cache_keyed_path(base, a, 8),
+          "keyed path follows the prefix and the frontier");
+    check(ka.parent_path() == base.parent_path() &&
+              ka.filename().string().size() == base.filename().string().size() + 17,
+          "keyed path is <base>.<16 hex>");
+    auto put = [](const fs::path &p, size_t bytes) {
+      std::ofstream f(p, std::ios::binary);
+      const std::string data(bytes, 'x');
+      f.write(data.data(), (std::streamsize)data.size());
+    };
+    const auto kb = prefix_cache_keyed_path(base, b, 7);
+    const auto kc = prefix_cache_keyed_path(base, {9}, 7);
+    put(ka, 100);
+    put(kb, 100);
+    put(kc, 100);
+    put(base, 1000);                       // the single file is not a keyed one
+    put(fs::path(ka.string() + ".tmp-1-2"), 1000);   // nor is a temporary
+    const auto now = fs::file_time_type::clock::now();
+    fs::last_write_time(ka, now - std::chrono::hours(3));
+    fs::last_write_time(kb, now - std::chrono::hours(2));
+    fs::last_write_time(kc, now - std::chrono::hours(1));
+    check(prefix_cache_keyed_files(base).size() == 3, "three keyed files");
+    prefix_cache_touch(ka);                // a read hit: ka is the newest now
+    check(prefix_cache_evict(base, 250, kc) == 1 && !fs::exists(kb) &&
+              fs::exists(ka) && fs::exists(kc) && fs::exists(base),
+          "eviction removes the least recently used keyed file only");
+    check(prefix_cache_evict(base, 0, kc) == 1 && !fs::exists(ka) &&
+              fs::exists(kc),
+          "eviction never removes the file just written");
+  }
+
   std::printf("prefix_cache_file_test: %d checks passed\n", checks);
   return 0;
 }
