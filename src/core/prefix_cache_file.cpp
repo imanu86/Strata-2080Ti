@@ -599,27 +599,54 @@ bool prefix_cache_read(const std::filesystem::path &path,
   }
 }
 
-std::filesystem::path prefix_cache_keyed_path(
-    const std::filesystem::path &base, const std::vector<int32_t> &prefix,
-    int32_t next_token) {
-  uint64_t h = 1469598103934665603ull;   // FNV-1a 64
-  auto mix = [&h](const void *data, size_t n) {
-    const auto *p = static_cast<const uint8_t *>(data);
-    for (size_t i = 0; i < n; ++i) {
-      h ^= p[i];
-      h *= 1099511628211ull;
-    }
-  };
-  const uint64_t count = prefix.size();
-  mix(&count, sizeof(count));
-  if (!prefix.empty())
-    mix(prefix.data(), prefix.size() * sizeof(int32_t));
-  mix(&next_token, sizeof(next_token));
+namespace {
+// FNV-1a 64 over the ids, then the count and the frontier token: the ids come first so one pass over a prompt gives
+// the key of every prefix of it (prefix_cache_keyed_paths)
+constexpr uint64_t kFnvBasis = 1469598103934665603ull;
+inline void fnv_mix(uint64_t &h, const void *data, size_t n) {
+  const auto *p = static_cast<const uint8_t *>(data);
+  for (size_t i = 0; i < n; ++i) {
+    h ^= p[i];
+    h *= 1099511628211ull;
+  }
+}
+std::filesystem::path keyed_name(const std::filesystem::path &base, uint64_t h,
+                                 uint64_t count, int32_t next_token) {
+  fnv_mix(h, &count, sizeof(count));
+  fnv_mix(h, &next_token, sizeof(next_token));
   char suffix[18];
   std::snprintf(suffix, sizeof(suffix), ".%016llx", (unsigned long long)h);
   auto path = base;
   path += suffix;
   return path;
+}
+} // namespace
+
+std::filesystem::path prefix_cache_keyed_path(
+    const std::filesystem::path &base, const std::vector<int32_t> &prefix,
+    int32_t next_token) {
+  uint64_t h = kFnvBasis;
+  if (!prefix.empty())
+    fnv_mix(h, prefix.data(), prefix.size() * sizeof(int32_t));
+  return keyed_name(base, h, prefix.size(), next_token);
+}
+
+std::vector<std::filesystem::path>
+prefix_cache_keyed_paths(const std::filesystem::path &base,
+                         const std::vector<int32_t> &ids,
+                         const std::vector<int64_t> &at) {
+  std::vector<std::filesystem::path> out;
+  out.reserve(at.size());
+  uint64_t h = kFnvBasis;
+  int64_t done = 0;
+  for (const int64_t a : at) {
+    if (a < done || a >= (int64_t)ids.size())
+      break;   // ascending and inside ids, else the rest is not computed
+    fnv_mix(h, ids.data() + done, size_t(a - done) * sizeof(int32_t));
+    done = a;
+    out.push_back(keyed_name(base, h, (uint64_t)a, ids[size_t(a)]));
+  }
+  return out;
 }
 
 std::vector<PrefixCacheEntry>
