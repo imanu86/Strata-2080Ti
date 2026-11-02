@@ -17,6 +17,7 @@
 #include "strata/kernels/gr.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
+#include "strata/kernels/mrope.hpp"
 #include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/native_qsa.hpp"
@@ -166,6 +167,7 @@ MtpDrafter::~MtpDrafter() {
         cudaFree(dense_);
     }
     if (owns_weights_ && experts_) cudaFree(experts_);
+    if (st_.owns_rope) strata::kernels::rope_table_release(st_.cos_tab);   // (set_apart: its own tables, in the arena)
     if (state_arena_) cudaFree(state_arena_);
     if (arena_) cudaFree(arena_);
     if (head_logits_) cudaFree(head_logits_);
@@ -384,19 +386,23 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     const bool kv_int8_was = qsa_kv_int8();
     qsa_set_kv_hybrid(false);
     if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
-    uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
+    // STRATA_MTP_DEVICE (set_apart): the session's rope tables are on another card, so the state builds its own
+    const QsaState* const share_rope = apart_ ? nullptr : &ss.qsa_states[ss.qsa_primary()];
+    uint64_t sb = qsa_state_bytes(g, max_cells, apart_, ring);
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
-    if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) {
+    if (qsa_state_init(g, max_cells, state_arena_, st_, share_rope, ring) == 0) {
         if (st_.kv_mode == 0) { err = "mtp: state init failed"; return false; }
         std::fprintf(stderr, "strata mtp: no pinned RAM left for the draft layer's K/V copy; keeping it in VRAM\n");
         cudaGetLastError();
+        if (st_.owns_rope) strata::kernels::rope_table_release(st_.cos_tab);
         cudaFree(state_arena_);
         st_ = QsaState{};
         ring = -1;   // fully resident
-        sb = qsa_state_bytes(g, max_cells, false, ring);
+        sb = qsa_state_bytes(g, max_cells, apart_, ring);
         if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
-        if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) { err = "mtp: state init failed"; return false; }
+        if (qsa_state_init(g, max_cells, state_arena_, st_, share_rope, ring) == 0) { err = "mtp: state init failed"; return false; }
     }
+    if (apart_) st_.dev = device_;   // the snapshot copies and the ring refill switch to this card
     qsa_set_kv_int8(kv_int8_was);
     qsa_set_kv_hybrid(kv_hybrid_was);
     qsa_state_zero(st_, g, nullptr);

@@ -142,6 +142,10 @@ public:
     /// Before `load`: the round/step graphs get the forcing kernel (a no-op while its token is -1), and the drafter's
     /// stream the highest priority (STRATA_MTP_PRIORITY=0: the default priority).
     void set_force_capture(bool on) { force_on_ = on; }
+    /// STRATA_MTP_DEVICE (before `load`): the drafter on a card no stage runs on.  Its K/V state then builds its own
+    /// rope tables (the session's are on another card) and carries its device (QsaState::dev), so the snapshot copies
+    /// and the ring refill switch to it.  Off (the default): nothing changes.
+    void set_apart(bool on) { apart_ = on; }
     /// The rows the next round reads (null: the bound `window_R`), copied into the bound buffer before the round.
     void set_source_R(const float* rows) { src_R_ = rows; }
     /// Capture the round graphs for T = 1..max_t and every step graph now (a capture syncs the drafter's stream).
@@ -262,6 +266,7 @@ private:
     // --pipeline-windows 2 (chain_launch)
     bool stage_source_R(int T, std::string& err);   ///< set_source_R's rows into the bound buffer
     bool force_on_ = false, chain_live_ = false;
+    bool apart_ = false;   ///< set_apart: own rope tables, st_.dev = device_
     const float* src_R_ = nullptr;
     int32_t *h_force_ = nullptr, *m_force_ = nullptr;   ///< the forced tokens (mapped), -1 = the step's own pick
     cudaEvent_t ev_chain_ = nullptr;
