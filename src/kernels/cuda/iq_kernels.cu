@@ -6038,17 +6038,19 @@ __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned lon
 // [r0, r0 + 32): gate rows r0.. and up rows r0.. (64 weight rows, the same per-(row, entry) sums as mode 7), so
 // one 32-lane warp per entry holds exactly one q8_1 block of h and runs quantize_q8_1_kernel's own code on it -
 // bitwise the separate kernels' hq, two launches fewer per call.
-// MINB (STRATA_GU_FUSED_MINB=4, opt-in, lab/upsync-v0.2.9): the same kernel under __launch_bounds__(256, 4), so ptxas
-// keeps it within 64 registers and an SM holds 4 blocks (32 warps) instead of 3: at 71-78 registers (IQ3_XXS / IQ3_S,
-// sm_75 and sm_86) a layer's 280-300 blocks (n_ff 640 / 32 x 14-15 experts) run in two waves on the 68 SMs of an RTX
-// 2080 Ti, at 4 blocks an SM the second wave is a tail.  Register allocation only: the same sums in the same order.
-template<int TG, int MINB = 1>
-__global__ void __launch_bounds__(256, MINB) native_gu_fused_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                              const int32_t* __restrict__ grp_start,
-                                                              const int32_t* __restrict__ n_groups,
-                                                              const int32_t* __restrict__ ent_tok,
-                                                              const block_q8_1* __restrict__ xq, NativeExpertLayout L,
-                                                              block_q8_1* __restrict__ hq) {
+// The body is a device function so two kernels can share it: native_gu_fused_kernel (__launch_bounds__(256), as
+// before) and native_gu_fused_kernel_minb4 (STRATA_GU_FUSED_MINB=4, opt-in, lab/upsync-v0.2.9: __launch_bounds__(256, 4),
+// so ptxas keeps it within 64 registers and an SM holds 4 blocks, 32 warps, instead of 3: at 71-78 registers
+// (IQ3_XXS / IQ3_S, sm_75 and sm_86) a layer's 280-300 blocks (n_ff 640 / 32 x 14-15 experts) run in two waves on the
+// 68 SMs of an RTX 2080 Ti, at 4 blocks an SM the second wave is a tail).  Register allocation only: the same sums in
+// the same order.  (A MINB template argument of 1 is not the same as no argument: ptxas then gave 87-95 registers.)
+template<int TG>
+__device__ __forceinline__ void native_gu_fused_body(const unsigned long long* __restrict__ grp_ptr,
+                                                     const int32_t* __restrict__ grp_start,
+                                                     const int32_t* __restrict__ n_groups,
+                                                     const int32_t* __restrict__ ent_tok,
+                                                     const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                     block_q8_1* __restrict__ hq) {
     using GT = typename GridOf<TG>::T;
     using F = Fmt<TG>;
     __shared__ GT sgrid[GridOf<TG>::N];
@@ -6125,6 +6127,24 @@ __global__ void __launch_bounds__(256, MINB) native_gu_fused_kernel(const unsign
             if (lane == 0) y->ds = q8_1_ds(d, sum);
         }
     }
+}
+template<int TG>
+__global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                              const int32_t* __restrict__ grp_start,
+                                                              const int32_t* __restrict__ n_groups,
+                                                              const int32_t* __restrict__ ent_tok,
+                                                              const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                              block_q8_1* __restrict__ hq) {
+    native_gu_fused_body<TG>(grp_ptr, grp_start, n_groups, ent_tok, xq, L, hq);
+}
+template<int TG>
+__global__ void __launch_bounds__(256, 4) native_gu_fused_kernel_minb4(const unsigned long long* __restrict__ grp_ptr,
+                                                                       const int32_t* __restrict__ grp_start,
+                                                                       const int32_t* __restrict__ n_groups,
+                                                                       const int32_t* __restrict__ ent_tok,
+                                                                       const block_q8_1* __restrict__ xq, NativeExpertLayout L,
+                                                                       block_q8_1* __restrict__ hq) {
+    native_gu_fused_body<TG>(grp_ptr, grp_start, n_groups, ent_tok, xq, L, hq);
 }
 
 // dflash2-kern: Strix Halo (gfx1151) takes mode 8 (gate/up + SwiGLU + q8_1 in one launch, the group's activations in LDS) for the
@@ -6346,18 +6366,17 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         const size_t sh = (size_t) LDS_NT * (size_t) (L.n_embd / 32) * sizeof(block_q8_1);
         // STRATA_GU_FUSED_MINB=4: the 64-register build of the kernel (4 blocks an SM); anything else, today's
         static const int minb = [] { const char* v = std::getenv("STRATA_GU_FUSED_MINB"); return v ? std::atoi(v) : 0; }();
-        auto go = [&](auto mb) {
-            constexpr int MB = decltype(mb)::value;
-            switch (L.gu_type) {
-                case 16: native_gu_fused_kernel<16, MB><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
-                case 18: native_gu_fused_kernel<18, MB><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
-                case 21: native_gu_fused_kernel<21, MB><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
-                case 23: native_gu_fused_kernel<23, MB><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
-                default: native_gu_fused_kernel<22, MB><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
-            }
-        };
-        if (minb == 4) go(std::integral_constant<int, 4>{});
-        else go(std::integral_constant<int, 1>{});
+#define STRATA_GU_FUSED(K)                                                                                   \
+        switch (L.gu_type) {                                                                                 \
+            case 16: K<16><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
+            case 18: K<18><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
+            case 21: K<21><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
+            case 23: K<23><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
+            default: K<22><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
+        }
+        if (minb == 4) { STRATA_GU_FUSED(native_gu_fused_kernel_minb4) }
+        else { STRATA_GU_FUSED(native_gu_fused_kernel) }
+#undef STRATA_GU_FUSED
         check("native_expert_grouped/gu fused");
     }
 #endif
