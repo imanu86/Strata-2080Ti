@@ -90,7 +90,22 @@ bool ck(cudaError_t e, const char* what, std::string& err) {
     return false;
 }
 
+// STRATA_PEER_NOSWITCH: once refused by the driver the queries go back under the device switch
+bool g_noswitch_refused = false;
+void noswitch_refuse(cudaError_t e) {
+    if (!g_noswitch_refused)
+        std::fprintf(stderr, "strata: STRATA_PEER_NOSWITCH: the peer's stream refused a query without the device switch (%s): "
+                             "switching the device for the peer's waits from here on\n", cudaGetErrorString(e));
+    g_noswitch_refused = true;
+    cudaGetLastError();
+}
+
 }  // namespace
+
+bool PeerExperts::noswitch() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_PEER_NOSWITCH"); return v != nullptr && std::atoi(v) != 0; }();
+    return on && !g_noswitch_refused;
+}
 
 PeerExperts::~PeerExperts() { close(); }
 
@@ -251,6 +266,12 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
     row_of_.clear();
     const int64_t n = n_tok * k;
     if (n > CAP) { err = "peer experts: window too large"; return false; }
+    const auto t0 = std::chrono::steady_clock::now();
+    struct Timed {   // the host time of this call, whichever way it returns
+        const std::chrono::steady_clock::time_point t0;
+        double& ms;
+        ~Timed() { ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
+    } timed{t0, ms_launch};
     Meta& m = *(Meta*) h_meta_;
     int groups = 0, rows = 0;
     // distinct experts in routing order; each one's entries become compact rows
@@ -281,6 +302,7 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
     m.count[1] = rows;
     entries_ += rows;
     launched_rows_ = rows;
+    ++launches;
     // direct: x is the verifier's pinned (portable) doorbell row block - copied from where it is
     if (!direct) std::memcpy(h_x_, x, (size_t) (n_tok * H) * sizeof(float));
     On on(device_);
@@ -317,10 +339,15 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
 bool PeerExperts::finish(float* out, std::string& err) {
     if (launched_rows_ == 0) return true;
     const auto t0 = std::chrono::steady_clock::now();
-    {
+    // spin on the stream (a blocking sync would sleep the pool thread and wake it late)
+    cudaError_t e = cudaErrorNotReady;
+    if (noswitch()) {   // STRATA_PEER_NOSWITCH: the query under the calling thread's device (the primary's)
+        while ((e = cudaStreamQuery(stream_)) == cudaErrorNotReady) {
+        }
+        if (e != cudaSuccess) noswitch_refuse(e);   // asked again below, under the peer's device
+    }
+    if (e != cudaSuccess) {
         On on(device_);
-        // spin on the stream (a blocking sync would sleep the pool thread and wake it late)
-        cudaError_t e;
         while ((e = cudaStreamQuery(stream_)) == cudaErrorNotReady) {
         }
         if (!ck(e, "finish", err)) return false;
@@ -380,6 +407,12 @@ bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, 
 
 void PeerExperts::apply_pending(bool wait) {
     if (pending_.empty()) return;
+    if (noswitch()) {   // STRATA_PEER_NOSWITCH: the event query works on any device's event
+        const cudaError_t q = wait ? cudaEventSynchronize(refill_ev_) : cudaEventQuery(refill_ev_);
+        if (q == cudaSuccess) { for (const auto& [i, slot] : pending_) res_[(size_t) i] = slot; pending_.clear(); return; }
+        if (q != cudaErrorNotReady) noswitch_refuse(q);   // refused: asked again below under the peer's device
+        else if (!wait) return;
+    }
     {
         On on(device_);
         if (wait) cudaEventSynchronize(refill_ev_);

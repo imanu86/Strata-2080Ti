@@ -81,6 +81,13 @@ public:
     int64_t experts() const { return experts_; }      ///< distinct (layer, expert) the peer computed
     int64_t swaps() const { return swaps_; }
     double ms_wait = 0;                               ///< host time spent in finish() waiting for the peer
+    double ms_launch = 0;                             ///< host time spent in launch() (plan, copies, kernel launches)
+    int64_t launches = 0;                             ///< layers with a share on the peer (a launch and a finish each)
+    /// STRATA_PEER_NOSWITCH=1 (opt-in, lab/upsync-v0.2.9): finish() and apply_pending() query the peer's stream and
+    /// event without switching the calling thread's device (the stream carries its own context, as the verifier's
+    /// STRATA_P2_FLUSH_NOSWITCH does).  No GPU work changes.  If the driver refuses a query the engine says so once
+    /// and goes back to the switch.
+    static bool noswitch();
 
 private:
     int device_ = -1;

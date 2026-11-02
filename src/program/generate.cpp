@@ -17413,6 +17413,10 @@ int main(int argc, char** argv) {
                                drive.d.pcie_experts};
             };
             const DecSnap ds0 = dec_snap();
+            // multi-GPU: the peer's share of the per-layer host time ("CPU" above holds the pool's run AND the peer's
+            // finish), so the two can be told apart in the log
+            const double peer_launch0 = peer.ms_launch, peer_wait0 = peer.ms_wait;
+            const int64_t peer_launches0 = peer.launches, peer_entries0 = peer.entries(), peer_experts0 = peer.experts();
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
@@ -18965,6 +18969,12 @@ int main(int argc, char** argv) {
                 if (aov)
                     std::fprintf(stderr, "strata decode adapt overlap: %lld windows took swaps still landing, a layer waited %.2f ms in all so far\n",
                                  (long long) aov_flips, ver.ms_gate);
+                if (peer.valid())   // the peer's part of "per-layer host": launch() (in plan) and finish() (in CPU)
+                    std::fprintf(stderr, "strata decode peer: per window: %.2f ms host in launch + %.2f ms waiting in finish over %.1f layers "
+                                         "with a share; per layer-window: %.2f entries, %.2f experts%s\n",
+                                 (peer.ms_launch - peer_launch0) / w, (peer.ms_wait - peer_wait0) / w, (double) (peer.launches - peer_launches0) / w,
+                                 (double) (peer.entries() - peer_entries0) / (w * L), (double) (peer.experts() - peer_experts0) / (w * L),
+                                 strata::core::PeerExperts::noswitch() ? " (STRATA_PEER_NOSWITCH)" : "");
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();
                     if (pr.empty()) continue;
