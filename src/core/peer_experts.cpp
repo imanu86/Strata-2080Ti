@@ -38,6 +38,8 @@ struct Meta {                           // one block, uploaded with one copy per
     int32_t count[4];                   // [0] groups, [1] entries
     int32_t out_row[CAP];               // multi-GPU: compact row -> entry row in the host `out`
 };
+// STRATA_PEER_ONE_COPY: the plan's bytes in the shared block, rounded so the rows after it start 256-byte aligned
+constexpr size_t kMetaPad = (sizeof(Meta) + 255) / 256 * 256;
 
 /// Switches the calling thread to `dev` and back.  The engine's own thread lives on device 0.
 struct On {
@@ -118,6 +120,11 @@ bool PeerExperts::refill_flush() {
     return on;
 }
 
+bool PeerExperts::one_copy() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_PEER_ONE_COPY"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+
 PeerExperts::~PeerExperts() { close(); }
 
 void PeerExperts::close() {
@@ -127,14 +134,14 @@ void PeerExperts::close() {
         if (stream_) cudaStreamSynchronize(stream_);
         if (refill_) cudaStreamSynchronize(refill_);
         cache_.close();
-        if (d_x_) cudaFree(d_x_);
+        if (d_stage_) cudaFree(d_stage_);   // STRATA_PEER_ONE_COPY: d_x_ and d_meta_ point into it
+        else { if (d_x_) cudaFree(d_x_); if (d_meta_) cudaFree(d_meta_); }
         if (d_out_) cudaFree(d_out_);
-        if (d_meta_) cudaFree(d_meta_);
         if (d_q8_) cudaFree(d_q8_);
         if (d_scratch_) cudaFree(d_scratch_);
-        if (h_x_) cudaFreeHost(h_x_);
+        if (h_stage_) cudaFreeHost(h_stage_);
+        else { if (h_x_) cudaFreeHost(h_x_); if (h_meta_) cudaFreeHost(h_meta_); }
         if (h_out_) cudaFreeHost(h_out_);
-        if (h_meta_) cudaFreeHost(h_meta_);
         if (h_stamp_) cudaFreeHost(h_stamp_);
         if (refill_ev_) cudaEventDestroy(refill_ev_);
         if (stream_) cudaStreamDestroy(stream_);
@@ -142,6 +149,7 @@ void PeerExperts::close() {
     }
     d_x_ = d_out_ = h_x_ = h_out_ = nullptr;
     d_meta_ = h_meta_ = d_scratch_ = nullptr;
+    d_stage_ = h_stage_ = nullptr;
     d_q8_ = nullptr;
     d_sx_ = d_sh_ = nullptr;
     h_stamp_ = m_stamp_ = nullptr;
@@ -200,19 +208,30 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
         for (const auto& f : lay.fmt) ff = std::max<int64_t>(ff, f.n_ff);
     const size_t scratch = std::max<size_t>((size_t) strata::kernels::moe_hit_grouped_scratch_bytes(CAP, H, ff),
                                             strata::kernels::native_expert_scratch_bytes(CAP, ff));
+    // STRATA_PEER_ONE_COPY: the plan (kMetaPad bytes) and the activation rows in one block on each side, one copy a layer
+    const bool one = one_copy();
+    const size_t stage = kMetaPad + (size_t) CAP * H * sizeof(float);
     const bool alloc_ok =
         ck(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking), "stream", err) &&
         ck(cudaStreamCreateWithFlags(&refill_, cudaStreamNonBlocking), "refill stream", err) &&
         ck(cudaEventCreateWithFlags(&refill_ev_, cudaEventDisableTiming), "event", err) &&
-        ck(cudaHostAlloc((void**) &h_x_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable | cudaHostAllocMapped), "input staging", err) &&
+        (one ? ck(cudaHostAlloc(&h_stage_, stage, cudaHostAllocPortable | cudaHostAllocMapped), "plan + input staging", err) &&
+               ck(cudaMalloc(&d_stage_, stage), "plan + input", err)
+             : ck(cudaHostAlloc((void**) &h_x_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable | cudaHostAllocMapped), "input staging", err) &&
+               ck(cudaHostAlloc(&h_meta_, sizeof(Meta), cudaHostAllocPortable | cudaHostAllocMapped), "plan staging", err) &&
+               ck(cudaMalloc((void**) &d_x_, (size_t) CAP * H * sizeof(float)), "input", err) &&
+               ck(cudaMalloc(&d_meta_, sizeof(Meta)), "plan", err)) &&
         ck(cudaHostAlloc((void**) &h_out_, (size_t) CAP * H * sizeof(float), cudaHostAllocPortable | cudaHostAllocMapped), "result staging", err) &&
-        ck(cudaHostAlloc(&h_meta_, sizeof(Meta), cudaHostAllocPortable | cudaHostAllocMapped), "plan staging", err) &&
-        ck(cudaMalloc((void**) &d_x_, (size_t) CAP * H * sizeof(float)), "input", err) &&
         ck(cudaMalloc((void**) &d_out_, (size_t) CAP * H * sizeof(float)), "result", err) &&
-        ck(cudaMalloc(&d_meta_, sizeof(Meta)), "plan", err) &&
         ck(cudaMalloc((void**) &d_q8_, (size_t) CAP * (H / 32) * 36), "activations", err) &&
         ck(cudaMalloc(&d_scratch_, scratch), "scratch", err);
     if (!alloc_ok) { close(); return false; }
+    if (one) {   // the plan at the start of the block, the rows after it
+        h_meta_ = h_stage_;
+        d_meta_ = d_stage_;
+        h_x_ = (float*) ((uint8_t*) h_stage_ + kMetaPad);
+        d_x_ = (float*) ((uint8_t*) d_stage_ + kMetaPad);
+    }
     if (stamp()) {   // STRATA_PEER_STAMP: the stamp page, mapped so the host reads it without a copy
         const size_t n = (size_t) n_layers * 2;
         if (!ck(cudaHostAlloc((void**) &h_stamp_, n * sizeof(unsigned long long), cudaHostAllocPortable | cudaHostAllocMapped), "stamp page", err) ||
@@ -329,14 +348,20 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
     launched_rows_ = rows;
     ++launches;
     // direct: x is the verifier's pinned (portable) doorbell row block - copied from where it is
-    if (!direct) std::memcpy(h_x_, x, (size_t) (n_tok * H) * sizeof(float));
+    // (STRATA_PEER_ONE_COPY: into the shared block first, so the plan and the rows go up in one copy)
+    const bool one = h_stage_ != nullptr;
+    if (!direct || one) std::memcpy(h_x_, x, (size_t) (n_tok * H) * sizeof(float));
     On on(device_);
     const cudaStream_t s = stream_;
     // STRATA_PEER_STAMP: the layer's GPU span starts here, before the first copy (the stamp is a one-thread kernel)
     if (m_stamp_ != nullptr) { stamp_layer_ = layer; strata::kernels::gpu_stamp(m_stamp_, (int) (layer * 2), s); }
-    if (!ck(cudaMemcpyAsync(d_x_, direct ? x : h_x_, (size_t) (n_tok * H) * sizeof(float), cudaMemcpyHostToDevice, s), "input", err) ||
-        !ck(cudaMemcpyAsync(d_meta_, h_meta_, sizeof(Meta), cudaMemcpyHostToDevice, s), "plan", err))
+    if (one) {
+        if (!ck(cudaMemcpyAsync(d_stage_, h_stage_, kMetaPad + (size_t) (n_tok * H) * sizeof(float), cudaMemcpyHostToDevice, s), "plan + input", err))
+            return false;
+    } else if (!ck(cudaMemcpyAsync(d_x_, direct ? x : h_x_, (size_t) (n_tok * H) * sizeof(float), cudaMemcpyHostToDevice, s), "input", err) ||
+               !ck(cudaMemcpyAsync(d_meta_, h_meta_, sizeof(Meta), cudaMemcpyHostToDevice, s), "plan", err)) {
         return false;
+    }
     Meta* dm = (Meta*) d_meta_;
     const auto& lay = strata::kernels::cpu::expert_layout();
     if (lay.native) {

@@ -79,6 +79,11 @@ public:
     /// Off, nothing changes.
     static bool refill_flush();
     void poll_pending() { if (refill_flush() && !pending_.empty()) apply_pending(false); }
+    /// STRATA_PEER_ONE_COPY=1 (opt-in, lab/upsync-v0.2.9): the layer's plan and its activation rows live in one pinned
+    /// block (the plan first, the rows after it) with one device block laid out the same, so launch() queues ONE host
+    /// to device copy a layer instead of two (plan + rows).  The rows are memcpy'd into the block first, also on the
+    /// direct path (a copy of n_tok x n_embd floats on the pool thread).  The kernels and their inputs do not change.
+    static bool one_copy();
     double ms_adapt = 0;                              ///< host time spent in adapt() (the swaps' copies queued)
 
     int64_t resident() const { return resident_; }
@@ -119,6 +124,7 @@ private:
     float* h_x_ = nullptr;   float* d_x_ = nullptr;   // n_tok x n_embd
     float* h_out_ = nullptr; float* d_out_ = nullptr; // compact rows
     void* h_meta_ = nullptr; void* d_meta_ = nullptr; // groups: ptr | start | dst | tok | count
+    void* h_stage_ = nullptr; void* d_stage_ = nullptr;   // STRATA_PEER_ONE_COPY: plan + rows in one block (h_meta_/h_x_ point into it)
     uint8_t* d_q8_ = nullptr;
     void* d_scratch_ = nullptr;
     const float* d_sx_ = nullptr;                     // APR: device sign vectors (x: H, h: FF); nullptr = identity
