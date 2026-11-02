@@ -17417,6 +17417,8 @@ int main(int argc, char** argv) {
             // finish), so the two can be told apart in the log
             const double peer_launch0 = peer.ms_launch, peer_wait0 = peer.ms_wait;
             const int64_t peer_launches0 = peer.launches, peer_entries0 = peer.entries(), peer_experts0 = peer.experts();
+            const size_t peer_spans0 = peer.spans_us().size();   // STRATA_PEER_STAMP: the GPU spans before this request
+            const double peer_span_us0 = peer.span_us_total;
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
@@ -18969,12 +18971,26 @@ int main(int argc, char** argv) {
                 if (aov)
                     std::fprintf(stderr, "strata decode adapt overlap: %lld windows took swaps still landing, a layer waited %.2f ms in all so far\n",
                                  (long long) aov_flips, ver.ms_gate);
-                if (peer.valid())   // the peer's part of "per-layer host": launch() (in plan) and finish() (in CPU)
+                if (peer.valid()) {   // the peer's part of "per-layer host": launch() (in plan) and finish() (in CPU)
+                    std::string span;   // STRATA_PEER_STAMP: the peer stream's GPU span per layer (p50 / p90) and per window
+                    if (strata::core::PeerExperts::stamp() && peer.spans_us().size() > peer_spans0) {
+                        std::vector<float> sp(peer.spans_us().begin() + (ptrdiff_t) peer_spans0, peer.spans_us().end());
+                        const size_t i50 = sp.size() / 2, i90 = std::min(sp.size() - 1, sp.size() * 9 / 10);
+                        std::nth_element(sp.begin(), sp.begin() + (ptrdiff_t) i50, sp.end());
+                        const float p50 = sp[i50];
+                        std::nth_element(sp.begin(), sp.begin() + (ptrdiff_t) i90, sp.end());
+                        const float p90 = sp[i90];
+                        char buf[160];
+                        std::snprintf(buf, sizeof buf, "; GPU span per layer p50 %.0f us, p90 %.0f us, %.2f ms/window over %zu layers (STRATA_PEER_STAMP)",
+                                      p50, p90, (peer.span_us_total - peer_span_us0) * 1e-3 / w, sp.size());
+                        span = buf;
+                    }
                     std::fprintf(stderr, "strata decode peer: per window: %.2f ms host in launch + %.2f ms waiting in finish over %.1f layers "
-                                         "with a share; per layer-window: %.2f entries, %.2f experts%s\n",
+                                         "with a share; per layer-window: %.2f entries, %.2f experts%s%s\n",
                                  (peer.ms_launch - peer_launch0) / w, (peer.ms_wait - peer_wait0) / w, (double) (peer.launches - peer_launches0) / w,
                                  (double) (peer.entries() - peer_entries0) / (w * L), (double) (peer.experts() - peer_experts0) / (w * L),
-                                 strata::core::PeerExperts::noswitch() ? " (STRATA_PEER_NOSWITCH)" : "");
+                                 strata::core::PeerExperts::noswitch() ? " (STRATA_PEER_NOSWITCH)" : "", span.c_str());
+                }
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();
                     if (pr.empty()) continue;

@@ -8,6 +8,7 @@
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
+#include "strata/kernels/verify_kernels.hpp"   // gpu_stamp (STRATA_PEER_STAMP)
 #include "strata/kernels/window_limits.hpp"
 
 #include <algorithm>
@@ -107,6 +108,11 @@ bool PeerExperts::noswitch() {
     return on && !g_noswitch_refused;
 }
 
+bool PeerExperts::stamp() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_PEER_STAMP"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+
 PeerExperts::~PeerExperts() { close(); }
 
 void PeerExperts::close() {
@@ -124,6 +130,7 @@ void PeerExperts::close() {
         if (h_x_) cudaFreeHost(h_x_);
         if (h_out_) cudaFreeHost(h_out_);
         if (h_meta_) cudaFreeHost(h_meta_);
+        if (h_stamp_) cudaFreeHost(h_stamp_);
         if (refill_ev_) cudaEventDestroy(refill_ev_);
         if (stream_) cudaStreamDestroy(stream_);
         if (refill_) cudaStreamDestroy(refill_);
@@ -132,6 +139,8 @@ void PeerExperts::close() {
     d_meta_ = h_meta_ = d_scratch_ = nullptr;
     d_q8_ = nullptr;
     d_sx_ = d_sh_ = nullptr;
+    h_stamp_ = m_stamp_ = nullptr;
+    stamp_layer_ = -1;
     stream_ = refill_ = nullptr;
     refill_ev_ = nullptr;
     device_ = -1;
@@ -199,6 +208,17 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
         ck(cudaMalloc((void**) &d_q8_, (size_t) CAP * (H / 32) * 36), "activations", err) &&
         ck(cudaMalloc(&d_scratch_, scratch), "scratch", err);
     if (!alloc_ok) { close(); return false; }
+    if (stamp()) {   // STRATA_PEER_STAMP: the stamp page, mapped so the host reads it without a copy
+        const size_t n = (size_t) n_layers * 2;
+        if (!ck(cudaHostAlloc((void**) &h_stamp_, n * sizeof(unsigned long long), cudaHostAllocPortable | cudaHostAllocMapped), "stamp page", err) ||
+            !ck(cudaHostGetDevicePointer((void**) &m_stamp_, h_stamp_, 0), "stamp page device pointer", err)) {
+            close();
+            return false;
+        }
+        std::memset(h_stamp_, 0, n * sizeof(unsigned long long));
+        spans_us_.clear();
+        span_us_total = 0;
+    }
     if (strata::kernels::cpu::hadamard_spec().any()) {   // APR: this device's copies of the sign vectors
         d_sx_ = strata::kernels::hadamard_device_signs(strata::kernels::cpu::hadamard_signs((int) H), (int) H);
         d_sh_ = strata::kernels::hadamard_device_signs(strata::kernels::cpu::hadamard_signs((int) ff), (int) ff);
@@ -307,6 +327,8 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
     if (!direct) std::memcpy(h_x_, x, (size_t) (n_tok * H) * sizeof(float));
     On on(device_);
     const cudaStream_t s = stream_;
+    // STRATA_PEER_STAMP: the layer's GPU span starts here, before the first copy (the stamp is a one-thread kernel)
+    if (m_stamp_ != nullptr) { stamp_layer_ = layer; strata::kernels::gpu_stamp(m_stamp_, (int) (layer * 2), s); }
     if (!ck(cudaMemcpyAsync(d_x_, direct ? x : h_x_, (size_t) (n_tok * H) * sizeof(float), cudaMemcpyHostToDevice, s), "input", err) ||
         !ck(cudaMemcpyAsync(d_meta_, h_meta_, sizeof(Meta), cudaMemcpyHostToDevice, s), "plan", err))
         return false;
@@ -330,10 +352,13 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
             strata::kernels::scatter_rows_f32(d_out_, out, dm->out_row, rows, H, s);
         } catch (const std::exception& e) { err = std::string("peer experts: scatter: ") + e.what(); return false; }
         launched_direct_ = true;
+        if (m_stamp_ != nullptr) strata::kernels::gpu_stamp(m_stamp_, (int) (layer * 2 + 1), s);   // after the last kernel
         return true;
     }
-    return ck(cudaMemcpyAsync(h_out_, d_out_, (size_t) rows * H * sizeof(float), cudaMemcpyDeviceToHost, s),
-              "results", err);
+    if (!ck(cudaMemcpyAsync(h_out_, d_out_, (size_t) rows * H * sizeof(float), cudaMemcpyDeviceToHost, s), "results", err))
+        return false;
+    if (m_stamp_ != nullptr) strata::kernels::gpu_stamp(m_stamp_, (int) (layer * 2 + 1), s);
+    return true;
 }
 
 bool PeerExperts::finish(float* out, std::string& err) {
@@ -353,6 +378,16 @@ bool PeerExperts::finish(float* out, std::string& err) {
         if (!ck(e, "finish", err)) return false;
     }
     ms_wait += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (h_stamp_ != nullptr && stamp_layer_ >= 0) {   // STRATA_PEER_STAMP: the stream is done, both stamps have landed
+        const volatile unsigned long long* st = h_stamp_ + stamp_layer_ * 2;
+        const unsigned long long a = st[0], b = st[1];
+        if (b >= a) {
+            const float us = (float) ((double) (b - a) * 1e-3);
+            spans_us_.push_back(us);
+            span_us_total += us;
+        }
+        stamp_layer_ = -1;
+    }
     if (launched_direct_) { launched_rows_ = 0; return true; }
     for (size_t r = 0; r < row_of_.size(); ++r)
         std::memcpy(out + (size_t) row_of_[r] * H, h_out_ + r * H, (size_t) H * sizeof(float));

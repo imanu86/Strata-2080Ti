@@ -88,6 +88,14 @@ public:
     /// STRATA_P2_FLUSH_NOSWITCH does).  No GPU work changes.  If the driver refuses a query the engine says so once
     /// and goes back to the switch.
     static bool noswitch();
+    /// STRATA_PEER_STAMP=1 (opt-in, lab/upsync-v0.2.9, PIPELINE3_PIANO tappa 0): launch() puts two one-thread
+    /// %globaltimer stamps on the peer's stream, before its first copy and after its last kernel, into a mapped page
+    /// (two words per layer); finish() reads the layer's GPU span once the stream is done.  The expert work is the
+    /// same: the stamps say how long the peer's stream is busy for a layer, against the host's launch + finish.
+    static bool stamp();
+    /// the GPU spans (us) of the layers finished so far, in order; the decode timing line reads a window range of them
+    const std::vector<float>& spans_us() const { return spans_us_; }
+    double span_us_total = 0;                         ///< their sum (us)
 
 private:
     int device_ = -1;
@@ -110,6 +118,10 @@ private:
     std::vector<int32_t> row_of_;                     ///< compact row -> original entry
     int64_t launched_rows_ = 0;
     bool launched_direct_ = false;
+    unsigned long long* h_stamp_ = nullptr;           ///< STRATA_PEER_STAMP: 2 x n_layers ns stamps, mapped (host view)
+    unsigned long long* m_stamp_ = nullptr;           ///< the same page as the peer sees it
+    int64_t stamp_layer_ = -1;                        ///< the layer whose stamps the next finish() reads
+    std::vector<float> spans_us_;
 };
 
 }  // namespace strata::core
