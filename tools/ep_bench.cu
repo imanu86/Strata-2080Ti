@@ -31,6 +31,7 @@
 //   ep_bench [windows=40] [dense_mib=62] [blob_kib=1728]        (under bench_lock.py: it owns both GPUs for ~30 s)
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -349,7 +350,7 @@ int main(int argc, char** argv) {
                         k_experts<<<own_blocks, 256, 0, O.s>>>(O.pool, O.pool_bytes, off_e, n_own, chunks, c.T, O.rows, row16, O.sink);
                     if (exchange)
                         k_wait_copy<<<std::max(1, std::min(64, (n16_r + 255) / 256)), 256, 0, O.s>>>(
-                            (uint4*) (O.rows + 2 * kRowsMax / 16), dbox_r, n16_r, dflag + 32, O.xready, O.epoch, l, O.stamps, derr);
+                            (uint4*) (O.rows + 2 * kRowsMax / 16), (const volatile uint4*) dbox_r, n16_r, dflag + 32, O.xready, O.epoch, l, O.stamps, derr);
                 }
                 CK(cudaStreamEndCapture(O.s, &g));
                 CK(cudaGraphInstantiate(&ge, g, 0));
