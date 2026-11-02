@@ -11,6 +11,9 @@ default: spenta, nessuna riga di esecuzione cambia e il testo è identico (verif
 
 ## 0. Conclusione
 
+- **Tappa 0 fatta (2/11 sera, M): span GPU del server a strato p50 ~300 µs, ≥ 250 → `procede = false`.** Esito e
+  numeri sotto la tappa 0 (§4) e in `RISULTATI.md` della cartella delle corse; il resto del piano resta come scritto,
+  fermo finché una misura dentro lo span (copie e scatter contro kernel esperti) non lo riapre.
 - **Si procede, ma la prima tappa è una misura di un'ora, non il server.** Il banco (§1, M) dice che a T=3 il server
   persistente espone **113 µs** a strato e quello guidato dall'host **118**: togliere l'host dal percorso, nel banco, vale
   **4,7 µs**. Nel motore (`Vpeer`, M) l'host costa invece 446-542 µs a strato. Quindi il banco **non rappresenta il
@@ -299,6 +302,16 @@ Nessuna tappa dopo la 0 inizia prima che la 0 e la 0b abbiano i loro numeri.
   1 solo con caldi alla padrona e righe bf16 fin dall'inizio, e il kernel unico resta in lista; **≥ 250 µs** → `procede =
   false`, si scrive il perché in `RISULTATI.md` e ci si ferma. In più: `host(launch + finish)` − span = quanto l'host
   aggiunge davvero (M), e testo identico a `Vpeer` (stessa build, `STRATA_PEER_STAMP=0`).
+
+**Esito** (2/11 sera, M, `FEP0` in `corse_2080ti\20261101_tre_schede`, build `8ad3bef3`, 3 coppie `Vst`/`Vns` a contesto
+128K, 42 richieste): span GPU del server a strato p50 **297-315 µs** per braccio (242-360 sulle richieste), p90 399-461;
+somma 14,2-15,1 ms a finestra contro `launch + finish` dell'host 11,4-12,1 (launch 2,1-3,1, finish 5,7-11,1). Il flusso
+parte prima che `launch` finisca (la somma degli span supera l'attesa in `finish`), quindi lo span può contenere fino a
+45-65 µs di vuoti di sottomissione; il limite inferiore del lavoro GPU puro è l'attesa in `finish`, 120-230 µs a strato.
+Tutti e due i limiti stanno sopra i 150 della tappa 1 a grafo e il centro sopra i 250: **`procede = false`**, motivo in
+`RISULTATI.md`. `STRATA_PEER_NOSWITCH`: nessuna differenza, mai rifiutata. Testo: uguale fra i bracci a parità di
+adattamento, non misurato contro `STRATA_PEER_STAMP=0` a cache fissa. Per riaprire: due stamp in più (dopo le copie,
+prima dello scatter) che dicano se i ~300 µs sono copie e scatter sulle righe mappate o i kernel esperti stessi.
 
 ### Tappa 0b — il join dell'adattamento fuori dal percorso (mezza giornata)
 
