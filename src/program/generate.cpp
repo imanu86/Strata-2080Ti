@@ -17914,6 +17914,10 @@ int main(int argc, char** argv) {
                 double rb_ms[2][2][2] = {}, rb_n[2][2][2] = {};
                 bool pl_prev_rolled = false;
                 int64_t cal_n[10] = {}, cal_on[10] = {};   // per p_on decile: windows scored, on the path
+                // the bet's two halves, over the scored windows: A accepted whole, and its bonus guessed given that;
+                // per class, the rows A had (its T).  Log only.
+                int64_t cal_whole = 0, cal_bonus = 0;
+                double cls_T[2] = {0, 0};
                 double last_verdict = 0.0;
                 int64_t pl_disagree = 0, pl_late = 0;
                 static const bool pl_prestage = [] {   // STRATA_PIPELINE_PRESTAGE=0: B staged at its launch
@@ -18284,6 +18288,8 @@ int main(int argc, char** argv) {
                         const int bin = std::min(9, std::max(0, (int) (B.p_on * 10.0f)));
                         cal_n[bin] += 1;
                         cal_on[bin] += would ? 1 : 0;
+                        cal_whole += a == A.T - 1 ? 1 : 0;
+                        cal_bonus += would ? 1 : 0;
                     }
                     tre("V", A.seq, a, on ? 1 : (B.launched ? -1 : 0));
                     {
@@ -18295,6 +18301,7 @@ int main(int argc, char** argv) {
                         rb_ms[c][pl_prev_rolled ? 1 : 0][B.launched ? 1 : 0] += now - last_verdict;
                         rb_n[c][pl_prev_rolled ? 1 : 0][B.launched ? 1 : 0] += 1;
                         cls_tok[c] += a + 1;
+                        cls_T[c] += A.T;
                         cls_n[c] += 1;
                         last_verdict = now;
                     }
@@ -18488,6 +18495,15 @@ int main(int argc, char** argv) {
                             cal += b;
                         }
                     std::fprintf(stderr, "strata pipeline calibration (p_on decile: on/scored):%s\n", cal.c_str());
+                    {   // the bet's two halves: A whole, and the bonus guessed when it was; the rows per class
+                        int64_t scored = 0;
+                        for (int i = 0; i < 10; ++i) scored += cal_n[i];
+                        std::fprintf(stderr, "strata pipeline bet: of %lld scored, A accepted whole %lld (%.0f%%), its bonus "
+                                             "guessed %lld of those (%.0f%%); rows per window: fresh %.2f, speculative %.2f\n",
+                                     (long long) scored, (long long) cal_whole, 100.0 * avg((double) cal_whole, (double) scored),
+                                     (long long) cal_bonus, 100.0 * avg((double) cal_bonus, (double) cal_whole),
+                                     avg(cls_T[0], cls_n[0]), avg(cls_T[1], cls_n[1]));
+                    }
                 }
             }
             while (!pl_ran && !cancelled && produced_n < max_new) {
