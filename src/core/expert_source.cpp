@@ -5283,6 +5283,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             d.fail_layer = d.layers;
             return;
         }
+        d.peer->poll_pending();              // STRATA_PEER_REFILL_FLUSH: the swaps that landed join the tables here, not at the decode's join
     }
     const auto c4 = std::chrono::steady_clock::now();
     pt("ran");

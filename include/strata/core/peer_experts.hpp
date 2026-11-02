@@ -72,6 +72,14 @@ public:
     /// swapped-in expert becomes resident at `apply_pending`.  Call only between verify windows.
     bool adapt(const float* usage, const int32_t* res0, int max_swaps, std::string& err);
     void apply_pending(bool wait);
+    /// STRATA_PEER_REFILL_FLUSH=1 (opt-in, lab/upsync-v0.2.9, PIPELINE3_PIANO tappa 0b): adapt() queries the refill
+    /// stream right after its last copy, so WDDM hands the copies to the card now instead of at the next driver call
+    /// (#2188), and the pool thread calls poll_pending() after every layer: a non-blocking apply_pending, so the swaps
+    /// land in the tables inside the window and the decode's join of the adapt thread finds nothing left to wait for.
+    /// Off, nothing changes.
+    static bool refill_flush();
+    void poll_pending() { if (refill_flush() && !pending_.empty()) apply_pending(false); }
+    double ms_adapt = 0;                              ///< host time spent in adapt() (the swaps' copies queued)
 
     int64_t resident() const { return resident_; }
     /// the last launch writes its rows into the host rows itself (the caller must not touch them)

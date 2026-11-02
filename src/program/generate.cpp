@@ -17415,8 +17415,9 @@ int main(int argc, char** argv) {
             const DecSnap ds0 = dec_snap();
             // multi-GPU: the peer's share of the per-layer host time ("CPU" above holds the pool's run AND the peer's
             // finish), so the two can be told apart in the log
-            const double peer_launch0 = peer.ms_launch, peer_wait0 = peer.ms_wait;
+            const double peer_launch0 = peer.ms_launch, peer_wait0 = peer.ms_wait, peer_adapt0 = peer.ms_adapt;
             const int64_t peer_launches0 = peer.launches, peer_entries0 = peer.entries(), peer_experts0 = peer.experts();
+            const int64_t peer_swaps0 = peer.swaps();
             const size_t peer_spans0 = peer.spans_us().size();   // STRATA_PEER_STAMP: the GPU spans before this request
             const double peer_span_us0 = peer.span_us_total;
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
@@ -18985,11 +18986,14 @@ int main(int argc, char** argv) {
                                       p50, p90, (peer.span_us_total - peer_span_us0) * 1e-3 / w, sp.size());
                         span = buf;
                     }
+                    // the peer's adapt(): its host time runs on the adapt thread and shows in "adapt join" when it outlasts the draft
                     std::fprintf(stderr, "strata decode peer: per window: %.2f ms host in launch + %.2f ms waiting in finish over %.1f layers "
-                                         "with a share; per layer-window: %.2f entries, %.2f experts%s%s\n",
+                                         "with a share; per layer-window: %.2f entries, %.2f experts; adapt %.2f ms host, %.1f swaps/window%s%s%s\n",
                                  (peer.ms_launch - peer_launch0) / w, (peer.ms_wait - peer_wait0) / w, (double) (peer.launches - peer_launches0) / w,
                                  (double) (peer.entries() - peer_entries0) / (w * L), (double) (peer.experts() - peer_experts0) / (w * L),
-                                 strata::core::PeerExperts::noswitch() ? " (STRATA_PEER_NOSWITCH)" : "", span.c_str());
+                                 (peer.ms_adapt - peer_adapt0) / w, (double) (peer.swaps() - peer_swaps0) / w,
+                                 strata::core::PeerExperts::noswitch() ? " (STRATA_PEER_NOSWITCH)" : "",
+                                 strata::core::PeerExperts::refill_flush() ? " (STRATA_PEER_REFILL_FLUSH)" : "", span.c_str());
                 }
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();

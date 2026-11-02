@@ -113,6 +113,11 @@ bool PeerExperts::stamp() {
     return on;
 }
 
+bool PeerExperts::refill_flush() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_PEER_REFILL_FLUSH"); return v != nullptr && std::atoi(v) != 0; }();
+    return on;
+}
+
 PeerExperts::~PeerExperts() { close(); }
 
 void PeerExperts::close() {
@@ -397,6 +402,12 @@ bool PeerExperts::finish(float* out, std::string& err) {
 
 bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, std::string& err) {
     if (!pending_.empty() || max_swaps <= 0) return true;
+    const auto t0 = std::chrono::steady_clock::now();
+    struct Timed {   // the host time of this call (the decode's adapt thread), whichever way it returns
+        const std::chrono::steady_clock::time_point t0;
+        double& ms;
+        ~Timed() { ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
+    } timed{t0, ms_adapt};
     const auto& lay = strata::kernels::cpu::expert_layout();
     struct Swap { float gain; int32_t layer, in, out; };
     std::vector<Swap> swaps;
@@ -437,7 +448,11 @@ bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, 
         pending_.emplace_back((int32_t) in, slot);
         ++swaps_;
     }
-    return ck(cudaEventRecord(refill_ev_, refill_), "refill event", err);
+    if (!ck(cudaEventRecord(refill_ev_, refill_), "refill event", err)) return false;
+    // STRATA_PEER_REFILL_FLUSH: under WDDM the copies sit in the driver's buffer until a call flushes the stream
+    // (#2188); the query is that call, and the pool's poll_pending finds them landed during the next window
+    if (refill_flush()) (void) cudaStreamQuery(refill_);
+    return true;
 }
 
 void PeerExperts::apply_pending(bool wait) {
