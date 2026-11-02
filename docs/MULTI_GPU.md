@@ -185,7 +185,13 @@ tokens. The tokens are the serial loop's, up to CPU rounding.
   or more): on 2x Arc Pro B65 decode is 17% to 23% faster, and setup writes `--spec 2` for those cards ([INTEL_ARC.md](INTEL_ARC.md)).
   It runs exactly two cards, so one card, Arc A-series cards and three or more cards stay serial.
 - **Draft layer placement:** with the pipeline on, the draft layer loads on the first card, whose window has finished when the
-  chain starts. `STRATA_MTP_STAGE0=0` keeps the old place.
+  chain starts. `STRATA_MTP_STAGE0=0` keeps the old place. `STRATA_MTP_DEVICE=N` (CUDA, opt-in, off by default) puts the
+  draft layer, its chain and its K/V on CUDA N instead, a visible card that runs no stage (a third card beside a two-stage
+  split: `CUDA_VISIBLE_DEVICES` must list it and `--split-device` must not): the window's rows reach it once per chain, the
+  draft head's subset rows are copied over once at start, and its embedding reads the native table in mapped host memory,
+  which it needs (an IQ model file, not `STRATA_EMBED_VRAM=1`). It takes what `STRATA_MTP_STAGE0` takes (`--pipeline-windows 2`,
+  `draft_vocab.bin`, no `--batch`), not `--prefill-head-alias`; `STRATA_MTP_STAGE0=1` wins when both are set, and a card that
+  is not visible or runs a stage is refused with one log line. Measured: not yet.
 - **Off, with one log line saying why:** `--batch` slots, `--peer-device`, the helper caches (`--expert-cache-device1..3`, which
   `--remote-expert-opt` builds on), a split onto one GPU, no draft layer, and on three or more stages `--pipeline-windows 1` and
   `--adapt-async 1`. A request with repetition penalties or coupled draft sampling decodes serially.
