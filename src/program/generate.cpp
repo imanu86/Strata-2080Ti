@@ -14477,14 +14477,17 @@ int main(int argc, char** argv) {
                 const std::vector<ConvCheckpoint> no_checkpoints;
                 const strata::core::ConversationView view{c->ids, no_images, no_checkpoints, cvec_cached};
                 const size_t n_st = stages.size();
-                const strata::core::QsaState* const no_draft = nullptr;
+                // the draft K/V goes where the park and the restore put it (park_current_body): with the last stage's
+                // image, or with stage 0's when the drafter is off the last card (mtp_off_last: its K/V is on CUDA0 or
+                // STRATA_MTP_DEVICE's card, and the restore reads it from the root image)
+                const strata::core::QsaState* const root_draft = use_mtp && mtp_off_last ? &mtp.kv_state() : nullptr;
                 auto draft_of = [&](size_t k) -> const strata::core::QsaState* {
-                    return use_mtp && k + 1 == n_st ? &mtp.kv_state() : nullptr;
+                    return use_mtp && !mtp_off_last && k + 1 == n_st ? &mtp.kv_state() : nullptr;
                 };
                 size_t estimate = 0;
                 bool sized = n_st == 0
                     ? strata::core::conversation_snapshot_bytes(view, ss, g, use_mtp ? &mtp.kv_state() : nullptr, estimate, e)
-                    : strata::core::conversation_snapshot_bytes(view, ss, g, no_draft, estimate, e);
+                    : strata::core::conversation_snapshot_bytes(view, ss, g, root_draft, estimate, e);
                 for (size_t k = 0; sized && k < n_st; ++k) {
                     const strata::core::OnDevice on(stages[k]->dev);
                     size_t stage_bytes = 0;
@@ -14507,7 +14510,7 @@ int main(int argc, char** argv) {
                 strata::core::SavedConversation image;
                 bool captured = n_st == 0
                     ? strata::core::conversation_snapshot_save(image, view, ss, g, use_mtp ? &mtp.kv_state() : nullptr, e)
-                    : strata::core::conversation_snapshot_save(image, view, ss, g, no_draft, e);
+                    : strata::core::conversation_snapshot_save(image, view, ss, g, root_draft, e);
                 if (captured) at_b(image.live, *c);
                 for (size_t k = 0; captured && k < n_st; ++k) {
                     const strata::core::OnDevice on(stages[k]->dev);
@@ -15487,20 +15490,21 @@ int main(int argc, char** argv) {
                         strata::core::SavedConversation image;
                         // One GPU: the whole-session form, as before.  A layer split: the same checks as a parked
                         // image - each later stage's image against its own session (the draft K/V with the last
-                        // stage's), then the first stage's without the draft - all before any GPU write.
+                        // stage's, or with the first stage's when the drafter is off the last card, mtp_off_last),
+                        // then the first stage's - all before any GPU write.
                         auto disk_image_valid = [&](const strata::core::SavedConversation& im) -> bool {
                             if (stages.empty()) return strata::core::conversation_snapshot_validate(im, ss, g, use_mtp ? &mtp.kv_state() : nullptr, err);
                             if (im.stage_images.size() != stages.size()) { err = "stage count differs"; return false; }
                             for (size_t i = 0; i < stages.size(); ++i) {
                                 const strata::core::OnDevice on(stages[i]->dev);
                                 if (!strata::core::conversation_snapshot_validate(im.stage_images[i], stages[i]->ss, g,
-                                        use_mtp && i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err)) {
+                                        use_mtp && !mtp_off_last && i + 1 == stages.size() ? &mtp.kv_state() : nullptr, err)) {
                                     err = "stage CUDA" + std::to_string(stages[i]->dev) + ": " + err;
                                     return false;
                                 }
                             }
                             return strata::core::conversation_snapshot_validate(im, ss, g,
-                                       static_cast<const strata::core::QsaState*>(nullptr), err);
+                                       use_mtp && mtp_off_last ? &mtp.kv_state() : nullptr, err);
                         };
                         if (strata::core::prefix_cache_read(disk_path, prefix_identity, prefix,
                                 int32_t(ids[size_t(disk_at)]), want_cvec, image, err) &&
@@ -17205,16 +17209,18 @@ int main(int argc, char** argv) {
                         size_t estimate = 0;
                         const uint64_t floor = uint64_t(o.conversation_cache_min_free_mib) * 1024 * 1024;
                         // A layer split saves one image per stage, as parking does: the first stage's without the
-                        // draft, each later stage's on its own device, the draft K/V with the last one; the size is
-                        // the sum of the stages'.  Every stage is at `to` here (checkpoint_at just read them all).
+                        // draft, each later stage's on its own device, the draft K/V with the last one (or with the
+                        // first stage's when the drafter is off the last card, mtp_off_last, as the park and the restore
+                        // place it); the size is the sum of the stages'.  Every stage is at `to` here (checkpoint_at
+                        // just read them all).
                         const size_t n_st = stages.size();
-                        const strata::core::QsaState* const no_draft = nullptr;
+                        const strata::core::QsaState* const root_draft = use_mtp && mtp_off_last ? &mtp.kv_state() : nullptr;
                         auto disk_draft_of = [&](size_t k) -> const strata::core::QsaState* {
-                            return use_mtp && k + 1 == n_st ? &mtp.kv_state() : nullptr;
+                            return use_mtp && !mtp_off_last && k + 1 == n_st ? &mtp.kv_state() : nullptr;
                         };
                         bool sized = n_st == 0
                             ? strata::core::conversation_snapshot_bytes(view, ss, g, use_mtp ? &mtp.kv_state() : nullptr, estimate, err)
-                            : strata::core::conversation_snapshot_bytes(view, ss, g, no_draft, estimate, err);
+                            : strata::core::conversation_snapshot_bytes(view, ss, g, root_draft, estimate, err);
                         for (size_t k = 0; sized && k < n_st; ++k) {
                             const strata::core::OnDevice on(stages[k]->dev);
                             size_t stage_bytes = 0;
@@ -17229,7 +17235,7 @@ int main(int argc, char** argv) {
                             strata::core::SavedConversation image;
                             bool captured = n_st == 0
                                 ? strata::core::conversation_snapshot_save(image, view, ss, g, use_mtp ? &mtp.kv_state() : nullptr, err)
-                                : strata::core::conversation_snapshot_save(image, view, ss, g, no_draft, err);
+                                : strata::core::conversation_snapshot_save(image, view, ss, g, root_draft, err);
                             for (size_t k = 0; captured && k < n_st; ++k) {   // the later stages, in stage order
                                 const strata::core::OnDevice on(stages[k]->dev);
                                 strata::core::SavedConversation part;
