@@ -1,4 +1,5 @@
 #include "strata/core/conversation_snapshot.hpp"
+#include "strata/core/on_device.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "conversation_checked.hpp"
 #include "conversation_copy.hpp"
@@ -292,6 +293,10 @@ size_t conversation_kv_bytes(const QsaState& st, const ModelGeometry& g, int64_t
 bool conversation_kv_save(ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                           int64_t upto, bool index, std::string& error,
                           int64_t unchanged_tokens, size_t* reused_bytes) {
+    // a state on its own card (QsaState::dev, the drafter apart from every stage): its copies run there, synchronous -
+    // the park's stage and slot are the caller's card's, and the launch below waits on that card's stream alone
+    const OnDevice on_dev(st.dev);
+    const bool apart = st.dev >= 0;
     Layout l{};
     if (!layout(st, g, upto, index, l, error)) return false;
     if (!valid(st, l, upto, error)) return false;
@@ -325,7 +330,7 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
             ParkAsync& a = park_async();
             if (a.slot != nullptr) {
                 VramKvSlot& s = *a.slot;
-                const bool fits = src[i] != nullptr && sizes[i] > 0 && s.used + sizes[i] <= s.cap &&
+                const bool fits = !apart && src[i] != nullptr && sizes[i] > 0 && s.used + sizes[i] <= s.cap &&
                                   (st.kv_mode == 0 || on_device(src[i]));   // (kv_mode 0: the pools are device memory)
                 if (fits) {
                     const size_t at0 = s.used;
@@ -354,7 +359,7 @@ bool conversation_kv_save(ConversationKv& image, const QsaState& st, const Model
         auto tick = [trace] { return trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{}; };
         const auto t0 = tick();
         // (kv_mode 0: the pools are device memory by construction, so no pointer-attribute query)
-        const bool staged = a.active && src[i] != nullptr && sizes[i] > keep && a.used + (sizes[i] - keep) <= a.cap &&
+        const bool staged = !apart && a.active && src[i] != nullptr && sizes[i] > keep && a.used + (sizes[i] - keep) <= a.cap &&
                             (st.kv_mode == 0 || on_device(src[i]));
         const auto t1 = tick();
         if (staged) dst[i]->resize_for_overwrite(sizes[i]);
@@ -423,6 +428,7 @@ bool refresh_residency(const QsaState& st, const ModelGeometry& g, int64_t upto,
 
 bool conversation_kv_copy(const QsaState& from, const QsaState& to, const ModelGeometry& g,
                           int64_t upto, bool index, std::string& error, bool queued) {
+    const OnDevice on_dev(to.dev);   // (QsaState::dev: a target on its own card refreshes there)
     Layout lf{}, lt{};
     if (!layout(from, g, upto, index, lf, error) || !valid(from, lf, upto, error) ||
         !layout(to, g, upto, index, lt, error) || !valid(to, lt, upto, error)) return false;
@@ -454,6 +460,7 @@ bool conversation_kv_copy(const QsaState& from, const QsaState& to, const ModelG
 
 bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                              int64_t upto, bool index, std::string& error) {
+    const OnDevice on_dev(st.dev);   // (QsaState::dev: the copies and the ring refill on the state's own card)
     // STRATA_PARK_VRAM_MIB: from the image's VRAM slot when it holds every part (no host buffer is read: no join)
     const VramKvSlot* slot = vram_kv_find(image.dev_tag);
     if (slot == nullptr) conversation_park_join();
@@ -477,6 +484,7 @@ bool conversation_kv_restore(const ConversationKv& image, const QsaState& st, co
 
 bool conversation_kv_restore_prefix(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                                     int64_t captured, int64_t upto, bool index, std::string& error) {
+    const OnDevice on_dev(st.dev);   // (QsaState::dev, as in conversation_kv_restore)
     const VramKvSlot* slot = vram_kv_find(image.dev_tag);   // (STRATA_PARK_VRAM_MIB, as in conversation_kv_restore)
     if (slot == nullptr) conversation_park_join();
     if (upto < 0 || upto > captured) {
@@ -524,9 +532,11 @@ bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const Mode
     s.sizes = {l.data, l.value_data, l.scales, l.value_scales, l.pooled};
     const auto src = pools(st);
     const auto sizes = s.sizes;
+    const int dev = st.dev;   // (QsaState::dev: read on the state's own card)
     auto why = std::make_shared<std::string>();
-    s.read = [src, sizes, why](size_t part, size_t offset, void* dst, size_t n) {
+    s.read = [src, sizes, dev, why](size_t part, size_t offset, void* dst, size_t n) {
         if (part >= 5 || offset > sizes[part] || n > sizes[part] - offset) { *why = "K/V read out of range"; return false; }
+        const OnDevice on_dev(dev);
         return transfer(dst, src[part] ? static_cast<const uint8_t*>(src[part]) + offset : nullptr, n, *why);
     };
     s.error = [why] { return *why; };
@@ -536,6 +546,7 @@ bool conversation_kv_source(SessionKvSource& out, const QsaState& st, const Mode
 
 bool conversation_kv_verify(const ConversationKv& image, const QsaState& st, const ModelGeometry& g,
                             int64_t upto, bool index, uint64_t& fingerprint, std::string& error) {
+    const OnDevice on_dev(st.dev);   // (QsaState::dev)
     conversation_park_join();
     if (!conversation_kv_validate(image, st, g, upto, index, error)) return false;
     std::array<uint8_t, 65536> buffer;

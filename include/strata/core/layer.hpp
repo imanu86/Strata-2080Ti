@@ -251,6 +251,9 @@ struct QsaState {
     float* cos_tab = nullptr;        ///< (max_cells, n_rot/2), built on the HOST in float64
     bool owns_rope = false;          ///< built the table above (not borrowed with share_rope): it releases it
     float* sin_tab = nullptr;
+    /// The card this state lives on when it is not the caller's current one (the MTP drafter apart from every stage,
+    /// STRATA_MTP_DEVICE): the snapshot copies and the ring refill switch to it.  -1: the current device, as always.
+    int dev = -1;
 
     /// THE PER-TOKEN COUNTS, IN DEVICE MEMORY - the whole reason this layer can be a graph.  `qsa_step_fill`
     /// computes all four from the position, so one H2D per token updates every count every kernel needs.
