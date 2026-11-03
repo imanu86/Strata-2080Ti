@@ -927,6 +927,23 @@ struct PeerPrefill {
     std::vector<char> plan;         // [n_layers x NE]: 1 = this chunk sends (layer, expert) to this server (decided at the stream plan)
     int64_t planned = 0, cand = 0, layers_in = 0;   // stats: pairs sent, candidates seen, layers with a plan
     double est_saved_ms = 0.0;      // the primary's streaming time the plan is estimated to save (sum over layers)
+    // ---- the closed loop (docs/PEER_PREFILL2.md s.2.2): after every chunk the primary's STALL before this server's rows
+    // (events on the primary's stream around its wait, a layer) and the server's own span (events on its streams, a
+    // layer) are read, and two things are adapted for the next chunk's plan: `factor`, which multiplies the per-layer
+    // budget (halved when the stall eats the estimated saving, grown when there was none), and `row_us_eff`, the
+    // server's measured cost per routed row (its span minus the per-layer fixed cost, over its rows; an EWMA) used
+    // in place of row_us when larger.  So the plan follows the link it is on, riser or Oculink, without a hand tuning.
+    double factor = 1.0;            // multiplies the per-layer budget (STRATA_PEER2_PREFILL_BUDGET x factor); [0.02, 4]
+    double row_us_eff = 0.0;        // the measured cost per row (us), 0 until the first chunk is read
+    std::vector<cudaEvent_t> ev_w0, ev_w1;   // [n_layers] on the primary (timing): before its wait on this server's rows / after their copy into Dm
+    std::vector<cudaEvent_t> ev_s0, ev_s1;   // [n_layers] on the server (timing): before its H2D of the block / after its rows' last D2H
+    std::vector<char> ev_used;      // [n_layers] this chunk's layers with rows on this server (their events are recorded)
+    cudaEvent_t ev_last = nullptr;  // the last primary event recorded this chunk (the fold waits for it)
+    int64_t chunks = 0;             // chunks planned so far
+    int64_t chunk_planned = 0, chunk_rows = 0;      // this chunk's plan: pairs sent, rows computed
+    double chunk_saved_ms = 0.0;    // this chunk's estimated saving of the primary's streaming (at the measured bw0)
+    double stall_ms_total = 0.0, server_ms_total = 0.0;   // sums over the chunks read (the end line)
+    int64_t chunks_read = 0;        // chunks whose events were read
     ~PeerPrefill() {
         if (host_xq) cudaFreeHost(host_xq);
         if (dev < 0) return;
@@ -944,11 +961,15 @@ struct PeerPrefill {
         if (s_cp) cudaStreamSynchronize(s_cp);
         for (cudaEvent_t e : pcopied) if (e) cudaEventDestroy(e);
         for (cudaEvent_t e : pused) if (e) cudaEventDestroy(e);
+        for (cudaEvent_t e : ev_s0) if (e) cudaEventDestroy(e);   // (the closed loop's, on the server)
+        for (cudaEvent_t e : ev_s1) if (e) cudaEventDestroy(e);
         if (s_cp) cudaStreamDestroy(s_cp);
         if (s_out) cudaStreamDestroy(s_out);
         if (s) cudaStreamDestroy(s);
         cudaSetDevice(prev);
         if (ev_in) cudaEventDestroy(ev_in);
+        for (cudaEvent_t e : ev_w0) if (e) cudaEventDestroy(e);   // (the closed loop's, on the primary)
+        for (cudaEvent_t e : ev_w1) if (e) cudaEventDestroy(e);
         if (x_stream) { cudaStreamSynchronize(x_stream); cudaStreamDestroy(x_stream); }
         if (ev_x) cudaEventDestroy(ev_x);
         if (host_x) cudaFreeHost(host_x);
@@ -2505,32 +2526,44 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
 
 // ---- STRATA_PEER2_PREFILL (docs/PEER_PREFILL2.md): the second server's prompt share, the rows-in path.
 namespace {
-// Host -> device bandwidth of `dev` in GB/s from a timed pinned copy (32 MiB, the best of 3 after a warm-up): what
-// the cost model prices a streamed blob at on the primary and a routed row at on the server.  0 on any failure
-// (the caller then refuses the share: a model without a measure would guess).
+// Host -> device bandwidth of `dev` in GB/s: 8 copies of 32 MiB in a row from pinned memory (the kind the expert
+// arena is), timed by EVENTS on the stream (the span the card is busy, not the host's view) - what the cost model
+// prices a streamed blob at on the primary and a routed row at on the server.  The first draft timed ONE copy from
+// the host with cudaStreamSynchronize: under WDDM the driver's submission latency (tens of ms) was most of it and the
+// 3080 Ti on PCIe 4.0 x4 measured 0.85 GB/s, the 3060 0.38 (engine run of 3/11 night); with the real ~5-6 GB/s the
+// cost model's budget was 7x too wide and every candidate was taken.  Best of 3 batches after a warm-up batch.  0 on
+// any failure (the caller then refuses the share: a model without a measure would guess).
 double measure_h2d_gbs(int dev) {
     const core::OnDevice on(dev);
     const size_t bytes = (size_t) 32 << 20;
+    constexpr int kCopies = 8;
     void* h = nullptr;
     void* d = nullptr;
     cudaStream_t s = nullptr;
+    cudaEvent_t e0 = nullptr, e1 = nullptr;
     double best = 0.0;
     if (cudaHostAlloc(&h, bytes, cudaHostAllocPortable) != cudaSuccess) { cudaGetLastError(); return 0.0; }
     if (cudaMalloc(&d, bytes) != cudaSuccess) { cudaGetLastError(); cudaFreeHost(h); return 0.0; }
-    if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) == cudaSuccess) {
+    if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) == cudaSuccess && cudaEventCreate(&e0) == cudaSuccess &&
+        cudaEventCreate(&e1) == cudaSuccess) {
         std::memset(h, 1, bytes);
         for (int rep = 0; rep < 4; ++rep) {
-            const auto t0 = std::chrono::steady_clock::now();
-            if (cudaMemcpyAsync(d, h, bytes, cudaMemcpyHostToDevice, s) != cudaSuccess || cudaStreamSynchronize(s) != cudaSuccess) {
+            bool ok = cudaEventRecord(e0, s) == cudaSuccess;
+            for (int c = 0; ok && c < kCopies; ++c) ok = cudaMemcpyAsync(d, h, bytes, cudaMemcpyHostToDevice, s) == cudaSuccess;
+            ok = ok && cudaEventRecord(e1, s) == cudaSuccess;
+            (void) cudaStreamQuery(s);   // WDDM: hand the batch to the card now
+            float ms = 0.0f;
+            if (!ok || cudaStreamSynchronize(s) != cudaSuccess || cudaEventElapsedTime(&ms, e0, e1) != cudaSuccess) {
                 cudaGetLastError();
                 best = 0.0;
                 break;
             }
-            const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            if (rep > 0 && sec > 0.0) best = std::max(best, (double) bytes / sec * 1e-9);
+            if (rep > 0 && ms > 0.0f) best = std::max(best, (double) bytes * kCopies / ((double) ms * 1e-3) * 1e-9);
         }
-        cudaStreamDestroy(s);
     }
+    if (e0) cudaEventDestroy(e0);
+    if (e1) cudaEventDestroy(e1);
+    if (s) cudaStreamDestroy(s);
     cudaFree(d);
     cudaFreeHost(h);
     return best;
@@ -2610,6 +2643,17 @@ bool Prefill::set_peer2(core::PeerExperts* peer, std::string& err) {
     pp->G = m.T_max;
     const MmqPlan& mp = mmq_plan();
     if (cudaEventCreateWithFlags(&pp->ev_in, cudaEventDisableTiming) != cudaSuccess) { err = "prefill second server: event"; return false; }
+    {   // the closed loop's primary-side events (timing), one pair a layer, on this stage's device
+        const size_t nl = (size_t) m.g->n_layers;
+        pp->ev_w0.assign(nl, nullptr);
+        pp->ev_w1.assign(nl, nullptr);
+        pp->ev_used.assign(nl, 0);
+        for (size_t l = 0; l < nl; ++l)
+            if (cudaEventCreate(&pp->ev_w0[l]) != cudaSuccess || cudaEventCreate(&pp->ev_w1[l]) != cudaSuccess) {
+                err = "prefill second server: the timing events on this card";
+                return false;
+            }
+    }
     {   // the D2H of the rows' bytes beside the compute stream (as the first server's host route does)
         const char* xv = std::getenv("STRATA_PF_PEER_XSTREAM");
         if ((xv == nullptr || std::atoi(xv) != 0) &&
@@ -2629,6 +2673,13 @@ bool Prefill::set_peer2(core::PeerExperts* peer, std::string& err) {
     for (int i = 0; ok && i < PeerPrefill::kGrpEv; ++i)
         ok = cudaEventCreateWithFlags(&pp->ev_grp[i], cudaEventDisableTiming) == cudaSuccess;
     for (int b = 0; ok && b < 2; ++b) ok = cudaEventCreateWithFlags(&pp->ev_dm[b], cudaEventDisableTiming) == cudaSuccess;
+    {   // the closed loop's server-side events (timing), one pair a layer, on the server
+        const size_t nl = (size_t) m.g->n_layers;
+        pp->ev_s0.assign(nl, nullptr);
+        pp->ev_s1.assign(nl, nullptr);
+        for (size_t l = 0; ok && l < nl; ++l)
+            ok = cudaEventCreate(&pp->ev_s0[l]) == cudaSuccess && cudaEventCreate(&pp->ev_s1[l]) == cudaSuccess;
+    }
     auto take = [&](size_t bytes) -> void* {
         void* p = nullptr;
         if (!ok || cudaMalloc(&p, bytes) != cudaSuccess) { ok = false; return nullptr; }
@@ -3760,7 +3811,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     if (c <= 0.0) { cands.push_back({e, 0.0, 0.0, blob}); continue; }   // not routed last chunk: free to send
                     const double bytes_a = c * row_bytes;
                     if (bytes_a >= blob) continue;   // (b): the blob is the cheaper thing on the primary's link
-                    const double t_server = bytes_a / (P2.bw_gbs * 1e3) + c * P2.row_us;   // us (GB/s = KB/us)
+                    // the server's time: the bytes over its link plus its compute per row - the configured row_us or
+                    // the cost the closed loop measured on the chunks before, whichever is larger
+                    const double t_server = bytes_a / (P2.bw_gbs * 1e3) + c * std::max(P2.row_us, P2.row_us_eff);   // us (GB/s = KB/us)
                     cands.push_back({e, c, t_server, blob - bytes_a});
                 }
                 if (cands.empty()) return;
@@ -3772,17 +3825,81 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 double t_used = P2.layer_us;
                 int64_t taken = 0;
                 for (const Cand& cd : cands) {
-                    const double budget = P2.budget_frac * (double) (n_nonres - taken - 1) * t_blob0;
+                    // the budget: the primary's streaming time of the experts it still streams on this layer, times the
+                    // configured fraction, times the closed loop's factor (s.2.2)
+                    const double budget = P2.factor * P2.budget_frac * (double) (n_nonres - taken - 1) * t_blob0;
                     if (t_used + cd.t_server > budget) continue;
                     t_used += cd.t_server;
                     ++taken;
                     P2.plan[base + (size_t) cd.e] = 1;
                     P2.est_saved_ms += t_blob0 * 1e-3;
+                    P2.chunk_saved_ms += t_blob0 * 1e-3;
                 }
                 if (taken > 0) ++P2.layers_in;
                 P2.planned += taken;
+                P2.chunk_planned += taken;
+            };
+            // the closed loop's fold (docs/PEER_PREFILL2.md s.2.2): the chunk before this one is read - the primary's
+            // stall before the server's rows and the server's span, a layer - and the factor and the measured row
+            // cost are set for this chunk's plan.  The events of the chunk before are complete by now in practice (the
+            // chunk ends synchronized for on_chunk); if not, the last one is waited for: a bounded wait, and the
+            // measure is worth it.  One line a chunk (the trace), so the loop can be read on the riser and on an Oculink.
+            auto p2_fold = [&]() {
+                PeerPrefill& P2 = *m.pp2;
+                if (P2.chunks > 0 && P2.ev_last != nullptr) {
+                    cudaError_t q = cudaEventQuery(P2.ev_last);
+                    if (q == cudaErrorNotReady) q = cudaEventSynchronize(P2.ev_last);
+                    if (q != cudaSuccess) (void) cudaGetLastError();
+                    double stall_ms = 0.0, server_ms = 0.0;
+                    int64_t layers = 0;
+                    for (size_t l2 = 0; q == cudaSuccess && l2 < P2.ev_used.size(); ++l2) {
+                        if (!P2.ev_used[l2]) continue;
+                        float a = 0.0f, b = 0.0f;
+                        if (cudaEventElapsedTime(&a, P2.ev_w0[l2], P2.ev_w1[l2]) == cudaSuccess) stall_ms += a;
+                        else (void) cudaGetLastError();
+                        if (cudaEventElapsedTime(&b, P2.ev_s0[l2], P2.ev_s1[l2]) == cudaSuccess) server_ms += b;
+                        else (void) cudaGetLastError();
+                        ++layers;
+                    }
+                    if (q == cudaSuccess && layers > 0) {
+                        // the stall's span holds the copy of the rows into Dm too (rows x N x 4 over the primary's link)
+                        const double copy_ms = (double) P2.chunk_rows * (double) N * 4.0 / (P2.bw0_gbs * 1e6);
+                        stall_ms = std::max(0.0, stall_ms - copy_ms);
+                        // the server's measured cost per row: its span less the fixed cost a layer, over its rows (EWMA)
+                        if (P2.chunk_rows > 0) {
+                            const double eff = (server_ms * 1e3 - (double) layers * P2.layer_us) / (double) P2.chunk_rows;
+                            if (eff > 0.0) P2.row_us_eff = P2.row_us_eff > 0.0 ? 0.5 * P2.row_us_eff + 0.5 * eff : eff;
+                        }
+                        // the factor: the stall against the estimated saving.  Stall above a quarter of the saving: the
+                        // server cost more than it gave, halve; above a twentieth: trim; a stall under a hundredth and
+                        // under a millisecond: there was slack, widen.  Bounded [0.02, 4].
+                        const double saved = P2.chunk_saved_ms;
+                        const double ratio = saved > 0.0 ? stall_ms / saved : (stall_ms > 0.0 ? 1e9 : 0.0);
+                        const double f0 = P2.factor;
+                        if (ratio > 0.25) P2.factor *= 0.5;
+                        else if (ratio > 0.05) P2.factor *= 0.8;
+                        else if (ratio < 0.01 && stall_ms < 1.0) P2.factor *= 1.25;
+                        P2.factor = std::clamp(P2.factor, 0.02, 4.0);
+                        P2.stall_ms_total += stall_ms;
+                        P2.server_ms_total += server_ms;
+                        ++P2.chunks_read;
+                        const double model_row_us = ((double) P2.xq_rb + (double) N * 4) / (P2.bw_gbs * 1e3) + P2.row_us;
+                        std::fprintf(stderr, "strata prefill: second server GPU %d (stage on CUDA%d), chunk %lld: sent %lld pairs (%lld rows) over "
+                                             "%lld layers; server %.0f ms, the primary stalled %.0f ms for it, estimated saving %.0f ms; row cost "
+                                             "measured %.1f us (model %.1f: link + compute); budget factor %.2f -> %.2f\n",
+                                     P2.dev, m.device, (long long) (P2.chunks - 1), (long long) P2.chunk_planned, (long long) P2.chunk_rows,
+                                     (long long) layers, server_ms, stall_ms, saved, P2.row_us_eff, model_row_us, f0, P2.factor);
+                    }
+                }
+                std::fill(P2.ev_used.begin(), P2.ev_used.end(), 0);
+                P2.ev_last = nullptr;
+                P2.chunk_planned = 0;
+                P2.chunk_rows = 0;
+                P2.chunk_saved_ms = 0.0;
+                ++P2.chunks;
             };
             const bool p2_on = m.pp2 && m.pp2->peer != nullptr;
+            if (p2_on) p2_fold();
             if (p2_on) std::fill(m.pp2->plan.begin(), m.pp2->plan.end(), 0);   // (a layer the KVA skips keeps no plan from the chunk before)
             for (int64_t l = LB; l < LE; ++l) {
                 seq_start[(size_t) l] = seq.size();
@@ -5297,8 +5414,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             cudaStreamWaitEvent(ps, P.ev_in, 0);
                             if (P.out_pending) { cudaStreamWaitEvent(ps, P.ev_done, 0); P.out_pending = false; }
                             if (timed) pe.mark(kPeMoeIn, ps);
-                            if (P.rows_in) cudaMemcpyAsync(P.xq_blk, P.host_xq, (size_t) nr_p * P.xq_rb, cudaMemcpyHostToDevice, ps);
-                            else if (P.p2p) cudaMemcpyPeerAsync(P.mixed, P.dev, m.mixed, prevd, (size_t) T * N * 4, ps);
+                            if (P.rows_in) {
+                                cudaEventRecord(P.ev_s0[(size_t) l], ps);   // the closed loop: the server's span starts
+                                cudaMemcpyAsync(P.xq_blk, P.host_xq, (size_t) nr_p * P.xq_rb, cudaMemcpyHostToDevice, ps);
+                            } else if (P.p2p) cudaMemcpyPeerAsync(P.mixed, P.dev, m.mixed, prevd, (size_t) T * N * 4, ps);
                             else if (P.f16) f16_to_f32_wide(P.mixed, P.host_x16, T * N, ps);
                             else copy_f32_wide(P.mixed, P.host_x, T * N, ps);
                             P.back_at = r_at;
@@ -5556,6 +5675,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 P.out_pending = true;
                             } else if (P.out_pipe) {
                                 cudaEventRecord(P.ev_done, P.s_out);
+                                if (P.rows_in) { cudaEventRecord(P.ev_s1[(size_t) l], P.s_out); P.ev_used[(size_t) l] = 1; P.chunk_rows += nr_p; }
                                 P.out_pending = true;
                             } else {
                                 cudaMemcpyPeerAsync(m.Dm + (size_t) r_at * N, prevd, P.Dm, P.dev, (size_t) nr_p * N * 4, ps);
@@ -6012,8 +6132,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         m.pend_wall_n = n_stream;
                     }
                     if (peer2_now) {   // STRATA_PEER2_PREFILL: the second server's FP32 rows, from the mapped page into its block of Dm
+                        // (the closed loop: the primary's stall before those rows = the span between these two events on
+                        // its stream, less the copy's own time, read at the next chunk's plan)
+                        cudaEventRecord(m.pp2->ev_w0[(size_t) l], m.cs);
                         cudaStreamWaitEvent(m.cs, m.pp2->ev_done, 0);
                         copy_f32_wide(m.Dm + (size_t) m.pp2->back_at * N, m.pp2->host_rows, m.pp2->back_rows * N, m.cs);
+                        cudaEventRecord(m.pp2->ev_w1[(size_t) l], m.cs);
+                        m.pp2->ev_last = m.pp2->ev_w1[(size_t) l];
                     }
                     if (peer_now) {   // multi-GPU: the peer's rows are in Dm (or, without P2P, in host memory)
                         cudaStreamWaitEvent(m.cs, m.pp->ev_done, 0);
@@ -6324,10 +6449,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             const PeerPrefill& P2 = *m.pp2;
             std::fprintf(stderr, "strata prefill timing (second server GPU %d): MoE layers with rows %lld, rows/layer %.0f, experts/layer %.1f; "
                                  "the cost model planned %lld of %lld candidate pairs over %lld layers, estimated %.0f ms of the primary's "
-                                 "streaming saved (links: server %.2f GB/s, primary %.2f GB/s)\n",
+                                 "streaming saved (links: server %.2f GB/s, primary %.2f GB/s); closed loop over %lld chunks read: server "
+                                 "%.0f ms, the primary stalled %.0f ms, row cost measured %.1f us, budget factor now %.2f\n",
                          P2.dev, (long long) P2.layers, P2.layers ? (double) P2.rows / P2.layers : 0.0,
                          P2.layers ? (double) P2.experts / P2.layers : 0.0, (long long) P2.planned, (long long) P2.cand,
-                         (long long) P2.layers_in, P2.est_saved_ms, P2.bw_gbs, P2.bw0_gbs);
+                         (long long) P2.layers_in, P2.est_saved_ms, P2.bw_gbs, P2.bw0_gbs, (long long) P2.chunks_read,
+                         P2.server_ms_total, P2.stall_ms_total, P2.row_us_eff, P2.factor);
         }
     }
     if (kva_run || kva.capture) {

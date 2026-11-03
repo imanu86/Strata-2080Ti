@@ -78,6 +78,46 @@ della padrona né il primo server hanno: la precedenza del dispatch), con `c` = 
   ordinale, come `--peer-device`) e `STRATA_PREFILL_BW_GBS` per la padrona. Senza misura e senza valore la quota è
   rifiutata con una riga (un modello senza misura tirerebbe a indovinare).
 
+### 2.2 Anello chiuso (quarta stesura, dopo la prova nel motore del 3/11 notte)
+
+La prova con la terza stesura (build `4512b587`, `--peer-device 1,2`, 2080 Ti server 1 su x16, 3060 server 2 sul
+riser) ha **dimezzato la lettura**: 446/778/929 contro 966/1378/1466 (M), con `combine 12152 ms (78,7 %)` a 4K: la
+padrona aspettava la 3060. Tre cause, tutte nel modello aperto:
+
+1. **La banda della padrona misurata era falsa** (0,85 GB/s; la 3060 0,38): una copia sola da 32 MiB cronometrata
+   dall'host con `cudaStreamSynchronize`, e sotto WDDM la latenza di invio del driver (decine di ms) era quasi tutto
+   il tempo. Ora `measure_h2d_gbs` fa **8 copie in fila da memoria bloccata** (la stessa natura dell'arena) e misura
+   con **eventi sullo stream** (il tempo in cui la scheda è occupata, non la vista dell'host), meglio di 3 giri dopo
+   uno di riscaldamento, con `cudaStreamQuery` per spingere il lotto.
+2. **Il tetto per strato non limitava nulla**: con `bw0` = 0,85 un blob «costava» 1,9 ms e il budget di uno strato
+   (`n_nonres × t_blob` ≈ 400 × 1,9 ms ≈ 0,8 s) accoglieva ogni candidato; per questo `ROW_US` non entrava nel piano
+   (identico con 1 e con 6) e il «risparmio stimato» era 424 s su un prompt da 134 s. Con la banda vera (~5-6 GB/s) il
+   budget torna a ~100 ms per strato e il costo per riga decide.
+3. **Nessuna retroazione**: il modello non vedeva quanto la padrona aspettava davvero. Ora, per ogni pezzo:
+   - sulla padrona, due eventi per strato intorno all'attesa delle righe del server (`ev_w0` prima di
+     `cudaStreamWaitEvent(ev_done2)`, `ev_w1` dopo la `copy_f32_wide`): lo **stallo** della padrona per il server,
+     meno il tempo nominale della copia delle righe;
+   - sul server, due eventi per strato (`ev_s0` prima della H2D del blocco, `ev_s1` dopo l'ultima D2H delle righe): lo
+     **span del server**;
+   - al piano del pezzo successivo (`p2_fold`, prima di `p2_plan_layer`; l'ultimo evento del pezzo prima è di norma
+     già completo, altrimenti lo si aspetta): il **costo per riga misurato** `row_us_eff = (span − strati ×
+     layer_us) / righe` (EWMA 0,5) entra nel piano al posto di `row_us` quando è maggiore; e il **fattore** del budget
+     si muove dallo stallo contro il risparmio stimato del pezzo: stallo > 25 % del risparmio → ×0,5; > 5 % → ×0,8;
+     < 1 % e sotto 1 ms → ×1,25; limiti [0,02, 4]. Il budget per strato è `fattore × STRATA_PEER2_PREFILL_BUDGET ×
+     (n_nonres − presi) × t_blob0`.
+   - una riga per pezzo: `strata prefill: second server GPU B (stage on CUDAx), chunk c: sent P pairs (R rows) over L
+     layers; server S ms, the primary stalled W ms for it, estimated saving E ms; row cost measured m us (model m0: link
+     + compute); budget factor f0 -> f1`, e nel riepilogo di fine prompt le somme (`closed loop over n chunks read:
+     server … ms, the primary stalled … ms, row cost measured … us, budget factor now …`).
+
+Che cosa aspettarsi sul riser: al primo pezzo (priorità uniforme, fattore 1, costo per riga del modello ≈ 34 µs
+con la 3060 a 0,38 GB/s) il server prende meno di prima (il budget è ~100 ms per strato, non 800); la riga del pezzo 0
+dirà uno stallo ancora positivo (il costo vero per riga della 3060 sui gruppi piccoli è ~60-70 µs: 254 ms per strato
+a 3458 righe nella prova) e `row cost measured ~60-70 us`, fattore 1 → 0,5 o 0,8; dal pezzo 1 il piano usa il costo
+misurato e il fattore, lo stallo scende verso lo zero e il fattore si assesta dove la 3060 finisce appena prima della
+padrona. Un prompt da un pezzo solo (4K) non ha retroazione: paga il primo piano. Sull'Oculink la stessa riga mostrerà
+costo per riga ~5 µs e fattore che sale fino a 4 finché la soglia dei byte (non il budget) limita i candidati.
+
 ### 2.1 Esempio numerico: riser x1 Gen2 contro Oculink x4
 
 Numeri: blob 1,6 MiB; padrona 3080 Ti sull'Oculink a 6,7 GB/s (M) → un blob le costa **250 µs**; per strato lo stadio 0
@@ -149,7 +189,7 @@ il margine — il criterio dei byte sul link della padrona resta quello giusto.
 | `STRATA_PREFILL_BW_GBS` | — | la banda H2D della padrona (il costo di un blob in streaming); assente = misurata |
 | `STRATA_PEER2_PREFILL_ROW_US` | 1 | µs di calcolo del server per riga instradata, sommati al tempo di trasferimento |
 | `STRATA_PEER2_PREFILL_LAYER_US` | 300 | µs fissi per strato in cui il server ha almeno una voce (eventi, lanci, latenza del link) |
-| `STRATA_PEER2_PREFILL_BUDGET` | 1,0 | frazione (0..4) del tempo di streaming della padrona sullo strato che il server può usare; sotto 1 più prudente, sopra 1 per misurare se la padrona non era davvero il collo |
+| `STRATA_PEER2_PREFILL_BUDGET` | 1,0 | frazione (0..4) del tempo di streaming della padrona sullo strato che il server può usare, moltiplicata dal fattore dell'anello chiuso (§2.2); sotto 1 più prudente, sopra 1 per misurare se la padrona non era davvero il collo |
 | `STRATA_PEER2_PREFILL_BITS` | 0 | 1: il piano prende solo gli strati con `MmqPlan::group_sort` (entrambi i prodotti MMQ a tile interi su **ogni** scheda visibile: `mmq::whole_tiles`): lì le righe del server 2 sono quelle della padrona bit per bit per costruzione (§5). 0: tutti gli strati MMQ |
 
 Riga all'apertura: `strata prefill: peer GPU B (second server) computes the rows of its experts that the cost model
@@ -267,9 +307,10 @@ piccoli (§5). Terza stesura: lancio del server imbottito a 16 esperti, riferime
 su `0 0`, poi su `0 1`; su `0 2` ci si aspetta FAIL con relativo ~1e-7 (sm_75).
 
 Misura utile arrivata con la seconda stesura (M): sul riser la 3060 fa **0,37–0,38 GB/s** compresi i prodotti
-(113 MiB in ~295 ms per strato a 9 040 righe); la padrona su se stessa 5,5 GB/s. Il modello di costo con la banda
-misurata a `set_peer2` (copia pura) sovrastima la 3060 di poco: `STRATA_PEER2_PREFILL_ROW_US` copre la differenza
-(a 9 040 righe: 295 ms − 113 MiB / 0,5 GB/s ≈ 60 ms → ~6 µs a riga; default 1, da alzare a 5-6 sul riser).
+(113 MiB in ~295 ms per strato a 9 040 righe); la padrona su se stessa 5,5 GB/s. Quarta stesura (dopo la prova nel
+motore con `4512b587`, banco tutto PASS): misura di banda con eventi su 8 copie, anello chiuso per pezzo (§2.2),
+costo per riga misurato nel piano. **Non compilata, non provata.** `STRATA_PEER2_PREFILL_ROW_US` resta a 1: il costo
+vero lo misura l'anello dal primo pezzo in poi.
 
 Rischi funzionali:
 - **Bit fra schede** (§5): se il banco dice che le righe della 3060 differiscono negli ultimi bit per i tipi senza
