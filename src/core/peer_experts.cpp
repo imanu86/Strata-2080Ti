@@ -1,4 +1,6 @@
 // src/core/peer_experts.cpp - see include/strata/core/peer_experts.hpp.
+// STRATA_EP_SPLIT_PREFILL (docs/EP_SPLIT_PREFILL.md): with the variable on, the prompt path of the peer card's stage
+// reads this cache and res_ as its resident tier (cache(), res_table()); nothing of the tier is lent to it.
 #include "strata/core/peer_experts.hpp"
 
 #include "strata/core/device.hpp"   // primary_device() (STRATA_PRIMARY_DEVICE)
@@ -319,6 +321,10 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
         sizes.push_back((int64_t) b);
     }
     if (pick.empty()) { err = "peer experts: no room or no expert left for the peer"; close(); return false; }
+    // STRATA_EP_SPLIT_PREFILL: the stage's prompt MMQ reads a resident expert in its slot only when the slot has the
+    // guard (ExpertCache::set_slot_guard, Prefill::slot_guard_bytes); it is NOT asked here because strata_prefill links
+    // strata_engine (this file), so the call would be circular: the stage falls back to the gather for those experts
+    // (slower, the same bits), as docs/EP_SPLIT_PREFILL.md s.10 says.  Not an allocation, not a behavior change.
     const bool opened = lay.native ? cache_.open_sized(sizes, n_layers, n_expert, err)
                                    : cache_.open((int64_t) pick.size(), n_layers, n_expert, (int64_t) lay.max_blob, err);
     if (!opened) { err = "peer experts: " + err; close(); return false; }
@@ -606,6 +612,24 @@ void PeerExperts::apply_pending(bool wait) {
     }
     for (const auto& [i, slot] : pending_) res_[(size_t) i] = slot;
     pending_.clear();
+}
+
+// STRATA_EP_SPLIT_PREFILL (docs/EP_SPLIT_PREFILL.md s.6): before the stage reads the slots.  The window check comes
+// FIRST: a fused window's kernel lives on stream_ waiting for a doorbell, and synchronizing that stream would wait with
+// it; the design never calls this with a window open (adapt and the fused server run between decode windows, the prompt
+// after them), so an open window is reported, not waited for.  Then the swaps of an earlier adapt() land (res_ final),
+// and both streams drain: no copy into a slot in flight while the stage reads them.  No allocation, nothing swapped.
+bool PeerExperts::quiesce(std::string& err) {
+    if (device_ < 0) return true;   // no tier: nothing to quiesce
+    if (window_open_.load(std::memory_order_acquire)) {
+        err = "peer experts: a fused window is still open";
+        return false;
+    }
+    apply_pending(true);
+    On on(device_);
+    if (!ck(cudaStreamSynchronize(stream_), "quiesce: stream", err)) return false;
+    if (!ck(cudaStreamSynchronize(refill_), "quiesce: refill stream", err)) return false;
+    return true;
 }
 
 // ====================================================================================================================

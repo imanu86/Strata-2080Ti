@@ -67,6 +67,25 @@ public:
     /// Whether the primary (device 0) and the peer can read each other's memory directly (NVLink / PCIe P2P).
     bool p2p() const { return p2p_; }
 
+    // ---- STRATA_EP_SPLIT_PREFILL=1 (opt-in, lab/upsync-v0.2.9, docs/EP_SPLIT_PREFILL.md s.2, s.6): the peer card
+    // also runs a prompt STAGE (layers [K, n_layers) with its own dense weights and session), whose prompt path takes
+    // this tier's cache and residency table as its RESIDENT tier (`Prefill::init(..., &cache(), res_table(), ...)`).
+    // Nothing of the tier is lent: the slots stay the decode's (the fused kernel holds them by index in d_slot_ptr,
+    // adapt rotates them between windows), the stage allocates its own prompt buffers.  Off, none of this is called.
+    /// The tier's cache, read-only: the stage's prompt path reads a resident expert in its slot (a hit) and streams
+    /// the rest from host memory itself.  No slot is ever lent or claimed through this handle.
+    const ExpertCache& cache() const { return cache_; }
+    /// The tier's residency table, n_layers x n_expert -> the peer's slot or kNotResident: the same format as the
+    /// primary's `host_res` (`Prefill::init(..., host_res, ...)`).  Valid while the tier is open (res_ is sized once
+    /// at open and never reallocated after it; adapt / apply_pending change entries in place, between decode
+    /// windows).  Outside a fused window it is the table has() answers from, so the stage and the pool thread agree.
+    const int32_t* res_table() const { return res_.data(); }
+    /// Before a staged prompt read: lands the swaps of an earlier adapt() (apply_pending(true): res_ is final) and
+    /// waits for the tier's two streams, so no copy into a slot is in flight while the stage reads the slots.  false
+    /// with `err` when a fused window is still open (a kernel that may still write the slots: never in the design,
+    /// said with an error and not with a different text) or on a CUDA error.  A closed tier: nothing to do, true.
+    bool quiesce(std::string& err);
+
     /// Starts the peer's share of one layer: the entries i with kind[i] == 2 (x: n_tok rows of n_embd floats).
     /// multi-GPU: with `out` (pinned, portable host rows) the peer writes its rows straight into
     /// out[entry] with a scatter kernel (no D2H copy + host memcpy in finish); STRATA_PEER_DIRECT=0: the old way.
@@ -160,7 +179,7 @@ private:
     int64_t n_layers_ = 0, n_expert_ = 0;
     ExpertCache cache_;
     ExpertSource* src_ = nullptr;
-    std::vector<int32_t> res_;                        ///< [n_layers * n_expert] -> peer slot or -1
+    std::vector<int32_t> res_;                        ///< [n_layers * n_expert] -> peer slot or -1 (sized at open, never reallocated after: res_table() hands it out)
     std::vector<std::pair<int32_t, int32_t>> pending_;   ///< (residency index, slot) once the copies land
     int64_t resident_ = 0, entries_ = 0, experts_ = 0, swaps_ = 0;
     cudaStream_t stream_ = nullptr, refill_ = nullptr;

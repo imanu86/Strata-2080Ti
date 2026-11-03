@@ -43,6 +43,7 @@
 #include "strata/core/remote_experts.hpp"
 #include "strata/core/on_device.hpp"
 #include "strata/core/peer_experts.hpp"
+#include "strata/core/ep_split.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/layout.hpp"
 #include "strata/core/session.hpp"
@@ -4608,6 +4609,61 @@ int main(int argc, char** argv) {
                              rope_cfg.type == RST::YaRN ? "YaRN" : "--yarn-attn-factor", rope_cfg.mscale());
         }
     }
+    // STRATA_EP_SPLIT_PREFILL=1 (opt-in, docs/EP_SPLIT_PREFILL.md): the prompt read in two layer stages (the primary
+    // layers [0, ep_K), the peer card [ep_K, n_layers) with its own dense weights and session), the reply written as
+    // today with the peer as expert server.  Admitted here, with the options parsed and the geometry known, before
+    // anything is loaded; refused with one line and the engine runs exactly as without the variable.  Off: `ep_on`
+    // is false and every addition below it is skipped.
+    const bool ep_on = [&] {
+        strata::core::ep_split::Config cfg;
+        cfg.on = strata::core::ep_split::env_on();
+        if (!cfg.on) return false;   // off: nothing below runs, not even the device-count query (admit would say false silently)
+        cfg.serve = o.serve;
+        cfg.peer_device = o.peer_device;
+        cfg.layer_split = !o.layer_split.empty();
+        cfg.expert_cache_remote = o.expert_cache_remote[0] > 0;
+        cfg.batch = o.batch;
+        cfg.vision = o.vision;
+        cfg.prefill_head_alias = o.prefill_head_alias;
+        {   // (read as conversation_state.cpp reads them: ASYNC is "1", the slots a count clamped to [0, 16])
+            const char* ca = std::getenv("STRATA_CKPT_ASYNC");
+            cfg.ckpt_async = ca != nullptr && ca[0] == '1';
+            const char* cv = std::getenv("STRATA_CKPT_VRAM_SLOTS");
+            cfg.ckpt_vram_slots = cv != nullptr ? std::max(0, std::min(16, std::atoi(cv))) : 0;
+            cfg.prompt_cache_every = o.prompt_cache_every;
+        }
+        {
+            const char* ev = std::getenv("STRATA_KV_GROW");
+            cfg.kv_grow = ev != nullptr && ev[0] != '\0' ? ev[0] != '0' : o.kv_grow;
+        }
+        cfg.elastic = o.elastic || o.vram_elastic;
+        cfg.pipeline_windows = std::max(0, o.pipeline_windows);   // (-1 = unset: no split of the decode)
+        {   // (read as prefill.cpp reads it: "0" is off, not a request; with a peer the layer-major chain declines anyway)
+            const char* v = std::getenv("STRATA_PREFILL_LAYER_MAJOR");
+            cfg.layer_major = strata::program::draft_kv::split_env_on(v);
+        }
+        {
+            const char* v = std::getenv("STRATA_BATCH_CONCURRENT_READ");
+            cfg.batch_concurrent = v != nullptr && std::atoi(v) != 0;
+        }
+        cfg.native_pack = native_pack;
+        cfg.expert_profile = !o.expert_profile.empty();
+        cfg.session_files = false;   // (refused with a peer at the request, as today)
+        cfg.n_layers = g.n_layers;
+        cfg.layer = strata::core::ep_split::env_layer();
+        {
+            int n_dev = 0;
+            if (cudaGetDeviceCount(&n_dev) != cudaSuccess) { (void) cudaGetLastError(); n_dev = 0; }
+            cfg.n_devices = n_dev;
+        }
+        cfg.primary_device = primary_device;
+        std::string why;
+        const bool on = strata::core::ep_split::admit(cfg, why);
+        if (!on && !why.empty()) std::fprintf(stderr, "%s\n", strata::core::ep_split::line_off(why).c_str());
+        return on;
+    }();
+    const int64_t ep_K = strata::core::ep_split::env_layer();   // the peer stage's first layer (meaningful with ep_on)
+    static const bool ep_trace = strata::core::ep_split::env_trace();
     strata::core::NativeEmbed native_embed;
     if (native_pack) {
         if (o.native_preset.empty() || o.spec < 2 || o.keep_canonical ||
@@ -5343,6 +5399,61 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: layer split: CUDA%d holds its weights; %.2f GiB free (its session "
                                  "follows the split search)\n", st.dev, (double) fb / 1073741824.0);
         }
+    }
+    // STRATA_EP_SPLIT_PREFILL: the peer card's prompt stage, kept apart from `stages` (docs/EP_SPLIT_PREFILL.md s.2):
+    // the layer split does not exist for the rest of the engine (`multi_gpu` false, `stages` empty), the verifier,
+    // the checkpoints, the parking and the slots see one full session on CUDA0 as with --peer-device today.  The
+    // stage uses dev, lb, le, wt, dense, ss, stream and sp only: no cache of its own (its prompt path reads the peer
+    // tier's), no residency table, no verifier, no head (the drafter stays on CUDA0); with --vision its own
+    // image-position table on its card, as a split's stages have.  Loaded after CUDA0's weights, as the stages above.
+    // What it takes on the peer card (dense weights, session, prompt buffers) is VRAM the peer tier does not get: the
+    // tier is filled from what is free at peer.open, after all of this (said in one line there).
+    std::unique_ptr<GpuStage> ep_stage;
+    void* ep_sbuf = nullptr;       ///< its session's device memory (freed at exit)
+    float* ep_R_dev0 = nullptr;    ///< CUDA0: the stage's final residual rows of a chunk, for the drafter's prompt pass (null without a drafter)
+    int64_t ep_R_rows = 0;         ///< rows ep_R_dev0 holds (the prompt chunk)
+    double ep_free0_gib = 0;       ///< the peer card's free VRAM before the stage took anything (the tier's loss is measured from it)
+    if (ep_on) {
+        ep_stage = std::make_unique<GpuStage>();
+        GpuStage& ep = *ep_stage;
+        ep.dev = o.peer_device;
+        ep.lb = ep_K;
+        ep.le = g.n_layers;
+        if (!strata::core::RemoteExperts::preflight(ep.dev, ep_free0_gib, err)) {
+            std::fprintf(stderr, "strata generate: ep-split: %s\n", err.c_str());
+            return 1;
+        }
+        const strata::core::OnDevice on(ep.dev);
+        if (!load_stage_weights(ep, ep_K, g.n_layers, /*trim=*/true)) return 1;
+        // the trim is a load-time filter (NativeDense::set_layer_range); the primary holds every layer, so a later
+        // load on it (none today) must not be trimmed to the stage's range
+        strata::core::NativeDense::set_layer_range(-1, -1);
+        if (cudaStreamCreateWithFlags(&ep.stream, cudaStreamNonBlocking) != cudaSuccess) {
+            std::fprintf(stderr, "strata generate: ep-split, CUDA%d: its stream failed\n", ep.dev);
+            return 1;
+        }
+        // a control vector (the speed projection): its tables on this device too - the stage's layers apply it here
+        if (!strata::kernels::cvec_replicate(err)) {
+            std::fprintf(stderr, "strata generate: ep-split, CUDA%d: %s\n", ep.dev, err.c_str());
+            return 1;
+        }
+        // --vision: this card's image-position table (the identity until a picture request), read by every rope
+        // kernel the stage runs; the table is per device (mrope.hpp), CUDA0's stays CUDA0's.  Re-uploaded with CUDA0's
+        // at every picture request (upload_mrope below), as a split's stages are.
+        if (o.vision) {
+            if (cudaMalloc(&ep.mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
+                cudaMemcpy(ep.mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
+                    cudaSuccess) {
+                std::fprintf(stderr, "strata generate: ep-split, CUDA%d: the image position table failed\n", ep.dev);
+                return 1;
+            }
+            strata::kernels::mrope_table_set(ep.mrope);
+        }
+        size_t fb = 0, tb = 0;
+        cudaMemGetInfo(&fb, &tb);
+        std::fprintf(stderr, "strata generate: ep-split: CUDA%d holds the dense weights of layers [%lld, %lld); %.2f GiB "
+                             "free (its session follows)\n", ep.dev, (long long) ep.lb, (long long) ep.le,
+                     (double) fb / 1073741824.0);
     }
     GpuStage* const last_st = stages.empty() ? nullptr : stages.back().get();
     // 0.1.44: the drafter on the FIRST stage's card, for a two-stage pipelined decode.  Its chain then runs while that card is idle
@@ -6246,6 +6357,33 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: layer split: CUDA%d holds its weights, session [%lld, %lld)%s; "
                              "%.2f GiB free\n", st.dev, (long long) st.lb, (long long) st.le,
                      last ? " and the head" : "", (double) fb / 1073741824.0);
+    }
+    // STRATA_EP_SPLIT_PREFILL: the peer stage's session, carved [ep_K, n_layers) on its card (no head: the drafter and
+    // the output head stay on CUDA0).  CUDA0's session above stays the full carve (hi0 = -1: `multi_gpu` is false).
+    if (ep_on) {
+        GpuStage& ep = *ep_stage;
+        const strata::core::OnDevice on(ep.dev);
+        if (cudaMalloc(&ep_sbuf, strata::core::session_bytes(g, o.max_context, K, ep.lb, ep.le)) != cudaSuccess ||
+            strata::core::session_init(g, o.max_context, K, ep_sbuf, ep.ss, ep.lb, ep.le) == 0) {
+            std::fprintf(stderr, "strata generate: ep-split, CUDA%d: the session state failed\n", ep.dev);
+            return 1;
+        }
+        strata::core::session_zero(ep.ss, g, nullptr, (void*) ep.stream);
+        if (cudaStreamSynchronize(ep.stream) != cudaSuccess) {
+            std::fprintf(stderr, "strata generate: ep-split, CUDA%d: zeroing the session state failed\n", ep.dev);
+            return 1;
+        }
+        size_t fb = 0, tb = 0;
+        cudaMemGetInfo(&fb, &tb);
+        std::fprintf(stderr, "strata generate: ep-split: CUDA%d holds its weights, session [%lld, %lld); %.2f GiB free\n",
+                     ep.dev, (long long) ep.lb, (long long) ep.le, (double) fb / 1073741824.0);
+    }
+    // the state that crosses between the two cards at a request's seams (s.5), and what the stage is known to hold (s.6)
+    strata::core::ep_split::StateMover mover;
+    strata::core::ep_split::Sync ep_sync;
+    if (ep_on && !mover.init(g, ep_K, g.n_layers, primary_device, ep_stage->dev, o.max_context, err)) {
+        std::fprintf(stderr, "strata generate: ep-split: the state mover failed: %s\n", err.c_str());
+        return 1;
     }
 
     // --batch: every stage carves o.batch more sessions like its own (same layer range and context), one per
@@ -7184,7 +7322,19 @@ int main(int argc, char** argv) {
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2 && native_head.loaded()) mtp_bind += (int64_t) mtp.bind_bytes(native_head.row_bytes(), n_vocab) + (48 << 20);   // DFlash2's own draft head and logits, bound after this
 #endif
-        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind + pipe_first;
+        // STRATA_EP_SPLIT_PREFILL: the drafter's row buffer on CUDA0 (the peer stage's final rows of a chunk cross into
+        // it for the drafter's prompt pass, docs/EP_SPLIT_PREFILL.md s.3.4) is allocated after the cache, so the cache
+        // leaves it room here: chunk x hc x n_embd floats at the largest chunk the scan may pick (o.prefill_chunk is
+        // prefill_auto_max with --prefill auto: 320 MiB at 8192 tokens, hc 4, n_embd 2560; the chunk only steps down).
+        // None without a drafter (the buffer is not allocated then).  Without it the buffer came out of the 256 MiB
+        // late-allocation margin and CUDA0 ended ~300 MiB under the free VRAM --peer-device keeps today.
+        const int64_t ep_rows_bytes = (ep_on && !o.mtp.empty())
+            ? (int64_t) o.prefill_chunk * (int64_t) g.hc * (int64_t) g.n_embd * (int64_t) sizeof(float) : 0;
+        if (ep_rows_bytes > 0)
+            std::fprintf(stderr, "strata generate: expert cache auto: +%lld MiB kept for the EP prefill's drafter row buffer "
+                                 "on CUDA0 (%lld rows, allocated after the cache)\n",
+                         (long long) (ep_rows_bytes >> 20), (long long) o.prefill_chunk);
+        const int64_t reserve = (((int64_t) o.vram_reserve_mib + prefill_mib) << 20) + mtp_bind + pipe_first + ep_rows_bytes;
         const int64_t blob = (int64_t) nibble_max_slot_bytes();   // max_blob (STRATA_EXPERT_NIBBLE: or a larger 4-bit slot)
         // #496: the least a working cache needs (the verify window cannot start without one, #174): a cache too small to lend the prompt path a
         // 256-token chunk's buffers (plus the 128 slots a loan leaves; one slot without --prefill) makes it allocate its own on top
@@ -7982,8 +8132,40 @@ int main(int argc, char** argv) {
             return 1;
         }
         const auto tp0 = Clock::now();
-        if (!peer.open(o.peer_device, profile, xcache, *srcp, g.n_layers, g.n_expert, o.peer_reserve_mib, o.peer_slots,
-                       err)) {
+        // STRATA_EP_SPLIT_PREFILL: the stage's prompt path owns its buffers on the peer card (no loan from the peer
+        // tier: its slots are the decode's), so the peer's reserve rises by what they need before the tier is filled
+        // (s.4b).  Below 128 slots left the tier refuses to open, with its own message.
+        int64_t ep_reserve_add = 0;
+        if (ep_on) {
+            uint64_t pb = 0;
+            {
+                const strata::core::OnDevice on(ep_stage->dev);
+                pb = strata::prefill::Prefill::bytes_needed_owned(g, ep_stage->ss, o.prefill_chunk, srcp != nullptr);
+            }
+            ep_reserve_add = strata::core::ep_split::reserve_add_mib(pb);
+            std::fprintf(stderr, "%s\n", strata::core::ep_split::line_on(ep_K, g.n_layers, ep_stage->dev,
+                                                                         (int64_t) (pb >> 20), o.peer_reserve_mib,
+                                                                         o.peer_reserve_mib + ep_reserve_add).c_str());
+            // The tier is filled from what is free NOW minus the reserve: the stage's dense weights and session, taken
+            // before this point, are slots the tier does not get either (about 1,450 at 1.66 MiB a slot for 1.75 GiB of
+            // dense weights and a 0.6 GiB session), on top of the prompt buffers above.  Pairs that leave the tier are
+            // computed by the CPU in the decode, which rounds differently: the reply can differ from the same engine
+            // without the variable.  Said here with the --peer-reserve-mib that gives a run WITHOUT the variable the
+            // same tier (the comparison the plan asks for: docs/EP_SPLIT_PREFILL.md s.12).
+            {
+                const strata::core::OnDevice on(ep_stage->dev);
+                size_t fb = 0, tb = 0;
+                cudaMemGetInfo(&fb, &tb);
+                const double taken_mib = std::max(0.0, ep_free0_gib * 1024.0 - (double) fb / 1048576.0);
+                std::fprintf(stderr, "strata ep-split: CUDA%d: the stage holds %.0f MiB of dense weights, session and streams "
+                                     "before the peer tier, plus %lld MiB of reserve for its prompt buffers: the tier is "
+                                     "smaller by both (the same tier without the variable: --peer-reserve-mib %lld)\n",
+                             ep_stage->dev, taken_mib, (long long) ep_reserve_add,
+                             (long long) (o.peer_reserve_mib + ep_reserve_add + (int64_t) (taken_mib + 0.5)));
+            }
+        }
+        if (!peer.open(o.peer_device, profile, xcache, *srcp, g.n_layers, g.n_expert,
+                       o.peer_reserve_mib + (int) ep_reserve_add, o.peer_slots, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
@@ -9718,7 +9900,11 @@ int main(int argc, char** argv) {
                                  "nothing to take, so it is not armed by default (STRATA_PREFILL_CPU_SHARE=auto forces it)\n",
                          (long long) xcache.slots(), (long long) (g.n_layers * g.n_expert));
         if (share_pool && stages.empty() && !multi_gpu && share_has_work && !share_default_ok()) share_has_work = false;   // H11
-        strata::prefill::Prefill::arm_cpu_share(share_pool, share_pool && stages.empty() && !multi_gpu && share_has_work);
+        // (STRATA_EP_SPLIT_PREFILL: not by default either, as with the layer split - the share picks its CPU experts among
+        // those a stage would stream, and the peer stage's resident set is the peer tier's, which adapt changes between
+        // requests: with the share on its bits would depend on the tier's state of the moment.  STRATA_PREFILL_CPU_SHARE
+        // set by hand applies to both stages, as it does to a split's.)
+        strata::prefill::Prefill::arm_cpu_share(share_pool, share_pool && stages.empty() && !multi_gpu && !ep_on && share_has_work);
         void* borrow = nullptr;
         uint64_t borrow_bytes = 0;
         int32_t lend_first = -1;          // the first slot the prompt path may borrow (its largest chunk)
@@ -10155,6 +10341,20 @@ int main(int argc, char** argv) {
         const int64_t sp_chunk_max = (o.elastic && xcache.elastic() && o.prefill_auto && borrow != nullptr && !multi_gpu)
                                          ? o.prefill_auto_max : 0;
         auto init_prompt_paths = [&]() -> int {   // 0: ready; 1: failed (err set); 2: failed with "do not fit"
+            // STRATA_EP_SPLIT_PREFILL: the peer stage's prompt path first (CUDA0's hands its chunks to it): layers
+            // [ep_K, last], its own session, the peer tier's cache and residency table as its resident tier, its own
+            // buffers (no loan: the tier's slots are never lent), on its stream (s.3.2)
+            if (ep_on) {
+                GpuStage& ep = *ep_stage;
+                ep.sp.set_stage(ep_K, -1, nullptr);
+                const strata::core::OnDevice on(ep.dev);
+                if (share_pool) ep.sp.set_cpu_pool(&pool);   // one stage at a time takes it for a chunk (prefill.cpp)
+                if (!ep.sp.init(ep.wt, g, ep.ss, srcp, &peer.cache(), peer.res_table(), o.prefill_chunk, (void*) ep.stream,
+                                err, nullptr, 0)) {
+                    err = "EP prefill, CUDA" + std::to_string(ep.dev) + " prompt path: " + err;
+                    return err.find("do not fit") != std::string::npos ? 2 : 1;
+                }
+            }
             for (size_t i = 0; i < stages.size(); ++i) {
                 GpuStage& st = *stages[i];
                 st.sp.set_stage(st.lb, i + 1 < stages.size() ? st.le : -1, i + 1 < stages.size() ? &stages[i + 1]->sp : nullptr);
@@ -10174,6 +10374,7 @@ int main(int argc, char** argv) {
                 }
             }
             if (multi_gpu) sp.set_stage(0, split_at[0], &stages[0]->sp);
+            else if (ep_on) sp.set_stage(0, ep_K, &ep_stage->sp);   // CUDA0 reads [0, ep_K), the peer stage the rest
             if (share_pool) sp.set_cpu_pool(&pool);
             if (!sp.init(wt, g, ss, prefill_src, &xcache, host_res.data(), o.prefill_chunk, main_cs, err, borrow, borrow_bytes,
                          o.prefill_head_alias, sp_chunk_max))
@@ -10197,6 +10398,16 @@ int main(int argc, char** argv) {
                     const int64_t need = (int64_t) strata::prefill::Prefill::bytes_needed(g, i == 0 ? ss : stages[i - 1]->ss, c, srcp != nullptr);
                     if (need + kHeadroom > (int64_t) fb) {
                         dev_out = dev < 0 ? 0 : dev; need_out = need; free_out = (int64_t) fb;
+                        return false;
+                    }
+                }
+                if (ep_on) {   // the peer stage's own buffers against its card's free VRAM (the peer's reserve)
+                    const strata::core::OnDevice on(ep_stage->dev);
+                    size_t fb = 0, tb = 0;
+                    cudaMemGetInfo(&fb, &tb);
+                    const int64_t need = (int64_t) strata::prefill::Prefill::bytes_needed(g, ep_stage->ss, c, srcp != nullptr);
+                    if (need + kHeadroom > (int64_t) fb) {
+                        dev_out = ep_stage->dev; need_out = need; free_out = (int64_t) fb;
                         return false;
                     }
                 }
@@ -10235,6 +10446,11 @@ int main(int argc, char** argv) {
                     stp->sp.reset();
                     (void) cudaGetLastError();
                 }
+                if (ep_on) {
+                    const strata::core::OnDevice on(ep_stage->dev);
+                    ep_stage->sp.reset();
+                    (void) cudaGetLastError();
+                }
                 sp.reset();
                 (void) cudaGetLastError();
                 o.prefill_chunk = next;
@@ -10257,6 +10473,38 @@ int main(int argc, char** argv) {
                                      "off (setup: --vision no), close other programs using the GPU, use a shorter "
                                      "context, or read prompts in smaller chunks (--prefill 512)\n");
             return 1;
+        }
+        if (ep_on) {
+            {   // what the raised reserve left unused on the peer card: the reserve was sized at the largest chunk the scan
+                // could pick (prefill_auto_max with --prefill auto), the stage's buffers are the chosen chunk's; the
+                // difference stays free on the card for the whole process, slots the peer tier could have held.
+                // STRATA_EP_SPLIT_RESERVE_MIB=N sets the reserve by hand (N = this line's prompt buffers + 512 MiB).
+                const strata::core::OnDevice on(ep_stage->dev);
+                size_t fb = 0, tb = 0;
+                cudaMemGetInfo(&fb, &tb);
+                const uint64_t owned = strata::prefill::Prefill::bytes_needed_owned(g, ep_stage->ss, o.prefill_chunk, srcp != nullptr);
+                std::fprintf(stderr, "strata ep-split: CUDA%d: prompt buffers %llu MiB at the %lld-token chunk, %llu MiB free on the "
+                                     "card after them (the reserve was sized at %lld tokens; STRATA_EP_SPLIT_RESERVE_MIB=%llu "
+                                     "would give the peer tier the rest)\n",
+                             ep_stage->dev, (unsigned long long) (owned >> 20), (long long) o.prefill_chunk,
+                             (unsigned long long) (fb >> 20), (long long) (o.prefill_auto ? o.prefill_auto_max : o.prefill_chunk),
+                             (unsigned long long) ((owned + strata::core::ep_split::kReserveHeadroomBytes + ((1ull << 20) - 1)) >> 20));
+            }
+            if (!o.mtp.empty()) {
+                // the peer stage's final residual rows of a chunk cross to CUDA0 into this buffer for the drafter's
+                // prompt pass (s.3.4): a chunk of rows, hc * n_embd floats each, allocated once (300 MiB at 7680 tokens,
+                // hc = 4): the cache sizing above kept it room (ep_rows_bytes).  Only with a drafter: without one the
+                // rows are never asked for and CUDA0 keeps the VRAM.
+                const strata::core::OnDevice on0(primary_device);
+                ep_R_rows = o.prefill_chunk;
+                const size_t bytes = (size_t) ep_R_rows * (size_t) g.hc * (size_t) g.n_embd * sizeof(float);
+                if (cudaMalloc(&ep_R_dev0, bytes) != cudaSuccess) {
+                    (void) cudaGetLastError();
+                    std::fprintf(stderr, "strata serve: ep-split: the drafter's row buffer (%llu MiB) does not fit on CUDA%d\n",
+                                 (unsigned long long) (bytes >> 20), primary_device);
+                    return 1;
+                }
+            }
         }
         if (peer.valid() && o.peer_prefill_rows != 0) {
             const int64_t rows = o.peer_prefill_rows > 0 ? o.peer_prefill_rows : o.prefill_chunk * K / 2;
@@ -11385,7 +11633,9 @@ int main(int argc, char** argv) {
         // every `prompt_cache_every` tokens from where the request resumed), and the last stage puts them together.
         std::mutex part_mu;
         std::map<int64_t, std::vector<ConvCheckpoint>> part_at;   // position -> one part per stage
-        std::vector<int64_t> part_next(stages.size() + 1, INT64_MAX);
+        // the prompt's stages: CUDA0's and the split's, or with the EP prefill CUDA0's and the peer stage (s.6)
+        const size_t n_prompt_stages = ep_on ? 2 : stages.size() + 1;
+        std::vector<int64_t> part_next(n_prompt_stages, INT64_MAX);
         // a checkpoint of the state after `cur[0, L)`; false only when the copy itself failed.  `parts`: the stages'
         // states saved at L (a split's mid-prompt checkpoint); without, they are read now (everything is at L)
         // #613: why the last checkpoint_at failed - a failed device sync is the GPU itself (a hang Windows then resets),
@@ -11421,14 +11671,24 @@ int main(int argc, char** argv) {
             c.ids.assign(cur.begin(), cur.begin() + L);
             c.imgs = imgs_below(req_imgs, L);
             if (parts != nullptr) {
-                if (parts->size() != stages.size() + 1) return false;
+                if (parts->size() != n_prompt_stages) return false;
                 c.gdn = std::move((*parts)[0].gdn);
                 c.dev_tag = (*parts)[0].dev_tag;
                 c.ple = std::move((*parts)[0].ple);
                 c.tails = std::move((*parts)[0].tails);
                 c.dead = std::move((*parts)[0].dead);
                 c.block_pos = std::move((*parts)[0].block_pos);
-                for (size_t i = 1; i < parts->size(); ++i) c.stage_parts.push_back(std::move((*parts)[i]));
+                if (ep_on) {
+                    // the EP prefill: part 0 is the full session's (its rows of layers >= ep_K are stale mid-prompt),
+                    // part 1 the peer stage's at the same count; merged into ONE full-session checkpoint, no stage parts
+                    std::string merr;
+                    if (!strata::core::ep_split::checkpoint_merge_tail(c, (*parts)[1], ss, ep_stage->ss, g, merr)) {
+                        std::fprintf(stderr, "strata serve: ep-split checkpoint at %lld: %s\n", (long long) L, merr.c_str());
+                        return false;
+                    }
+                } else {
+                    for (size_t i = 1; i < parts->size(); ++i) c.stage_parts.push_back(std::move((*parts)[i]));
+                }
             } else if (ckpt_pool.on() || ckpt_threads_env()) {
                 // STRATA_CKPT_POOL / STRATA_CKPT_THREADS: the parts go into the vectors a pooled checkpoint already has
                 // (none resized), with the threads all at once; part k is stage k's session, synchronized first
@@ -11586,8 +11846,10 @@ int main(int argc, char** argv) {
             for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) cur[(size_t) (p0 + t + 1)];
             // E-9: batched through the prompt path when it can (a layer split: only with STRATA_SPLIT_MTP_BATCH=1)
             bool batched = false;
+            // (the EP prefill: the rows are on the peer card and the drafter on CUDA0, so E-9 is never tried: the plan
+            // of a split with its variable off, which is "the drafter's own pass, nothing to say")
             const strata::program::draft_kv::Plan dkv = strata::program::draft_kv::plan(
-                use_mtp, multi_gpu, split_mtp_batch && !mtp_off_last, strata::core::native_embed() != nullptr);
+                use_mtp, multi_gpu || ep_on, split_mtp_batch && !mtp_off_last && !ep_on, strata::core::native_embed() != nullptr);
             if (dkv.try_batched || dkv.why != nullptr) {
                 strata::prefill::Prefill& dsp = multi_gpu ? stages.back()->sp : sp;   // the drafter's stage
                 const char* why = dkv.why;
@@ -11605,7 +11867,23 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            if (!e.empty() || (use_mtp && !batched && !mtp.prefill(R_rows, nxt.data(), T, p0, e))) return false;
+            if (!e.empty()) return false;
+            if (use_mtp && !batched) {
+                const float* R_draft = R_rows;
+                if (ep_on) {
+                    // the EP prefill: this runs on the peer stage's thread with its rows on its card; the drafter's
+                    // prompt pass copies rows D2D on its own device (mtp.cpp), so the rows cross to CUDA0 first (s.3.4)
+                    if (ep_R_dev0 == nullptr || T > ep_R_rows) {
+                        e = "ep-split: a chunk of " + std::to_string(T) + " rows is more than the drafter's row buffer holds (" +
+                            std::to_string(ep_R_rows) + ")";
+                        return false;
+                    }
+                    if (!mover.rows_to_primary(R_rows, ep_R_dev0, T, g.hc * g.n_embd, e)) return false;
+                    R_draft = ep_R_dev0;
+                }
+                const strata::core::OnDevice on_draft(ep_on ? primary_device : -1);
+                if (!mtp.prefill(R_draft, nxt.data(), T, p0, e)) return false;
+            }
             if (use_mtp && std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr)
                 std::fprintf(stderr, "strata serve: DRAFT_PREFILL path=%s mode=%d cells=%lld\n",
                              batched ? "batched" : "token", mtp.kv_state().kv_mode, (long long) T);
@@ -11624,12 +11902,12 @@ int main(int argc, char** argv) {
             // Keep the prefill's existing chunk geometry. One extra near-tail checkpoint
             // can serve a branch whose shared prefix ends before the final cached state.
             const bool tail_checkpoint = o.prompt_cache_tail && o.prompt_cache > 0 && o.prompt_cache_every > 0 &&
-                !multi_gpu && !pp_tail_saved && pp_total - done > std::max<int64_t>(1, o.short_read) &&
+                !multi_gpu && !ep_on && !pp_tail_saved && pp_total - done > std::max<int64_t>(1, o.short_read) &&
                 pp_total - done <= T &&   // this chunk's real size (--prefill auto chunks differ from o.prefill_chunk)
                 !sp.layer_major_mid();
             if (periodic_checkpoint || tail_checkpoint) {
                 bool saved = false;
-                if (multi_gpu) {   // the stages' parts, saved when each of them read this chunk
+                if (multi_gpu || ep_on) {   // the stages' parts, saved when each of them read this chunk
                     std::vector<ConvCheckpoint> parts;
                     {
                         std::lock_guard<std::mutex> lk(part_mu);
@@ -11637,7 +11915,7 @@ int main(int argc, char** argv) {
                         if (it != part_at.end()) parts = std::move(it->second);
                         part_at.erase(part_at.begin(), part_at.upper_bound(done));
                     }
-                    bool complete = parts.size() == stages.size() + 1;
+                    bool complete = parts.size() == n_prompt_stages;
                     for (const ConvCheckpoint& k : parts) complete = complete && !k.gdn.empty();
                     saved = !complete || checkpoint_at(done, &parts);   // an incomplete set: no checkpoint here
                 } else {
@@ -11657,12 +11935,14 @@ int main(int argc, char** argv) {
             }
             return true;
         };
-        if (multi_gpu) {   // the batched prompt is reported by its last stage (the drafter's rows are there)
-            stages.back()->sp.on_chunk = std::move(sp.on_chunk);
+        if (multi_gpu || ep_on) {   // the batched prompt is reported by its last stage (the drafter's rows are there)
+            // (the EP prefill: the last stage is the peer stage; the rows cross to the drafter on CUDA0 in on_chunk)
+            strata::prefill::Prefill& last_sp = ep_on ? ep_stage->sp : stages.back()->sp;
+            last_sp.on_chunk = std::move(sp.on_chunk);
             sp.on_chunk = nullptr;
-            for (size_t i = 0; i <= stages.size(); ++i) {
-                strata::prefill::Prefill& stage_sp = i == 0 ? sp : stages[i - 1]->sp;
-                strata::core::SessionState& stage_ss = i == 0 ? ss : stages[i - 1]->ss;
+            for (size_t i = 0; i < n_prompt_stages; ++i) {
+                strata::prefill::Prefill& stage_sp = i == 0 ? sp : ep_on ? ep_stage->sp : stages[i - 1]->sp;
+                strata::core::SessionState& stage_ss = i == 0 ? ss : ep_on ? ep_stage->ss : stages[i - 1]->ss;
                 stage_sp.on_stage_chunk = [&, i](int64_t done, std::string& e) -> bool {
                     if (o.prompt_cache <= 0 || o.prompt_cache_every <= 0 || done < part_next[i]) return true;
                     part_next[i] = done + o.prompt_cache_every;
@@ -11675,12 +11955,12 @@ int main(int argc, char** argv) {
                         std::fprintf(stderr, "strata serve: checkpoint at %lld skipped: stage %zu's state could not be copied "
                                              "out (see above); the request goes on without it\n", (long long) done, i);
                         std::lock_guard<std::mutex> lk(part_mu);
-                        part_at[done].resize(stages.size() + 1);   // (marks the set as seen; its empty parts make it incomplete)
+                        part_at[done].resize(n_prompt_stages);   // (marks the set as seen; its empty parts make it incomplete)
                         return true;
                     }
                     std::lock_guard<std::mutex> lk(part_mu);
                     auto& v = part_at[done];
-                    v.resize(stages.size() + 1);
+                    v.resize(n_prompt_stages);
                     v[i] = std::move(part);
                     return true;
                 };
@@ -13615,6 +13895,7 @@ int main(int argc, char** argv) {
         auto copy_from_slot = [&](int b, const ConvCheckpoint* at, std::string& e) -> bool {
             // the main session's K/V is replaced by the slot's: K/V retained from a restore described the old one
             conversations.take_reuse();
+            if (ep_on) ep_sync.invalidate();   // (a rewrite of the main session, whole or failed: the peer stage holds nothing of it)
             const int64_t upto = at != nullptr ? (int64_t) at->ids.size() : (int64_t) bs[(size_t) b].ids.size();
             if (at != nullptr && at->stage_parts.size() != stages.size()) { e = "a checkpoint without its stage parts"; return false; }
 #if defined(STRATA_GPU_METAL)
@@ -14903,6 +15184,7 @@ int main(int argc, char** argv) {
                         std::fflush(stdout);
                         return 1;
                     }
+                    if (ep_on) ep_sync.invalidate();   // (a session file rewrote the main session: s.6; refused with a peer today)
                     live = std::move(image.live.ids);
                     live_imgs = std::move(image.live.imgs);
                     checks = std::move(image.checkpoints);
@@ -15132,6 +15414,12 @@ int main(int argc, char** argv) {
                         const strata::core::OnDevice on(st->dev);
                         cudaDeviceSynchronize();
                         ok = ok && cudaMemcpy(st->mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t),
+                                              cudaMemcpyHostToDevice) == cudaSuccess;
+                    }
+                    if (ep_on && ep_stage->mrope != nullptr) {   // STRATA_EP_SPLIT_PREFILL: the peer stage's table too
+                        const strata::core::OnDevice on(ep_stage->dev);
+                        cudaDeviceSynchronize();
+                        ok = ok && cudaMemcpy(ep_stage->mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t),
                                               cudaMemcpyHostToDevice) == cudaSuccess;
                     }
                     return ok;
@@ -15716,6 +16004,7 @@ int main(int argc, char** argv) {
                 cvec_cached = donor->cvec;
                 resume = parked.tokens;
                 from_live = false;
+                if (ep_on) ep_sync.invalidate();   // the main session was rewritten from the donor (s.6)
                 conversations.count_borrow();
                 std::fprintf(stderr, "strata serve: conversation cache: borrowed %lld tokens from a parked "
                              "conversation, which stays parked, in %.1f ms; parked=%zu bytes=%zu borrowed=%zu\n",
@@ -15732,6 +16021,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR restoring parked conversation: %s\n", err.c_str());
                     return 1;
                 }
+                if (ep_on) ep_sync.invalidate();   // a parked or disk image rewrote the main session (s.6)
                 for (size_t i = 0; i < stages.size(); ++i) {   // the later stages' parts
                     const strata::core::OnDevice on(stages[i]->dev);
                     if (strata::core::conversation_snapshot_restore(incoming->stage_images[i], stages[i]->ss, g,
@@ -15825,6 +16115,17 @@ int main(int argc, char** argv) {
                 }
             }
             int64_t reread_to = -1;   // STRATA_CKPT_REREAD only: read [0, reread_to) again instead of restoring
+            // STRATA_EP_SPLIT_PREFILL: this request's tokens as the sync bookkeeping keeps them (ids are int64 here)
+            std::vector<int32_t> ep_ids32;
+            if (ep_on) ep_ids32.assign(ids.begin(), ids.end());
+            // the peer stage's session zeroed like the main one (its stream synchronized); a zero is a rewrite (s.6)
+            auto ep_zero = [&]() {
+                if (!ep_on) return;
+                const strata::core::OnDevice on(ep_stage->dev);
+                strata::core::session_zero(ep_stage->ss, g, nullptr, (void*) ep_stage->stream);
+                cudaStreamSynchronize(ep_stage->stream);
+                ep_sync.invalidate();
+            };
             if (resume == 0) {
                 strata::core::session_zero(ss, g, nullptr, main_cs);
                 cudaStreamSynchronize(main_stream);
@@ -15833,6 +16134,7 @@ int main(int argc, char** argv) {
                     strata::core::session_zero(st->ss, g, nullptr, (void*) st->stream);
                     cudaStreamSynchronize(st->stream);
                 }
+                ep_zero();
                 checks.clear();
             } else if (!from_live) {
                 ConvCheckpoint* c = nullptr;
@@ -15857,6 +16159,7 @@ int main(int argc, char** argv) {
                         strata::core::session_zero(st->ss, g, nullptr, (void*) st->stream);
                         cudaStreamSynchronize(st->stream);
                     }
+                    ep_zero();
                     reread_to = resume;
                     std::fprintf(stderr, "strata serve: STRATA_CKPT_REREAD: reading %lld tokens again instead of "
                                          "restoring\n", (long long) resume);
@@ -15871,6 +16174,7 @@ int main(int argc, char** argv) {
                     std::printf("ERR restoring a conversation checkpoint failed\n");
                     return 1;
                 }
+                if (ep_on) ep_sync.invalidate();   // a checkpoint mount rewrote the main session's running state (s.6)
                 if (lent && lent_slot == admit_slot) {
                     // the slot this request continues in drops its checkpoints at the admission: this one moves back
                     // into the chain (and on into the slot then: moved_in)
@@ -16427,6 +16731,25 @@ int main(int argc, char** argv) {
                 };
                 auto run = [&](int64_t q, int64_t r) -> bool {
                     if (planned) sp.force_chunk(plan.chunk, plan_single, plan.chunked);
+                    if (ep_on) {
+                        // STRATA_EP_SPLIT_PREFILL (s.4): the peer stage reads on from q, so what it does not hold of the
+                        // main session's [0, q) for its layers crosses first (the cells the decode wrote, or the whole
+                        // prefix after a restore - valid_for says which), with the running state at q.  The peer tier is
+                        // quiesced before every stage read: an earlier adapt's copies have landed and its residency
+                        // table (the stage's resident tier) does not move while the stage reads its slots.
+                        if (!peer.quiesce(e)) return false;
+                        const int64_t c0 = ep_sync.valid_for(ep_ids32.data(), q);
+                        if (c0 < q) {
+                            if (cudaStreamSynchronize(main_stream) != cudaSuccess) {
+                                e = "ep-split handover to the peer stage: the primary's stream failed";
+                                return false;
+                            }
+                            strata::core::ep_split::Stats st;
+                            if (!mover.to_peer(ss, ep_stage->ss, c0, q, /*running_state=*/true, st, e)) return false;
+                            ep_sync.note(ep_ids32.data(), q);
+                            if (ep_trace) std::fprintf(stderr, "%s\n", strata::core::ep_split::line_trace("to peer", st).c_str());
+                        }
+                    }
                     bool run_ok;
                     if (!co_set.empty() && !co_tried && admit_slot >= 0 && req_imgs.empty()) {
                         co_tried = true;
@@ -17082,6 +17405,30 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: pin=%lld: the cache has no checkpoint there to pin (it resumed from "
                                  "%lld)\n", (long long) req_pin, (long long) read_from);
             }
+            // STRATA_EP_SPLIT_PREFILL (s.3.5): a batched part is read and both stages are drained (Prefill::run returns
+            // once the peer stage's thread finished): the cells [c0, c1) the peer stage computed for its layers and its
+            // running state at c1 cross to the full session, which is the truth for every layer from here (the
+            // checkpoint at the cut, the parking, the prefix image and the decode read it).  An error ends the request
+            // with ERR, never a different text.
+            auto ep_to_primary = [&](int64_t c0, int64_t c1) -> bool {
+                if (!ep_on || c1 <= c0) return true;
+                if (cudaStreamSynchronize(main_stream) != cudaSuccess) {
+                    err = "the primary's stream failed before the handover";
+                    return false;
+                }
+                {
+                    const strata::core::OnDevice on(ep_stage->dev);
+                    if (cudaStreamSynchronize(ep_stage->stream) != cudaSuccess) {
+                        err = "the peer stage's stream failed before the handover";
+                        return false;
+                    }
+                }
+                strata::core::ep_split::Stats st;
+                if (!mover.to_primary(ep_stage->ss, ss, c0, c1, /*running_state=*/true, st, err)) return false;
+                ep_sync.note(ep_ids32.data(), c1);
+                if (ep_trace) std::fprintf(stderr, "%s\n", strata::core::ep_split::line_trace("to primary", st).c_str());
+                return true;
+            };
             std::vector<int64_t> cuts = {reread_to, root_at, message_at, turn_at, n - 1};
             if (pin_at >= 0) {
                 cuts.push_back(pin_at);
@@ -17145,6 +17492,13 @@ int main(int argc, char** argv) {
                 pp_exact = false;   // a batched or pipelined part is in flight: a cancel may leave the state past pp_reached
                 const bool sp_ok = read_to <= at || (win ? read_windows(at, read_to, err) : read_part(at, to, err));
                 if (sp_ok) pp_exact = true;
+                // the EP prefill: a batched part's cells [at, reached) and the peer stage's state cross to CUDA0 now,
+                // before the cut's checkpoint reads the full session (a read stopped short: up to where it reached)
+                if (sp_ok && !win && ep_on && !ep_to_primary(at, std::min(pp_reached, read_to))) {
+                    std::printf("ERR ep-split handover: %s\n", err.c_str());
+                    std::fflush(stdout);
+                    return 1;
+                }
                 if (trace) {
                     const double ms = std::chrono::duration<double, std::milli>(Clock::now() - tsp).count();
                     (win ? req_times.windows_ms : req_times.read_ms) += ms;
@@ -17156,6 +17510,7 @@ int main(int argc, char** argv) {
                     std::fflush(stderr);
                 }
                 if (!sp_ok && nf_hit) {   // #879: DONE nonfinite (the lent slots are refilled below)
+                    if (ep_on) ep_sync.invalidate();   // (the two sessions parted mid-part: nothing of this read is kept)
                     cancelled = true;
                     break;
                 }
@@ -17177,6 +17532,24 @@ int main(int argc, char** argv) {
                             std::_Exit(1);
                         }
                         return 1;
+                    }
+                    if (ep_on) {
+                        // STRATA_EP_SPLIT_PREFILL: a BATCHED part stopped midway (the stages are drained: Prefill::run
+                        // returns after drain_pipeline; the peer stage's session is at pp_reached, which its on_chunk
+                        // set).  The cells [at, pp_reached) it computed cross now, so the mid-prompt checkpoints this
+                        // part made (positions <= pp_reached, kept in `checks`) find the full session's K/V at every
+                        // layer when a later request resumes from one.  NOT after a part read in windows: the stage
+                        // computed nothing of it (the verifier wrote those cells into `ss` on all layers itself), and
+                        // the copy would have put the stage's stale bytes of [at, pp_reached) - and of the page's cells
+                        // before `at` - over them, while the conversation stays live at pp_reached (pp_exact holds
+                        // after read_windows): a wrong continuation with no error.  Then nothing of the stage is
+                        // trusted either way (the next read copies what it needs again).
+                        if (!win && !ep_to_primary(at, pp_reached)) {
+                            std::printf("ERR ep-split handover: %s\n", err.c_str());
+                            std::fflush(stdout);
+                            return 1;
+                        }
+                        ep_sync.invalidate();
                     }
                     cancelled = true;   // stopped while reading the prompt: refill the lent slots below, then DONE cancel
                     break;
@@ -19007,14 +19380,23 @@ int main(int argc, char** argv) {
                                       strata::core::PeerExperts::fused_hostwait() ? ", HOSTWAIT" : "");
                         fused_note = buf;
                     }
+                    // STRATA_EP_SPLIT_PREFILL: the handovers between the cards since the engine started (s.3.7)
+                    std::string ep_note;
+                    if (ep_on) {
+                        char buf[120];
+                        std::snprintf(buf, sizeof buf, " ep-split: %lld passaggi, %.0f MB, %.1f ms", (long long) mover.handovers(),
+                                      (double) mover.bytes_total() / 1e6, mover.ms_total());
+                        ep_note = buf;
+                    }
                     // the peer's adapt(): its host time runs on the adapt thread and shows in "adapt join" when it outlasts the draft
                     std::fprintf(stderr, "strata decode peer: per window: %.2f ms host in launch + %.2f ms waiting in finish over %.1f layers "
-                                         "with a share; per layer-window: %.2f entries, %.2f experts; adapt %.2f ms host, %.1f swaps/window%s%s%s%s\n",
+                                         "with a share; per layer-window: %.2f entries, %.2f experts; adapt %.2f ms host, %.1f swaps/window%s%s%s%s%s\n",
                                  (peer.ms_launch - peer_launch0) / w, (peer.ms_wait - peer_wait0) / w, (double) (peer.launches - peer_launches0) / w,
                                  (double) (peer.entries() - peer_entries0) / (w * L), (double) (peer.experts() - peer_experts0) / (w * L),
                                  (peer.ms_adapt - peer_adapt0) / w, (double) (peer.swaps() - peer_swaps0) / w,
                                  strata::core::PeerExperts::noswitch() ? " (STRATA_PEER_NOSWITCH)" : "",
-                                 strata::core::PeerExperts::refill_flush() ? " (STRATA_PEER_REFILL_FLUSH)" : "", fused_note.c_str(), span.c_str());
+                                 strata::core::PeerExperts::refill_flush() ? " (STRATA_PEER_REFILL_FLUSH)" : "", fused_note.c_str(), span.c_str(),
+                                 ep_note.c_str());
                 }
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();
@@ -20912,6 +21294,18 @@ int main(int argc, char** argv) {
     cudaFree(d_emb);
     cudaFree(d_parts);
     cudaFree(sbuf);
+    if (ep_on) {   // STRATA_EP_SPLIT_PREFILL: the mover's pieces and streams, then the peer stage's session and stream
+        mover.close();
+        if (ep_R_dev0 != nullptr) cudaFree(ep_R_dev0);
+        const strata::core::OnDevice on(ep_stage->dev);
+        cudaStreamSynchronize(ep_stage->stream);
+        ep_stage->sp.reset();   // (its buffers freed with its device current, as `reset` asks)
+        strata::core::session_release(ep_stage->ss);
+        cudaFree(ep_sbuf);
+        if (ep_stage->mrope != nullptr) cudaFree(ep_stage->mrope);
+        cudaStreamDestroy(ep_stage->stream);
+        ep_stage->stream = nullptr;
+    }
     cudaFree(arena);
     return 0;
 }

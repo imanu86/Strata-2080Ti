@@ -626,6 +626,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_include_directories(peer_fused_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(peer_fused_test PRIVATE strata_kernels strata_core CUDA::cudart)
   endif()
+  # EP_SPLIT_PREFILL (docs/EP_SPLIT_PREFILL.md s.5, s.11, lab/upsync-v0.2.9): the state mover of STRATA_EP_SPLIT_PREFILL=1
+  # (ep_split.cpp, the running state of layers [K, n) between the peer stage's session and the primary's full one) bit
+  # for bit on sessions carved by session_init, kv_mode 0 and 1, in both directions, plus the Sync bookkeeping and the
+  # mid-prompt checkpoint merge; host code only, GPU, no model.  Not in the default build: `cmake --build <dir>
+  # --target ep_split_test`.  CUDA only, like peer_fused_test above (the mover's pinned pieces and streams are the CUDA runtime's).
+  if(STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
+    add_executable(ep_split_test EXCLUDE_FROM_ALL tools/ep_split_test.cpp)
+    target_include_directories(ep_split_test PRIVATE include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(ep_split_test PRIVATE strata_engine strata_kernels strata_core CUDA::cudart)
+  endif()
   # PEER_FUSED s.5: the kernel is built at __launch_bounds__(256, 2) (STRATA_PEER_FUSED_MINB unset or 2); the 3- and
   # 4-blocks-per-SM instances (STRATA_PEER_FUSED_MINB=3|4) are two more large kernels in iq_kernels.cu (one instance
   # holds every type's body), so they exist only in a build that asks for them.  Off (the default) leaves
@@ -721,6 +731,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp src/core/dflash2.cpp
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
+    src/core/ep_split.cpp
     src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu strata_prefix_cache ${_strata_gpu_runtime_target})
