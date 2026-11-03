@@ -1570,6 +1570,21 @@ void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream) {
     check("wait_flag_ge");
 }
 
+namespace {
+// STRATA_PEER2_SKIP (docs/PEER_FUSED2.md s.11.1): wait_flag_ge_kernel that also returns when *other == value - BOTH words
+// polled every turn (wait_flag_ge_or reads its skip word once: that word is written before the node runs; the empty
+// word here is written by the pool thread while the node may already be spinning).  Both are mapped host memory.
+__global__ void wait_flag_ge_any_kernel(const volatile uint32_t* flag, uint32_t value, const volatile uint32_t* other) {
+    while (*flag < value && *other != value) strata_spin_pause();
+    __threadfence_system();
+}
+}  // namespace
+
+void wait_flag_ge_any(const uint32_t* flag, uint32_t value, const uint32_t* other, void* stream) {
+    wait_flag_ge_any_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value, other);
+    check("wait_flag_ge_any");
+}
+
 void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long long* t_in, unsigned long long* t_out,
                           void* stream) {
     wait_flag_ge_stamped_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value, t_in, t_out);

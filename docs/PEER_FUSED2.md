@@ -11,7 +11,9 @@ Tutto dietro la lista `--peer-device A,B`. **Con un solo device nulla cambia**: 
 default e il codice percorso è quello di prima, voce per voce; il solo costo aggiunto sul percorso a un server è un
 confronto con un puntatore nullo per strato nel dispatch e nell'adapt (`d.peer2 != nullptr`, `peer2.valid()`).
 
-Scritto e **non compilato, non installato, non provato** (§9).
+Scritto e **non compilato, non installato, non provato** (§9). Compilato e PASS al banco bit per bit il 3/11; la prima
+misura nel motore e le tre modifiche che ne seguono (salto a vuoto, righe q8_1 pubblicate dalla padrona, quota calda al
+server 2) sono in §11, anch'esse non compilate né provate.
 
 ## 0. In una frase
 
@@ -35,6 +37,10 @@ passo, prima quello del server 1 poi quello del server 2, poi le righe CPU come 
 | `STRATA_PEER2_FUSED` | 1 (segue `STRATA_PEER_FUSED`) | 0: il server 2 resta sul percorso per-strato anche con `STRATA_PEER_FUSED=1` (il server 1 tiene il suo kernel) |
 | `STRATA_PEER2_WAIT_MS` | 1500 | limite di **ogni** attesa dentro il kernel del server 2 (doorbell, `lready`, barriere): sotto i 2 s del TDR di Windows (§5). Il server 1 resta a `STRATA_PEER_FUSED_WAIT_MS` (20 000) |
 | `STRATA_PEER2_FUSED_BLOCKS` | = `STRATA_PEER_FUSED_BLOCKS` | tetto di blocchi residenti per SM del kernel del server 2: con 1 la 3060 lascia posto al desktop (§5) |
+| `STRATA_PEER2_SKIP` | **1** | salto a vuoto (§11.1): a un passo in cui il server 2 non ha voci la padrona non aspetta il suo flag |
+| `STRATA_PEER_SKIP` | 0 | lo stesso per il server 1 (§11.1) |
+| `STRATA_PEER2_STAGE` | 0 | la padrona pubblica le righe del passo già quantizzate q8_1 per il server 2: 2,9 KB a token sul riser invece di 10 (§11.2) |
+| `STRATA_PEER2_SHARE` | 0 | frazione 0..0,5: all'apertura il server 1 lascia al server 2 una coppia ogni 1/f delle sue candidate calde (§11.3) |
 
 `--peer-adapt-swaps`, `--peer-prefill-rows`, `STRATA_PEER_HOT`, `STRATA_PEER_*` restano del server 1. Le variabili
 `STRATA_PEER2_*` le legge solo il `PeerExperts` aperto con `ordinal` 1 (`peer_fused.hpp`: `kEnvOn2`, `kEnvWaitMs2`,
@@ -228,3 +234,134 @@ strata ... --peer-device 2,1 --peer-reserve-mib 3000,1500 ...
 Attesi: due righe di apertura (§7), `strata decode peer:` e `strata decode peer2 (GPU 1):`, risposta sensata. Poi
 `STRATA_PEER2_FUSED=1` e la riga `the peer (second server) on GPU 1 serves each window with one persistent kernel`.
 Confronto: la stessa corsa con `--peer-device 2` sola (bit diversi, §6: va misurato con KL / testo, non con `memcmp`).
+
+## 11. Tre modifiche dopo la prima misura (3/11, sera)
+
+Misura nel motore (decode, 2080 Ti server 1 su x16, 3060 server 2 sul riser x1 Gen2 con lo schermo, mega-kernel su
+entrambe): finestra 29,77 ms contro 27,40 con un server; attesa GPU della padrona 24,00 ms contro 16,38; CPU 1,61 ms
+contro 4,58; esperti CPU 0,37 a strato-finestra contro 1,10. La 3060 ha 2-3 voci (≈2 esperti) a strato-finestra, su
+34-37 strati su 48, e costa ~160 µs a strato: la padrona la aspetta a ogni passo (il nodo del flag 2 sta prima delle
+righe CPU), quindi quei 160 µs × 48 sono i ~7,6 ms in più di attesa GPU.
+
+**Dove vanno i 160 µs.** Il kernel legge già `x` con tutti i blocchi in parallelo (128 B per warp, `__ldcv`, fase C),
+`lready` e le barriere stanno in VRAM, il doorbell lo legge un solo thread: non sono le transazioni, sono i **byte sul
+riser**. A T=4 un passo muove 40 KB di `x` fp32 in lettura e 20-30 KB di righe fp32 in scrittura: ~130 µs a 0,5 GB/s
+(x1 Gen2: 500 MB/s per verso, ~420 effettivi con le intestazioni), più il giro doorbell → flag. Le righe fp32 non si
+toccano (bit-identità: la `combine` le legge così); l'ingresso sì: la padrona ha già i byte q8_1 di quelle righe (la
+fase C del kernel li rifà con lo stesso `q8_1_store`), e in q8_1 una riga sono 2 880 B invece di 10 240. Da qui le tre
+modifiche, ognuna dietro una variabile, **spente = il codice di prima, istruzione per istruzione** (`Window::ahead`
+0, `Window::xq` nullo, `Hook::empty_dev0` / `xq_dev0` nulli, `share` 0).
+
+Scritte e **non compilate, non installate, non provate**.
+
+### 11.1 Salto a vuoto — `STRATA_PEER2_SKIP` (default **1**), `STRATA_PEER_SKIP` (default 0)
+
+Oggi a ogni passo il grafo della padrona aspetta il flag del server 2 anche quando il server 2 non ha voci: il kernel
+deve vedere il doorbell sul riser, leggere gli `ids`, pianificare zero gruppi, fare il fence e alzare il flag, e la
+padrona aspetta tutto il giro (~decine di µs sul riser) per niente. Con il salto:
+
+- **Host** (`PeerExperts::launch`, ramo fused): quando `groups == 0` scrive `empty[s] = s + 1` nella pagina mappata del
+  server (`kOffEmpty`, 256 parole, azzerate a `fused_begin`) e fa il fence. È memoria host sul lato x16: costa nulla.
+- **Padrona** (`verify.cpp`, `post`): il nodo del passo diventa `wait_flag_ge_any(flag_out, ring, empty + ring − 1)`:
+  esce su `flag ≥ ring` **oppure** `empty[s] == ring`, entrambe le parole lette a ogni giro (`wait_flag_ge_or` di E-6
+  legge la sua parola una volta sola: non va bene, la parola vuota arriva mentre il nodo già gira). Con il hook senza
+  `empty_dev0` (salto spento, o HOSTWAIT) il nodo è `wait_flag_ge` di prima. Sotto HOSTWAIT `finish()` non aspetta
+  un passo con `expect_ == 0`.
+- **Kernel** (`Window::ahead = 1`): senza il nodo la padrona può suonare il doorbell di `s + 2` prima che il kernel
+  abbia alzato `flag(s)`, e l'invariante «nessun blocco due passi avanti» (PEER_FUSED §5), che reggeva `plan[s & 1]` e
+  `done[s & 1]`, cadeva: un blocco lento ancora fermo su `lready` del passo `s` avrebbe letto il piano di `s + 2` e un
+  conteggio di `done` si sarebbe perso. Il kernel se lo garantisce da solo: al passo `s ≥ 2`, **dopo** il doorbell e
+  **prima** di riscrivere `plan[s & 1]`, il blocco 0 aspetta `done[s & 1] ≥ (s >> 1) × nblocks` (tutti gli incrementi
+  del passo `s − 2`; VRAM, mai il link; limite `wait_ns` → `kErrTimeoutDone`). Nessun altro blocco aspetta nulla di
+  nuovo. Il kernel serve comunque ogni passo (`cnt[s] = 0`, stamp, flag): il controllo di `fused_end` resta intero.
+- **`fused_end`**: la padrona può finire la finestra mentre il kernel sta ancora servendo gli ultimi passi vuoti
+  (microsecondi): il drain fa 500 µs di attesa attiva prima dei sonni da 1 ms, così la coda non costa mai 1 ms.
+- Il server 1 ha lo stesso codice dietro `STRATA_PEER_SKIP`, default 0: sull'x16 il giro a vuoto vale pochi µs e la
+  2080 Ti ha quasi sempre voci; si accende per misurare.
+
+Default 1 sul server 2 perché il percorso nuovo è piccolo e recintato (una parola in più per passo, un'attesa in VRAM
+nel blocco 0 che di norma è già soddisfatta) e il guadagno è certo sui 11-14 strati su 48 in cui la 3060 non ha voci.
+Resta **non provato**: il banco con `--skip` (sotto) è la prova da fare prima del motore.
+
+### 11.2 Meno byte sul riser — `STRATA_PEER2_STAGE` (default 0, solo il server 2)
+
+Non lo «staging» di un blocco solo (il kernel legge già in parallelo e coalescente; un blocco solo avrebbe meno
+richieste in volo, non di più), ma meno byte:
+
+- **Padrona** (`verify.cpp`, `pre`, subito dopo il doorbell): un nodo in più per passo, `peer_fused_publish_q8(xm, n,
+  N, xq + tb·N/32 blocchi, xq_seq, ring)` (`peer_fused.cuh`): un blocco di 1024 thread quantizza le `n` righe del
+  passo con **`q8_1_store`** — lo stesso quantizzatore di `quantize_q8_1_rows` (la via hit della padrona) e della
+  fase C del kernel, stessa TU, stessi flag — direttamente nella pagina mappata `xq` del server 2 (`h_xq_`,
+  `kMaxTok × N/32 × 36` B, allocata da `fused_open` con la variabile), fence di sistema, poi `xq_seq = ring`
+  (`kOffXqSeq` nella pagina del server). Costo sulla padrona: ~3-5 µs a passo (il nodo + 11,5 KB sull'x16).
+- **Kernel** (`Window::xq`, `xq_seq`): il blocco 0, pianificato il passo, se `groups > 0` aspetta `xq_seq ≥ ring`
+  (mappata, limite `wait_ns` → `kErrTimeoutXq`) **prima** di `lready`; un passo vuoto non la legge. La fase C copia
+  `n_tok × N/32 × 36` B dalla pagina mappata in `d_q8` a 16 B per thread (`__ldcv` di `uint4`, coalescente) invece di
+  leggere `n_tok × N` float e quantizzare: 11,5 KB invece di 40 a T=4, ~70 µs in meno a passo sul riser.
+- Stima: passo da ~160 a ~100 µs (resta la scrittura delle righe fp32, 10 KB a voce). Lo dicono gli stamp (`GPU span
+  per step` della riga `peer2`) e il banco con `--stage`.
+
+### 11.3 Quota calda al server 2 — `STRATA_PEER2_SHARE` (default 0, 0 < f ≤ 0,5)
+
+Oggi il server 2 prende le coppie **dopo** la fine della tier del server 1: le più fredde fra quelle sulle GPU, quindi
+poche voci a passo (2-3), e la 2080 Ti resta il collo (la padrona la aspetta 15-16 ms a finestra). Con la quota:
+
+- `PeerExperts::open(..., share)` del **server 1**: fra le sue candidate in ordine di rango (le coppie che la padrona
+  non tiene) **lascia** la candidata `c` con `floor((c + 1) f) > floor(c f)` — una ogni 1/f — senza prenderla
+  (`left_[idx] = 1`) e riempie il budget con le successive. Le coppie lasciate oltre la fine della sua tier non contano
+  come lasciate (sarebbero andate al server 2 comunque): `left_count()` dice quante hanno davvero cambiato scheda.
+- Il **server 2** apre come oggi (salta la padrona e `before->has`): trova libere le coppie lasciate, che vengono prima
+  nel ranking, e le prende per prime, poi le successive alla fine del server 1 fino al suo budget. `took_left()`
+  conta quante delle lasciate ha preso (il suo budget può finire prima). Una coppia sta su una scheda sola per
+  costruzione, come prima.
+- `generate.cpp` legge la variabile (solo con `--peer-device A,B`; sopra 0,5 → 0,5 con una riga) e stampa: `STRATA_PEER2_SHARE
+  0.20: GPU 2 left one candidate every 5.0 (N hot pairs) to the second server, which took M of them`. Se il server 2
+  non si apre, le coppie lasciate sono di nessuno (righe CPU): una riga lo dice, e si rilancia senza la variabile.
+- **Adapt**: nulla da cambiare. L'adapt del server 1 esclude già `other->claims(l, e)` (le coppie del server 2 hanno
+  `res_ ≥ 0`); i candidati della padrona escludono `peer2.has`. Il server 1 non se le riporta via.
+- `STRATA_PEER_HOT` (server 1) agisce prima, sull'ordine di `profile`; la quota conta le candidate dopo quell'ordine.
+
+**Bit.** 11.1 e 11.2: nessun bit cambia (chi calcola cosa è lo stesso; i byte q8_1 sono gli stessi di prima perché
+`q8_1_store` sugli stessi float dà gli stessi byte, sulla padrona come sulla 3060; il banco lo verifica con `memcmp`).
+11.3: le righe delle coppie spostate sono le stesse (stesso kernel, stessi interi, stesse somme: la pretesa «stessi bit
+su entrambe le schede» che il banco `--second` controlla fra due schede qualunque), e l'**ordine di somma non
+cambia** — la `combine` della padrona somma le `k` voci di un token nell'ordine delle voci, qualunque attore le abbia
+scritte (§6). Cambia però il **bordo freddo**: il server 2 ha lo stesso numero di slot, quindi prendendo N coppie
+calde lascia andare le sue N più fredde, che diventano righe CPU (o quota PCIe): quelle voci, rare, cambiano bit
+rispetto a `SHARE=0`, come per una tier più piccola. Detto, non nascosto.
+
+### 11.4 Banco e prova nel motore
+
+`tools/peer_fused_test.cu`: `--skip` (la finestra non aspetta il flag di un server senza voci al passo, parola vuota
+scritta dall'host come fa `launch`; con `--primary` il kernel-padrona legge flag **o** parola come `wait_flag_ge_any`;
+entrambi i kernel con `ahead = 1`; `cnt` e stamp letti a fine finestra) e `--stage` (con `--second`: ogni finestra è
+servita **due volte** sugli stessi passi, la seconda con le righe q8_1 del server 2 pubblicate dall'host — quantizzate
+sulla prima scheda con `quantize_q8_1_rows`, gli stessi byte del riferimento — e stampa per passo `2o server voci n:
+senza stage X us, con stage Y us`; entrambe le corse confrontate bit per bit). Codici d'errore nuovi nel banco e nel
+motore: `kErrTimeoutXq` (8), `kErrTimeoutDone` (9).
+
+```
+set CUDA_DEVICE_ORDER=PCI_BUS_ID
+set CUDA_VISIBLE_DEVICES=0,1,2
+set STRATA_EXP_MODE=8
+peer_fused_test 2 --second 1 --primary 0 --skip            (salto: PASS bit per bit con la padrona avanti)
+peer_fused_test 2 --second 1 --primary 0 --stage           (stage: per passo senza/con, PASS su entrambe le corse)
+peer_fused_test 2 --second 1 --primary 0 --skip --stage    (insieme)
+peer_fused_test 2 --second 1                               (senza flag: il banco di prima)
+```
+
+Motore, una variabile alla volta sulla stessa corsa `Qfus*` con `--peer-device 2,1`:
+
+```
+set STRATA_PEER_FUSED=1
+set STRATA_PEER2_FUSED=1
+set STRATA_PEER2_SKIP=1        (default; =0 per il confronto)      → attesa GPU della padrona, riga peer2
+set STRATA_PEER2_STAGE=1                                           → GPU span per step della riga peer2 (p50 da ~160 a ~100 us attesi)
+set STRATA_PEER2_SHARE=0.2                                         → riga "left one candidate every 5.0"; voci a strato del peer2 ≈ 2-3 volte
+set STRATA_PEER_SKIP=1                                             (opzionale, server 1)
+```
+
+Attesi: la riga `peer2` mostra meno strati con attesa e, con lo stage, span minori; con la quota `entries` del server
+2 sale e quella del server 1 scende, la finestra non cresce. Punti dove la compilazione può fermarsi: la lambda
+`serve` del banco (cattura `w2` e `recs` del ciclo), `wait_flag` con argomenti di default, `std::atof` in
+`generate.cpp` (`<cstdlib>` è già incluso), `kEnvShare2` visto da `generate.cpp` tramite `peer_experts.hpp`.

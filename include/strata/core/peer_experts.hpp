@@ -54,9 +54,21 @@ public:
     /// is the server opened before this one (its pairs are skipped too, so a pair is on one card) and `ordinal` its
     /// place (0 the first, as today; 1 the second: it reads the STRATA_PEER2_* knobs).  `before` must be open and idle
     /// (it is: the servers open one after the other at startup) and have the same n_layers x n_expert.
+    /// `share` (STRATA_PEER2_SHARE, docs/PEER_FUSED2.md s.11.3; the FIRST server only, 0 < share <= 0.5): of its
+    /// candidates in rank order (the pairs the primary does not hold), the first server LEAVES every pair whose
+    /// floor((c + 1) share) > floor(c share) (c = the candidate's index) to the second - it does not take it, marks it
+    /// in `left_for_next` - and fills its budget with the next ones; the second, which skips what the first holds,
+    /// takes those hot pairs first (they come first in the ranking) and then the pairs after the first's end, as
+    /// today.  0 (the default): the fill of before, pair for pair.
     bool open(int device, const std::vector<std::pair<int32_t, int32_t>>& ranked, const ExpertCache& primary,
               ExpertSource& src, int64_t n_layers, int64_t n_expert, int reserve_mib, int64_t max_slots,
-              std::string& err, const PeerExperts* before = nullptr, int ordinal = 0);
+              std::string& err, const PeerExperts* before = nullptr, int ordinal = 0, double share = 0.0);
+    /// s.11.3: whether the first server left (layer, expert) to the second at open (share > 0); false otherwise.
+    bool left_for_next(int64_t layer, int64_t expert) const {
+        return !left_.empty() && left_[(size_t) (layer * n_expert_ + expert)] != 0;
+    }
+    int64_t left_count() const { return left_count_; }   ///< pairs the first server left to the second (0 without share)
+    int64_t took_left() const { return took_left_; }     ///< on the second: how many of those it took (its budget may end first)
     void close();
     bool valid() const { return device_ >= 0; }
     int device() const { return device_; }
@@ -238,7 +250,7 @@ private:
     bool fused_open(std::string& err);        ///< open()'s fused part: shape, page, buffers, hook (false = a CUDA error)
     void fused_close();                       ///< frees what fused_open allocated (the kernel already left)
     cudaError_t fused_query();                ///< cudaStreamQuery(stream_) without the device switch, under it if refused
-    cudaError_t fused_drain(double limit_s);  ///< polls fused_query until not cudaErrorNotReady or the limit
+    cudaError_t fused_drain(double limit_s, double spin_s = 0.0);  ///< polls fused_query until not cudaErrorNotReady or the limit (busy for the first spin_s, then 1 ms sleeps)
     bool fused_map(const void* host, void** dev, std::string& err);   ///< the peer's device pointer of a mapped host page (cached)
     int device_ = -1;
     int ordinal_ = 0;                                 ///< open()'s ordinal: 1 = the second server (STRATA_PEER2_* knobs, device in the log lines)
@@ -249,6 +261,8 @@ private:
     std::vector<int32_t> res_;                        ///< [n_layers * n_expert] -> peer slot or -1 (sized at open, never reallocated after: res_table() hands it out)
     std::vector<std::pair<int32_t, int32_t>> pending_;   ///< (residency index, slot) once the copies land
     int64_t resident_ = 0, entries_ = 0, experts_ = 0, swaps_ = 0;
+    std::vector<uint8_t> left_;                       ///< s.11.3 (the first server, share > 0): 1 = left to the second at open; empty otherwise
+    int64_t left_count_ = 0, took_left_ = 0;
     // ---- STRATA_EP_SPLIT_PREFILL tappa 4b (docs/EP_SPLIT_PREFILL.md s.13.2): the lend guard.  Up between
     // generate.cpp's lend and refill of the tier's tail; atomic because adapt() runs on the decode's adapt thread
     // and the guard is set from the request thread (the design never overlaps them: the atomic makes the read
@@ -297,6 +311,13 @@ private:
     uint32_t* h_cnt_ = nullptr;        uint32_t* m_cnt_ = nullptr;
     unsigned long long* h_stamp_fused_ = nullptr;   unsigned long long* m_stamp_fused_ = nullptr;
     const uint32_t* flag_out_dev0_ = nullptr;       ///< flag_out as the primary device sees it (the graph's wait node)
+    // ---- docs/PEER_FUSED2.md s.11: the skip (the empty words) and the staged q8_1 rows; off, every pointer stays null
+    bool skip_ = false;                               ///< STRATA_PEER2_SKIP / STRATA_PEER_SKIP (read once at fused_open, by ordinal)
+    bool stage_ = false;                              ///< STRATA_PEER2_STAGE (the second server only)
+    uint32_t* h_empty_ = nullptr;                     ///< kOffEmpty, host view: launch() writes empty[s] = s + 1 on an empty step
+    const uint32_t* empty_dev0_ = nullptr;            ///< the same words as the primary sees them (the graph's wait_flag_ge_any)
+    uint32_t* h_xq_seq_ = nullptr;     uint32_t* m_xq_seq_ = nullptr;   uint32_t* xq_seq_dev0_ = nullptr;   ///< kOffXqSeq: host, the peer, the primary
+    uint8_t* h_xq_ = nullptr;          uint8_t* m_xq_ = nullptr;        uint8_t* xq_dev0_ = nullptr;        ///< the xq page (kMaxTok rows of q8_1): host, the peer, the primary
     // VRAM
     int32_t* d_own_ = nullptr;                        ///< n_layers x n_expert: the peer's slot or -1 (what the kernel plans with)
     unsigned long long* d_slot_ptr_ = nullptr;        ///< cache_.slots(): slot -> device address of its blob

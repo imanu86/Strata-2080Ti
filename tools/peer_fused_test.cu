@@ -37,7 +37,23 @@
 // windows behave; 2 if peer_fused_shape refuses the pack on this device (its `why` is printed).
 //
 //   peer_fused_test [device=0] [gu_type=0] [d_type=0] [n_expert=512] [n_slots=16] [windows=20] [seed]
-//                   [--primary D] [--second D2]
+//                   [--primary D] [--second D2] [--skip] [--stage]
+//
+// --skip (docs/PEER_FUSED2.md s.11.1, STRATA_PEER2_SKIP): the host (or the primary's kernel) plays the primary's node
+// of that section: a step on which a server has no entry is NOT waited for on that server's flag (the empty word of
+// its page, kOffEmpty, says so, as PeerExperts::launch writes it; with --primary the wait kernel polls flag OR word as
+// wait_flag_ge_any does), so the next doorbell goes up while that kernel may still be on the empty step - several
+// steps ahead over a run of empty ones.  Both kernels get Window::ahead = 1 (block 0's wait on done[s & 1] before it
+// rewrites the plan).  cnt[s] and the stamps are read after the window (the kernel serves every step, skipped or not)
+// and the rows are compared as before: the point is that nothing of a later step lands in an earlier one.
+//
+// --stage (s.11.2, STRATA_PEER2_STAGE; needs --second): every window is served TWICE on the same steps - first as before,
+// then with the second server reading the step's rows already quantized: the host quantizes the rows on the first
+// device (quantize_q8_1_rows: the bytes the reference uses) into the second server's xq page and raises its ring
+// (kOffXqSeq) before the doorbell (the engine's publish node does it right after; the kernel waits the ring only on a
+// step with entries).  Both runs are compared bit for bit, and for every step the second server's span is printed
+// without and with the stage: what the fewer bytes over its link are worth.  With --primary the q8_1 rows still come
+// from the host (the fake primary's push kernel does not quantize).
 //
 // --second D2 (docs/PEER_FUSED2.md, two expert servers): a SECOND persistent kernel on device D2 beside the one on
 // `device`, as the engine runs it with --peer-device A,B: its own mapped page, ownership table, slot arena, plan,
@@ -249,12 +265,14 @@ __device__ __forceinline__ void pause_ns(unsigned ns) {
 #endif
 }
 
-// k_wait_copy's wait (one poller on the link), bounded: on timeout *perr = want and the host fails the step
+// k_wait_copy's wait (one poller on the link), bounded: on timeout *perr = want and the host fails the step.
+// `empty` (--skip, null otherwise): the server's empty word of the step, polled with the flag as wait_flag_ge_any does -
+// the step passes on either.
 __global__ void k_primary_wait(const volatile uint32_t* flag, uint32_t want, unsigned long long wait_ns,
-                               volatile uint32_t* perr, unsigned long long* waited) {
+                               volatile uint32_t* perr, unsigned long long* waited, const volatile uint32_t* empty) {
     if (threadIdx.x != 0) return;
     const unsigned long long t0 = gtime();
-    while (*flag < want) {
+    while (*flag < want && !(empty != nullptr && *empty == want)) {
         pause_ns(64);
         if (gtime() - t0 > wait_ns) { *perr = want; return; }
     }
@@ -287,6 +305,8 @@ const char* err_name(uint32_t e) {
         case pf::kErrPlanOverflow: return "kErrPlanOverflow";
         case pf::kErrBadWindow: return "kErrBadWindow";
         case pf::kErrBadType: return "kErrBadType";
+        case pf::kErrTimeoutXq: return "kErrTimeoutXq";
+        case pf::kErrTimeoutDone: return "kErrTimeoutDone";
         default: return "?";
     }
 }
@@ -341,6 +361,16 @@ struct Pages {
     float* ymiss_d2 = nullptr;
     const uint32_t* pflag2_d = nullptr;     // --primary with --second: the primary's pointer of the second's flag
     unsigned long long* pwait2_d = nullptr; // its wait on it (pwords_h + 16)
+    // --skip: the empty words of each page (host view: written by the host as PeerExperts::launch does; the primary's
+    // view for its wait kernel)
+    volatile uint32_t* empty = nullptr;
+    volatile uint32_t* empty2 = nullptr;
+    const uint32_t* pempty_d = nullptr;
+    const uint32_t* pempty2_d = nullptr;
+    // --stage: the second server's xq page (host view, D2's view) and its ring on the second page
+    uint8_t* xq_h = nullptr;
+    const uint8_t* xq_d2 = nullptr;
+    volatile uint32_t* xq_seq2 = nullptr;
 };
 
 void* dev_ptr(void* host) {
@@ -355,12 +385,16 @@ int main(int argc, char** argv) {
     int pos[6] = {0, 0, 0, 512, 16, 20};
     uint64_t seed = (uint64_t) std::chrono::system_clock::now().time_since_epoch().count();
     int primary = -1, second = -1, npos = 0;
+    bool skip = false, stage = false;
     for (int a = 1; a < argc; ++a) {
         const std::string s = argv[a];
         if (s == "--primary" && a + 1 < argc) { primary = std::atoi(argv[++a]); continue; }
         if (s == "--second" && a + 1 < argc) { second = std::atoi(argv[++a]); continue; }
+        if (s == "--skip") { skip = true; continue; }
+        if (s == "--stage") { stage = true; continue; }
         if (s == "--help" || s == "-h") {
-            std::printf("peer_fused_test [device=0] [gu_type=0 (mixed model)] [d_type=0] [n_expert=512] [n_slots=16 a layer] [windows=20] [seed] [--primary D] [--second D2]\n");
+            std::printf("peer_fused_test [device=0] [gu_type=0 (mixed model)] [d_type=0] [n_expert=512] [n_slots=16 a layer] [windows=20] [seed] "
+                        "[--primary D] [--second D2] [--skip] [--stage]\n");
             return 0;
         }
         if (npos < 6) pos[npos] = std::atoi(argv[a]);
@@ -378,6 +412,10 @@ int main(int argc, char** argv) {
         (second >= 0 && (second >= nd || second == device || second == primary))) {
         std::printf("devices: %d; device %d, primary %d, second %d (three different devices)\n", nd, device, primary, second);
         return 1;
+    }
+    if (stage && second < 0) {
+        std::printf("--stage needs --second D2 (the staged q8_1 rows are the second server's): ignored\n");
+        stage = false;
     }
 
     // ---- the synthetic model: the mixed one (gu_type 0) or 4 uniform layers
@@ -408,6 +446,8 @@ int main(int argc, char** argv) {
             CK(cudaGetDeviceProperties(&q, second));
             std::printf(" | second server CUDA%d %s sm_%d%d SMs %d", second, q.name, q.major, q.minor, q.multiProcessorCount);
         }
+        if (skip) std::printf(" | --skip: an empty step is not waited for (Window::ahead on both kernels)");
+        if (stage) std::printf(" | --stage: every window served twice, the second time with the second server's q8_1 rows staged");
         std::printf("\n");
     }
 
@@ -658,6 +698,21 @@ int main(int argc, char** argv) {
         CK(cudaStreamCreateWithFlags(&s_kernel2, cudaStreamNonBlocking));
         CK(cudaSetDevice(device));
     }
+    // --skip: the empty words of each page (the engine's PeerExperts::launch writes them; here the host does, in publish)
+    P.empty = (volatile uint32_t*) (P.page_h + pf::kOffEmpty);
+    if (second >= 0) P.empty2 = (volatile uint32_t*) (P.page2_h + pf::kOffEmpty);
+    // --stage: the second server's xq page (kMaxTok rows of q8_1 blocks) and its ring, D2's views
+    uint8_t* h_xq_tmp = nullptr;   // the quantized rows come back from the first device here before they go to the page
+    if (stage) {
+        const size_t xq_bytes = pf::q8_bytes(pf::kMaxTok, N);
+        CK(cudaHostAlloc((void**) &P.xq_h, xq_bytes, hflags));
+        std::memset(P.xq_h, 0, xq_bytes);
+        CK(cudaMallocHost((void**) &h_xq_tmp, xq_bytes));
+        P.xq_seq2 = (volatile uint32_t*) (P.page2_h + pf::kOffXqSeq);
+        CK(cudaSetDevice(second));
+        P.xq_d2 = (const uint8_t*) dev_ptr(P.xq_h);
+        CK(cudaSetDevice(device));
+    }
 
     cudaStream_t s_kernel = nullptr, s_ref = nullptr, s_primary = nullptr;
     CK(cudaStreamCreateWithFlags(&s_kernel, cudaStreamNonBlocking));
@@ -679,6 +734,10 @@ int main(int argc, char** argv) {
         if (second >= 0) {   // the primary waits the second server's flag too (one more wait node a step, after the first's)
             P.pflag2_d = (const uint32_t*) (((uint8_t*) dev_ptr(P.page2_h)) + pf::kOffFlagOut);
             P.pwait2_d = (unsigned long long*) (((uint8_t*) dev_ptr(P.pwords_h)) + 16);
+        }
+        if (skip) {   // --skip: the empty words as the primary's wait kernel reads them (wait_flag_ge_any's second word)
+            P.pempty_d = (const uint32_t*) (((uint8_t*) dev_ptr(P.page_h)) + pf::kOffEmpty);
+            if (second >= 0) P.pempty2_d = (const uint32_t*) (((uint8_t*) dev_ptr(P.page2_h)) + pf::kOffEmpty);
         }
         CK(cudaMalloc((void**) &d_px, x_bytes));
         CK(cudaMalloc((void**) &d_pids, ids_bytes));
@@ -716,9 +775,10 @@ int main(int argc, char** argv) {
     base.out = d_out;
     base.sync = d_sync;
     base.lay = d_lay;
+    base.ahead = skip ? 1 : 0;   // --skip: the doorbell may run ahead of the flags (s.11.1)
     // --second: the second kernel's argument - D2's pointers, its own page, tables and VRAM, the shared doorbell
     pf::Window base2 = base;
-    if (second >= 0) {
+    if (second >= 0) {   // (--stage: xq and xq_seq are set per run, off then on, in the window loop: the kernel wants both or neither)
         base2.nblocks = shape2.blocks;
         base2.wait_ns = wait_ns2;
         base2.seq = P.seq_d2;
@@ -762,13 +822,14 @@ int main(int argc, char** argv) {
         }
         w.epoch = ++epoch;
         *P.flag_out = 0; *P.abort = 0; *P.err = 0; *P.exit = 0;
-        for (int s = 0; s < pf::kMaxSteps; ++s) P.cnt[s] = 0;
+        for (int s = 0; s < pf::kMaxSteps; ++s) { P.cnt[s] = 0; P.empty[s] = 0; }
         for (int s = 0; s < 2 * pf::kMaxSteps; ++s) P.stamp[s] = 0;
         if (second >= 0) {
             w2.epoch = epoch;
             *P.flag_out2 = 0; *P.abort2 = 0; *P.err2 = 0; *P.exit2 = 0;
-            for (int s = 0; s < pf::kMaxSteps; ++s) P.cnt2[s] = 0;
+            for (int s = 0; s < pf::kMaxSteps; ++s) { P.cnt2[s] = 0; P.empty2[s] = 0; }
             for (int s = 0; s < 2 * pf::kMaxSteps; ++s) P.stamp2[s] = 0;
+            if (P.xq_seq2 != nullptr) *P.xq_seq2 = 0;   // --stage: no q8_1 rows published yet (fused_begin's zeroing)
         }
         *(volatile uint32_t*) P.seq_h = 0;
         *perr_h = 0;
@@ -795,11 +856,12 @@ int main(int argc, char** argv) {
     };
 
     // the host's spin on flag_out >= want with the engine's bound, the streams flushed every ~2 ms (hook.flush);
-    // --second: both flags (the graph has one wait node a server, the first's then the second's)
-    auto wait_flag = [&](uint32_t want, std::string& why) -> bool {
+    // --second: both flags (the graph has one wait node a server, the first's then the second's).  --skip: a server
+    // with no entry at the step (skip1 / skip2) is not waited for - the primary's node passes on the empty word
+    auto wait_flag = [&](uint32_t want, std::string& why, bool skip1 = false, bool skip2 = false) -> bool {
         const auto t0 = Clock::now();
         auto last_flush = t0;
-        while (*P.flag_out < want || (second >= 0 && *P.flag_out2 < want)) {
+        while ((!skip1 && *P.flag_out < want) || (second >= 0 && !skip2 && *P.flag_out2 < want)) {
             if (*P.err != 0) { why = std::string("the kernel reported ") + err_name(*P.err); return false; }
             if (second >= 0 && *P.err2 != 0) { why = std::string("the second server's kernel reported ") + err_name(*P.err2); return false; }
             if (secs_since(t0) > kFlagWaitS) { why = "no flag within " + std::to_string((int) kFlagWaitS) + " s"; return false; }
@@ -835,9 +897,28 @@ int main(int argc, char** argv) {
     // carries the graph's order push(0), push(1), wait(0), push(2), wait(1), ... (G = 2) and not push / wait a step.
     // The step's ymiss rows get the sentinel first: the kernel must not find a stale row of the step before (G steps
     // back, the same group) under what it writes, nor must a non-owned entry keep one.
+    bool stage_run = false;   // --stage: the current run of the window stages the second server's rows
     auto publish = [&](const StepRec& r, uint32_t want) {
         const int n = r.n_tok * K;
         std::memset(P.ymiss_h + (size_t) r.tb * K * N, kSentKernel, (size_t) n * N * sizeof(float));
+        if (skip) {   // --skip: the empty word of a server with nothing at this step, as PeerExperts::launch writes it
+            if (r.groups == 0) P.empty[r.s] = want;
+            if (second >= 0 && r.groups2 == 0) P.empty2[r.s] = want;
+        }
+        if (stage_run) {
+            // --stage: the step's rows quantized on the first device (quantize_q8_1_rows: the reference's bytes) into the
+            // second server's xq page at the step's row offset, then its ring - before the doorbell here (the engine's
+            // publish node runs right after it; the kernel reads the ring only once it has the doorbell and entries)
+            const size_t off = (size_t) r.tb * (size_t) (N / 32) * 36, bytes = (size_t) r.n_tok * (size_t) (N / 32) * 36;
+            CK(cudaMemcpyAsync(d_x_ref, r.x.data(), (size_t) r.n_tok * N * sizeof(float), cudaMemcpyHostToDevice, s_ref));
+            strata::kernels::quantize_q8_1_rows(d_x_ref, r.n_tok, N, d_q8_ref, s_ref);
+            CK(cudaMemcpyAsync(h_xq_tmp + off, d_q8_ref, bytes, cudaMemcpyDeviceToHost, s_ref));
+            CK(cudaStreamSynchronize(s_ref));
+            std::memcpy(P.xq_h + off, h_xq_tmp + off, bytes);
+            host_fence();
+            *P.xq_seq2 = want;
+        }
+        host_fence();
         if (primary < 0) {
             std::memcpy(P.x_h + (size_t) r.tb * N, r.x.data(), (size_t) r.n_tok * N * sizeof(float));
             std::memcpy(P.ids_h + (size_t) r.tb * K, r.ids.data(), (size_t) n * sizeof(int32_t));
@@ -865,10 +946,12 @@ int main(int argc, char** argv) {
     // --primary: the primary's wait on flag_out >= want, queued after the pushes already on its stream (post(l, grp))
     auto primary_wait = [&](uint32_t want) {
         CK(cudaSetDevice(primary));
-        k_primary_wait<<<1, 32, 0, s_primary>>>(P.pflag_d, want, wait_ns, P.perr_d, P.pwait_d);
+        const int s = (int) want - 1;
+        // (--skip: the step's empty word beside the flag, as the engine's wait_flag_ge_any node)
+        k_primary_wait<<<1, 32, 0, s_primary>>>(P.pflag_d, want, wait_ns, P.perr_d, P.pwait_d, skip ? P.pempty_d + s : nullptr);
         CK(cudaGetLastError());
         if (second >= 0) {   // then the second server's flag: the graph's second node of the step
-            k_primary_wait<<<1, 32, 0, s_primary>>>(P.pflag2_d, want, wait_ns, P.perr_d, P.pwait2_d);
+            k_primary_wait<<<1, 32, 0, s_primary>>>(P.pflag2_d, want, wait_ns, P.perr_d, P.pwait2_d, skip ? P.pempty2_d + s : nullptr);
             CK(cudaGetLastError());
         }
         (void) cudaStreamQuery(s_primary);
@@ -1007,83 +1090,119 @@ int main(int argc, char** argv) {
             const bool force_empty = G == 2 && (s % G) == 1 && (recs[(size_t) s - 1].rows > 0 || recs[(size_t) s - 1].rows2 > 0) && rng.below(2) == 0;
             draw_step(r, force_empty);
         }
-        if (!begin_window(w, w2)) { abort_window(); all_ok = false; break; }
-        bool win_ok = true;
-        std::string why;
-        // the graph's order: the first G steps are rung before any flag is waited for; flag(s) seen -> ring s + G
-        for (int s = 0; s < G && s < steps; ++s) publish(recs[(size_t) s], (uint32_t) s + 1);
-        for (int s = 0; s < steps && win_ok; ++s) {
-            StepRec& r = recs[(size_t) s];
-            const int n = r.n_tok * K;
-            if (primary >= 0) {   // the primary's wait kernel sees the flag first; the host waits for its stream
-                primary_wait((uint32_t) s + 1);
-                CK(cudaSetDevice(primary));
-                const cudaError_t e = drain(s_primary, kFlagWaitS + 2.0);
-                CK(cudaSetDevice(device));
-                if (e != cudaSuccess) { why = std::string("the primary's stream: ") + cudaGetErrorString(e); win_ok = false; break; }
-                host_fence();
-                if (*perr_h != 0) { why = "the primary's wait kernel timed out on flag_out"; win_ok = false; break; }
-                r.primary_wait_ns = *pwait_h;
+        // ---- one run of the window: begin, the graph's doorbell order, the snapshots, end.  --stage: run twice on the
+        // same steps (the second time with the second server's rows staged); the records of a run overwrite the last.
+        // The counts and stamps are read AFTER the window: with --skip the host does not wait an empty step's flag, so
+        // at snapshot time the kernel may not have served it yet (it serves every step before it leaves).
+        auto serve = [&](bool stage_on) -> bool {
+            stage_run = stage_on;
+            w2.xq = stage_on ? (const void*) P.xq_d2 : nullptr;
+            w2.xq_seq = stage_on ? (const uint32_t*) (P.page2_d + pf::kOffXqSeq) : nullptr;
+            if (!begin_window(w, w2)) { abort_window(); return false; }
+            bool win_ok = true;
+            std::string why;
+            // the graph's order: the first G steps are rung before any flag is waited for; flag(s) seen -> ring s + G
+            for (int s = 0; s < G && s < steps; ++s) publish(recs[(size_t) s], (uint32_t) s + 1);
+            for (int s = 0; s < steps && win_ok; ++s) {
+                StepRec& r = recs[(size_t) s];
+                const int n = r.n_tok * K;
+                if (primary >= 0) {   // the primary's wait kernel sees the flag first; the host waits for its stream
+                    primary_wait((uint32_t) s + 1);
+                    CK(cudaSetDevice(primary));
+                    const cudaError_t e = drain(s_primary, kFlagWaitS + 2.0);
+                    CK(cudaSetDevice(device));
+                    if (e != cudaSuccess) { why = std::string("the primary's stream: ") + cudaGetErrorString(e); win_ok = false; break; }
+                    host_fence();
+                    if (*perr_h != 0) { why = "the primary's wait kernel timed out on flag_out"; win_ok = false; break; }
+                    r.primary_wait_ns = *pwait_h;
+                }
+                // (--skip: a server with nothing at this step is not waited for: the next doorbell goes up at once)
+                if (!wait_flag((uint32_t) s + 1, why, skip && r.groups == 0, skip && r.groups2 == 0)) { win_ok = false; break; }
+                r.rows_out.resize((size_t) n * N);
+                std::memcpy(r.rows_out.data(), P.ymiss_h + (size_t) r.tb * K * N, (size_t) n * N * sizeof(float));
+                if (s + G < steps) publish(recs[(size_t) s + G], (uint32_t) (s + G) + 1);   // pre(l + 1, grp): the same group's rows again
             }
-            if (!wait_flag((uint32_t) s + 1, why)) { win_ok = false; break; }
-            r.rows_out.resize((size_t) n * N);
-            std::memcpy(r.rows_out.data(), P.ymiss_h + (size_t) r.tb * K * N, (size_t) n * N * sizeof(float));
-            r.cnt = P.cnt[s];
-            r.st0 = P.stamp[2 * s];
-            r.st1 = P.stamp[2 * s + 1];
-            if (second >= 0) {
-                r.cnt2 = P.cnt2[s];
-                r.st0_2 = P.stamp2[2 * s];
-                r.st1_2 = P.stamp2[2 * s + 1];
+            if (!win_ok) {
+                std::printf("  FAIL finestra %d%s: %s (err %s, flag_out %u", win, stage_on ? " (con stage)" : "", why.c_str(), err_name(*P.err), *P.flag_out);
+                if (second >= 0) std::printf("; secondo server: err %s, flag_out %u", err_name(*P.err2), *P.flag_out2);
+                std::printf(")\n");
+                abort_window();
+                return false;
             }
-            if (s + G < steps) publish(recs[(size_t) s + G], (uint32_t) (s + G) + 1);   // pre(l + 1, grp): the same group's rows again
-        }
-        if (!win_ok) {
-            std::printf("  FAIL finestra %d: %s (err %s, flag_out %u", win, why.c_str(), err_name(*P.err), *P.flag_out);
-            if (second >= 0) std::printf("; secondo server: err %s, flag_out %u", err_name(*P.err2), *P.flag_out2);
-            std::printf(")\n");
-            abort_window();
-            all_ok = false;
-            break;
-        }
-        // fused_end's part: the kernel has left, no error, the epoch written (--second: both kernels)
-        {
+            // fused_end's part: the kernel has left, no error, the epoch written (--second: both kernels)
             const cudaError_t e = drain(s_kernel, 5.0);
             const cudaError_t e2 = second >= 0 ? drain(s_kernel2, 5.0) : cudaSuccess;
             if (e != cudaSuccess || e2 != cudaSuccess) {
                 std::printf("  FAIL finestra %d: a kernel did not leave after the last flag (%s; second server %s)\n", win, cudaGetErrorString(e),
                             second >= 0 ? cudaGetErrorString(e2) : "-");
                 abort_window();
-                all_ok = false;
-                break;
+                return false;
             }
             host_fence();
-            if (*P.err != 0) { std::printf("  FAIL finestra %d: err %s after the window\n", win, err_name(*P.err)); all_ok = false; break; }
-            if (*P.exit != w.epoch) { std::printf("  FAIL finestra %d: exit %u, epoch %u\n", win, *P.exit, w.epoch); all_ok = false; break; }
+            if (*P.err != 0) { std::printf("  FAIL finestra %d: err %s after the window\n", win, err_name(*P.err)); return false; }
+            if (*P.exit != w.epoch) { std::printf("  FAIL finestra %d: exit %u, epoch %u\n", win, *P.exit, w.epoch); return false; }
             if (second >= 0) {
-                if (*P.err2 != 0) { std::printf("  FAIL finestra %d: secondo server: err %s after the window\n", win, err_name(*P.err2)); all_ok = false; break; }
-                if (*P.exit2 != w2.epoch) { std::printf("  FAIL finestra %d: secondo server: exit %u, epoch %u\n", win, *P.exit2, w2.epoch); all_ok = false; break; }
+                if (*P.err2 != 0) { std::printf("  FAIL finestra %d: secondo server: err %s after the window\n", win, err_name(*P.err2)); return false; }
+                if (*P.exit2 != w2.epoch) { std::printf("  FAIL finestra %d: secondo server: exit %u, epoch %u\n", win, *P.exit2, w2.epoch); return false; }
             }
-        }
-        // the reference, step by step, and the comparison
+            for (int s = 0; s < steps; ++s) {   // every step's count and stamps, now that both kernels have served them all
+                StepRec& r = recs[(size_t) s];
+                r.cnt = P.cnt[s];
+                r.st0 = P.stamp[2 * s];
+                r.st1 = P.stamp[2 * s + 1];
+                if (second >= 0) {
+                    r.cnt2 = P.cnt2[s];
+                    r.st0_2 = P.stamp2[2 * s];
+                    r.st1_2 = P.stamp2[2 * s + 1];
+                }
+            }
+            return true;
+        };
+        // the reference of every step against the run's snapshots; the spans of the run
+        auto check_run = [&](std::vector<double>& spans, std::vector<double>& spans2, std::vector<double>& pwaits) -> bool {
+            spans.clear(); spans2.clear(); pwaits.clear();
+            bool ok = true;
+            for (int s = 0; s < steps; ++s) {
+                const StepRec& r = recs[(size_t) s];
+                spans.push_back((double) (r.st1 - r.st0) * 1e-3);
+                if (second >= 0) spans2.push_back((double) (r.st1_2 - r.st0_2) * 1e-3);
+                if (primary >= 0) pwaits.push_back((double) r.primary_wait_ns * 1e-3);
+                if (ok && !check_step(r, win)) ok = false;
+            }
+            return ok;
+        };
+        bool win_ok = serve(false);
         std::vector<double> spans, spans2, pwaits;
+        if (win_ok) win_ok = check_run(spans, spans2, pwaits);
+        else { all_ok = false; break; }
         int64_t entries = 0, entries2 = 0;
-        for (int s = 0; s < steps; ++s) {
-            const StepRec& r = recs[(size_t) s];
-            entries += r.rows;
-            entries2 += r.rows2;
-            spans.push_back((double) (r.st1 - r.st0) * 1e-3);
-            if (second >= 0) spans2.push_back((double) (r.st1_2 - r.st0_2) * 1e-3);
-            if (primary >= 0) pwaits.push_back((double) r.primary_wait_ns * 1e-3);
-            if (!check_step(r, win)) { win_ok = false; break; }
-        }
+        for (const StepRec& r : recs) { entries += r.rows; entries2 += r.rows2; }
         peer_entries_total += entries;
         peer2_entries_total += entries2;
         std::printf("finestra %3d: T %2d G %d passi %2d voci del peer %4lld  flag visto -> alzato p50 %8.1f us", win, T, G, steps,
                     (long long) entries, median(spans));
         if (second >= 0) std::printf("  2o server: voci %4lld p50 %8.1f us", (long long) entries2, median(spans2));
         if (primary >= 0) std::printf("  attesa padrona p50 %8.1f us", median(pwaits));
-        std::printf("  %s\n", win_ok ? "PASS" : "FAIL");
+        if (stage && win_ok) {
+            // --stage: the same window again, the second server's rows staged; every row compared again, then the
+            // second server's span of every step without and with the stage (its entries say what the step moved)
+            const std::vector<double> spans2_off = spans2;
+            std::vector<double> spans_b, spans2_b, pwaits_b;
+            win_ok = serve(true) && check_run(spans_b, spans2_b, pwaits_b);
+            if (win_ok) {
+                std::printf("  con stage: 2o server p50 %8.1f us (senza %8.1f us)", median(spans2_b), median(spans2_off));
+                if (primary >= 0) std::printf("  attesa padrona p50 %8.1f us", median(pwaits_b));
+            }
+            std::printf("  %s\n", win_ok ? "PASS" : "FAIL");
+            if (win_ok)
+                for (int s = 0; s < steps; ++s) {
+                    const StepRec& r = recs[(size_t) s];
+                    std::printf("    passo %2d strato %d (%d/%d) righe %d: 2o server voci %3d: senza stage %8.1f us, con stage %8.1f us\n", s, r.l,
+                                layers[(size_t) r.l].gu, layers[(size_t) r.l].d, r.n_tok, r.rows2, spans2_off[(size_t) s], spans2_b[(size_t) s]);
+                }
+        } else {
+            std::printf("  %s\n", win_ok ? "PASS" : "FAIL");
+        }
         if (!win_ok) all_ok = false;
     }
 
@@ -1189,6 +1308,7 @@ int main(int argc, char** argv) {
         CK(cudaSetDevice(device));
         cudaFreeHost(P.page2_h);
     }
+    if (stage) { cudaFreeHost(P.xq_h); cudaFreeHost(h_xq_tmp); }
     if (primary >= 0) {
         CK(cudaSetDevice(primary));
         (void) drain(s_primary, 2.0);

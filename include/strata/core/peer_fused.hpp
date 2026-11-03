@@ -71,8 +71,18 @@ inline constexpr size_t kOffErr = 256;        ///< uint32 (Err): the kernel's fi
 inline constexpr size_t kOffExit = 384;       ///< uint32: the last block to leave writes the window's epoch here
 inline constexpr size_t kOffCnt = 512;        ///< uint32[kMaxSteps]: per step `groups << 16 | rows`, written before the flag
 inline constexpr size_t kOffStamp = 2048;     ///< uint64[2 * kMaxSteps]: %globaltimer when the step's doorbell was seen / its flag raised
+/// STRATA_PEER2_SKIP (docs/PEER_FUSED2.md s.11.1): uint32[kMaxSteps], `empty[s] = s + 1` written by the HOST (launch()) when
+/// the server has no entry at step s; the primary's graph node of that step passes on `flag_out >= ring` OR `empty[s] == ring`
+/// (wait_flag_ge_any), so an empty step never waits the server's round trip.  Zeroed by the host at begin.
+inline constexpr size_t kOffEmpty = 6144;
+/// STRATA_PEER2_STAGE (s.11.2): uint32, the ring of the step whose q8_1 rows the primary has published in the xq page
+/// (peer_fused_publish_q8 writes it after the rows and a system fence); block 0 of the kernel waits it before lready
+/// on a step with entries.  Zeroed by the host at begin.
+inline constexpr size_t kOffXqSeq = 7168;
 static_assert(kOffCnt + (size_t) kMaxSteps * 4 <= kOffStamp, "the count words overlap the stamps");
-static_assert(kOffStamp + (size_t) 2 * kMaxSteps * 8 <= kPageBytes, "the stamps overflow the page");
+static_assert(kOffStamp + (size_t) 2 * kMaxSteps * 8 <= kOffEmpty, "the stamps overlap the empty words");
+static_assert(kOffEmpty + (size_t) kMaxSteps * 4 <= kOffXqSeq, "the empty words overlap the xq ring");
+static_assert(kOffXqSeq + 128 <= kPageBytes, "the xq ring overflows the page");
 
 /// Environment knobs (read once by the host side; the names are the contract, the parsing is PeerExperts').
 inline constexpr const char* kEnvOn = "STRATA_PEER_FUSED";                 ///< 1: the fused server (master switch)
@@ -89,6 +99,23 @@ inline constexpr const char* kEnvOn2 = "STRATA_PEER2_FUSED";               ///< 
 inline constexpr const char* kEnvWaitMs2 = "STRATA_PEER2_WAIT_MS";         ///< bound of the second server's kernel waits (default kWaitMs2Default)
 inline constexpr const char* kEnvBlocks2 = "STRATA_PEER2_FUSED_BLOCKS";    ///< cap on the second server's resident blocks per SM (default: STRATA_PEER_FUSED_BLOCKS); fewer leave SMs to the desktop
 inline constexpr int kWaitMs2Default = 1500;                               ///< under the 2 s TDR of a card that drives the desktop
+/// docs/PEER_FUSED2.md s.11 (three knobs, each off = the behaviour before it, bit for bit):
+///   STRATA_PEER2_SKIP (default 1) / STRATA_PEER_SKIP (default 0): a step on which the server has no entry does not hold the
+///     primary: the host writes empty[s] (kOffEmpty) in launch(), the graph's node waits flag_out OR empty[s]
+///     (wait_flag_ge_any), finish() under HOSTWAIT does not spin; the kernel gets Window::ahead = 1, which makes block 0
+///     wait, before it rewrites plan[s & 1] at step s, for every block's done count of step s - 2 (the invariant the
+///     primary's flag wait used to give it: no block two steps ahead).
+///   STRATA_PEER2_STAGE (default 0; the second server only): the primary publishes the step's activation rows ALREADY
+///     QUANTIZED (q8_1, 2 880 B a row of 2 560 instead of 10 240) into the server's xq page (peer_fused_publish_q8: one
+///     node a step after the doorbell, the same q8_1_store as the kernel's phase C, the same bytes) and raises kOffXqSeq;
+///     the kernel's phase C copies them (16 B a thread) instead of reading x and quantizing.  Fewer bytes over a slow link.
+///   STRATA_PEER2_SHARE (generate.cpp; 0 .. 0.5, default 0): at open, of the pairs the primary does not hold, the FIRST
+///     server leaves one every 1/SHARE of its candidates to the second (PeerExperts::open `share`), so the second holds
+///     hot pairs too and the two servers finish a step together.
+inline constexpr const char* kEnvSkip = "STRATA_PEER_SKIP";                ///< the first server's skip (default 0)
+inline constexpr const char* kEnvSkip2 = "STRATA_PEER2_SKIP";              ///< the second server's skip (default 1)
+inline constexpr const char* kEnvStage2 = "STRATA_PEER2_STAGE";            ///< 1: the primary publishes q8_1 rows for the second server
+inline constexpr const char* kEnvShare2 = "STRATA_PEER2_SHARE";            ///< read by generate.cpp: the second server's share of the hot pairs
 
 // ---------------------------------------------------------------- device-visible structs (VRAM / kernel argument)
 
@@ -102,6 +129,8 @@ enum Err : uint32_t {
     kErrPlanOverflow = 5,     ///< more than kCap entries in a step (cannot happen with a well-formed window)
     kErrBadWindow = 6,        ///< steps > kMaxSteps, n_tok > kMaxTok, a null pointer or a geometry the kernel was not built for
     kErrBadType = 7,          ///< a step's layer has a gate/up or down type the kernel has no body for (lay[l]; fused_open checks the pack)
+    kErrTimeoutXq = 8,        ///< STRATA_PEER2_STAGE: block 0 waited wait_ns for the primary's q8_1 rows of a step (xq_seq)
+    kErrTimeoutDone = 9,      ///< STRATA_PEER2_SKIP: block 0 waited wait_ns for every block's done count of step s - 2
 };
 
 /// One step's plan, written by block 0 into VRAM and read by every block: peer_experts.cpp's `Meta`, same fields,
@@ -184,6 +213,18 @@ struct Window {
     /// Written by the host before the launch, never during a window.  Every layer: gu_type_fused, d_type_fused,
     /// n_embd / n_ff as above, had_block 0, d_signs null, gu_nib false (fused_open and peer_fused_shape check).
     const strata::kernels::NativeExpertLayout* lay = nullptr;
+    // ---- docs/PEER_FUSED2.md s.11 (0 / null: the kernel of before, instruction for instruction)
+    /// STRATA_PEER2_SKIP: the primary may ring step s + 2 before this kernel raised flag(s) (it no longer waits an
+    /// empty step), so block 0 waits, before it rewrites plan[s & 1] and counts on done[s & 1] at step s, for every
+    /// block's done count of step s - 2 (VRAM, bounded by wait_ns -> kErrTimeoutDone).  0: the primary waits every
+    /// flag and the invariant holds by itself, no wait.
+    int ahead = 0;
+    /// STRATA_PEER2_STAGE: the primary's xq page as this device sees it (mapped): kMaxTok rows of n_embd/32 q8_1 blocks,
+    /// the step's rows at gtb * n_embd/32; phase C copies them into q8 instead of quantizing x.  Null: phase C of before.
+    const void* xq = nullptr;
+    /// With xq: the mapped ring the primary writes after the rows (kOffXqSeq); block 0 waits `>= s + 1` before lready on a
+    /// step with entries (never on an empty one).  Null with xq null.
+    const uint32_t* xq_seq = nullptr;
 };
 
 /// What peer_fused_shape resolved for a pack on a device: the kernel instance and its grid.
@@ -232,6 +273,14 @@ struct Hook {
     void (*abort)(void* ctx) = nullptr;
     uint32_t* flag_out_host = nullptr;         ///< the mapped word (host view): release_gpu_waits raises it to UINT32_MAX
     const uint32_t* flag_out_dev0 = nullptr;   ///< the same word as the primary device sees it (null: no graph wait)
+    // ---- docs/PEER_FUSED2.md s.11 (null: the graph of before)
+    /// STRATA_PEER2_SKIP: the empty words (kOffEmpty) as the primary sees them; with it the step's node is
+    /// wait_flag_ge_any(flag_out_dev0, ring, empty_dev0 + ring - 1).  Null without the skip, or with HOSTWAIT (no node).
+    const uint32_t* empty_dev0 = nullptr;
+    /// STRATA_PEER2_STAGE: the xq page and its ring (kOffXqSeq) as the primary sees them; with them the graph adds, right
+    /// after the step's doorbell, peer_fused_publish_q8(x rows, xq_dev0 + gtb * n_embd/32 blocks, xq_seq_dev0, ring).
+    uint8_t* xq_dev0 = nullptr;
+    uint32_t* xq_seq_dev0 = nullptr;
 };
 
 /// Byte offset of `hq` inside a scratch of native_expert_scratch_bytes(cap_entries, n_ff): the gate, up and h float
@@ -274,5 +323,14 @@ bool peer_fused_shape(const NativeExpertLayout* lay, int n_layers, int minb, int
 /// launch error (cudaGetLastError is consumed).  Does not query or synchronize the stream: the host does.
 bool peer_fused_launch(const strata::core::peer_fused::Window& w, const strata::core::peer_fused::Shape& shape,
                        cudaStream_t stream, std::string& err);
+
+/// STRATA_PEER2_STAGE (docs/PEER_FUSED2.md s.11.2), on the PRIMARY's stream inside the window's graph, right after the
+/// step's doorbell: quantizes the step's `n_tok` activation rows `x` (device, n_tok x n_embd fp32: the rows the doorbell
+/// published) with q8_1_store - the quantizer of quantize_q8_1_rows and of the kernel's phase C, so the bytes are the
+/// ones the server would have made itself - straight into `xq` (the server's mapped xq page at the step's row offset,
+/// as the primary sees it), fences at system scope and stores `value` (the step's ring) into `xq_seq` (mapped).  One
+/// block of 1024 threads, a warp a q8_1 block.  Not built (HIP, no AMD layouts): false with `err`.
+bool peer_fused_publish_q8(const float* x, int64_t n_tok, int64_t n_embd, void* xq, uint32_t* xq_seq, uint32_t value,
+                           cudaStream_t stream, std::string& err);
 
 }  // namespace strata::kernels

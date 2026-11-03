@@ -73,6 +73,10 @@ bool gdn_commit_layers(float* state, int64_t state_stride, int64_t conv_off, con
 /// Spin until *flag >= value (a mapped host flag).  The value is fixed at capture, so several rings can be
 /// outstanding at once (the split verify window keeps two).
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream);
+/// wait_flag_ge that also returns when *other == value, both words (mapped host memory) polled every turn: the fused
+/// peer server's step node under STRATA_PEER2_SKIP (docs/PEER_FUSED2.md s.11.1) - the server's output flag, or the
+/// host's word saying the server has nothing at this step.
+void wait_flag_ge_any(const uint32_t* flag, uint32_t value, const uint32_t* other, void* stream);
 /// wait_flag_ge and copy_i32_from_mapped in ONE launch (143-amdk): thread 0 spins on *flag >= value, the block then
 /// copies dst[0, n) = src[0, n) (mapped host memory, volatile reads).  One kernel node fewer per layer: a dependent
 /// kernel costs ~2.4 us on a gfx1201 graph whatever it does.  n <= 128 * k for any k (a strided loop).

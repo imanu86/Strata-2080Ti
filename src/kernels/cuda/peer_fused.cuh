@@ -41,6 +41,19 @@
 // their plan / q8 / hq pointers WITHOUT __restrict__ for that reason (iq_kernels.cu, native_gu_fused_core and
 // native_down_lds_body) - those buffers are rewritten by other blocks between the steps of one launch.  The layouts
 // (w.lay) are written by the host before the launch and never during it.
+//
+// docs/PEER_FUSED2.md s.11, two optional pieces of the Window (0 / null: the kernel above, instruction for instruction):
+//   w.ahead (STRATA_PEER2_SKIP): the primary no longer waits the flag of a step on which this server has no entry, so
+//     its doorbell of step s + 2 can arrive while slow blocks still count step s on done[s & 1] - the invariant "no block
+//     two steps ahead" that the primary's wait used to give.  Block 0 restores it itself: at step s >= 2, after the
+//     doorbell and before it rewrites plan[s & 1], it waits (VRAM, bounded -> kErrTimeoutDone) until done[s & 1] holds
+//     every block's increment of step s - 2.  A block at step s - 2 waiting lready can therefore never read the plan of
+//     step s, and the done thresholds stay exact (cnt and the stamps of every step are written).  No other block waits.
+//   w.xq / w.xq_seq (STRATA_PEER2_STAGE): the primary publishes the step's rows already quantized (peer_fused_publish_q8,
+//     the same q8_1_store): block 0 waits xq_seq >= ring before lready on a step WITH entries, and phase C copies the
+//     n_tok x n_embd/32 q8_1 blocks (16 B a thread, __ldcv) into q8 instead of reading n_tok x n_embd floats and
+//     quantizing: 2 880 B a row over the link instead of 10 240.  The bytes in q8 are the same: q8_1_store on the same
+//     floats, there or here.
 
 namespace pf = ::strata::core::peer_fused;
 
@@ -232,7 +245,8 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
                    w.seq == nullptr || w.x == nullptr || w.ids == nullptr || w.ymiss == nullptr ||
                    w.flag_out == nullptr || w.abort == nullptr || w.err == nullptr || w.exit == nullptr || w.cnt == nullptr ||
                    w.stamp == nullptr || w.own == nullptr || w.slot_ptr == nullptr || w.plan == nullptr || w.q8 == nullptr ||
-                   w.hq == nullptr || w.out == nullptr || w.sync == nullptr;
+                   w.hq == nullptr || w.out == nullptr || w.sync == nullptr ||
+                   (w.xq != nullptr) != (w.xq_seq != nullptr);   // s.11.2: the staged rows come with their ring, or neither
         for (int g = 0; g < w.G && g < 2; ++g) {
             const int nt = w.gte[g] - w.gtb[g];
             if (w.gtb[g] < 0 || nt < 0 || nt > pf::kMaxTok || (int64_t) nt * w.k > pf::kCap) bad = true;
@@ -266,6 +280,24 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
                         if (pf_now_ns() - t0 > w.wait_ns) { pf_fail(w, pf::kErrTimeoutSeq); o = 0; break; }
                     }
                 }
+                if (o && w.ahead != 0 && s >= 2) {
+                    // s.11.1 (STRATA_PEER2_SKIP): the doorbell may be ahead of the flags; before this block rewrites
+                    // plan[s & 1] and counts on done[s & 1], every block must have counted step s - 2 on that word (the
+                    // (s >> 1)-th use of it: (s >> 1) x nblocks increments).  VRAM, never the link; usually already so.
+                    const unsigned need = (unsigned) (s >> 1) * (unsigned) nblocks;
+                    const unsigned long long t1 = pf_now_ns();
+                    unsigned dspins = 0;
+                    while (pf_ld(&w.sync->done[s & 1]) < need) {
+                        pf_pause(32);
+                        if ((++dspins & 1023u) == 0) {
+                            if (pf_ld(&w.sync->quit) != 0) { o = 0; break; }
+                            if ((dspins & 4095u) == 0) {
+                                if (pf_ld(w.abort) != 0) { pf_fail(w, pf::kErrAbort); o = 0; break; }
+                                if (pf_now_ns() - t1 > w.wait_ns) { pf_fail(w, pf::kErrTimeoutDone); o = 0; break; }
+                            }
+                        }
+                    }
+                }
                 if (o) {
                     __threadfence_system();   // the primary's rows and ids were published before its doorbell
                     *(volatile unsigned long long*) (w.stamp + 2 * s) = pf_now_ns();
@@ -278,7 +310,29 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
             pf_plan(w, plan, l, tb, n, pf_dyn, &s_groups, &s_rows);
             __threadfence();
             __syncthreads();
-            if (tid == 0) pf_st(&w.sync->lready, want);
+            if (tid == 0) {
+                int o = 1;
+                if (w.xq != nullptr && s_groups > 0) {
+                    // s.11.2 (STRATA_PEER2_STAGE): the primary's q8_1 rows of this step land after its doorbell (the
+                    // next node of its graph); the other blocks copy them in phase C, so they start only once the ring
+                    // says the rows are there.  Mapped, bounded; an empty step never reads it.
+                    const unsigned long long t1 = pf_now_ns();
+                    unsigned xspins = 0;
+                    while (pf_ld(w.xq_seq) < want) {
+                        pf_pause(64);
+                        if ((++xspins & 1023u) == 0) {
+                            if (pf_ld(w.abort) != 0) { pf_fail(w, pf::kErrAbort); o = 0; break; }
+                            if (pf_ld(&w.sync->quit) != 0) { o = 0; break; }
+                            if (pf_now_ns() - t1 > w.wait_ns) { pf_fail(w, pf::kErrTimeoutXq); o = 0; break; }
+                        }
+                    }
+                    if (o) __threadfence_system();   // the rows were published before the ring
+                }
+                s_ok = o;
+                if (o) pf_st(&w.sync->lready, want);
+            }
+            __syncthreads();
+            if (!s_ok) { ok = false; break; }
         } else {
             // the other blocks: block 0's plan word (VRAM, never the link), bounded with a slack over block 0's own
             // wait; `quit` every 1024 turns, the host's `abort` (mapped) and the clock every 4096: block 0 may itself
@@ -313,7 +367,16 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
             const NativeExpertLayout L = w.lay[l];
             // ---- C: the step's rows quantized (x mapped -> q8 VRAM): a global warp a q8_1 block, quantize_q8_1_kernel's
             // thread -> value map (lane = i % 32), the same q8_1_store
-            {
+            if (w.xq != nullptr) {
+                // s.11.2 (STRATA_PEER2_STAGE): the primary already made these q8_1 blocks (peer_fused_publish_q8, the same
+                // q8_1_store on the same floats): copy them, 16 bytes a thread, coalesced; 2 880 B a row over the link
+                // instead of 10 240.  The row offset tb * n_embd/32 blocks x 36 B is a multiple of 16 (36 x 32 = 1 152).
+                const uint4* src = (const uint4*) ((const unsigned char*) w.xq + (size_t) tb * (size_t) (w.n_embd / 32) * sizeof(block_q8_1));
+                uint4* dst = (uint4*) w.q8;
+                const long long n16 = (long long) n_tok * (w.n_embd / 32) * (long long) sizeof(block_q8_1) / 16;
+                for (long long idx = (long long) blockIdx.x * pf::kThreads + tid; idx < n16; idx += (long long) nblocks * pf::kThreads)
+                    dst[idx] = __ldcv(src + idx);
+            } else {
                 const float* x = w.x + (size_t) tb * (size_t) w.n_embd;
                 block_q8_1* q8 = (block_q8_1*) w.q8;
                 const int nwg = (int) ((long long) n_tok * w.n_embd / 32);
@@ -432,6 +495,23 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
                 __threadfence_system();
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- s.11.2: the primary's publish of a step's q8_1 rows
+
+/// peer_fused_publish_q8's kernel, on the PRIMARY: one block, a warp a q8_1 block of the step's rows - value i of row
+/// set x (n values) goes through q8_1_store exactly as in quantize_q8_1_kernel and in phase C above (lane = i % 32), the
+/// block lands in the mapped xq page; then every thread fences at system scope, the block syncs, thread 0 stores the
+/// ring.  The page is host memory on the primary's own link (x16): the byte stores of a warp coalesce as they do in VRAM.
+__global__ void __launch_bounds__(1024) pf_publish_q8_kernel(const float* __restrict__ x, long long n, block_q8_1* xq,
+                                                            uint32_t* xq_seq, uint32_t value) {
+    for (long long i = threadIdx.x; i < n; i += blockDim.x) q8_1_store(x[i], xq, i);
+    __threadfence_system();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        *(volatile uint32_t*) xq_seq = value;
+        __threadfence_system();
     }
 }
 
@@ -642,6 +722,27 @@ bool peer_fused_launch(const pf::Window& w, const pf::Shape& shape, cudaStream_t
         err = std::string("peer fused: launch (") + (shape.cooperative ? "cooperative" : "plain") + ", " + std::to_string(shape.blocks) +
               " blocks): " + cudaGetErrorString(e);
         (void) cudaGetLastError();
+        return false;
+    }
+    return true;
+#endif
+}
+
+bool peer_fused_publish_q8(const float* x, int64_t n_tok, int64_t n_embd, void* xq, uint32_t* xq_seq, uint32_t value,
+                           cudaStream_t stream, std::string& err) {
+#if !STRATA_PEER_FUSED_BUILT
+    (void) x; (void) n_tok; (void) n_embd; (void) xq; (void) xq_seq; (void) value; (void) stream;
+    err = "peer fused: the fused peer server is not built into this engine";
+    return false;
+#else
+    if (x == nullptr || xq == nullptr || xq_seq == nullptr || n_tok <= 0 || n_embd <= 0 || n_embd % 32 != 0) {
+        err = "peer fused: publish q8: a null page or a geometry that is not rows of a multiple of 32";
+        return false;
+    }
+    pf_publish_q8_kernel<<<1, 1024, 0, stream>>>(x, (long long) n_tok * n_embd, (block_q8_1*) xq, xq_seq, value);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        err = std::string("peer fused: publish q8: ") + cudaGetErrorString(e);
         return false;
     }
     return true;

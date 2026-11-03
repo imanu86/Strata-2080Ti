@@ -130,6 +130,8 @@ const char* fused_err_name(uint32_t e) {
         case kErrPlanOverflow: return "more entries in a step than the plan holds";
         case kErrBadWindow: return "a window geometry the kernel was not built for";
         case kErrBadType: return "a layer's gate/up or down type the kernel has no body for";
+        case kErrTimeoutXq: return "timeout waiting for the primary's q8_1 rows of a step (STRATA_PEER2_STAGE)";
+        case kErrTimeoutDone: return "timeout waiting for every block's count of the step before last (STRATA_PEER2_SKIP)";
         default: return "unknown";
     }
 }
@@ -221,9 +223,11 @@ void PeerExperts::close() {
 
 bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>>& ranked, const ExpertCache& primary,
                        ExpertSource& src, int64_t n_layers, int64_t n_expert, int reserve_mib, int64_t max_slots,
-                       std::string& err, const PeerExperts* before, int ordinal) {
+                       std::string& err, const PeerExperts* before, int ordinal, double share) {
     close();
     ordinal_ = ordinal;
+    left_.clear();
+    left_count_ = took_left_ = 0;
     int count = 0;
     if (!ck(cudaGetDeviceCount(&count), "cudaGetDeviceCount", err)) return false;
     if (device < 1 || device >= count) {
@@ -317,11 +321,24 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
     std::vector<std::pair<int32_t, int32_t>> pick;
     std::vector<int64_t> sizes;
     uint64_t used = 0;
+    // s.11.3 (STRATA_PEER2_SHARE): the first server leaves one candidate every 1/share to the second, counted over its
+    // candidates in rank order up to where its budget ends (the pairs after that end go to the second anyway)
+    const bool leave = ordinal == 0 && before == nullptr && share > 0.0 && share <= 0.5;
+    if (leave) left_.assign((size_t) (n_layers * n_expert), 0);
+    int64_t cand = 0;
     for (const auto& pr : ranked) {
         if (primary.slot_of(pr.first, pr.second) >= 0) continue;
         // two servers: the second takes the NEXT pairs of the ranking, the ones the first server did not fit either
         // (its tier ends where its budget ended, in rank order), so a pair lives on one card
         if (before != nullptr && before->has(pr.first, pr.second)) continue;
+        if (leave) {
+            const int64_t c = cand++;
+            if ((int64_t) ((double) (c + 1) * share) > (int64_t) ((double) c * share)) {
+                left_[(size_t) (pr.first * n_expert + pr.second)] = 1;
+                ++left_count_;
+                continue;   // the second server's: it skips what this one holds, so it finds this pair free
+            }
+        }
         const uint64_t b = lay.blob_bytes(pr.first);
         const uint64_t b256 = lay.native ? (b + 255) / 256 * 256 : lay.max_blob;
         if (used + b256 > budget) break;
@@ -329,6 +346,21 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
         used += b256;
         pick.push_back(pr);
         sizes.push_back((int64_t) b);
+        if (before != nullptr && before->left_for_next(pr.first, pr.second)) ++took_left_;   // the second: a hot pair the first left it
+    }
+    if (leave) {
+        // the pairs left after the first server's end were never its (the second takes them as the next of the
+        // ranking): only those left BEFORE the end count as "left", so the log says what really moved
+        int64_t beyond = 0;
+        if (!pick.empty()) {
+            const auto& last = pick.back();
+            bool past = false;
+            for (const auto& pr : ranked) {
+                if (past && left_[(size_t) (pr.first * n_expert + pr.second)] != 0) { left_[(size_t) (pr.first * n_expert + pr.second)] = 0; ++beyond; }
+                if (pr == last) past = true;
+            }
+        }
+        left_count_ -= beyond;
     }
     if (pick.empty()) { err = "peer experts: no room or no expert left for the peer"; close(); return false; }
     // STRATA_EP_SPLIT_PREFILL: the stage's prompt MMQ reads a resident expert in its slot only when the slot has the
@@ -434,6 +466,12 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
             m.count[1] = rows;
             entries_ += rows;
             ++launches;
+        } else if (skip_ && h_empty_ != nullptr) {
+            // s.11.1 (STRATA_PEER2_SKIP): nothing of this server at this step - said to the primary's graph node (and to
+            // finish() under HOSTWAIT) with the step's ring in the empty word, so nobody waits the kernel's round trip
+            // over the link for a flag that carries no rows.  The kernel still serves the step (cnt[s] = 0, its flag).
+            store_u32(h_empty_ + step_, (uint32_t) step_ + 1u);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
         }
         launched_rows_ = rows;
         launched_direct_ = true;   // the kernel writes the mapped rows: the pool must not zero them
@@ -498,6 +536,9 @@ bool PeerExperts::finish(float* out, std::string& err) {
         // node, so the pool thread waits for the flag before it raises its own.
         launched_rows_ = 0;
         if (!fused_hostwait()) return true;
+        // s.11.1 (STRATA_PEER2_SKIP): an empty step is not waited for here either (the graph's node, when there is one,
+        // passes on the empty word): the step's rows are nobody's
+        if (skip_ && step_ > 0 && expect_[(size_t) step_ - 1] == 0) return true;
         const auto t0 = std::chrono::steady_clock::now();
         const uint32_t want = (uint32_t) step_;   // the step just counted is ring step_ (= s + 1)
         for (unsigned spins = 0;; ++spins) {
@@ -702,6 +743,10 @@ bool PeerExperts::fused_open(std::string& err) {
     // 20 s of the host's own layer wait
     const int wait_ms = second ? env_int(kEnvWaitMs2, kWaitMs2Default) : env_int(kEnvWaitMs, 20000);
     wait_ns_ = wait_ms > 0 ? (unsigned long long) wait_ms * 1000000ull : kWaitNsDefault;
+    // s.11: the skip of the empty steps (on by default on the second server, whose link is the slow one; off on the
+    // first) and the staged q8_1 rows (the second server only, off by default)
+    skip_ = env_int(second ? kEnvSkip2 : kEnvSkip, second ? 1 : 0) != 0;
+    stage_ = second && env_int(kEnvStage2, 0) != 0;
     // one layout a layer (s.3, d_lay_): the geometry must be the pack's one (the buffers are sized once), the types
     // are the layer's own; peer_fused_shape checks every layer against the kernel's bodies and this device's dispatch
     fused_lays_.assign((size_t) n_layers_, strata::kernels::NativeExpertLayout{});
@@ -738,11 +783,23 @@ bool PeerExperts::fused_open(std::string& err) {
     h_cnt_ = (uint32_t*) (h_page_ + kOffCnt);            m_cnt_ = (uint32_t*) (m_page + kOffCnt);
     h_stamp_fused_ = (unsigned long long*) (h_page_ + kOffStamp);
     m_stamp_fused_ = (unsigned long long*) (m_page + kOffStamp);
+    // s.11: the empty words (host-written, primary-read) and the xq ring (primary-written, peer-read) live in the page
+    h_empty_ = skip_ ? (uint32_t*) (h_page_ + kOffEmpty) : nullptr;
+    h_xq_seq_ = stage_ ? (uint32_t*) (h_page_ + kOffXqSeq) : nullptr;
+    m_xq_seq_ = stage_ ? (uint32_t*) (m_page + kOffXqSeq) : nullptr;
+    if (stage_) {   // the xq page: kMaxTok rows of n_embd/32 q8_1 blocks, written by the primary, read by the kernel
+        if (!ck(cudaHostAlloc((void**) &h_xq_, q8_bytes(kMaxTok, fused_L_.n_embd), cudaHostAllocPortable | cudaHostAllocMapped), "fused xq page", err)) return false;
+        std::memset(h_xq_, 0, q8_bytes(kMaxTok, fused_L_.n_embd));
+        if (!ck(cudaHostGetDevicePointer((void**) &m_xq_, h_xq_, 0), "fused xq page device pointer", err)) return false;
+    }
     {
         On on0(primary_device());
         uint8_t* p0 = nullptr;
         if (!ck(cudaHostGetDevicePointer((void**) &p0, h_page_, 0), "fused page device pointer (primary)", err)) return false;
         flag_out_dev0_ = (const uint32_t*) (p0 + kOffFlagOut);
+        empty_dev0_ = skip_ ? (const uint32_t*) (p0 + kOffEmpty) : nullptr;
+        xq_seq_dev0_ = stage_ ? (uint32_t*) (p0 + kOffXqSeq) : nullptr;
+        if (stage_ && !ck(cudaHostGetDevicePointer((void**) &xq_dev0_, h_xq_, 0), "fused xq page device pointer (primary)", err)) return false;
     }
 
     // ---- VRAM (s.3) and the pinned ownership rows (s.4); d_q8_, d_scratch_ and d_out_ are the per-layer path's
@@ -786,22 +843,35 @@ bool PeerExperts::fused_open(std::string& err) {
     hook_.abort = &PeerExperts::hook_abort;
     hook_.flag_out_host = h_flag_out_;
     hook_.flag_out_dev0 = fused_hostwait() ? nullptr : flag_out_dev0_;   // HOSTWAIT: no graph node, finish() waits
+    // s.11: the skip's empty words go with the graph node (under HOSTWAIT finish() reads expect_ instead); the staged
+    // rows need the primary's publish node, which the graph adds when it sees the page
+    hook_.empty_dev0 = skip_ && hook_.flag_out_dev0 != nullptr ? empty_dev0_ : nullptr;
+    hook_.xq_dev0 = stage_ ? xq_dev0_ : nullptr;
+    hook_.xq_seq_dev0 = stage_ ? xq_seq_dev0_ : nullptr;
     fused_on_ = true;
     std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the peer%s on GPU %d serves each window with one persistent kernel: %lld layers, gate/up types {%s}, "
                          "down types {%s} (n_embd %lld, n_ff %lld), minb %d, %d blocks (%d per SM x %d SMs), %zu B dynamic shared "
-                         "(grid %zu B), %s launch, waits bounded at %d ms%s%s\n",
+                         "(grid %zu B), %s launch, waits bounded at %d ms%s%s%s%s\n",
                  second ? " (second server)" : "", device_,
                  (long long) n_layers_, mask_text(shape_.gu_mask).c_str(), mask_text(shape_.d_mask).c_str(),
                  (long long) fused_L_.n_embd, (long long) fused_L_.n_ff, shape_.minb, shape_.blocks,
                  shape_.blocks_per_sm, shape_.sms, shape_.dyn_shared, shape_.grid_bytes, shape_.cooperative ? "cooperative" : "plain", wait_ms,
                  fused_hostwait() ? "; STRATA_PEER_FUSED_HOSTWAIT: the pool thread waits for the kernel's flag, no graph node" : "",
-                 stamp() ? "; STRATA_PEER_STAMP: the spans come from the kernel's own stamps" : "");
+                 stamp() ? "; STRATA_PEER_STAMP: the spans come from the kernel's own stamps" : "",
+                 skip_ ? (second ? "; STRATA_PEER2_SKIP: a step with no entry here does not hold the primary" : "; STRATA_PEER_SKIP: a step with no entry here does not hold the primary") : "",
+                 stage_ ? "; STRATA_PEER2_STAGE: the primary publishes the step's rows as q8_1 (2 880 B a row instead of 10 240)" : "");
     return true;
 }
 
 /// Frees fused_open's allocations (the caller is under the peer's device and has drained the stream).
 void PeerExperts::fused_close() {
     if (h_page_) cudaFreeHost(h_page_);
+    if (h_xq_) cudaFreeHost(h_xq_);
+    h_xq_ = m_xq_ = xq_dev0_ = nullptr;
+    h_empty_ = nullptr;
+    empty_dev0_ = nullptr;
+    h_xq_seq_ = m_xq_seq_ = xq_seq_dev0_ = nullptr;
+    skip_ = stage_ = false;
     if (h_own_) cudaFreeHost(h_own_);
     if (d_own_) cudaFree(d_own_);
     if (d_slot_ptr_) cudaFree(d_slot_ptr_);
@@ -843,12 +913,16 @@ cudaError_t PeerExperts::fused_query() {
 
 /// Polls the stream until it is idle, fails, or `limit_s` passed (then cudaErrorNotReady).  A sleep between polls:
 /// this waits for a kernel to leave, not for a layer's rows.
-cudaError_t PeerExperts::fused_drain(double limit_s) {
+cudaError_t PeerExperts::fused_drain(double limit_s, double spin_s) {
     const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
         const cudaError_t e = fused_query();
         if (e != cudaErrorNotReady) return e;
-        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > limit_s) return cudaErrorNotReady;
+        const double el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (el > limit_s) return cudaErrorNotReady;
+        // s.11.1: with the skip the kernel may still be serving the window's last EMPTY steps (microseconds) when the
+        // primary's sync returns; fused_end asks for a busy stretch first, so that tail never costs a 1 ms sleep
+        if (el < spin_s) continue;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
@@ -952,7 +1026,9 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
         store_u32(h_cnt_ + s, 0);
         *(volatile unsigned long long*) (h_stamp_fused_ + 2 * s) = 0;
         *(volatile unsigned long long*) (h_stamp_fused_ + 2 * s + 1) = 0;
+        if (h_empty_ != nullptr) store_u32(h_empty_ + s, 0);   // s.11.1: no step is empty until launch() says so
     }
+    if (h_xq_seq_ != nullptr) store_u32(h_xq_seq_, 0);        // s.11.2: no q8_1 rows published yet
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!ck(cudaMemsetAsync(d_sync_, 0, sizeof(Sync), stream_), "fused: sync words", err)) return false;
     // (4) the verifier's pages as the peer sees them
@@ -993,6 +1069,11 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
     win.sync = d_sync_;
     win.lay = d_lay_;                    // one layout a layer: the kernel picks each step's bodies from it
     win.n_layers = (int) n_layers_;
+    // s.11: with the skip the primary rings ahead of the flags on empty steps (the kernel guards its own double buffer);
+    // with the stage the kernel copies the primary's q8_1 rows from the xq page.  Off: 0 / null, the kernel of before.
+    win.ahead = skip_ ? 1 : 0;
+    win.xq = stage_ ? (const void*) m_xq_ : nullptr;
+    win.xq_seq = stage_ ? (const uint32_t*) m_xq_seq_ : nullptr;
     // (6) one launch a window, then a query so WDDM hands it to the card now instead of at the next driver call
     std::string lerr;
     if (!strata::kernels::peer_fused_launch(win, shape_, stream_, lerr)) {
@@ -1016,7 +1097,8 @@ bool PeerExperts::fused_end(std::string& err) {
     using namespace peer_fused;
     if (!fused_on_) return true;
     const bool was_open = window_open_;
-    const cudaError_t e = fused_drain(5.0);
+    // (s.11.1: with the skip the kernel may be a few empty steps behind the primary's sync: a busy 500 us first)
+    const cudaError_t e = fused_drain(5.0, skip_ ? 0.0005 : 0.0);
     // from here has / launch / finish are the per-layer path again - unless the kernel is still alive: then the window
     // stays open (adapt() must not refill the slots it reads) and the verifier's guard aborts it; the next begin
     // closes it once the stream is idle

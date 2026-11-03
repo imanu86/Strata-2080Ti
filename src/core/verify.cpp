@@ -2212,6 +2212,19 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 doorbell_publish_res(xm, ids_ + tb * K, layer_res, (int) g.n_expert, (int64_t) n * N, (int64_t) n * K,
                                      m_x_ + tb * N, m_ids_ + tb * K, m_seq_, cs);
             }
+            // STRATA_PEER2_STAGE (docs/PEER_FUSED2.md s.11.2): right after the doorbell, the step's rows once more, already
+            // quantized (q8_1, the quantizer of the hit path and of the server's own phase C: the same bytes), into the
+            // fused server's xq page with its ring - one node a step, only where that server's hook carries the page
+            // (the second server, on its slow link), in the doorbell window graphs the fused server serves (as the wait
+            // nodes of `post`: not the batch windows, not the head bet).
+            if (!batch_rec_ && rec_from_ < 0 && rec_to_ < 0) {
+                for (const strata::core::peer_fused::Hook* h : {peer_hook_, peer_hook2_}) {
+                    if (h == nullptr || h->xq_dev0 == nullptr || h->xq_seq_dev0 == nullptr) continue;
+                    if (!peer_fused_publish_q8(xm, n, N, h->xq_dev0 + (size_t) tb * (size_t) (N / 32) * 36, h->xq_seq_dev0,
+                                               (uint32_t) ((l - lb_) * G + grp + 1), cs, err))
+                        return false;
+                }
+            }
             if (sh_fork_late) {
                 note_prio_fork(cs);
                 cudaEventRecord(ev_fork_, cs);
@@ -2370,13 +2383,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 // wait node a step, before the CPU rows' wait, in the plain window graphs only: the batch windows and the
                 // head bet (STRUCT-A) run no fused window, so their graphs must not wait on a flag nobody raises.  The
                 // copy below stays the same: p_dst skips this GPU's hit rows, the peer's rows come with the CPU's.
+                // STRATA_PEER2_SKIP (docs/PEER_FUSED2.md s.11.1): with the server's empty words the node also passes on
+                // empty[s] == ring, which the pool thread writes when the server has nothing at this step: an empty step
+                // never waits the server's round trip.  Without them (null) the node of before.
                 if (peer_hook_ != nullptr && peer_hook_->flag_out_dev0 != nullptr && !batch_rec_ && rec_from_ < 0 &&
-                    rec_to_ < 0)
-                    wait_flag_ge(peer_hook_->flag_out_dev0, ring, cs);   // the peer's share is in the mapped rows
+                    rec_to_ < 0) {
+                    if (peer_hook_->empty_dev0 != nullptr) wait_flag_ge_any(peer_hook_->flag_out_dev0, ring, peer_hook_->empty_dev0 + (ring - 1), cs);
+                    else wait_flag_ge(peer_hook_->flag_out_dev0, ring, cs);   // the peer's share is in the mapped rows
+                }
                 // two servers: the second server's flag after the first's - one more node a step, a fixed order
                 if (peer_hook2_ != nullptr && peer_hook2_->flag_out_dev0 != nullptr && !batch_rec_ && rec_from_ < 0 &&
-                    rec_to_ < 0)
-                    wait_flag_ge(peer_hook2_->flag_out_dev0, ring, cs);
+                    rec_to_ < 0) {
+                    if (peer_hook2_->empty_dev0 != nullptr) wait_flag_ge_any(peer_hook2_->flag_out_dev0, ring, peer_hook2_->empty_dev0 + (ring - 1), cs);
+                    else wait_flag_ge(peer_hook2_->flag_out_dev0, ring, cs);
+                }
                 const bool fuse_rows = fuse_rows_on() && !prof_on_ && !remote_opt_ && dec_batch && m_bal_ == nullptr;   // 143-amdk
                 if (!fuse_rows) {
                     if (m_bal_ != nullptr)   // set_pcie_balance: ... and ends as it waits for the CPU's rows

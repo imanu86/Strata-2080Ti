@@ -8305,8 +8305,24 @@ int main(int argc, char** argv) {
                                  (long long) (o.peer_reserve_mib + ep_reserve_add + (int64_t) (taken_mib + 0.5)));
             }
         }
+        // STRATA_PEER2_SHARE=f (docs/PEER_FUSED2.md s.11.3; 0 < f <= 0.5, only with a second server): of the pairs the
+        // primary does not hold, the first server leaves one every 1/f of its candidates to the second, so the second
+        // holds hot pairs too and the two servers finish a step together instead of the second idling on cold pairs.
+        // A pair still lives on one card (the second skips what the first holds; the first's adapt never takes what
+        // the second claims).  0 (the default): the fill of before.
+        double peer2_share = 0.0;
+        if (o.peer_device2 >= 1) {
+            if (const char* v = std::getenv(strata::core::peer_fused::kEnvShare2); v != nullptr && v[0] != '\0') {
+                peer2_share = std::atof(v);
+                if (!(peer2_share > 0.0)) peer2_share = 0.0;
+                if (peer2_share > 0.5) {
+                    std::fprintf(stderr, "strata generate: STRATA_PEER2_SHARE %.2f is above 0.5: using 0.5\n", peer2_share);
+                    peer2_share = 0.5;
+                }
+            }
+        }
         if (!peer.open(o.peer_device, profile, xcache, *srcp, g.n_layers, g.n_expert,
-                       o.peer_reserve_mib + (int) ep_reserve_add, o.peer_slots, err)) {
+                       o.peer_reserve_mib + (int) ep_reserve_add, o.peer_slots, err, nullptr, 0, peer2_share)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
@@ -8329,6 +8345,10 @@ int main(int argc, char** argv) {
             if (!peer2.open(o.peer_device2, profile, xcache, *srcp, g.n_layers, g.n_expert, reserve2, slots2, err2, &peer, 1)) {
                 std::fprintf(stderr, "strata generate: second expert server on GPU %d not opened (%s): continuing with GPU %d alone\n",
                              o.peer_device2, err2.c_str(), o.peer_device);
+                if (peer.left_count() > 0)   // s.11.3: the pairs the first left for it are now nobody's (CPU rows): say so
+                    std::fprintf(stderr, "strata generate: STRATA_PEER2_SHARE %.2f: the %lld hot pairs GPU %d left to the second server "
+                                         "are on no card now (CPU rows): rerun without the variable, or with the second server open\n",
+                                 peer2_share, (long long) peer.left_count(), o.peer_device);
             } else {
                 std::fprintf(stderr, "strata generate: peer GPU %d (second server): %lld experts, %.2f GiB (filled in %.1f s, reserve %d MiB); "
                                      "with the primary's %lld and GPU %d's %lld that is %lld of %lld on the GPUs\n",
@@ -8336,6 +8356,11 @@ int main(int argc, char** argv) {
                              std::chrono::duration<double>(Clock::now() - tp1).count(), reserve2, (long long) xcache.slots(),
                              o.peer_device, (long long) peer.resident(),
                              (long long) (peer2.resident() + peer.resident() + xcache.slots()), (long long) (g.n_layers * g.n_expert));
+                if (peer2_share > 0.0)   // s.11.3: how many of the hot pairs the first left it the second really took
+                    std::fprintf(stderr, "strata generate: STRATA_PEER2_SHARE %.2f: GPU %d left one candidate every %.1f (%lld hot pairs) to "
+                                         "the second server, which took %lld of them%s\n",
+                                 peer2_share, o.peer_device, 1.0 / peer2_share, (long long) peer.left_count(), (long long) peer2.took_left(),
+                                 peer2.took_left() < peer.left_count() ? " (its budget ended first: the rest are CPU rows)" : "");
             }
         }
     }
