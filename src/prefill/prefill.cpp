@@ -944,22 +944,33 @@ struct PeerPrefill {
     double chunk_saved_ms = 0.0;    // this chunk's estimated saving of the primary's streaming (at the measured bw0)
     double stall_ms_total = 0.0, server_ms_total = 0.0;   // sums over the chunks read (the end line)
     int64_t chunks_read = 0;        // chunks whose events were read
-    // ---- the loop on the REAL result (s.2.3): the primary's chunk time with and without the server.  ev_m0 / ev_m1 are
-    // recorded on the primary's stream at the start and the end of EVERY MoE layer while this server exists; the
-    // chunk's span (first ev_m0 -> last ev_m1, per token) feeds one of two EWMAs by the chunk's mode.  `mode_on` is
-    // decided from the two: the server is used only while its chunks are faster than the chunks without it; in
-    // either mode every kProbeEvery-th chunk runs the OTHER mode (a probe), so a riser switches itself off and an
-    // Oculink switches itself on, and both keep being re-measured.  The host's time inside the server's issue
+    // ---- the loop on the REAL result (s.2.3): the primary's MoE time with and without the server, on PAIRS of adjacent
+    // chunks.  ev_m0 / ev_m1 are recorded on the primary's stream at the start and the end (after the combine) of
+    // EVERY MoE layer while this server exists; a chunk's measure is the SUM of those spans: the MoE part only (no
+    // attention, so no dependence on the position in the prompt), which scales with the chunk's rows.  A pair is an ON
+    // chunk and an OFF chunk next to each other with the SAME token count (a prompt's first chunk may be shorter, its
+    // last one too: those pairs are void), and its gain is (moe_off - moe_on) / moe_off; `gain_ewma` decides the mode.
+    // The server starts OFF: from OFF a trial pair (ON then OFF) every kTrialEvery chunks, never on a prompt's chunk 0
+    // (a one-chunk prompt never pays a trial); from ON a check pair (the running ON chunk, then an OFF one) every
+    // kCheckEvery chunks.  Mode, gains and costs persist across prompts.  The host's time inside the server's issue
     // (peer_layer) is measured too: on WDDM those calls are the primary's cost when the host is the critical path.
-    static constexpr int kProbeEvery = 8;
+    static constexpr int kTrialEvery = 16;   // OFF: chunks between two trial pairs
+    static constexpr int kCheckEvery = 8;    // ON: chunks between two check pairs
+    static constexpr double kGainOn = 0.02;  // the pair gain (EWMA) the server must show to be, or stay, ON
     std::vector<cudaEvent_t> ev_m0, ev_m1;   // [n_layers] on the primary (timing): the layer's MoE start / after its combine
-    int chunk_first_l = -1, chunk_last_l = -1;   // the chunk's first and last MoE layer with the events recorded
-    bool mode_on = true;            // the plan is made (true) or empty (false) - the decided mode
-    bool chunk_on = true;           // the mode this chunk was planned in (a probe may differ from mode_on)
-    bool chunk_probe = false;       // this chunk is a probe of the other mode
-    int64_t chunk_T = 0;            // the chunk's tokens (the span is normalized per token)
-    double ewma_on = 0.0, ewma_off = 0.0;    // ms per token of the primary's chunk span, by mode (0 = not measured yet)
-    int64_t chunks_on = 0, chunks_off = 0;   // chunks measured by mode
+    std::vector<char> ev_m_used;    // [n_layers] the layer's MoE events were recorded this chunk
+    bool mode_on = false;           // the decided mode: the plan is made (true) or empty (false).  OFF until a pair proves the gain
+    bool chunk_on = false;          // the mode this chunk was planned in (a trial or check chunk may differ from mode_on)
+    int chunk_role = 0;             // 0 a plain chunk of its mode; 1 the first half of a pair (ON); 2 the second half (OFF)
+    int64_t chunk_T = 0;            // the chunk's tokens (a pair needs two equal)
+    int64_t prompt_chunk = 0;       // the chunk's index in its prompt (run() resets it)
+    int64_t since_pair = 1 << 20;   // chunks since the last pair started (large at open: the first trial comes early)
+    double last_moe_ms = -1.0;      // the chunk before's MoE time, token count and mode (the first half of a pair)
+    int64_t last_T = 0;
+    bool last_on = false;
+    int last_role = 0;
+    double gain_ewma = 0.0;         // the pairs' gain, EWMA (0.5); > kGainOn keeps the server on
+    int64_t pairs = 0;              // pairs measured
     double layer_us_eff = 0.0;      // the server's measured FIXED cost per layer (us, EWMA of its smallest layer spans)
     double host_ms_chunk = 0.0;     // this chunk's host time inside the server's issue (peer_layer)
     double host_us_layer = 0.0;     // the same per layer, EWMA (us)
@@ -2671,6 +2682,7 @@ bool Prefill::set_peer2(core::PeerExperts* peer, std::string& err) {
         pp->ev_w1.assign(nl, nullptr);
         pp->ev_m0.assign(nl, nullptr);
         pp->ev_m1.assign(nl, nullptr);
+        pp->ev_m_used.assign(nl, 0);
         pp->ev_used.assign(nl, 0);
         for (size_t l = 0; l < nl; ++l)
             if (cudaEventCreate(&pp->ev_w0[l]) != cudaSuccess || cudaEventCreate(&pp->ev_w1[l]) != cudaSuccess ||
@@ -3435,6 +3447,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     PfTimer pt;
     PeTimer pe;
     if (m.pp) pe.dev = m.pp->dev; else pe.on = false;
+    if (m.pp2) { m.pp2->prompt_chunk = 0; m.pp2->last_role = 0; m.pp2->last_moe_ms = -1.0; }   // STRATA_PEER2_PREFILL s.2.3: a pair never spans two prompts
     const cudaStream_t cs = (cudaStream_t) m.cs;
     // the MMQ row table lives in the borrowed cache slots, which the refill after a prompt overwrites with experts:
     // write it again for every prompt (a layout is reused as long as the chunk and the slots are the same)
@@ -3901,24 +3914,34 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         else (void) cudaGetLastError();
                         ++layers;
                     }
-                    // (2) the primary's chunk: first MoE start -> last MoE end, per token, into the EWMA of the chunk's mode
-                    double chunk_ms = 0.0;
-                    bool chunk_measured = false;
-                    if (q == cudaSuccess && P2.chunk_first_l >= 0 && P2.chunk_last_l >= P2.chunk_first_l && P2.chunk_T > 0) {
+                    // (2) the primary's MoE time of the chunk: the sum of its MoE layers' spans (no attention: no
+                    // dependence on the position in the prompt; it scales with the chunk's rows, so only chunks with
+                    // the same token count are compared)
+                    double moe_ms = 0.0;
+                    int64_t moe_layers = 0;
+                    for (size_t l2 = 0; q == cudaSuccess && l2 < P2.ev_m_used.size(); ++l2) {
+                        if (!P2.ev_m_used[l2]) continue;
                         float c = 0.0f;
-                        if (cudaEventElapsedTime(&c, P2.ev_m0[(size_t) P2.chunk_first_l], P2.ev_m1[(size_t) P2.chunk_last_l]) == cudaSuccess) {
-                            chunk_ms = c;
-                            chunk_measured = true;
-                            const double per_tok = chunk_ms / (double) P2.chunk_T;
-                            double& ew = P2.chunk_on ? P2.ewma_on : P2.ewma_off;
-                            ew = ew > 0.0 ? 0.5 * ew + 0.5 * per_tok : per_tok;
-                            if (P2.chunk_on) ++P2.chunks_on; else ++P2.chunks_off;
-                        } else {
-                            (void) cudaGetLastError();
-                        }
+                        if (cudaEventElapsedTime(&c, P2.ev_m0[l2], P2.ev_m1[l2]) == cudaSuccess) { moe_ms += c; ++moe_layers; }
+                        else (void) cudaGetLastError();
                     }
+                    const bool chunk_measured = moe_layers > 0;
                     const double f0 = P2.factor;
                     const bool was_on = P2.mode_on;
+                    // (3) the pair: this chunk is a pair's second half (OFF) and the chunk before was its first (ON)
+                    // with the same token count: the gain decides the mode
+                    double gain = 0.0;
+                    bool paired = false;
+                    if (chunk_measured && P2.chunk_role == 2 && P2.last_role == 1 && P2.last_moe_ms > 0.0 && P2.last_T == P2.chunk_T &&
+                        !P2.chunk_on && P2.last_on) {
+                        gain = (moe_ms - P2.last_moe_ms) / moe_ms;   // > 0: the ON chunk's MoE was shorter than the OFF one's
+                        P2.gain_ewma = P2.pairs > 0 ? 0.5 * P2.gain_ewma + 0.5 * gain : gain;
+                        ++P2.pairs;
+                        paired = true;
+                        P2.mode_on = P2.gain_ewma > PeerPrefill::kGainOn;
+                    }
+                    if (chunk_measured) { P2.last_moe_ms = moe_ms; P2.last_T = P2.chunk_T; P2.last_on = P2.chunk_on; P2.last_role = P2.chunk_role; }
+                    else { P2.last_moe_ms = -1.0; P2.last_role = 0; }
                     if (q == cudaSuccess && layers > 0) {
                         // the stall's span holds the copy of the rows into Dm too (rows x N x 4 over the primary's link)
                         const double copy_ms = (double) P2.chunk_rows * (double) N * 4.0 / (P2.bw0_gbs * 1e6);
@@ -3948,45 +3971,56 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         P2.server_ms_total += server_ms;
                         ++P2.chunks_read;
                     }
-                    // (3) the mode, on the real result: with both EWMAs, the server stays on only while its chunks are
-                    // at least 1 % faster per token than the chunks without it
-                    if (P2.ewma_on > 0.0 && P2.ewma_off > 0.0) P2.mode_on = P2.ewma_on < 0.99 * P2.ewma_off;
                     if (chunk_measured || layers > 0) {
                         const double model_row_us = ((double) P2.xq_rb + (double) N * 4) / (P2.bw_gbs * 1e3) + P2.row_us;
-                        std::fprintf(stderr, "strata prefill: second server GPU %d (stage on CUDA%d), chunk %lld %s: sent %lld pairs (%lld rows) "
-                                             "over %lld layers (%lld dropped: too few rows for the host's cost); server %.0f ms, the primary stalled "
-                                             "%.0f ms for it, estimated saving %.0f ms; primary chunk %.0f ms = %.3f ms/token (EWMA with %.3f over %lld "
-                                             "chunks, without %.3f over %lld); server fixed %.0f us + %.1f us a row (model %.1f), host in its issue "
-                                             "%.0f us a layer; budget factor %.2f -> %.2f; mode %s -> %s\n",
-                                     P2.dev, m.device, (long long) (P2.chunks - 1), P2.chunk_on ? (P2.chunk_probe ? "ON (probe)" : "ON") : (P2.chunk_probe ? "OFF (probe)" : "OFF"),
+                        char pair_txt[160];
+                        if (paired)
+                            std::snprintf(pair_txt, sizeof pair_txt, "; pair: ON %.0f ms vs OFF %.0f ms at %lld tokens = gain %+.1f%% (EWMA %+.1f%% over %lld pairs)",
+                                          P2.last_moe_ms > 0.0 ? P2.last_moe_ms : 0.0, moe_ms, (long long) P2.chunk_T, 100.0 * gain,
+                                          100.0 * P2.gain_ewma, (long long) P2.pairs);
+                        else
+                            pair_txt[0] = '\0';
+                        std::fprintf(stderr, "strata prefill: second server GPU %d (stage on CUDA%d), chunk %lld (%lld of its prompt) %s: sent %lld pairs "
+                                             "(%lld rows) over %lld layers (%lld dropped: too few rows for the host's cost); server %.0f ms, the primary "
+                                             "stalled %.0f ms for it, estimated saving %.0f ms; primary MoE %.0f ms over %lld layers%s; server fixed %.0f us "
+                                             "+ %.1f us a row (model %.1f), host in its issue %.0f us a layer; budget factor %.2f -> %.2f; mode %s -> %s\n",
+                                     P2.dev, m.device, (long long) (P2.chunks - 1), (long long) (P2.prompt_chunk - 1),
+                                     P2.chunk_on ? (P2.chunk_role == 1 ? "ON (pair, first)" : "ON") : (P2.chunk_role == 2 ? "OFF (pair, second)" : "OFF"),
                                      (long long) P2.chunk_planned, (long long) P2.chunk_rows, (long long) layers, (long long) P2.layers_dropped,
-                                     server_ms, stall_ms, P2.chunk_saved_ms, chunk_ms, P2.chunk_T > 0 ? chunk_ms / (double) P2.chunk_T : 0.0,
-                                     P2.ewma_on, (long long) P2.chunks_on, P2.ewma_off, (long long) P2.chunks_off, P2.layer_us_eff, P2.row_us_eff,
+                                     server_ms, stall_ms, P2.chunk_saved_ms, moe_ms, (long long) moe_layers, pair_txt, P2.layer_us_eff, P2.row_us_eff,
                                      model_row_us, P2.host_us_layer, f0, P2.factor, was_on ? "on" : "off", P2.mode_on ? "on" : "off");
                     }
                 }
-                // the next chunk's mode: the decided one, except that a chunk every kProbeEvery is a probe of the other
-                // mode (and, until both modes have a measure, the other mode is tried on the second chunk)
-                P2.chunk_probe = false;
+                // the next chunk's mode and role.  A pair's second half follows its first at once.  From OFF: a trial
+                // pair (ON first) every kTrialEvery chunks, never on a prompt's chunk 0 (a one-chunk prompt never pays
+                // one; the first chunk of a prompt may be shorter too).  From ON: the running ON chunk is a pair's first
+                // half every kCheckEvery chunks, and the OFF chunk after it the second.
                 P2.chunk_on = P2.mode_on;
-                if (P2.chunks > 0) {
-                    const bool other_unmeasured = P2.mode_on ? P2.ewma_off <= 0.0 : P2.ewma_on <= 0.0;
-                    if (other_unmeasured || P2.chunks % PeerPrefill::kProbeEvery == PeerPrefill::kProbeEvery - 1) {
-                        P2.chunk_on = !P2.mode_on;
-                        P2.chunk_probe = true;
-                    }
+                P2.chunk_role = 0;
+                ++P2.since_pair;
+                if (P2.last_role == 1) {
+                    P2.chunk_on = false;
+                    P2.chunk_role = 2;
+                } else if (!P2.mode_on && P2.prompt_chunk >= 1 && P2.since_pair >= PeerPrefill::kTrialEvery) {
+                    P2.chunk_on = true;
+                    P2.chunk_role = 1;
+                    P2.since_pair = 0;
+                } else if (P2.mode_on && P2.prompt_chunk >= 1 && P2.since_pair >= PeerPrefill::kCheckEvery) {
+                    P2.chunk_on = true;
+                    P2.chunk_role = 1;
+                    P2.since_pair = 0;
                 }
                 P2.chunk_T = T;
-                P2.chunk_first_l = -1;
-                P2.chunk_last_l = -1;
                 P2.layers_dropped = 0;
                 P2.host_ms_chunk = 0.0;
+                std::fill(P2.ev_m_used.begin(), P2.ev_m_used.end(), 0);
                 std::fill(P2.ev_used.begin(), P2.ev_used.end(), 0);
                 P2.ev_last = nullptr;
                 P2.chunk_planned = 0;
                 P2.chunk_rows = 0;
                 P2.chunk_saved_ms = 0.0;
                 ++P2.chunks;
+                ++P2.prompt_chunk;
             };
             const bool p2_on = m.pp2 && m.pp2->peer != nullptr;
             if (p2_on) p2_fold();
@@ -5783,7 +5817,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         peer2_now = use_mmq && m.pp2 && !order_peer2.empty();
                         if (m.pp2 && pre_mmq) {   // s.2.3: the layer's MoE start on the primary's stream, every MoE layer
                             cudaEventRecord(m.pp2->ev_m0[(size_t) l], m.cs);
-                            if (m.pp2->chunk_first_l < 0) m.pp2->chunk_first_l = (int) l;
+                            m.pp2->ev_m_used[(size_t) l] = 1;
                         }
                         if (peer2_now) {
                             const auto th0 = std::chrono::steady_clock::now();
@@ -6253,7 +6287,6 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     use_mmq && !fused_l && lay.native && lay.fmt[(size_t) l].tail_off ? m.row_sd : nullptr);
                     if (m.pp2 && use_mmq) {   // s.2.3: the layer's MoE end (after the combine), every MoE layer
                         cudaEventRecord(m.pp2->ev_m1[(size_t) l], m.cs);
-                        m.pp2->chunk_last_l = (int) l;
                         m.pp2->ev_last = m.pp2->ev_m1[(size_t) l];
                     }
                     // debug: STRATA_DBG_NAN=1 reports the first layer of a chunk whose MoE produced non-finite values
@@ -6555,12 +6588,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                  "the cost model planned %lld of %lld candidate pairs over %lld layers, estimated %.0f ms of the primary's "
                                  "streaming saved (links: server %.2f GB/s, primary %.2f GB/s); closed loop over %lld chunks read: server "
                                  "%.0f ms, the primary stalled %.0f ms, server fixed %.0f us + %.1f us a row, host %.0f us a layer, budget factor "
-                                 "now %.2f, mode %s (primary chunk %.3f ms/token with the server over %lld chunks, %.3f without over %lld)\n",
+                                 "now %.2f, mode %s (pair gain EWMA %+.1f%% over %lld pairs)\n",
                          P2.dev, (long long) P2.layers, P2.layers ? (double) P2.rows / P2.layers : 0.0,
                          P2.layers ? (double) P2.experts / P2.layers : 0.0, (long long) P2.planned, (long long) P2.cand,
                          (long long) P2.layers_in, P2.est_saved_ms, P2.bw_gbs, P2.bw0_gbs, (long long) P2.chunks_read,
                          P2.server_ms_total, P2.stall_ms_total, P2.layer_us_eff, P2.row_us_eff, P2.host_us_layer, P2.factor,
-                         P2.mode_on ? "on" : "off", P2.ewma_on, (long long) P2.chunks_on, P2.ewma_off, (long long) P2.chunks_off);
+                         P2.mode_on ? "on" : "off", 100.0 * P2.gain_ewma, (long long) P2.pairs);
         }
     }
     if (kva_run || kva.capture) {
