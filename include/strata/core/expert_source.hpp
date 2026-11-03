@@ -659,6 +659,11 @@ struct ExpertDispatch {
     /// Multi-GPU: the second GPU's tier.  Its experts are computed there instead of on the CPU (kind 2).
     PeerExperts* peer = nullptr;
     int64_t peer_entries = 0;      ///< routed entries the peer served in verify windows
+    /// Two servers (--peer-device A,B, docs/PEER_FUSED2.md): the second server.  Asked after `peer`: an expert the
+    /// primary and the first server do not hold is its (kind 3), launched and finished right after the first's.
+    /// Null with one server: no test on the path.
+    PeerExperts* peer2 = nullptr;
+    int64_t peer2_entries = 0;     ///< routed entries the second server served in verify windows
     /// Set when `dispatch` could not produce an answer.  The loop itself has no error channel, so this is
     /// where a source failure surfaces: the driver checks it after `session_loop` returns rather than the
     /// engine computing from a half-filled `parts`.

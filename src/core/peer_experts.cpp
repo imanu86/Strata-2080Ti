@@ -221,8 +221,9 @@ void PeerExperts::close() {
 
 bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>>& ranked, const ExpertCache& primary,
                        ExpertSource& src, int64_t n_layers, int64_t n_expert, int reserve_mib, int64_t max_slots,
-                       std::string& err) {
+                       std::string& err, const PeerExperts* before, int ordinal) {
     close();
+    ordinal_ = ordinal;
     int count = 0;
     if (!ck(cudaGetDeviceCount(&count), "cudaGetDeviceCount", err)) return false;
     if (device < 1 || device >= count) {
@@ -318,6 +319,9 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
     uint64_t used = 0;
     for (const auto& pr : ranked) {
         if (primary.slot_of(pr.first, pr.second) >= 0) continue;
+        // two servers: the second takes the NEXT pairs of the ranking, the ones the first server did not fit either
+        // (its tier ends where its budget ended, in rank order), so a pair lives on one card
+        if (before != nullptr && before->has(pr.first, pr.second)) continue;
         const uint64_t b = lay.blob_bytes(pr.first);
         const uint64_t b256 = lay.native ? (b + 255) / 256 * 256 : lay.max_blob;
         if (used + b256 > budget) break;
@@ -373,7 +377,7 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
 }
 
 bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int64_t n_tok, int64_t k,
-                         const int32_t* kind, std::string& err, float* out) {
+                         const int32_t* kind, std::string& err, float* out, int32_t mine) {
     const bool direct = peer_direct() && out != nullptr;
     launched_direct_ = false;
     launched_rows_ = 0;
@@ -388,12 +392,13 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
     } timed{t0, ms_launch};
     Meta& m = *(Meta*) h_meta_;
     int groups = 0, rows = 0;
-    // distinct experts in routing order; each one's entries become compact rows
+    // distinct experts in routing order; each one's entries become compact rows (`mine`: this server's kind code,
+    // 2 for the first server as always, 3 for the second)
     for (int64_t i = 0; i < n; ++i) {
-        if (kind[i] != 2) continue;
+        if (kind[i] != mine) continue;
         bool seen = false;
         for (int64_t j = 0; j < i; ++j)
-            if (kind[j] == 2 && ids[j] == ids[i]) { seen = true; break; }
+            if (kind[j] == mine && ids[j] == ids[i]) { seen = true; break; }
         if (seen) continue;
         // STRATA_PEER_FUSED: inside a window the slot comes from the window's table (the one has() answered from)
         const int32_t slot = window_open_ ? own_win_[(size_t) (layer * n_expert_ + ids[i])]
@@ -402,7 +407,7 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
         m.ptr[groups] = (unsigned long long) cache_.device_slot(slot);
         m.start[groups] = rows;
         for (int64_t j = i; j < n; ++j)
-            if (kind[j] == 2 && ids[j] == ids[i]) {
+            if (kind[j] == mine && ids[j] == ids[i]) {
                 m.dst[rows] = rows;
                 m.tok[rows] = (int32_t) (j / k);
                 m.out_row[rows] = (int32_t) j;
@@ -550,7 +555,7 @@ bool PeerExperts::finish(float* out, std::string& err) {
     return true;
 }
 
-bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, std::string& err) {
+bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, std::string& err, const PeerExperts* other) {
     // STRATA_PEER_FUSED: the window's kernel may be reading any slot right now; the swaps wait for the next gap
     if (window_open_) return true;
     // STRATA_EP_SPLIT_PREFILL tappa 4b: the tier's tail holds the stage's prompt buffers (lend_guard): no slot is
@@ -575,7 +580,8 @@ bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, 
         const int32_t* r1 = res_.data() + l * n_expert_;
         for (int32_t e = 0; e < (int32_t) n_expert_; ++e) {
             if (r1[e] >= 0) vict.emplace_back(u[e], e);
-            else if (r0[e] < 0 && u[e] >= 2.0f) cand.emplace_back(u[e], e);
+            // two servers: a pair the other server holds or is bringing in is no candidate (one card a pair)
+            else if (r0[e] < 0 && u[e] >= 2.0f && (other == nullptr || !other->claims(l, e))) cand.emplace_back(u[e], e);
         }
         if (cand.empty() || vict.empty()) continue;
         std::sort(cand.begin(), cand.end(), [](auto& a, auto& b) { return a.first > b.first; });
@@ -672,20 +678,29 @@ bool PeerExperts::fused_open(std::string& err) {
     using namespace peer_fused;
     fused_on_ = false;
     const auto& lay = strata::kernels::cpu::expert_layout();
-    auto refuse = [](const std::string& why) {
-        std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the fused expert server is not available for this run (%s): "
-                             "the peer keeps the per-layer path\n", why.c_str());
+    auto refuse = [this](const std::string& why) {
+        std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the fused expert server is not available for this run on GPU %d (%s): "
+                             "the peer keeps the per-layer path\n", device_, why.c_str());
         return true;
     };
+    // two servers (docs/PEER_FUSED2.md s.5): the second server's kernel can be left off by itself - its card may drive
+    // the desktop, where the per-layer path's short kernels are the safe choice - while the first keeps its own
+    const bool second = ordinal_ > 0;
+    if (second && env_int(kEnvOn2, 1) == 0) return refuse(std::string(kEnvOn2) + "=0: the second server keeps the per-layer path");
     if (!lay.native) return refuse("not a native pack");
     if (!peer_direct()) return refuse("STRATA_PEER_DIRECT=0: the kernel writes the mapped rows itself");
     if ((int64_t) lay.fmt.size() < n_layers_) return refuse("the pack's layout has fewer layers than the model");
     if (n_layers_ <= 0) return refuse("no layers");
     // the knobs, read once here (the names are the contract's)
     const int minb = env_int(kEnvMinb, kMinBlocksDefault);
-    const int blocks_cap = env_int(kEnvBlocks, 0);
+    // (the second server's cap of its own, STRATA_PEER2_FUSED_BLOCKS, so a card that drives the desktop can be left
+    // SMs for it; unset, the common cap)
+    const int blocks_cap = second ? env_int(kEnvBlocks2, env_int(kEnvBlocks, 0)) : env_int(kEnvBlocks, 0);
     const bool coop = env_int(kEnvCoop, 1) != 0;
-    const int wait_ms = env_int(kEnvWaitMs, 20000);
+    // the second server's waits are bounded under Windows' 2 s TDR by default (STRATA_PEER2_WAIT_MS): a kernel on the
+    // desktop's card that outlives the timeout takes the display driver down with it; the first server keeps the
+    // 20 s of the host's own layer wait
+    const int wait_ms = second ? env_int(kEnvWaitMs2, kWaitMs2Default) : env_int(kEnvWaitMs, 20000);
     wait_ns_ = wait_ms > 0 ? (unsigned long long) wait_ms * 1000000ull : kWaitNsDefault;
     // one layout a layer (s.3, d_lay_): the geometry must be the pack's one (the buffers are sized once), the types
     // are the layer's own; peer_fused_shape checks every layer against the kernel's bodies and this device's dispatch
@@ -772,9 +787,10 @@ bool PeerExperts::fused_open(std::string& err) {
     hook_.flag_out_host = h_flag_out_;
     hook_.flag_out_dev0 = fused_hostwait() ? nullptr : flag_out_dev0_;   // HOSTWAIT: no graph node, finish() waits
     fused_on_ = true;
-    std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the peer serves each window with one persistent kernel: %lld layers, gate/up types {%s}, "
+    std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the peer%s on GPU %d serves each window with one persistent kernel: %lld layers, gate/up types {%s}, "
                          "down types {%s} (n_embd %lld, n_ff %lld), minb %d, %d blocks (%d per SM x %d SMs), %zu B dynamic shared "
                          "(grid %zu B), %s launch, waits bounded at %d ms%s%s\n",
+                 second ? " (second server)" : "", device_,
                  (long long) n_layers_, mask_text(shape_.gu_mask).c_str(), mask_text(shape_.d_mask).c_str(),
                  (long long) fused_L_.n_embd, (long long) fused_L_.n_ff, shape_.minb, shape_.blocks,
                  shape_.blocks_per_sm, shape_.sms, shape_.dyn_shared, shape_.grid_bytes, shape_.cooperative ? "cooperative" : "plain", wait_ms,
@@ -809,6 +825,7 @@ void PeerExperts::fused_close() {
     for (auto& mp : map_cache_) mp = MappedPtr{};
     hook_ = peer_fused::Hook{};
     host_res_fused_ = nullptr;
+    other_res_fused_ = nullptr;
     window_open_ = false;
     fused_on_ = false;
     step_ = win_steps_ = 0;
@@ -905,8 +922,18 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
     // (2) the window's ownership (s.4): the peer computes what it holds and the primary does not; the device gets
     // only the layers whose row changed since the last window (the swaps of adapt), from the pinned rows
     const size_t own_n = (size_t) (n_layers_ * n_expert_);
-    for (size_t i = 0; i < own_n; ++i)
-        own_win_[i] = (res_[i] >= 0 && (host_res_fused_ == nullptr || host_res_fused_[i] < 0)) ? res_[i] : kNotResident;
+    if (other_res_fused_ == nullptr) {
+        for (size_t i = 0; i < own_n; ++i)
+            own_win_[i] = (res_[i] >= 0 && (host_res_fused_ == nullptr || host_res_fused_[i] < 0)) ? res_[i] : kNotResident;
+    } else {
+        // two servers, the second: a pair the first server holds is the first's (the dispatch asks it before this
+        // one), so it is left out here as the primary's are - the two kernels never plan the same entry.  The first's
+        // table is read at the same moment the first's own fused_begin reads it (both begins run back to back on the
+        // verifier's thread before the graph launch), so the two window tables agree.
+        const int32_t* other = other_res_fused_;
+        for (size_t i = 0; i < own_n; ++i)
+            own_win_[i] = (res_[i] >= 0 && (host_res_fused_ == nullptr || host_res_fused_[i] < 0) && other[i] < 0) ? res_[i] : kNotResident;
+    }
     const size_t row_bytes = (size_t) n_expert_ * sizeof(int32_t);
     for (int64_t l = 0; l < n_layers_; ++l) {
         const size_t o = (size_t) (l * n_expert_);

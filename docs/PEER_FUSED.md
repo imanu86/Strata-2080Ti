@@ -8,6 +8,9 @@ Contratto comune: `include/strata/core/peer_fused.hpp` (strutture condivise, fir
 **come** le cose si incastrano; l'header dice **che cosa** si chiama come. I pezzi di lavoro (§10) scrivono file
 disgiunti e usano solo i simboli dell'header.
 
+**Due server** (`--peer-device A,B`: la 2080 Ti più la 3060 sul riser, ciascuna con il proprio kernel persistente):
+`PEER_FUSED2.md`. Con un solo device tutto quello che segue vale invariato.
+
 ## 0. In una frase
 
 Oggi (`peer_experts.cpp` `launch`/`finish`) ogni strato della finestra costa sul flusso della 2080 Ti: 1-2 copie H2D

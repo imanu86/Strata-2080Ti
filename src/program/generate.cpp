@@ -782,6 +782,12 @@ struct Options {
     int peer_reserve_mib = 600;
     int64_t peer_slots = 0;
     int peer_adapt_swaps = -1;
+    /// Two expert servers (--peer-device A,B; docs/PEER_FUSED2.md): the SECOND server's device (-1 = one server, as
+    /// before), its reserve and its slot cap (-1 = the first's value: one value on the option serves both).  It takes
+    /// the ranked pairs the first server did not fit, fixed on its card; its adapt is off unless STRATA_PEER2_ADAPT=1.
+    int peer_device2 = -1;
+    int peer_reserve_mib2 = -1;
+    int64_t peer_slots2 = -1;
     /// the prompt path's rows per layer the peer computes: -1 = half of chunk x top-k, 0 = the prompt path stays on
     /// the primary
     int64_t peer_prefill_rows = -1;
@@ -1263,8 +1269,10 @@ void usage() {
                  "  --peer-device N      a second GPU as an adaptive expert-cache tier (rows over P2P; it also\n"
                  "                       computes its experts' prompt rows).  Not with --layer-split or\n"
                  "                       --expert-cache-device1..3.  Default output unchanged without it.\n"
-                 "  --peer-reserve-mib N  VRAM the peer tier leaves free on its card (default 600)\n"
-                 "  --peer-slots N       expert slots on the peer (default: what fits)\n"
+                 "                       N,M: two expert servers - M takes the ranked experts N did not fit, fixed\n"
+                 "                       on its card (docs/PEER_FUSED2.md; STRATA_PEER2_ADAPT=1 lets it adapt)\n"
+                 "  --peer-reserve-mib N  VRAM the peer tier leaves free on its card (default 600); N,M with two servers\n"
+                 "  --peer-slots N       expert slots on the peer (default: what fits); N,M with two servers\n"
                  "  --peer-adapt-swaps N  peer cache swaps per adaptation step (default: --adapt-swaps)\n"
                  "  --peer-prefill-rows N  prompt rows per layer the peer computes (default half of chunk x top-k;\n"
                  "                       0 = the prompt path stays on the primary)\n"
@@ -3497,9 +3505,27 @@ int main(int argc, char** argv) {
         else if (a == "--adapt-swaps") o.adapt_swaps = std::atoi(next("--adapt-swaps"));
         else if (a == "--expert-cache-cpu-order") o.expert_cache_cpu_order = true;
         else if (a == "--expert-cache-per-layer") o.expert_cache_per_layer = true;
-        else if (a == "--peer-device") o.peer_device = std::atoi(next("--peer-device"));
-        else if (a == "--peer-reserve-mib") o.peer_reserve_mib = std::atoi(next("--peer-reserve-mib"));
-        else if (a == "--peer-slots") o.peer_slots = std::atoll(next("--peer-slots"));
+        // two servers (docs/PEER_FUSED2.md): "A,B" on the three options; one value keeps the one-server reading
+        // (the second's reserve and slots then follow the first's, -1)
+        else if (a == "--peer-device" || a == "--peer-reserve-mib" || a == "--peer-slots") {
+            const std::string what = a;
+            const char* v = next(what.c_str());
+            const char* comma = std::strchr(v, ',');
+            if (comma != nullptr && std::strchr(comma + 1, ',') != nullptr) {
+                std::fprintf(stderr, "strata generate: %s takes one value or two (A,B: the first and the second expert server)\n", what.c_str());
+                return 2;
+            }
+            if (what == "--peer-device") {
+                o.peer_device = std::atoi(v);
+                if (comma != nullptr) o.peer_device2 = std::atoi(comma + 1);
+            } else if (what == "--peer-reserve-mib") {
+                o.peer_reserve_mib = std::atoi(v);
+                if (comma != nullptr) o.peer_reserve_mib2 = std::atoi(comma + 1);
+            } else {
+                o.peer_slots = std::atoll(v);
+                if (comma != nullptr) o.peer_slots2 = std::atoll(comma + 1);
+            }
+        }
         else if (a == "--peer-adapt-swaps") o.peer_adapt_swaps = std::atoi(next("--peer-adapt-swaps"));
         else if (a == "--peer-prefill-rows") o.peer_prefill_rows = std::atoll(next("--peer-prefill-rows"));
         else if (a == "--no-hit-poke") o.no_hit_poke = true;
@@ -4176,6 +4202,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: --peer-device cannot be combined with %s\n",
                      !o.layer_split.empty() ? "--layer-split (use one or the other)"
                                             : "--expert-cache-device1..3 (the peer tier already caches experts there)");
+        return 2;
+    }
+    // two servers: the second needs a first, and a card of its own (not the primary's, not the first's)
+    if (o.peer_device2 >= 0 && (o.peer_device < 1 || o.peer_device2 < 1 || o.peer_device2 == o.peer_device)) {
+        std::fprintf(stderr, "strata generate: --peer-device A,B needs two different CUDA devices from 1 up (the primary is device 0), got %d,%d\n",
+                     o.peer_device, o.peer_device2);
         return 2;
     }
 
@@ -8162,6 +8194,10 @@ int main(int argc, char** argv) {
 
     // ---- Multi-GPU: the second GPU's expert tier, filled with the ranked pairs the primary does not hold
     strata::core::PeerExperts peer;
+    // two servers (--peer-device A,B, docs/PEER_FUSED2.md): the second server, opened after the first with the pairs
+    // neither the primary nor the first holds; invalid (never opened) with one server, so every `peer2.valid()` below
+    // is false and the one-server path is the one above it
+    strata::core::PeerExperts peer2;
     if (o.peer_device >= 1) {
         if (profile.empty() || srcp == nullptr || o.expert_cache <= 0) {
             std::fprintf(stderr, "strata generate: --peer-device needs --expert-profile and the expert cache\n");
@@ -8278,6 +8314,30 @@ int main(int argc, char** argv) {
                              "%lld that is %lld of %lld on the GPUs\n", o.peer_device, (long long) peer.resident(), peer.gib(),
                      std::chrono::duration<double>(Clock::now() - tp0).count(), (long long) xcache.slots(),
                      (long long) (peer.resident() + xcache.slots()), (long long) (g.n_layers * g.n_expert));
+        // ---- the second server (docs/PEER_FUSED2.md s.2): the next ranked pairs, the ones the first did not fit,
+        // fixed on its card for the run (its adapt is off unless STRATA_PEER2_ADAPT=1: the card may sit on a slow
+        // link).  Its reserve and slot cap are the option's second value, or the first's.  Its card may be the
+        // desktop's (an RTX 3060 on a PCIe x1 riser): a device that does not open, or an allocation that fails, is
+        // one line here and a run with the first server alone - never an exit.  The EP prompt stage, the prompt
+        // path's peer share (set_peer) and the tier loan (tappa 4b) stay the FIRST server's: the second serves the
+        // decode windows only, its pairs are streamed from host memory by the prompt path like any non-resident one.
+        if (o.peer_device2 >= 1) {
+            const auto tp1 = Clock::now();
+            std::string err2;
+            const int reserve2 = o.peer_reserve_mib2 >= 0 ? o.peer_reserve_mib2 : o.peer_reserve_mib;
+            const int64_t slots2 = o.peer_slots2 >= 0 ? o.peer_slots2 : o.peer_slots;
+            if (!peer2.open(o.peer_device2, profile, xcache, *srcp, g.n_layers, g.n_expert, reserve2, slots2, err2, &peer, 1)) {
+                std::fprintf(stderr, "strata generate: second expert server on GPU %d not opened (%s): continuing with GPU %d alone\n",
+                             o.peer_device2, err2.c_str(), o.peer_device);
+            } else {
+                std::fprintf(stderr, "strata generate: peer GPU %d (second server): %lld experts, %.2f GiB (filled in %.1f s, reserve %d MiB); "
+                                     "with the primary's %lld and GPU %d's %lld that is %lld of %lld on the GPUs\n",
+                             o.peer_device2, (long long) peer2.resident(), peer2.gib(),
+                             std::chrono::duration<double>(Clock::now() - tp1).count(), reserve2, (long long) xcache.slots(),
+                             o.peer_device, (long long) peer.resident(),
+                             (long long) (peer2.resident() + peer.resident() + xcache.slots()), (long long) (g.n_layers * g.n_expert));
+            }
+        }
     }
 
     if (remote_opt && !remote_opt->init(err)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
@@ -8295,6 +8355,7 @@ int main(int argc, char** argv) {
     for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
         drive.d.remote[drive.d.remote_count++] = &remote_experts[(size_t) r];
     drive.d.peer = peer.valid() ? &peer : nullptr;
+    drive.d.peer2 = peer2.valid() ? &peer2 : nullptr;   // two servers: asked after the first (kind 3)
     drive.d.hit_cpu_order = o.expert_cache_cpu_order;
     drive.d.split_rows = !o.no_split_rows;
     drive.d.pool = &pool;
@@ -11076,6 +11137,13 @@ int main(int argc, char** argv) {
             peer.fused_set_host_res(host_res.empty() ? nullptr : host_res.data());
             ver.set_peer_fused(peer.fused_hook());
         }
+        // two servers (docs/PEER_FUSED2.md s.4): the second server's kernel beside the first's; its window table
+        // also leaves out what the first holds (the dispatch's precedence), so the two kernels never plan one entry
+        if (peer2.fused_on()) {
+            peer2.fused_set_host_res(host_res.empty() ? nullptr : host_res.data());
+            peer2.fused_set_other_res(peer.valid() ? peer.res_table() : nullptr);
+            ver.set_peer_fused2(peer2.fused_hook());
+        }
         if (!ver.init(wt, g, ss, vh, native_head.loaded() || prefill_head_alias_bound ? &native_head : nullptr,
                       batch_max_t(), err) ||
             (use_mtp && !prefill_head_alias_bound && !mtp.bind(last_st && !mtp_off_last ? last_st->wt : wt, last_st ? &last_st->head : &native_head,
@@ -12428,6 +12496,7 @@ int main(int argc, char** argv) {
         };
         auto apply_pending = [&](bool wait) {
             if (peer.valid()) peer.apply_pending(wait);
+            if (peer2.valid()) peer2.apply_pending(wait);   // two servers: its swaps (STRATA_PEER2_ADAPT) land the same way
             if (pending.empty()) return;
             if (wait) cudaEventSynchronize(adapt_ev);
             else if (cudaEventQuery(adapt_ev) != cudaSuccess) return;
@@ -12579,7 +12648,7 @@ int main(int argc, char** argv) {
                 const float* u = drive.d.usage.data() + l * g.n_expert;
                 const int32_t* r = host_res.data() + l * g.n_expert;
                 for (int32_t e = 0; e < (int32_t) g.n_expert; ++e) {
-                    if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }
+                    if (r[e] < 0) { if (u[e] >= 2.0f && !(peer.valid() && peer.has(l, e)) && !(peer2.valid() && peer2.has(l, e)) && !(remote_opt && remote_opt->owns(l, e)) && !helper_holds(l, e)) cand.emplace_back(u[e], e); }   // (two servers: the second's pairs are no candidates either)
                     // --elastic: the core never leaves - unless core_adapt; beside the pipeline el_core counts CUDA0's
                     // slots and a later stage's layers hold slots of their own cache
                     // STRATA_RAM_CORE: a fixed core's expert is never a victim, core_adapt or not
@@ -12726,9 +12795,27 @@ int main(int argc, char** argv) {
                 std::vector<int32_t> r0 = host_res;
                 for (const auto& [i, slot] : pending) r0[(size_t) i] = slot;   // swapped into the primary already
                 std::string perr;
+                // two servers: a pair the second holds or is bringing in is no candidate for the first (one card a pair)
                 if (!peer.adapt(drive.d.usage.data(), r0.data(),
-                                o.peer_adapt_swaps >= 0 ? o.peer_adapt_swaps : o.adapt_swaps, perr)) {
+                                o.peer_adapt_swaps >= 0 ? o.peer_adapt_swaps : o.adapt_swaps, perr,
+                                peer2.valid() ? &peer2 : nullptr)) {
                     std::fprintf(stderr, "strata serve: %s\n", perr.c_str());
+                    return false;
+                }
+                // the second server (docs/PEER_FUSED2.md s.3): off by default - its card may sit on a slow link, where
+                // a swap's copy costs more than the rows it would save; STRATA_PEER2_ADAPT=1 turns it on with at most
+                // STRATA_PEER2_ADAPT_SWAPS swaps a round (default 2).  After the first's adapt, on the same thread:
+                // what the first just evicted (res_ -1 now) is a candidate here, what it is bringing in (claims) is
+                // not, so a pair never ends up on both cards.
+                static const int peer2_swaps = [] {
+                    const char* on = std::getenv("STRATA_PEER2_ADAPT");
+                    if (on == nullptr || std::atoi(on) == 0) return 0;
+                    const char* n = std::getenv("STRATA_PEER2_ADAPT_SWAPS");
+                    return n != nullptr && n[0] != '\0' ? std::max(0, std::atoi(n)) : 2;
+                }();
+                if (peer2.valid() && peer2_swaps > 0 &&
+                    !peer2.adapt(drive.d.usage.data(), r0.data(), peer2_swaps, perr, &peer)) {
+                    std::fprintf(stderr, "strata serve: second expert server: %s\n", perr.c_str());
                     return false;
                 }
             }
@@ -18096,6 +18183,13 @@ int main(int argc, char** argv) {
             const size_t peer_spans0 = peer.spans_us().size();   // STRATA_PEER_STAMP: the GPU spans before this request
             const double peer_span_us0 = peer.span_us_total;
             const int64_t peer_fwin0 = peer.fused_windows(), peer_fsteps0 = peer.fused_steps();   // STRATA_PEER_FUSED
+            // two servers: the second server's own counters (its line follows the first's)
+            const double peer2_launch0 = peer2.ms_launch, peer2_wait0 = peer2.ms_wait, peer2_adapt0 = peer2.ms_adapt;
+            const int64_t peer2_launches0 = peer2.launches, peer2_entries0 = peer2.entries(), peer2_experts0 = peer2.experts();
+            const int64_t peer2_swaps0 = peer2.swaps();
+            const size_t peer2_spans0 = peer2.spans_us().size();
+            const double peer2_span_us0 = peer2.span_us_total;
+            const int64_t peer2_fwin0 = peer2.fused_windows(), peer2_fsteps0 = peer2.fused_steps();
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
@@ -19693,6 +19787,38 @@ int main(int argc, char** argv) {
                                  strata::core::PeerExperts::refill_flush() ? " (STRATA_PEER_REFILL_FLUSH)" : "", fused_note.c_str(), span.c_str(),
                                  ep_note.c_str());
                 }
+                if (peer2.valid()) {   // two servers: the second server's line, the same fields (its wait is its own)
+                    const bool fused2 = peer2.fused_on();
+                    std::string span2;
+                    if ((strata::core::PeerExperts::stamp() || fused2) && peer2.spans_us().size() > peer2_spans0) {
+                        std::vector<float> sp(peer2.spans_us().begin() + (ptrdiff_t) peer2_spans0, peer2.spans_us().end());
+                        const size_t i50 = sp.size() / 2, i90 = std::min(sp.size() - 1, sp.size() * 9 / 10);
+                        std::nth_element(sp.begin(), sp.begin() + (ptrdiff_t) i50, sp.end());
+                        const float p50 = sp[i50];
+                        std::nth_element(sp.begin(), sp.begin() + (ptrdiff_t) i90, sp.end());
+                        const float p90 = sp[i90];
+                        char buf[200];
+                        std::snprintf(buf, sizeof buf, "; GPU span per %s p50 %.0f us, p90 %.0f us, %.2f ms/window over %zu %s",
+                                      fused2 ? "step" : "layer", p50, p90, (peer2.span_us_total - peer2_span_us0) * 1e-3 / w, sp.size(),
+                                      fused2 ? "steps" : "layers");
+                        span2 = buf;
+                    }
+                    std::string fused_note2;
+                    if (fused2) {
+                        char buf[160];
+                        std::snprintf(buf, sizeof buf, " (STRATA_PEER_FUSED: %lld windows fused, %.1f steps/window)",
+                                      (long long) (peer2.fused_windows() - peer2_fwin0),
+                                      (double) (peer2.fused_steps() - peer2_fsteps0) / std::max<double>(1.0, (double) (peer2.fused_windows() - peer2_fwin0)));
+                        fused_note2 = buf;
+                    }
+                    std::fprintf(stderr, "strata decode peer2 (GPU %d): per window: %.2f ms host in launch + %.2f ms waiting in finish over %.1f layers "
+                                         "with a share; per layer-window: %.2f entries, %.2f experts; adapt %.2f ms host, %.1f swaps/window%s%s\n",
+                                 peer2.device(), (peer2.ms_launch - peer2_launch0) / w, (peer2.ms_wait - peer2_wait0) / w,
+                                 (double) (peer2.launches - peer2_launches0) / w,
+                                 (double) (peer2.entries() - peer2_entries0) / (w * L), (double) (peer2.experts() - peer2_experts0) / (w * L),
+                                 (peer2.ms_adapt - peer2_adapt0) / w, (double) (peer2.swaps() - peer2_swaps0) / w,
+                                 fused_note2.c_str(), span2.c_str());
+                }
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();
                     if (pr.empty()) continue;
@@ -20657,6 +20783,11 @@ int main(int argc, char** argv) {
         if (peer.fused_on()) {
             peer.fused_set_host_res(host_res.empty() ? nullptr : host_res.data());
             ver.set_peer_fused(peer.fused_hook());
+        }
+        if (peer2.fused_on()) {   // two servers: the second's kernel too (see the serve path)
+            peer2.fused_set_host_res(host_res.empty() ? nullptr : host_res.data());
+            peer2.fused_set_other_res(peer.valid() ? peer.res_table() : nullptr);
+            ver.set_peer_fused2(peer2.fused_hook());
         }
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());

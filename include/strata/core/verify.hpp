@@ -210,6 +210,10 @@ public:
     /// windows and the head bet never call it: the peer serves them on its per-layer path.  Null (the default):
     /// nothing changes.  Set before `init`.
     void set_peer_fused(const strata::core::peer_fused::Hook* h) { peer_hook_ = h; }
+    /// Two servers (--peer-device A,B, docs/PEER_FUSED2.md): the SECOND server's hook, driven beside the first's:
+    /// begin after it, one more wait node a step (its flag, after the first's), flush and end with it, aborted and
+    /// released with it.  Either one may be null (a server whose pack the kernel refused keeps its per-layer path).
+    void set_peer_fused2(const strata::core::peer_fused::Hook* h) { peer_hook2_ = h; }
     /// The next stage: `run` and `commit` continue into it (its pool calls get `next_user`); sampling settings
     /// and `final_R` are the last stage's.
     void set_next(Verifier* next, void* next_user) { next_ = next; next_user_ = next_user; }
@@ -593,6 +597,7 @@ private:
     uint32_t* hdrop_h_ = nullptr;        ///< STRATA_TEST_HANDOFF_DROP: the writing stage withholds its flag (mapped)
     uint32_t* hdrop_d_ = nullptr;
     const strata::core::peer_fused::Hook* peer_hook_ = nullptr;   ///< set_peer_fused: the fused peer server (null: off)
+    const strata::core::peer_fused::Hook* peer_hook2_ = nullptr;  ///< set_peer_fused2: the second server's (null: one server, or its kernel off)
     bool handoff_failed(std::string& err) const;   ///< the bounded hand-off wait timed out in the last window
     int prelaunched_ = 0;                ///< prelaunch ran for a window of this size: run skips staging + launch
     /// The overlapped split: stage this window's inputs and launch its graph now (the graph waits on the hand-off

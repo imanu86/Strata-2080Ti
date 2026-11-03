@@ -13,6 +13,13 @@
 //
 // The tier follows the conversation like the primary's: `adapt` swaps the most-routed experts that neither card
 // holds into the peer's least-used slots (per layer, so a slot keeps its layer's blob size).
+//
+// Two servers (--peer-device A,B, docs/PEER_FUSED2.md): generate.cpp opens TWO of these, one a card, in order.  The
+// second (`ordinal` 1) is filled with the ranked pairs that neither the primary nor the first holds (`open`'s
+// `before`), computes the entries the pool marks kind 3 (`launch`'s `mine`; the first keeps kind 2), and its adapt
+// never takes a pair the other server holds or is bringing in (`adapt`'s `other`, `claims`): a pair lives on ONE
+// server.  Each one has its own streams, buffers, mapped page and persistent kernel; the primary's graph waits on
+// both flags.  With one server every one of these parameters is at its default and the code path is the one above.
 #pragma once
 
 #include "strata/core/expert_cache.hpp"
@@ -43,13 +50,17 @@ public:
     PeerExperts& operator=(const PeerExperts&) = delete;
 
     /// Opens the tier on `device`: fills it with the first pairs of `ranked` that `primary` does not hold, as many
-    /// as fit in the card's free memory minus `reserve_mib` (`max_slots` > 0 caps the count).
+    /// as fit in the card's free memory minus `reserve_mib` (`max_slots` > 0 caps the count).  Two servers: `before`
+    /// is the server opened before this one (its pairs are skipped too, so a pair is on one card) and `ordinal` its
+    /// place (0 the first, as today; 1 the second: it reads the STRATA_PEER2_* knobs).  `before` must be open and idle
+    /// (it is: the servers open one after the other at startup) and have the same n_layers x n_expert.
     bool open(int device, const std::vector<std::pair<int32_t, int32_t>>& ranked, const ExpertCache& primary,
               ExpertSource& src, int64_t n_layers, int64_t n_expert, int reserve_mib, int64_t max_slots,
-              std::string& err);
+              std::string& err, const PeerExperts* before = nullptr, int ordinal = 0);
     void close();
     bool valid() const { return device_ >= 0; }
     int device() const { return device_; }
+    int ordinal() const { return ordinal_; }   ///< 0: the first (or only) server; 1: the second (--peer-device A,B)
 
     /// Whether the peer holds (layer, expert) right now.  STRATA_PEER_FUSED: inside a fused window the answer comes
     /// from the window's ownership table (own_win_, what the kernel on the peer plans with), not from res_, so the
@@ -57,6 +68,19 @@ public:
     bool has(int64_t layer, int64_t expert) const {
         const size_t idx = (size_t) (layer * n_expert_ + expert);
         return window_open_.load(std::memory_order_relaxed) ? own_win_[idx] >= 0 : res_[idx] >= 0;
+    }
+
+    /// Two servers: whether this server holds (layer, expert) or is bringing it in (a swap of adapt() whose copy has
+    /// not landed: in pending_, not yet in res_).  The other server's adapt() asks this before it takes a candidate,
+    /// so a pair never ends up on both cards; has() alone would miss the swap in flight.  Called on the adapt thread
+    /// between decode windows, the same thread that writes pending_ (adapt) - apply_pending runs at the decode's join
+    /// or on the pool thread inside a window, never beside an adapt.
+    bool claims(int64_t layer, int64_t expert) const {
+        const size_t idx = (size_t) (layer * n_expert_ + expert);
+        if (res_[idx] >= 0) return true;
+        for (const auto& p : pending_)
+            if ((size_t) p.first == idx) return true;
+        return false;
     }
 
     /// The device address of (layer, expert)'s blob on the peer, or null when it is not resident.
@@ -121,18 +145,20 @@ public:
     /// cache's queue, not on these streams).
     bool quiesce(std::string& err);
 
-    /// Starts the peer's share of one layer: the entries i with kind[i] == 2 (x: n_tok rows of n_embd floats).
+    /// Starts the peer's share of one layer: the entries i with kind[i] == `mine` (2 for the first server, 3 for the
+    /// second: the pool's kind codes) (x: n_tok rows of n_embd floats).
     /// multi-GPU: with `out` (pinned, portable host rows) the peer writes its rows straight into
     /// out[entry] with a scatter kernel (no D2H copy + host memcpy in finish); STRATA_PEER_DIRECT=0: the old way.
     bool launch(int64_t layer, const float* x, const int32_t* ids, int64_t n_tok, int64_t k, const int32_t* kind,
-                std::string& err, float* out = nullptr);
+                std::string& err, float* out = nullptr, int32_t mine = 2);
     /// Waits for the launched share and writes its rows into `out` (row i = entry i, n_embd floats).
     bool finish(float* out, std::string& err);
 
     /// Adaptive tier: swap up to `max_swaps` experts routed at least twice that neither the primary (`res0`, slot
     /// or -1) nor the peer holds into the peer's least-used slots.  Copies run on the peer's refill stream; a
-    /// swapped-in expert becomes resident at `apply_pending`.  Call only between verify windows.
-    bool adapt(const float* usage, const int32_t* res0, int max_swaps, std::string& err);
+    /// swapped-in expert becomes resident at `apply_pending`.  Call only between verify windows.  Two servers:
+    /// `other` is the other server; a pair it holds or is bringing in (claims) is no candidate here.
+    bool adapt(const float* usage, const int32_t* res0, int max_swaps, std::string& err, const PeerExperts* other = nullptr);
     void apply_pending(bool wait);
     /// STRATA_PEER_REFILL_FLUSH=1 (opt-in, lab/upsync-v0.2.9, PIPELINE3_PIANO tappa 0b): adapt() queries the refill
     /// stream right after its last copy, so WDDM hands the copies to the card now instead of at the next driver call
@@ -190,6 +216,11 @@ public:
     /// The primary's residency table (drive.d.host_res; may be null before the token graph's table exists): with the
     /// peer's own res_ it gives the window's ownership (own = res_ >= 0 && host_res < 0).  Set before the first window.
     void fused_set_host_res(const int32_t* host_res) { host_res_fused_ = host_res; }
+    /// Two servers: the FIRST server's residency table (its res_table()), set on the SECOND before its first window.
+    /// Its window table then leaves out every pair the first holds (own = res_ >= 0 && host_res < 0 && other < 0),
+    /// the same precedence the pool's dispatch applies (primary, then the first server, then this one), so the two
+    /// kernels never plan the same entry.  Null (the first server, or one server): no third test.
+    void fused_set_other_res(const int32_t* other_res) { other_res_fused_ = other_res; }
     /// The hook's four entry points (see the Hook comment in peer_fused.hpp).
     bool fused_begin(const peer_fused::WindowHost& w, std::string& err);
     bool fused_end(std::string& err);
@@ -210,6 +241,7 @@ private:
     cudaError_t fused_drain(double limit_s);  ///< polls fused_query until not cudaErrorNotReady or the limit
     bool fused_map(const void* host, void** dev, std::string& err);   ///< the peer's device pointer of a mapped host page (cached)
     int device_ = -1;
+    int ordinal_ = 0;                                 ///< open()'s ordinal: 1 = the second server (STRATA_PEER2_* knobs, device in the log lines)
     bool p2p_ = false;
     int64_t n_layers_ = 0, n_expert_ = 0;
     ExpertCache cache_;
@@ -255,6 +287,7 @@ private:
     strata::kernels::NativeExpertLayout* d_lay_ = nullptr;          ///< VRAM copy of fused_lays_: the kernel reads lay[l] a step
     peer_fused::Hook hook_;                           ///< what the verifier holds (fused_hook())
     const int32_t* host_res_fused_ = nullptr;         ///< the primary's residency table (fused_set_host_res)
+    const int32_t* other_res_fused_ = nullptr;        ///< two servers: the first server's table, on the second (fused_set_other_res)
     // the peer's mapped page (kPageBytes, Portable | Mapped): host view and the peer's device view of each word
     uint8_t* h_page_ = nullptr;
     uint32_t* h_flag_out_ = nullptr;   uint32_t* m_flag_out_ = nullptr;

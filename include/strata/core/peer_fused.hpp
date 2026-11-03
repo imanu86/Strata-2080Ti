@@ -81,6 +81,14 @@ inline constexpr const char* kEnvMinb = "STRATA_PEER_FUSED_MINB";          ///< 
 inline constexpr const char* kEnvBlocks = "STRATA_PEER_FUSED_BLOCKS";      ///< cap on resident blocks per SM (default: the occupancy)
 inline constexpr const char* kEnvCoop = "STRATA_PEER_FUSED_COOP";          ///< 0: plain launch even where cooperative launch exists
 inline constexpr const char* kEnvWaitMs = "STRATA_PEER_FUSED_WAIT_MS";     ///< bound of the kernel's waits (default 20000)
+/// Two servers (--peer-device A,B; docs/PEER_FUSED2.md): the knobs of the SECOND server (the PeerExperts opened with
+/// ordinal 1).  Its card may be the desktop's on a slow link (an RTX 3060 on a PCIe x1 riser), so its kernel's waits
+/// are bounded under Windows' 2 s TDR by default and the kernel can be left off there while the first server keeps it.
+/// The first server reads none of these: with one server nothing changes.
+inline constexpr const char* kEnvOn2 = "STRATA_PEER2_FUSED";               ///< 0: the second server keeps the per-layer path (default 1: as STRATA_PEER_FUSED)
+inline constexpr const char* kEnvWaitMs2 = "STRATA_PEER2_WAIT_MS";         ///< bound of the second server's kernel waits (default kWaitMs2Default)
+inline constexpr const char* kEnvBlocks2 = "STRATA_PEER2_FUSED_BLOCKS";    ///< cap on the second server's resident blocks per SM (default: STRATA_PEER_FUSED_BLOCKS); fewer leave SMs to the desktop
+inline constexpr int kWaitMs2Default = 1500;                               ///< under the 2 s TDR of a card that drives the desktop
 
 // ---------------------------------------------------------------- device-visible structs (VRAM / kernel argument)
 

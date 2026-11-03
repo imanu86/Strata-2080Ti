@@ -37,7 +37,17 @@
 // windows behave; 2 if peer_fused_shape refuses the pack on this device (its `why` is printed).
 //
 //   peer_fused_test [device=0] [gu_type=0] [d_type=0] [n_expert=512] [n_slots=16] [windows=20] [seed]
-//                   [--primary D]
+//                   [--primary D] [--second D2]
+//
+// --second D2 (docs/PEER_FUSED2.md, two expert servers): a SECOND persistent kernel on device D2 beside the one on
+// `device`, as the engine runs it with --peer-device A,B: its own mapped page, ownership table, slot arena, plan,
+// sync words and stream; the same doorbell page, x, ids and ymiss rows.  The pairs are dealt to the two servers
+// DISJOINTLY (~40% to the first, ~30% of the rest to the second: kind 2 and kind 3, the pool's codes), the host
+// waits both flags a step, and every row is compared bit for bit with the reference computed ON THE FIRST DEVICE
+// (the arenas hold the same synthetic blobs slot for slot on both cards, so the reference of a second-server entry
+// is today's path on the first card over the same bytes: the claim that an expert gives the same bits on either
+// card is what this checks, a 2080 Ti against a 3060 for instance).  cnt and stamps are checked on both pages; the
+// endurance windows abort and time out both kernels.  Any two devices will do.
 //
 // gu_type 0 (the default): the MIXED model - the ten (gate/up, down) pairs of Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS's
 // expert layers (tools/iq_pack.py native_experts.txt), one layer each in their order of first appearance: (17, 20),
@@ -164,22 +174,23 @@ void fill_blob(uint8_t* b, const Layer& ly, Rng& rng) {
 }
 
 // the host plan of PeerExperts::launch, field for field (peer_experts.cpp :322-346): distinct owned experts in routing
-// order, each one's entries as compact rows.  kind[i] == 2 <=> the peer owns ids[i].
+// order, each one's entries as compact rows.  kind[i] == mine <=> this server owns ids[i] (2 the first server, 3 the
+// second, as the pool marks them).
 void plan_host(const int32_t* ids, const int32_t* kind, int64_t n, int64_t k, const int32_t* own_l,
-               const unsigned long long* slot_ptr, pf::Plan& m, int& groups, int& rows) {
+               const unsigned long long* slot_ptr, pf::Plan& m, int& groups, int& rows, int32_t mine = 2) {
     groups = 0;
     rows = 0;
     for (int64_t i = 0; i < n; ++i) {
-        if (kind[i] != 2) continue;
+        if (kind[i] != mine) continue;
         bool seen = false;
         for (int64_t j = 0; j < i; ++j)
-            if (kind[j] == 2 && ids[j] == ids[i]) { seen = true; break; }
+            if (kind[j] == mine && ids[j] == ids[i]) { seen = true; break; }
         if (seen) continue;
         const int32_t slot = own_l[ids[i]];
         m.ptr[groups] = slot_ptr[slot];
         m.start[groups] = rows;
         for (int64_t j = i; j < n; ++j)
-            if (kind[j] == 2 && ids[j] == ids[i]) {
+            if (kind[j] == mine && ids[j] == ids[i]) {
                 m.dst[rows] = rows;
                 m.tok[rows] = (int32_t) (j / k);
                 m.out_row[rows] = (int32_t) j;
@@ -204,6 +215,11 @@ struct StepRec {
     uint32_t cnt = 0;                     // the kernel's cnt[s]
     unsigned long long st0 = 0, st1 = 0;  // stamp[2s], stamp[2s+1]
     unsigned long long primary_wait_ns = 0;   // --primary: what the primary's wait kernel spent on flag_out
+    // --second: the second server's plan (kind 3, its slots in the FIRST device's arena for the reference), counts and stamps
+    pf::Plan plan2{};
+    int groups2 = 0, rows2 = 0;
+    uint32_t cnt2 = 0;
+    unsigned long long st0_2 = 0, st1_2 = 0;
 };
 
 // ---------------------------------------------------------------- --primary D: the fake primary on another card
@@ -310,6 +326,21 @@ struct Pages {
     const uint32_t* pflag_d = nullptr;
     uint32_t* perr_d = nullptr;
     unsigned long long* pwait_d = nullptr;
+    // --second D2: the second server's own page (host view, its words) and D2's pointers of the shared pages
+    uint8_t* page2_h = nullptr;
+    uint8_t* page2_d = nullptr;
+    volatile uint32_t* flag_out2 = nullptr;
+    volatile uint32_t* abort2 = nullptr;
+    volatile uint32_t* err2 = nullptr;
+    volatile uint32_t* exit2 = nullptr;
+    volatile uint32_t* cnt2 = nullptr;
+    volatile unsigned long long* stamp2 = nullptr;
+    const uint32_t* seq_d2 = nullptr;
+    const float* x_d2 = nullptr;
+    const int32_t* ids_d2 = nullptr;
+    float* ymiss_d2 = nullptr;
+    const uint32_t* pflag2_d = nullptr;     // --primary with --second: the primary's pointer of the second's flag
+    unsigned long long* pwait2_d = nullptr; // its wait on it (pwords_h + 16)
 };
 
 void* dev_ptr(void* host) {
@@ -323,12 +354,13 @@ void* dev_ptr(void* host) {
 int main(int argc, char** argv) {
     int pos[6] = {0, 0, 0, 512, 16, 20};
     uint64_t seed = (uint64_t) std::chrono::system_clock::now().time_since_epoch().count();
-    int primary = -1, npos = 0;
+    int primary = -1, second = -1, npos = 0;
     for (int a = 1; a < argc; ++a) {
         const std::string s = argv[a];
         if (s == "--primary" && a + 1 < argc) { primary = std::atoi(argv[++a]); continue; }
+        if (s == "--second" && a + 1 < argc) { second = std::atoi(argv[++a]); continue; }
         if (s == "--help" || s == "-h") {
-            std::printf("peer_fused_test [device=0] [gu_type=0 (mixed model)] [d_type=0] [n_expert=512] [n_slots=16 a layer] [windows=20] [seed] [--primary D]\n");
+            std::printf("peer_fused_test [device=0] [gu_type=0 (mixed model)] [d_type=0] [n_expert=512] [n_slots=16 a layer] [windows=20] [seed] [--primary D] [--second D2]\n");
             return 0;
         }
         if (npos < 6) pos[npos] = std::atoi(argv[a]);
@@ -342,8 +374,9 @@ int main(int argc, char** argv) {
 
     int nd = 0;
     CK(cudaGetDeviceCount(&nd));
-    if (device < 0 || device >= nd || (primary >= 0 && (primary >= nd || primary == device))) {
-        std::printf("devices: %d; device %d, primary %d\n", nd, device, primary);
+    if (device < 0 || device >= nd || (primary >= 0 && (primary >= nd || primary == device)) ||
+        (second >= 0 && (second >= nd || second == device || second == primary))) {
+        std::printf("devices: %d; device %d, primary %d, second %d (three different devices)\n", nd, device, primary, second);
         return 1;
     }
 
@@ -369,6 +402,11 @@ int main(int argc, char** argv) {
             int p2p = 0;
             cudaDeviceCanAccessPeer(&p2p, primary, device);
             std::printf(" | primary CUDA%d %s (P2P %d, not used)", primary, q.name, p2p);
+        }
+        if (second >= 0) {
+            cudaDeviceProp q;
+            CK(cudaGetDeviceProperties(&q, second));
+            std::printf(" | second server CUDA%d %s sm_%d%d SMs %d", second, q.name, q.major, q.minor, q.multiProcessorCount);
         }
         std::printf("\n");
     }
@@ -408,6 +446,28 @@ int main(int argc, char** argv) {
     NativeExpertLayout* d_lay = nullptr;
     CK(cudaMalloc((void**) &d_lay, lays.size() * sizeof(NativeExpertLayout)));
     CK(cudaMemcpy(d_lay, lays.data(), lays.size() * sizeof(NativeExpertLayout), cudaMemcpyHostToDevice));
+    // --second: the kernel's shape on THAT device (its occupancy, its SM count, its own instance in the fat binary),
+    // its layout table and, as the engine does for the second server, the wait bound of STRATA_PEER2_WAIT_MS
+    pf::Shape shape2;
+    NativeExpertLayout* d_lay2 = nullptr;
+    unsigned long long wait_ns2 = wait_ns;
+    if (second >= 0) {
+        CK(cudaSetDevice(second));
+        std::string why;
+        const int minb = env_int(pf::kEnvMinb, pf::kMinBlocksDefault);
+        const int cap = env_int(pf::kEnvBlocks, 0);
+        const bool coop = env_int(pf::kEnvCoop, 1) != 0;
+        if (!strata::kernels::peer_fused_shape(lays.data(), nl, minb, cap, coop, shape2, why)) {
+            std::printf("peer_fused_shape refused the model on the second server CUDA%d: %s\n", second, why.c_str());
+            return 2;
+        }
+        std::printf("shape (second server CUDA%d): minb %d, dyn shared %zu B, %d blocks/SM x %d SMs = %d blocks, %s launch\n", second,
+                    shape2.minb, shape2.dyn_shared, shape2.blocks_per_sm, shape2.sms, shape2.blocks, shape2.cooperative ? "cooperative" : "plain");
+        wait_ns2 = (unsigned long long) std::max(1, env_int(pf::kEnvWaitMs2, pf::kWaitMs2Default)) * 1000000ull;
+        CK(cudaMalloc((void**) &d_lay2, lays.size() * sizeof(NativeExpertLayout)));
+        CK(cudaMemcpy(d_lay2, lays.data(), lays.size() * sizeof(NativeExpertLayout), cudaMemcpyHostToDevice));
+        CK(cudaSetDevice(device));
+    }
 
     Rng rng(seed);
 
@@ -415,51 +475,91 @@ int main(int argc, char** argv) {
     // the global slot index is l * n_slots + s, so the ownership table of layer l deals only its own slots
     std::vector<uint8_t*> d_arena((size_t) nl, nullptr);
     std::vector<unsigned long long> slot_ptr((size_t) nl * (size_t) n_slots);
+    // --second: the same blobs, slot for slot, in an arena on the second device (the reference of its entries runs on
+    // the first device over the first arena: same bytes, so the comparison is card against card)
+    std::vector<uint8_t*> d_arena2((size_t) nl, nullptr);
+    std::vector<unsigned long long> slot_ptr2(second >= 0 ? slot_ptr.size() : 0);
     {
         size_t total = 0;
         for (int l = 0; l < nl; ++l) {
             const Layer& ly = layers[(size_t) l];
             const size_t stride = (ly.L.bytes + 255) / 256 * 256;
             CK(cudaMalloc((void**) &d_arena[(size_t) l], stride * (size_t) n_slots));
+            if (second >= 0) {
+                CK(cudaSetDevice(second));
+                CK(cudaMalloc((void**) &d_arena2[(size_t) l], stride * (size_t) n_slots));
+                CK(cudaSetDevice(device));
+            }
             std::vector<uint8_t> blob(ly.L.bytes);
             for (int s = 0; s < n_slots; ++s) {
                 fill_blob(blob.data(), ly, rng);
                 CK(cudaMemcpy(d_arena[(size_t) l] + stride * (size_t) s, blob.data(), ly.L.bytes, cudaMemcpyHostToDevice));
                 slot_ptr[(size_t) l * (size_t) n_slots + (size_t) s] = (unsigned long long) (uintptr_t) (d_arena[(size_t) l] + stride * (size_t) s);
+                if (second >= 0) {
+                    CK(cudaSetDevice(second));
+                    CK(cudaMemcpy(d_arena2[(size_t) l] + stride * (size_t) s, blob.data(), ly.L.bytes, cudaMemcpyHostToDevice));
+                    CK(cudaSetDevice(device));
+                    slot_ptr2[(size_t) l * (size_t) n_slots + (size_t) s] = (unsigned long long) (uintptr_t) (d_arena2[(size_t) l] + stride * (size_t) s);
+                }
             }
             total += stride * (size_t) n_slots;
         }
-        std::printf("slots: %d a layer x %d layers, %.1f MiB of blobs\n", n_slots, nl, (double) total / (1024.0 * 1024.0));
+        std::printf("slots: %d a layer x %d layers, %.1f MiB of blobs%s\n", n_slots, nl, (double) total / (1024.0 * 1024.0),
+                    second >= 0 ? " on each of the two cards" : "");
     }
     unsigned long long* d_slot_ptr = nullptr;
     CK(cudaMalloc((void**) &d_slot_ptr, sizeof(unsigned long long) * slot_ptr.size()));
     CK(cudaMemcpy(d_slot_ptr, slot_ptr.data(), sizeof(unsigned long long) * slot_ptr.size(), cudaMemcpyHostToDevice));
+    unsigned long long* d_slot_ptr2 = nullptr;
+    if (second >= 0) {
+        CK(cudaSetDevice(second));
+        CK(cudaMalloc((void**) &d_slot_ptr2, sizeof(unsigned long long) * slot_ptr2.size()));
+        CK(cudaMemcpy(d_slot_ptr2, slot_ptr2.data(), sizeof(unsigned long long) * slot_ptr2.size(), cudaMemcpyHostToDevice));
+        CK(cudaSetDevice(device));
+    }
 
     // ---- the ownership table: ~40% of the pairs on a slot of the layer, the slots dealt from a shuffled order
     // (distinct while n_slots lasts, then the order again: a slot read by two experts is harmless to the comparison)
     std::vector<int32_t> own((size_t) nl * (size_t) n_expert, -1);
+    // --second: a second, DISJOINT table (~30% of the pairs the first does not own, on a slot of the second arena);
+    // `unowned` lists the pairs of neither server (the steps forced empty draw from it: empty on both kernels)
+    std::vector<int32_t> own2(second >= 0 ? own.size() : 0, -1);
     std::vector<std::vector<int32_t>> unowned((size_t) nl);
     {
-        int owned_pairs = 0;
+        int owned_pairs = 0, owned_pairs2 = 0;
         for (int l = 0; l < nl; ++l) {
-            std::vector<int32_t> deal((size_t) n_slots);
-            for (int s = 0; s < n_slots; ++s) deal[(size_t) s] = l * n_slots + s;
+            std::vector<int32_t> deal((size_t) n_slots), deal2((size_t) n_slots);
+            for (int s = 0; s < n_slots; ++s) deal[(size_t) s] = deal2[(size_t) s] = l * n_slots + s;
             std::shuffle(deal.begin(), deal.end(), rng.g);
-            size_t next = 0;
+            if (second >= 0) std::shuffle(deal2.begin(), deal2.end(), rng.g);
+            size_t next = 0, next2 = 0;
             for (int64_t e = 0; e < n_expert; ++e) {
                 if (rng.below(100) < 40) {
                     own[(size_t) l * (size_t) n_expert + (size_t) e] = deal[next++ % (size_t) n_slots];
                     ++owned_pairs;
+                } else if (second >= 0 && rng.below(100) < 30) {
+                    own2[(size_t) l * (size_t) n_expert + (size_t) e] = deal2[next2++ % (size_t) n_slots];
+                    ++owned_pairs2;
                 } else {
                     unowned[(size_t) l].push_back((int32_t) e);
                 }
             }
         }
-        std::printf("ownership: %d of %lld pairs on the peer\n", owned_pairs, (long long) (nl * n_expert));
+        if (second >= 0)
+            std::printf("ownership: %d of %lld pairs on the first server, %d on the second (disjoint)\n", owned_pairs, (long long) (nl * n_expert), owned_pairs2);
+        else
+            std::printf("ownership: %d of %lld pairs on the peer\n", owned_pairs, (long long) (nl * n_expert));
     }
     int32_t* d_own = nullptr;
     CK(cudaMalloc((void**) &d_own, own.size() * 4));
     CK(cudaMemcpy(d_own, own.data(), own.size() * 4, cudaMemcpyHostToDevice));
+    int32_t* d_own2 = nullptr;
+    if (second >= 0) {
+        CK(cudaSetDevice(second));
+        CK(cudaMalloc((void**) &d_own2, own2.size() * 4));
+        CK(cudaMemcpy(d_own2, own2.data(), own2.size() * 4, cudaMemcpyHostToDevice));
+        CK(cudaSetDevice(device));
+    }
 
     // ---- the kernel's VRAM (s.3) and the reference's (n_ff is the pack's one: the scratch and hq are sized once)
     pf::Plan* d_plan = nullptr;
@@ -487,6 +587,23 @@ int main(int argc, char** argv) {
     CK(cudaMalloc((void**) &d_out_ref, (size_t) pf::kCap * N * sizeof(float)));
     CK(cudaMalloc((void**) &d_plan_ref, sizeof(pf::Plan)));
     CK(cudaMallocHost((void**) &h_plan_ref, sizeof(pf::Plan)));
+    // --second: the second kernel's VRAM, on its device
+    pf::Plan* d_plan2 = nullptr;
+    void* d_q8_2 = nullptr;
+    uint8_t* d_scratch2 = nullptr;
+    float* d_out2 = nullptr;
+    pf::Sync* d_sync2 = nullptr;
+    if (second >= 0) {
+        CK(cudaSetDevice(second));
+        CK(cudaMalloc((void**) &d_plan2, 2 * sizeof(pf::Plan)));
+        CK(cudaMalloc(&d_q8_2, pf::q8_bytes(pf::kMaxTok, N)));
+        CK(cudaMalloc((void**) &d_scratch2, scratch_bytes));
+        CK(cudaMalloc((void**) &d_out2, (size_t) pf::kCap * N * sizeof(float)));
+        CK(cudaMalloc((void**) &d_sync2, sizeof(pf::Sync)));
+        CK(cudaMemset(d_plan2, 0, 2 * sizeof(pf::Plan)));
+        CK(cudaMemset(d_sync2, 0, sizeof(pf::Sync)));
+        CK(cudaSetDevice(device));
+    }
 
     // ---- the mapped pages (s.2): Portable | Mapped, the device pointers taken under the device that uses them
     Pages P;
@@ -521,6 +638,26 @@ int main(int argc, char** argv) {
     P.ymiss_ref_d = (float*) dev_ptr(P.ymiss_ref_h);
     volatile uint32_t* perr_h = (volatile uint32_t*) P.pwords_h;
     volatile unsigned long long* pwait_h = (volatile unsigned long long*) (P.pwords_h + 8);
+    // --second: its own page (the engine's PeerExperts allocates one a server) and D2's view of the shared pages
+    cudaStream_t s_kernel2 = nullptr;
+    if (second >= 0) {
+        CK(cudaHostAlloc((void**) &P.page2_h, pf::kPageBytes, hflags));
+        std::memset(P.page2_h, 0, pf::kPageBytes);
+        P.flag_out2 = (volatile uint32_t*) (P.page2_h + pf::kOffFlagOut);
+        P.abort2 = (volatile uint32_t*) (P.page2_h + pf::kOffAbort);
+        P.err2 = (volatile uint32_t*) (P.page2_h + pf::kOffErr);
+        P.exit2 = (volatile uint32_t*) (P.page2_h + pf::kOffExit);
+        P.cnt2 = (volatile uint32_t*) (P.page2_h + pf::kOffCnt);
+        P.stamp2 = (volatile unsigned long long*) (P.page2_h + pf::kOffStamp);
+        CK(cudaSetDevice(second));
+        P.page2_d = (uint8_t*) dev_ptr(P.page2_h);
+        P.seq_d2 = (const uint32_t*) dev_ptr(P.seq_h);
+        P.x_d2 = (const float*) dev_ptr(P.x_h);
+        P.ids_d2 = (const int32_t*) dev_ptr(P.ids_h);
+        P.ymiss_d2 = (float*) dev_ptr(P.ymiss_h);
+        CK(cudaStreamCreateWithFlags(&s_kernel2, cudaStreamNonBlocking));
+        CK(cudaSetDevice(device));
+    }
 
     cudaStream_t s_kernel = nullptr, s_ref = nullptr, s_primary = nullptr;
     CK(cudaStreamCreateWithFlags(&s_kernel, cudaStreamNonBlocking));
@@ -539,6 +676,10 @@ int main(int argc, char** argv) {
         P.pflag_d = (const uint32_t*) (((uint8_t*) dev_ptr(P.page_h)) + pf::kOffFlagOut);
         P.perr_d = (uint32_t*) dev_ptr(P.pwords_h);
         P.pwait_d = (unsigned long long*) (((uint8_t*) dev_ptr(P.pwords_h)) + 8);
+        if (second >= 0) {   // the primary waits the second server's flag too (one more wait node a step, after the first's)
+            P.pflag2_d = (const uint32_t*) (((uint8_t*) dev_ptr(P.page2_h)) + pf::kOffFlagOut);
+            P.pwait2_d = (unsigned long long*) (((uint8_t*) dev_ptr(P.pwords_h)) + 16);
+        }
         CK(cudaMalloc((void**) &d_px, x_bytes));
         CK(cudaMalloc((void**) &d_pids, ids_bytes));
         CK(cudaMallocHost((void**) &h_px, x_bytes));
@@ -575,22 +716,60 @@ int main(int argc, char** argv) {
     base.out = d_out;
     base.sync = d_sync;
     base.lay = d_lay;
+    // --second: the second kernel's argument - D2's pointers, its own page, tables and VRAM, the shared doorbell
+    pf::Window base2 = base;
+    if (second >= 0) {
+        base2.nblocks = shape2.blocks;
+        base2.wait_ns = wait_ns2;
+        base2.seq = P.seq_d2;
+        base2.x = P.x_d2;
+        base2.ids = P.ids_d2;
+        base2.ymiss = P.ymiss_d2;
+        base2.flag_out = (uint32_t*) (P.page2_d + pf::kOffFlagOut);
+        base2.abort = (const uint32_t*) (P.page2_d + pf::kOffAbort);
+        base2.err = (uint32_t*) (P.page2_d + pf::kOffErr);
+        base2.exit = (uint32_t*) (P.page2_d + pf::kOffExit);
+        base2.cnt = (uint32_t*) (P.page2_d + pf::kOffCnt);
+        base2.stamp = (unsigned long long*) (P.page2_d + pf::kOffStamp);
+        base2.own = d_own2;
+        base2.slot_ptr = d_slot_ptr2;
+        base2.plan = d_plan2;
+        base2.q8 = d_q8_2;
+        base2.hq = d_scratch2 + pf::hq_offset(pf::kCap, FF);
+        base2.out = d_out2;
+        base2.sync = d_sync2;
+        base2.lay = d_lay2;
+    }
 
     uint32_t epoch = 0;
     bool all_ok = true;
-    int64_t peer_entries_total = 0;
+    int64_t peer_entries_total = 0, peer2_entries_total = 0;
 
-    // ---- fused_begin's part: the words, the sentinel, d_sync, the launch, the WDDM push
-    auto begin_window = [&](pf::Window& w) -> bool {
+    // ---- fused_begin's part: the words, the sentinel, d_sync, the launch, the WDDM push.  --second: the same for
+    // the second kernel right after (w2 carries the same geometry), as the verifier calls the two begins back to back
+    auto begin_window = [&](pf::Window& w, pf::Window& w2) -> bool {
         const cudaError_t q = cudaStreamQuery(s_kernel);
         if (q != cudaSuccess) {
             std::printf("  the previous window's kernel is still on the stream (%s)\n", cudaGetErrorString(q));
             return false;
         }
+        if (second >= 0) {
+            const cudaError_t q2 = cudaStreamQuery(s_kernel2);
+            if (q2 != cudaSuccess) {
+                std::printf("  the previous window's kernel is still on the second server's stream (%s)\n", cudaGetErrorString(q2));
+                return false;
+            }
+        }
         w.epoch = ++epoch;
         *P.flag_out = 0; *P.abort = 0; *P.err = 0; *P.exit = 0;
         for (int s = 0; s < pf::kMaxSteps; ++s) P.cnt[s] = 0;
         for (int s = 0; s < 2 * pf::kMaxSteps; ++s) P.stamp[s] = 0;
+        if (second >= 0) {
+            w2.epoch = epoch;
+            *P.flag_out2 = 0; *P.abort2 = 0; *P.err2 = 0; *P.exit2 = 0;
+            for (int s = 0; s < pf::kMaxSteps; ++s) P.cnt2[s] = 0;
+            for (int s = 0; s < 2 * pf::kMaxSteps; ++s) P.stamp2[s] = 0;
+        }
         *(volatile uint32_t*) P.seq_h = 0;
         *perr_h = 0;
         host_fence();
@@ -601,30 +780,54 @@ int main(int argc, char** argv) {
             return false;
         }
         (void) cudaStreamQuery(s_kernel);   // WDDM: submit now
+        if (second >= 0) {
+            CK(cudaSetDevice(second));
+            CK(cudaMemsetAsync(d_sync2, 0, sizeof(pf::Sync), s_kernel2));
+            const bool ok2 = strata::kernels::peer_fused_launch(w2, shape2, s_kernel2, err);
+            (void) cudaStreamQuery(s_kernel2);
+            CK(cudaSetDevice(device));
+            if (!ok2) {
+                std::printf("  peer_fused_launch (second server): %s\n", err.c_str());
+                return false;   // the caller aborts: the first kernel is already waiting for a doorbell
+            }
+        }
         return true;
     };
 
-    // the host's spin on flag_out >= want with the engine's bound, the stream flushed every ~2 ms (hook.flush)
+    // the host's spin on flag_out >= want with the engine's bound, the streams flushed every ~2 ms (hook.flush);
+    // --second: both flags (the graph has one wait node a server, the first's then the second's)
     auto wait_flag = [&](uint32_t want, std::string& why) -> bool {
         const auto t0 = Clock::now();
         auto last_flush = t0;
-        while (*P.flag_out < want) {
+        while (*P.flag_out < want || (second >= 0 && *P.flag_out2 < want)) {
             if (*P.err != 0) { why = std::string("the kernel reported ") + err_name(*P.err); return false; }
+            if (second >= 0 && *P.err2 != 0) { why = std::string("the second server's kernel reported ") + err_name(*P.err2); return false; }
             if (secs_since(t0) > kFlagWaitS) { why = "no flag within " + std::to_string((int) kFlagWaitS) + " s"; return false; }
-            if (secs_since(last_flush) > 0.002) { (void) cudaStreamQuery(s_kernel); last_flush = Clock::now(); }
+            if (secs_since(last_flush) > 0.002) {
+                (void) cudaStreamQuery(s_kernel);
+                if (second >= 0) (void) cudaStreamQuery(s_kernel2);   // (a stream query works from any current device)
+                last_flush = Clock::now();
+            }
         }
         host_fence();
         return true;
     };
 
     // after an error or a stuck window: abort, drain within 5 s, so the process never exits over a live kernel
+    // (--second: both kernels, as release_gpu_waits aborts both hooks)
     auto abort_window = [&]() {
         host_fence();
         *P.abort = 1;
+        if (second >= 0) *P.abort2 = 1;
         host_fence();
         const cudaError_t e = drain(s_kernel, 5.0);
         if (e == cudaErrorNotReady) std::printf("  the kernel did not leave within 5 s of abort: leaving it to the driver\n");
         else if (e != cudaSuccess) std::printf("  stream error after abort: %s\n", cudaGetErrorString(e));
+        if (second >= 0) {
+            const cudaError_t e2 = drain(s_kernel2, 5.0);
+            if (e2 == cudaErrorNotReady) std::printf("  the second server's kernel did not leave within 5 s of abort: leaving it to the driver\n");
+            else if (e2 != cudaSuccess) std::printf("  second server: stream error after abort: %s\n", cudaGetErrorString(e2));
+        }
     };
 
     // ---- publishes one step: the host writes x / ids (or the primary's kernel does), fences, rings seq = s + 1.  With
@@ -664,6 +867,10 @@ int main(int argc, char** argv) {
         CK(cudaSetDevice(primary));
         k_primary_wait<<<1, 32, 0, s_primary>>>(P.pflag_d, want, wait_ns, P.perr_d, P.pwait_d);
         CK(cudaGetLastError());
+        if (second >= 0) {   // then the second server's flag: the graph's second node of the step
+            k_primary_wait<<<1, 32, 0, s_primary>>>(P.pflag2_d, want, wait_ns, P.perr_d, P.pwait2_d);
+            CK(cudaGetLastError());
+        }
         (void) cudaStreamQuery(s_primary);
         CK(cudaSetDevice(device));
     };
@@ -675,6 +882,7 @@ int main(int argc, char** argv) {
         r.ids.assign((size_t) n, -1);
         r.kind.assign((size_t) n, 0);
         const int32_t* own_l = own.data() + (size_t) r.l * (size_t) n_expert;
+        const int32_t* own2_l = second >= 0 ? own2.data() + (size_t) r.l * (size_t) n_expert : nullptr;
         const bool nothing_owned = !unowned[(size_t) r.l].empty() && (force_empty || rng.below(6) == 0);
         for (int i = 0; i < n; ++i) {
             const uint32_t d = rng.below(16);
@@ -684,7 +892,8 @@ int main(int argc, char** argv) {
             else if (d <= 5 && i > 0) e = r.ids[rng.below((uint32_t) i)];   // the same expert again, this or another token
             else e = (int32_t) rng.below((uint32_t) n_expert);
             r.ids[(size_t) i] = e;
-            r.kind[(size_t) i] = e >= 0 && own_l[e] >= 0 ? 2 : (e >= 0 ? 0 : -1);
+            // the pool's codes: 2 the first server, 3 the second (asked after the first), 0 neither, -1 a hole
+            r.kind[(size_t) i] = e >= 0 && own_l[e] >= 0 ? 2 : (e >= 0 && own2_l != nullptr && own2_l[e] >= 0) ? 3 : (e >= 0 ? 0 : -1);
         }
         r.x.resize((size_t) r.n_tok * N);
         for (int t = 0; t < r.n_tok; ++t) {
@@ -700,6 +909,9 @@ int main(int argc, char** argv) {
             }
         }
         plan_host(r.ids.data(), r.kind.data(), n, K, own_l, slot_ptr.data(), r.plan, r.groups, r.rows);
+        // the second server's plan with the FIRST arena's addresses: it is the reference's plan (run on the first
+        // device over the same bytes) and the host's count against cnt2; the kernel on D2 plans from d_own2 / d_slot_ptr2
+        if (second >= 0) plan_host(r.ids.data(), r.kind.data(), n, K, own2_l, slot_ptr.data(), r.plan2, r.groups2, r.rows2, 3);
     };
 
     // ---- the reference of one step on s_ref (today's path, peer_experts.cpp launch, with the layer's own layout),
@@ -718,24 +930,42 @@ int main(int argc, char** argv) {
             std::printf("  FAIL finestra %d passo %d: stamp %llu -> %llu\n", win, r.s, r.st0, r.st1);
             ok = false;
         }
+        if (second >= 0) {   // the second server's count and stamps, from its own page
+            const uint32_t expect2 = ((uint32_t) r.groups2 << 16) | (uint32_t) r.rows2;
+            if (r.cnt2 != expect2) {
+                std::printf("  FAIL finestra %d passo %d (strato %d, %d/%d): secondo server: cnt %ux%u, host %dx%d\n", win, r.s, r.l, ly.gu, ly.d,
+                            r.cnt2 >> 16, r.cnt2 & 0xffffu, r.groups2, r.rows2);
+                ok = false;
+            }
+            if (r.st1_2 < r.st0_2 || r.st0_2 == 0) {
+                std::printf("  FAIL finestra %d passo %d: secondo server: stamp %llu -> %llu\n", win, r.s, r.st0_2, r.st1_2);
+                ok = false;
+            }
+        }
         std::memset(P.ymiss_ref_h + (size_t) r.tb * K * N, kSentRef, (size_t) n * N * sizeof(float));
-        if (r.groups > 0) {
-            std::memcpy(h_plan_ref, &r.plan, sizeof(pf::Plan));
+        // the reference of each server's entries, today's path on the FIRST device: the first's plan, then the
+        // second's (its rows are other entries of the same step: disjoint rows of the same page)
+        for (int which = 0; which < (second >= 0 ? 2 : 1); ++which) {
+            const pf::Plan& plan = which == 0 ? r.plan : r.plan2;
+            const int groups = which == 0 ? r.groups : r.groups2, rows = which == 0 ? r.rows : r.rows2;
+            if (groups <= 0) continue;
+            std::memcpy(h_plan_ref, &plan, sizeof(pf::Plan));
             CK(cudaMemcpyAsync(d_x_ref, r.x.data(), (size_t) r.n_tok * N * sizeof(float), cudaMemcpyHostToDevice, s_ref));
             CK(cudaMemcpyAsync(d_plan_ref, h_plan_ref, sizeof(pf::Plan), cudaMemcpyHostToDevice, s_ref));
             strata::kernels::quantize_q8_1_rows(d_x_ref, r.n_tok, N, d_q8_ref, s_ref);
             strata::kernels::native_expert_grouped(ly.L, d_plan_ref->ptr, d_plan_ref->start, d_plan_ref->count, d_plan_ref->dst,
-                                                   d_plan_ref->tok, r.groups, r.rows, d_q8_ref, d_scratch_ref, d_out_ref, s_ref);
-            strata::kernels::scatter_rows_f32(d_out_ref, P.ymiss_ref_d + (size_t) r.tb * K * N, d_plan_ref->out_row, r.rows, N, s_ref);
+                                                   d_plan_ref->tok, groups, rows, d_q8_ref, d_scratch_ref, d_out_ref, s_ref);
+            strata::kernels::scatter_rows_f32(d_out_ref, P.ymiss_ref_d + (size_t) r.tb * K * N, d_plan_ref->out_row, rows, N, s_ref);
             CK(cudaStreamSynchronize(s_ref));
             host_fence();
         }
-        // every entry of the step: owned -> the reference's row; not owned -> the sentinel untouched
+        // every entry of the step: owned (by either server) -> the reference's row; not owned -> the sentinel untouched
         std::vector<uint8_t> sent((size_t) N * sizeof(float), kSentKernel);
         for (int j = 0; j < n && ok; ++j) {
             const float* got = r.rows_out.data() + (size_t) j * N;
-            const uint8_t* want = r.kind[(size_t) j] == 2 ? (const uint8_t*) (P.ymiss_ref_h + ((size_t) r.tb * K + (size_t) j) * N)
-                                                           : sent.data();
+            const bool owned = r.kind[(size_t) j] == 2 || r.kind[(size_t) j] == 3;
+            const uint8_t* want = owned ? (const uint8_t*) (P.ymiss_ref_h + ((size_t) r.tb * K + (size_t) j) * N)
+                                        : sent.data();
             if (std::memcmp(got, want, (size_t) N * sizeof(float)) == 0) continue;
             int64_t c = 0;
             while (c < N && std::memcmp((const uint8_t*) got + c * 4, want + c * 4, 4) == 0) ++c;
@@ -743,10 +973,12 @@ int main(int argc, char** argv) {
             std::memcpy(&a, (const uint8_t*) got + c * 4, 4);
             std::memcpy(&b, want + c * 4, 4);
             int cr = -1;
-            for (int q = 0; q < r.rows; ++q) if (r.plan.out_row[q] == j) { cr = q; break; }
+            if (r.kind[(size_t) j] == 3) { for (int q = 0; q < r.rows2; ++q) if (r.plan2.out_row[q] == j) { cr = q; break; } }
+            else { for (int q = 0; q < r.rows; ++q) if (r.plan.out_row[q] == j) { cr = q; break; } }
             std::printf("  FAIL finestra %d passo %d (strato %d, gate/up %d, down %d, tb %d): voce %d (riga compatta %d, token %d, esperto %d, %s) "
                         "colonna %lld: kernel %08x, riferimento %08x\n", win, r.s, r.l, ly.gu, ly.d, r.tb, j, cr, j / K, r.ids[(size_t) j],
-                        r.kind[(size_t) j] == 2 ? "del peer" : "non del peer: sentinella attesa", (long long) c, a, b);
+                        r.kind[(size_t) j] == 2 ? "del peer" : r.kind[(size_t) j] == 3 ? "del secondo server" : "di nessun server: sentinella attesa",
+                        (long long) c, a, b);
             ok = false;
         }
         return ok;
@@ -761,6 +993,9 @@ int main(int argc, char** argv) {
         pf::Window w = base;
         w.steps = steps; w.G = G; w.T = T;
         w.gtb[0] = gtb[0]; w.gtb[1] = gtb[1]; w.gte[0] = gte[0]; w.gte[1] = gte[1];
+        pf::Window w2 = base2;   // --second: the same geometry on the second kernel
+        w2.steps = steps; w2.G = G; w2.T = T;
+        w2.gtb[0] = gtb[0]; w2.gtb[1] = gtb[1]; w2.gte[0] = gte[0]; w2.gte[1] = gte[1];
         std::vector<StepRec> recs((size_t) steps);
         for (int s = 0; s < steps; ++s) {
             StepRec& r = recs[(size_t) s];
@@ -769,10 +1004,10 @@ int main(int argc, char** argv) {
             r.n_tok = gte[s % G] - gtb[s % G];
             // G = 2: half of the group-1 steps behind a group-0 step with entries own nothing - the step without
             // barriers whose doorbell is already up while the kernel still writes the rows of the step before
-            const bool force_empty = G == 2 && (s % G) == 1 && recs[(size_t) s - 1].rows > 0 && rng.below(2) == 0;
+            const bool force_empty = G == 2 && (s % G) == 1 && (recs[(size_t) s - 1].rows > 0 || recs[(size_t) s - 1].rows2 > 0) && rng.below(2) == 0;
             draw_step(r, force_empty);
         }
-        if (!begin_window(w)) { all_ok = false; break; }
+        if (!begin_window(w, w2)) { abort_window(); all_ok = false; break; }
         bool win_ok = true;
         std::string why;
         // the graph's order: the first G steps are rung before any flag is waited for; flag(s) seen -> ring s + G
@@ -796,19 +1031,28 @@ int main(int argc, char** argv) {
             r.cnt = P.cnt[s];
             r.st0 = P.stamp[2 * s];
             r.st1 = P.stamp[2 * s + 1];
+            if (second >= 0) {
+                r.cnt2 = P.cnt2[s];
+                r.st0_2 = P.stamp2[2 * s];
+                r.st1_2 = P.stamp2[2 * s + 1];
+            }
             if (s + G < steps) publish(recs[(size_t) s + G], (uint32_t) (s + G) + 1);   // pre(l + 1, grp): the same group's rows again
         }
         if (!win_ok) {
-            std::printf("  FAIL finestra %d: %s (err %s, flag_out %u)\n", win, why.c_str(), err_name(*P.err), *P.flag_out);
+            std::printf("  FAIL finestra %d: %s (err %s, flag_out %u", win, why.c_str(), err_name(*P.err), *P.flag_out);
+            if (second >= 0) std::printf("; secondo server: err %s, flag_out %u", err_name(*P.err2), *P.flag_out2);
+            std::printf(")\n");
             abort_window();
             all_ok = false;
             break;
         }
-        // fused_end's part: the kernel has left, no error, the epoch written
+        // fused_end's part: the kernel has left, no error, the epoch written (--second: both kernels)
         {
             const cudaError_t e = drain(s_kernel, 5.0);
-            if (e != cudaSuccess) {
-                std::printf("  FAIL finestra %d: the kernel did not leave after the last flag (%s)\n", win, cudaGetErrorString(e));
+            const cudaError_t e2 = second >= 0 ? drain(s_kernel2, 5.0) : cudaSuccess;
+            if (e != cudaSuccess || e2 != cudaSuccess) {
+                std::printf("  FAIL finestra %d: a kernel did not leave after the last flag (%s; second server %s)\n", win, cudaGetErrorString(e),
+                            second >= 0 ? cudaGetErrorString(e2) : "-");
                 abort_window();
                 all_ok = false;
                 break;
@@ -816,20 +1060,28 @@ int main(int argc, char** argv) {
             host_fence();
             if (*P.err != 0) { std::printf("  FAIL finestra %d: err %s after the window\n", win, err_name(*P.err)); all_ok = false; break; }
             if (*P.exit != w.epoch) { std::printf("  FAIL finestra %d: exit %u, epoch %u\n", win, *P.exit, w.epoch); all_ok = false; break; }
+            if (second >= 0) {
+                if (*P.err2 != 0) { std::printf("  FAIL finestra %d: secondo server: err %s after the window\n", win, err_name(*P.err2)); all_ok = false; break; }
+                if (*P.exit2 != w2.epoch) { std::printf("  FAIL finestra %d: secondo server: exit %u, epoch %u\n", win, *P.exit2, w2.epoch); all_ok = false; break; }
+            }
         }
         // the reference, step by step, and the comparison
-        std::vector<double> spans, pwaits;
-        int64_t entries = 0;
+        std::vector<double> spans, spans2, pwaits;
+        int64_t entries = 0, entries2 = 0;
         for (int s = 0; s < steps; ++s) {
             const StepRec& r = recs[(size_t) s];
             entries += r.rows;
+            entries2 += r.rows2;
             spans.push_back((double) (r.st1 - r.st0) * 1e-3);
+            if (second >= 0) spans2.push_back((double) (r.st1_2 - r.st0_2) * 1e-3);
             if (primary >= 0) pwaits.push_back((double) r.primary_wait_ns * 1e-3);
             if (!check_step(r, win)) { win_ok = false; break; }
         }
         peer_entries_total += entries;
+        peer2_entries_total += entries2;
         std::printf("finestra %3d: T %2d G %d passi %2d voci del peer %4lld  flag visto -> alzato p50 %8.1f us", win, T, G, steps,
                     (long long) entries, median(spans));
+        if (second >= 0) std::printf("  2o server: voci %4lld p50 %8.1f us", (long long) entries2, median(spans2));
         if (primary >= 0) std::printf("  attesa padrona p50 %8.1f us", median(pwaits));
         std::printf("  %s\n", win_ok ? "PASS" : "FAIL");
         if (!win_ok) all_ok = false;
@@ -842,7 +1094,10 @@ int main(int argc, char** argv) {
         pf::Window w = base;
         w.steps = nl; w.G = 1; w.T = T;
         w.gtb[0] = 0; w.gtb[1] = T; w.gte[0] = T; w.gte[1] = T;
-        bool ok = begin_window(w);
+        pf::Window w2 = base2;
+        w2.steps = nl; w2.G = 1; w2.T = T;
+        w2.gtb[0] = 0; w2.gtb[1] = T; w2.gte[0] = T; w2.gte[1] = T;
+        bool ok = begin_window(w, w2);
         std::string why;
         for (int s = 0; s < 2 && ok; ++s) {
             StepRec r;
@@ -861,19 +1116,26 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             host_fence();
             const bool still = *P.err == 0 && *P.flag_out == 2 && cudaStreamQuery(s_kernel) == cudaErrorNotReady;
+            const bool still2 = second < 0 || (*P.err2 == 0 && *P.flag_out2 == 2 && cudaStreamQuery(s_kernel2) == cudaErrorNotReady);
             const auto t0 = Clock::now();
             host_fence();
             *P.abort = 1;
+            if (second >= 0) *P.abort2 = 1;
             host_fence();
             const cudaError_t e = drain(s_kernel, 2.0);
+            const cudaError_t e2 = second >= 0 ? drain(s_kernel2, 2.0) : cudaSuccess;
             const double ms = secs_since(t0) * 1e3;
             host_fence();
             // the error exit raises flag_out to UINT32_MAX (the primary's waits must pass): 2 before, MAX after
             const bool good = still && e == cudaSuccess && *P.err == pf::kErrAbort && *P.exit == w.epoch && *P.flag_out == UINT32_MAX;
+            const bool good2 = second < 0 || (still2 && e2 == cudaSuccess && *P.err2 == pf::kErrAbort && *P.exit2 == w2.epoch && *P.flag_out2 == UINT32_MAX);
             std::printf("tenuta (a) abort al passo 2: %s | prima dell'abort: in attesa %s | uscita in %.1f ms (%s), err %s, exit %u (epoch %u), "
-                        "flag_out %u (atteso %u)\n", good ? "PASS" : "FAIL", still ? "si" : "no", ms, cudaGetErrorString(e), err_name(*P.err),
+                        "flag_out %u (atteso %u)\n", good && good2 ? "PASS" : "FAIL", still ? "si" : "no", ms, cudaGetErrorString(e), err_name(*P.err),
                         *P.exit, w.epoch, *P.flag_out, UINT32_MAX);
-            if (!good) { if (e == cudaErrorNotReady) abort_window(); ok = false; }
+            if (second >= 0)
+                std::printf("tenuta (a) secondo server: %s | in attesa %s | stream %s, err %s, exit %u (epoch %u), flag_out %u\n", good2 ? "PASS" : "FAIL",
+                            still2 ? "si" : "no", cudaGetErrorString(e2), err_name(*P.err2), *P.exit2, w2.epoch, *P.flag_out2);
+            if (!good || !good2) { if (e == cudaErrorNotReady || e2 == cudaErrorNotReady) abort_window(); ok = false; }
         } else {
             abort_window();
         }
@@ -885,28 +1147,48 @@ int main(int argc, char** argv) {
         w.steps = nl; w.G = 1; w.T = 1;
         w.gtb[0] = 0; w.gtb[1] = 1; w.gte[0] = 1; w.gte[1] = 1;
         w.wait_ns = 200ull * 1000000ull;
-        bool ok = begin_window(w);
+        pf::Window w2 = base2;
+        w2.steps = nl; w2.G = 1; w2.T = 1;
+        w2.gtb[0] = 0; w2.gtb[1] = 1; w2.gte[0] = 1; w2.gte[1] = 1;
+        w2.wait_ns = 200ull * 1000000ull;
+        bool ok = begin_window(w, w2);
         if (ok) {
             const auto t0 = Clock::now();
             const cudaError_t e = drain(s_kernel, 2.0);
+            const cudaError_t e2 = second >= 0 ? drain(s_kernel2, 2.0) : cudaSuccess;
             const double ms = secs_since(t0) * 1e3;
             host_fence();
             const bool good = e == cudaSuccess && *P.err == pf::kErrTimeoutSeq && *P.exit == w.epoch && *P.flag_out == UINT32_MAX;
+            const bool good2 = second < 0 || (e2 == cudaSuccess && *P.err2 == pf::kErrTimeoutSeq && *P.exit2 == w2.epoch && *P.flag_out2 == UINT32_MAX);
             std::printf("tenuta (b) wait_ns 200 ms senza doorbell: %s | uscita in %.1f ms (%s), err %s, exit %u (epoch %u), flag_out %u (atteso %u)\n",
-                        good ? "PASS" : "FAIL", ms, cudaGetErrorString(e), err_name(*P.err), *P.exit, w.epoch, *P.flag_out, UINT32_MAX);
-            if (!good) { if (e == cudaErrorNotReady) abort_window(); ok = false; }
+                        good && good2 ? "PASS" : "FAIL", ms, cudaGetErrorString(e), err_name(*P.err), *P.exit, w.epoch, *P.flag_out, UINT32_MAX);
+            if (second >= 0)
+                std::printf("tenuta (b) secondo server: %s | stream %s, err %s, exit %u (epoch %u), flag_out %u\n", good2 ? "PASS" : "FAIL",
+                            cudaGetErrorString(e2), err_name(*P.err2), *P.exit2, w2.epoch, *P.flag_out2);
+            if (!good || !good2) { if (e == cudaErrorNotReady || e2 == cudaErrorNotReady) abort_window(); ok = false; }
+        } else {
+            abort_window();
         }
         if (!ok) all_ok = false;
     }
 
     // ---- the end: never destroy a stream under a live kernel (the aborts above drained it, or said they could not)
-    if (cudaStreamQuery(s_kernel) == cudaErrorNotReady) {
-        std::printf("the kernel is still on the stream at exit: %s\n", all_ok ? "FAIL" : "FAIL (see above)");
+    if (cudaStreamQuery(s_kernel) == cudaErrorNotReady || (second >= 0 && cudaStreamQuery(s_kernel2) == cudaErrorNotReady)) {
+        std::printf("a kernel is still on its stream at exit: %s\n", all_ok ? "FAIL" : "FAIL (see above)");
         std::fflush(stdout);
         std::_Exit(1);
     }
     CK(cudaStreamDestroy(s_kernel));
     CK(cudaStreamDestroy(s_ref));
+    if (second >= 0) {
+        CK(cudaSetDevice(second));
+        CK(cudaStreamDestroy(s_kernel2));
+        for (uint8_t* a : d_arena2) cudaFree(a);
+        cudaFree(d_slot_ptr2); cudaFree(d_own2); cudaFree(d_lay2);
+        cudaFree(d_plan2); cudaFree(d_q8_2); cudaFree(d_scratch2); cudaFree(d_out2); cudaFree(d_sync2);
+        CK(cudaSetDevice(device));
+        cudaFreeHost(P.page2_h);
+    }
     if (primary >= 0) {
         CK(cudaSetDevice(primary));
         (void) drain(s_primary, 2.0);
@@ -922,7 +1204,9 @@ int main(int argc, char** argv) {
     cudaFreeHost(h_plan_ref);
     cudaFreeHost(P.page_h); cudaFreeHost(P.seq_h); cudaFreeHost(P.x_h); cudaFreeHost(P.ids_h);
     cudaFreeHost(P.ymiss_h); cudaFreeHost(P.ymiss_ref_h); cudaFreeHost(P.pwords_h);
-    std::printf("%s: %d finestre (%s, %d strati), %lld voci del peer, seme %llu\n", all_ok ? "PASS" : "FAIL", windows,
-                gu_type == 0 ? "modello misto" : "modello uniforme", nl, (long long) peer_entries_total, (unsigned long long) seed);
+    std::printf("%s: %d finestre (%s, %d strati), %lld voci del peer", all_ok ? "PASS" : "FAIL", windows,
+                gu_type == 0 ? "modello misto" : "modello uniforme", nl, (long long) peer_entries_total);
+    if (second >= 0) std::printf(" + %lld del secondo server (CUDA%d)", (long long) peer2_entries_total, second);
+    std::printf(", seme %llu\n", (unsigned long long) seed);
     return all_ok ? 0 : 1;
 }

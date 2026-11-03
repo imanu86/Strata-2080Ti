@@ -613,8 +613,9 @@ bool Verifier::release_gpu_waits(int timeout_ms) {
     // reaches them with no API call; UINT32_MAX is past every ring.  (E-6's skip words are device memory, but
     // wait_flag_ge_or also returns on its flag.)  A host function raising flag B later only raises.
     uint32_t* const peer_flag = peer_hook_ != nullptr ? peer_hook_->flag_out_host : nullptr;   // the fused peer's output flag
+    uint32_t* const peer_flag2 = peer_hook2_ != nullptr ? peer_hook2_->flag_out_host : nullptr;   // two servers: the second's
     for (uint32_t* p : {h_flag_, h_flagA_, h_flagB_, hflag_in_h_,   // + an overlapped split's hand-off wait
-                        peer_flag})
+                        peer_flag, peer_flag2})
         if (p != nullptr) *(volatile uint32_t*) p = UINT32_MAX;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     strata_store_fence();
@@ -623,11 +624,13 @@ bool Verifier::release_gpu_waits(int timeout_ms) {
     // A step that was in flight may have written its ring over the UINT32_MAX above between the two (the kernel does
     // not read the flag before it writes it): once the kernel has left (or the drain gave up) the word goes up again,
     // so no wait node of this card can sit on a small value forever (#267).  The kernel itself writes UINT32_MAX when
-    // it leaves on the abort; this is the belt to that suspender.
-    if (peer_hook_ != nullptr && peer_hook_->abort != nullptr) {
-        peer_hook_->abort(peer_hook_->ctx);
-        if (peer_flag != nullptr) {
-            *(volatile uint32_t*) peer_flag = UINT32_MAX;
+    // it leaves on the abort; this is the belt to that suspender.  Two servers: the same for each, the first then
+    // the second.
+    for (const strata::core::peer_fused::Hook* h : {peer_hook_, peer_hook2_}) {
+        if (h == nullptr || h->abort == nullptr) continue;
+        h->abort(h->ctx);
+        if (h->flag_out_host != nullptr) {
+            *(volatile uint32_t*) h->flag_out_host = UINT32_MAX;
             std::atomic_thread_fence(std::memory_order_seq_cst);
             strata_store_fence();
         }
@@ -1259,7 +1262,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     // the host never publishes) fit it.  (The peer itself refuses --layer-split; decided here after device_plan_ is.)
     // A later stage of a split (lb_ > 0, next_ == nullptr) is refused too: its windows are prelaunched by the stage
     // before it (prelaunch skips run's begin), and the peer's pages are the first stage's.
-    if (peer_hook_ != nullptr && (next_ != nullptr || device_plan_ || lb_ != 0 || le_ != g.n_layers)) {
+    if ((peer_hook_ != nullptr || peer_hook2_ != nullptr) && (next_ != nullptr || device_plan_ || lb_ != 0 || le_ != g.n_layers)) {
         err = "verify: STRATA_PEER_FUSED needs no layer split and no device plan";
         return false;
     }
@@ -2370,6 +2373,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 if (peer_hook_ != nullptr && peer_hook_->flag_out_dev0 != nullptr && !batch_rec_ && rec_from_ < 0 &&
                     rec_to_ < 0)
                     wait_flag_ge(peer_hook_->flag_out_dev0, ring, cs);   // the peer's share is in the mapped rows
+                // two servers: the second server's flag after the first's - one more node a step, a fixed order
+                if (peer_hook2_ != nullptr && peer_hook2_->flag_out_dev0 != nullptr && !batch_rec_ && rec_from_ < 0 &&
+                    rec_to_ < 0)
+                    wait_flag_ge(peer_hook2_->flag_out_dev0, ring, cs);
                 const bool fuse_rows = fuse_rows_on() && !prof_on_ && !remote_opt_ && dec_batch && m_bal_ == nullptr;   // 143-amdk
                 if (!fuse_rows) {
                     if (m_bal_ != nullptr)   // set_pcie_balance: ... and ends as it waits for the CPU's rows
@@ -3109,7 +3116,7 @@ bool Verifier::prelaunch(int T, const int32_t* tokens, int64_t pos0, std::string
     if (pos0 + T > ss_->qsa_states[ss_->qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
     // STRATA_PEER_FUSED: a prelaunched window skips run's begin, and its graph waits on the peer's flag (init refuses
     // the split already; this is the belt)
-    if (peer_hook_ != nullptr) { err = "verify: STRATA_PEER_FUSED does not serve a prelaunched window"; return false; }
+    if (peer_hook_ != nullptr || peer_hook2_ != nullptr) { err = "verify: STRATA_PEER_FUSED does not serve a prelaunched window"; return false; }
     const Clock::time_point t0 = Clock::now();
     stage_inputs(T, tokens, pos0);
     if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);
@@ -3188,12 +3195,21 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     // out of this function (a launch error, a timeout, a layer that never rang, a bad PLE gather): no kernel outlives
     // its window - the abort word makes it leave at its next poll and PeerExperts drains its stream, bounded.  Only
     // the doorbell graph: the zero-doorbell one (ar_on) publishes no step, so the peer serves it as today.
+    // Two servers (docs/PEER_FUSED2.md): the second server's hook is driven beside the first's - begin after it on
+    // the same WindowHost (both kernels read the same doorbell and pages), flushed and ended with it, aborted with
+    // it on every early way out (the guard holds both).  A begin that fails aborts what it may have left and, through
+    // the guard, the server already open.
     struct PeerWindow {
         const strata::core::peer_fused::Hook* hook = nullptr;
         bool open = false;   ///< begin succeeded and end has not closed it
-        ~PeerWindow() { if (open && hook != nullptr && hook->abort != nullptr) hook->abort(hook->ctx); }
+        const strata::core::peer_fused::Hook* hook2 = nullptr;   ///< the second server's
+        bool open2 = false;
+        ~PeerWindow() {
+            if (open && hook != nullptr && hook->abort != nullptr) hook->abort(hook->ctx);
+            if (open2 && hook2 != nullptr && hook2->abort != nullptr) hook2->abort(hook2->ctx);
+        }
     } pw;
-    if (peer_hook_ != nullptr && !ar_on() && !pre) {
+    if ((peer_hook_ != nullptr || peer_hook2_ != nullptr) && !ar_on() && !pre) {
         strata::core::peer_fused::WindowHost w;
         w.T = T;
         w.G = G;
@@ -3207,13 +3223,17 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         w.x_h = h_x_;
         w.ids_h = h_ids_;
         w.ymiss_h = h_ymiss_;
-        if (peer_hook_->begin == nullptr || !peer_hook_->begin(peer_hook_->ctx, w, err)) {
-            if (peer_hook_->begin == nullptr) err = "verify: STRATA_PEER_FUSED: the peer hook has no begin";
-            if (peer_hook_->abort != nullptr) peer_hook_->abort(peer_hook_->ctx);   // nothing may be left running
-            return false;
+        for (int which = 0; which < 2; ++which) {   // the first server, then the second
+            const strata::core::peer_fused::Hook* h = which == 0 ? peer_hook_ : peer_hook2_;
+            if (h == nullptr) continue;
+            if (h->begin == nullptr || !h->begin(h->ctx, w, err)) {
+                if (h->begin == nullptr) err = std::string("verify: STRATA_PEER_FUSED: the peer hook has no begin") + (which == 1 ? " (second server)" : "");
+                if (h->abort != nullptr) h->abort(h->ctx);   // nothing may be left running (the guard aborts the other server)
+                return false;
+            }
+            if (which == 0) { pw.hook = h; pw.open = true; }
+            else { pw.hook2 = h; pw.open2 = true; }
         }
-        pw.hook = peer_hook_;
-        pw.open = true;
     }
     const bool do_ple = ss.ple.ready() && ple_stage();
     uint32_t ple_rows[kVerifyMaxT * PLE_N_HEADS];
@@ -3338,6 +3358,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
                 const cudaError_t q = cudaStreamQuery(cs_);
 #endif
                 if (pw.open && pw.hook->flush != nullptr) pw.hook->flush(pw.hook->ctx);   // WDDM: the peer's stream too
+                if (pw.open2 && pw.hook2->flush != nullptr) pw.hook2->flush(pw.hook2->ctx);   // and the second server's
                 if (q != cudaErrorNotReady && *seq < want) {
                     trace_ev("NEVER-RANG", k, l, (int64_t) q);
                     trace_dump(stderr);
@@ -3467,9 +3488,16 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     if (pw.open) {   // STRATA_PEER_FUSED: the kernel has left, no error word, the device's counts are the host's
         if (pw.hook->end == nullptr || !pw.hook->end(pw.hook->ctx, err)) {
             if (pw.hook->end == nullptr) err = "verify: STRATA_PEER_FUSED: the peer hook has no end";
-            return false;   // (the guard aborts: a kernel still running leaves at its next poll)
+            return false;   // (the guard aborts: a kernel still running leaves at its next poll; the second server's too)
         }
         pw.open = false;
+    }
+    if (pw.open2) {   // two servers: the second server's kernel, the same checks
+        if (pw.hook2->end == nullptr || !pw.hook2->end(pw.hook2->ctx, err)) {
+            if (pw.hook2->end == nullptr) err = "verify: STRATA_PEER_FUSED: the peer hook has no end (second server)";
+            return false;
+        }
+        pw.open2 = false;
     }
     if (ar_on() && h_plan_err_ != nullptr && *(volatile uint32_t*) h_plan_err_ != 0) {   // #871: refresh_ar saw the table whole
         *(volatile uint32_t*) h_plan_err_ = 0;

@@ -4905,7 +4905,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     // ---- plan v0.3 P6: the GPU's share, decided and published FIRST so the GPU starts while the CPU works.
     // Distinct experts in routing order; resident ones and the last pcie_num/256 of the missed ones go to the GPU.
     const int64_t n = n_tok * k;
-    int32_t kind[kMaxWindowEntries];       // per entry: -1 CPU, 0 VRAM, 1 PCIe
+    int32_t kind[kMaxWindowEntries];       // per entry: -1 CPU, 0 VRAM, 1 PCIe, 2 the peer (first server), 3 the second server
     if (d.plan != nullptr && n <= kMaxWindowEntries && n <= d.plan->cap) {
         int64_t distinct[kMaxWindowEntries], first_of[kMaxWindowEntries];
         int nd = 0, nmiss = 0;
@@ -4926,7 +4926,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 distinct[nd++] = i;
                 const int32_t e = ids[i];
                 if (e >= 0 && e < d.n_expert && d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] < 0 &&
-                    !(d.peer != nullptr && d.peer->has(d.layers, e)) && !helper_holds(e)) ++nmiss;
+                    !(d.peer != nullptr && d.peer->has(d.layers, e)) && !(d.peer2 != nullptr && d.peer2->has(d.layers, e)) &&
+                    !helper_holds(e)) ++nmiss;
             }
         }
         // STRATA_ROUTE_TAIL_SKIP=R (default 7 on CUDA serve, =0 off; changes the output): a missed expert that EVERY token of the window routes
@@ -4982,6 +4983,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                                                                                  : (size_t) slot * (size_t) d.cache_blob));
                 } else if (d.peer != nullptr && d.peer->has(d.layers, e)) {
                     kd = 2;                        // multi-GPU: the second GPU computes it
+                } else if (d.peer2 != nullptr && d.peer2->has(d.layers, e)) {
+                    kd = 3;                        // two servers: the second server computes it (after the first: the precedence)
                 } else if (helper_holds(e)) {
                     // left to the helper: kind -1 until RemoteExperts::begin() claims the row (see above)
                 } else if (d.fs != nullptr && d.fs->take(d.layers, e, ptr)) {
@@ -5042,7 +5045,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             const int32_t e = ids[i];
             kind[i] = (e >= 0 && e < d.n_expert && d.host_res != nullptr &&
                        d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e] >= 0) ? 0
-                    : (e >= 0 && e < d.n_expert && d.peer != nullptr && d.peer->has(d.layers, e)) ? 2 : -1;
+                    : (e >= 0 && e < d.n_expert && d.peer != nullptr && d.peer->has(d.layers, e)) ? 2
+                    : (e >= 0 && e < d.n_expert && d.peer2 != nullptr && d.peer2->has(d.layers, e)) ? 3 : -1;
         }
     }
     if (d.peer != nullptr) {                 // multi-GPU: start the second GPU's share before the CPU's own work
@@ -5051,6 +5055,16 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             std::fprintf(stderr, "strata: %s (layer %lld)\n", perr.c_str(), (long long) d.layers);
             d.failed = true;
             d.fail = "the peer GPU's experts could not be launched";
+            d.fail_layer = d.layers;
+            return;
+        }
+    }
+    if (d.peer2 != nullptr) {                // two servers: the second server's share (kind 3), right after the first's
+        std::string perr;
+        if (!d.peer2->launch(d.layers, x_f, ids, n_tok, k, kind, perr, out, 3)) {
+            std::fprintf(stderr, "strata: %s (layer %lld, second server)\n", perr.c_str(), (long long) d.layers);
+            d.failed = true;
+            d.fail = "the second expert server's experts could not be launched";
             d.fail_layer = d.layers;
             return;
         }
@@ -5160,9 +5174,12 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 if (kind[i] == 0) ++d.cache_hits;
                 else ++d.offload_entries;                       // #588: PCIe or another GPU
                 if (kind[i] == 2 && d.peer != nullptr) ++d.peer_entries;
-                // multi-GPU: a direct peer launch is writing this row right now - zeroing it would race it;
-                // dec_batch: copy_rows_from_mapped_kernel already zeroes kind 0/1 rows on the GPU
+                if (kind[i] == 3 && d.peer2 != nullptr) ++d.peer2_entries;
+                // multi-GPU: a direct peer launch is writing this row right now - zeroing it would race it (the
+                // second server's rows the same); dec_batch: copy_rows_from_mapped_kernel already zeroes kind 0/1
+                // rows on the GPU
                 if (!((kind[i] == 2 && d.peer != nullptr && d.peer->launched_direct()) ||
+                      (kind[i] == 3 && d.peer2 != nullptr && d.peer2->launched_direct()) ||
                       (gpu_zeroes_hits && (kind[i] == 0 || kind[i] == 1))))
                     std::memset(row, 0, (size_t) H * sizeof(float));
                 continue;
@@ -5284,6 +5301,17 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             return;
         }
         d.peer->poll_pending();              // STRATA_PEER_REFILL_FLUSH: the swaps that landed join the tables here, not at the decode's join
+    }
+    if (d.peer2 != nullptr) {                // two servers: the second server's rows, after the first's (a fixed order)
+        std::string perr;
+        if (!d.peer2->finish(out, perr)) {
+            std::fprintf(stderr, "strata: %s (layer %lld, second server)\n", perr.c_str(), (long long) d.layers);
+            d.failed = true;
+            d.fail = "the second expert server's experts failed";
+            d.fail_layer = d.layers;
+            return;
+        }
+        d.peer2->poll_pending();
     }
     const auto c4 = std::chrono::steady_clock::now();
     pt("ran");
