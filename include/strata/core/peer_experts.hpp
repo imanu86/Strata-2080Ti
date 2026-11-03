@@ -128,8 +128,8 @@ public:
     // has / launch / finish are exactly the ones above.
     /// STRATA_PEER_FUSED=1, read once.
     static bool fused_env();
-    /// The fused server is on: fused_env(), a native pack whose every layer resolves to the same fused kernel instance,
-    /// and the buffers allocated at open().
+    /// The fused server is on: fused_env(), a native pack whose every layer has a gate/up and a down type the kernel
+    /// has a body for (one geometry, the types free to differ a layer), and the buffers allocated at open().
     bool fused_on() const { return fused_on_; }
     /// The verifier's handle (stable: a member).  Null when the fused server is off.
     const peer_fused::Hook* fused_hook() const { return fused_on_ ? &hook_ : nullptr; }
@@ -190,7 +190,9 @@ private:
     /// stall watchdog's thread; read by the pool thread (has) and the adapt thread.
     std::atomic<bool> window_open_{false};
     peer_fused::Shape shape_;                         ///< the kernel instance and grid peer_fused_shape resolved at open
-    strata::kernels::NativeExpertLayout fused_L_;     ///< the pack's layout (the same on every layer, checked at open)
+    strata::kernels::NativeExpertLayout fused_L_;     ///< layer 0's layout: the pack's geometry (n_embd, n_ff the same on every layer)
+    std::vector<strata::kernels::NativeExpertLayout> fused_lays_;   ///< one layout a layer (the types may differ a layer), what d_lay_ holds
+    strata::kernels::NativeExpertLayout* d_lay_ = nullptr;          ///< VRAM copy of fused_lays_: the kernel reads lay[l] a step
     peer_fused::Hook hook_;                           ///< what the verifier holds (fused_hook())
     const int32_t* host_res_fused_ = nullptr;         ///< the primary's residency table (fused_set_host_res)
     // the peer's mapped page (kPageBytes, Portable | Mapped): host view and the peer's device view of each word

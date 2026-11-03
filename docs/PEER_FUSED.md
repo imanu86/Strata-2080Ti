@@ -25,6 +25,11 @@ Host fuori dal percorso: pianifica i miss CPU come oggi, conta le voci del peer 
 Righe **identiche bit per bit** al percorso attuale del peer: stesse funzioni, stessi ordini di somma, stessa
 quantizzazione, stesso ordine dei gruppi e delle righe compatte (§8).
 
+**Pack misti** (3/11, §5a): il kernel è **uno per tutti i tipi**. Il modello vero (Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS)
+cambia tipo gate/up e down **strato per strato**; il kernel legge il layout dello strato da una tabella in VRAM
+(`d_lay`, uno per strato) e sceglie il corpo a ogni passo. Prima versione: un'istanza per coppia `(TG, TD)`, e
+`fused_open` rifiutava il pack al primo strato (`gate/up type 17`, corsa `Qfus1`).
+
 ## 1. Chi parla con chi (per finestra e per passo)
 
 ```
@@ -91,6 +96,7 @@ con il **puntatore device 0** (`cudaHostGetDevicePointer` sotto `On(primary_devi
 | `d_scratch` | `native_expert_scratch_bytes(kCap, n_ff)` | solo `hq` a `peer_fused::hq_offset(kCap, n_ff)` = `3 × round256(kCap × n_ff × 4)`, **lo stesso offset di `native_expert_grouped`** | kernel, fase D |
 | `d_out` | `kCap × N` fp32 | righe compatte (= `d_out_` di oggi) | kernel, fase E |
 | `d_sync` | `Sync` (128 B) | contatore/generazione della barriera, `lready`, `done`, `quit`, `exited` | kernel; azzerata dall'host prima del lancio (`cudaMemsetAsync` su `stream_`) |
+| `d_lay` | `n_layers × NativeExpertLayout` | il layout di ogni strato (`native_expert_layout(gu_type, d_type, n_embd, n_ff)` di `lay.fmt[l]`): tipi, passo delle righe, offset di up e down | host, a `open` (`fused_lays_`); il kernel legge `lay[l]` a ogni passo con voci (§5a) |
 
 ## 4. Tabella di proprietà e rotazioni fra finestre
 
@@ -113,7 +119,7 @@ con il **puntatore device 0** (`cudaHostGetDevicePointer` sotto `On(primary_devi
 - **Fuori da una finestra fused** (prompt, `batch_serve`, un `run` senza hook): `has()` risponde da `res_` e
   `launch()`/`finish()` fanno il percorso di oggi (§6). Così nessuna via di chiamata resta senza righe.
 
-## 5. Il kernel (`peer_fused_kernel<TG, TD, MINB>`, 256 thread, tutti i blocchi residenti)
+## 5. Il kernel (`peer_fused_kernel<MINB>`, 256 thread, tutti i blocchi residenti)
 
 Un ciclo `for (s = 0; s < w.steps; ++s)` identico in ogni blocco; `l = lb + s / G`, `grp = s % G`, `tb = gtb[grp]`,
 `n_tok = gte[grp] - tb`, `n = n_tok * k`, `want = s + 1`, `plan = &w.plan[s & 1]`.
@@ -123,8 +129,8 @@ Un ciclo `for (s = 0; s < w.steps; ++s)` identico in ogni blocco; `l = lb + s / 
 | **A** attesa | blocco 0, thread 0 | spin su `*w.seq >= want` (mappata, `volatile`, `__nanosleep(64)`); ogni 1024 giri controlla `*w.abort` e `%globaltimer - t0 > wait_ns` → `Err`; poi `__threadfence_system()`, `stamp[2s] = now` | — |
 | **B** piano | blocco 0 (256 thread) | legge `ids[tb*k .. +n)` con `__ldcv`; `first(i)`, `owned(i)`, gruppo, riga (§8); scrive `plan->ptr/start/dst/tok/out_row/count`; `__threadfence()`; `__syncthreads()`; thread 0: `sync->lready = want` | gli altri blocchi: thread 0 spin su `sync->lready >= want` (VRAM, `__nanosleep(32)`, controllo `quit` ogni 1024 giri), `__syncthreads()` |
 | **C** quantize | tutti | per il warp globale `wg` in `[blockIdx*8 + warp; wg < n_tok * N/32; wg += nblocks*8)`: `i = wg*32 + lane`, `q8_1_store(__ldcv(x + tb*N + i), q8, i)` — il corpo di `quantize_q8_1_kernel` (`iq_kernels.cu:2804-2822`) | barriera 1 |
-| **D** gate/up | tutti | se `groups == 0` salta a F; item `it` in `[blockIdx; it < (n_ff/32) * groups; it += nblocks)`: `bx = it % (n_ff/32)`, `g = it / (n_ff/32)`; `native_gu_fused_body<TG>(plan->ptr, plan->start, &plan->count[0], plan->tok, q8, L, hq, bx, g)` | barriera 2 |
-| **E** down | tutti | item in `[blockIdx; it < ceil(N/LDS_RB) * groups; ...)`: `bx = it % nbx`, `g = it / nbx`; `native_down_lds_body<TD>(plan->ptr, plan->start, &plan->count[0], plan->dst, hq, L, out, bx, g)` | barriera 3 |
+| **D** gate/up | tutti | se `groups == 0` salta a F; `L = w.lay[l]` (VRAM, uniforme); item `it` in `[blockIdx; it < (n_ff/32) * groups; it += nblocks)`: `bx = it % (n_ff/32)`, `g = it / (n_ff/32)`; `switch (L.gu_type)` → `native_gu_fused_core<TG>(plan->ptr, plan->start, &plan->count[0], plan->tok, q8, L, hq, bx, g, griglia, tile, sx)` con TG ∈ {16, 17, 18, 21, 22}; tipo assente → `kErrBadType` | barriera 2 |
+| **E** down | tutti | item in `[blockIdx; it < ceil(N/LDS_RB) * groups; ...)`: `bx = it % nbx`, `g = it / nbx`; `switch (L.d_type)` → `native_down_lds_body<TD>(plan->ptr, plan->start, &plan->count[0], plan->dst, hq, L, out, bx, g)` con TD ∈ {42, 20} | barriera 3 |
 | **F** scatter + flag | tutti | `idx` in `[tid globale; idx < rows * N/4; idx += nblocks*256)`: `r = idx / (N/4)`, `c = idx % (N/4)`; `__stwt(ymiss4 + (tb*k + plan->out_row[r]) * N/4 + c, out4[r * N/4 + c])`; poi **ogni thread** `__threadfence_system()`, `__syncthreads()`, thread 0 `old = atomicAdd(&sync->done[s & 1], 1)` (**mai azzerato**: un contatore per parità); l'ultimo del passo (`old == ((s >> 1) + 1) * nblocks - 1`): `cnt[s] = groups << 16 \| rows`, `stamp[2s+1] = now`, `__threadfence_system()`, `*flag_out = want` (volatile), `__threadfence_system()` | nessuna: si va al passo s+1 |
 
 **Barriera di griglia** (`grid_barrier`): una sola parola `sync->bar` (conteggio nei 16 bit bassi, generazione nei 16
@@ -165,9 +171,15 @@ barriera sugli ultimi passi terrebbe ferma la padrona (e l'host in `cudaStreamSy
 Un passo **non** alza mai il proprio flag dopo un errore. `release_gpu_waits` alza `flag_out = UINT32_MAX`, chiama
 `hook.abort` (che drena) e lo **rialza**: un passo in volo può aver scritto il suo ring sopra il primo MAX.
 
-**Memoria condivisa** (sm_75, 64 KiB per SM): statica dei corpi (griglia IQ3_XXS 1 KiB + `res[4][64]` 1 KiB) +
-dinamica = max(`LDS_NT × N/32 × 36` = 11 520 B per gate/up, `LDS_NT × n_ff/32 × 36` = 2 880 B per down) ≈ 14 KiB a
-blocco: 4 blocchi a SM entrano. Le due dichiarazioni `extern __shared__` dei corpi sono lo stesso buffer dinamico.
+**Memoria condivisa** (sm_75, 64 KiB per SM): il corpo gate/up (`native_gu_fused_core`) riceve i suoi tre buffer come
+argomenti e il kernel glieli ritaglia dal buffer dinamico: `[attivazioni LDS_NT × N/32 × 36 = 11 520 B | tile
+res[4][64] 1 024 B | griglia del tipo]`; la griglia è dimensionata sulla **più grande fra i tipi del pack**
+(`Shape::grid_bytes`: IQ2_XXS 2 KiB, IQ2_XS 4 KiB, IQ3_XXS 1 KiB, IQ3_S 2 KiB, IQ2_S 8 KiB). Pack misto di Flash-Next:
+11 520 + 1 024 + 8 192 = 20 736 B a blocco (3 blocchi a SM per memoria, 2 per registri a MINB 2); pack solo IQ3_XXS:
+13 568 B (4 a SM). Se ogni corpo tenesse la propria griglia statica, cinque griglie + cinque tile sarebbero ~22 KiB
+sempre allocati per un corpo solo in uso: per questo il corpo è stato diviso in `native_gu_fused_body` (dichiara le
+statiche come prima, per i kernel per-strato) e `native_gu_fused_core` (il lavoro, buffer dall'esterno). Il corpo down
+usa la sua `extern __shared__` (2 880 B) sullo stesso buffer, dopo la barriera 2.
 
 **Registri e blocchi** (`Shape`): `__launch_bounds__(256, MINB)`, MINB 2 di default (≤ 128 registri, senza spill: i
 corpi stanno a 64-78), `STRATA_PEER_FUSED_MINB=3|4` sceglie le istanze più strette. `peer_fused_shape` chiede
@@ -177,18 +189,60 @@ quando `cudaDevAttrCooperativeLaunch` lo consente (co-residenza garantita o il l
 altrimenti un lancio normale con la stessa griglia; `STRATA_PEER_FUSED_COOP=0` forza il lancio normale. La barriera è
 sempre la nostra (nessun `-rdc`, nessun `cooperative_groups::grid_group`).
 
-**Istanze compilate**: TG ∈ {18 IQ3_XXS, 21 IQ3_S, 22 IQ2_S} × TD ∈ {42 Q2_0, 20 IQ4_NL} × MINB 2; MINB 3 e 4 solo con
-la macro di compilazione `STRATA_PEER_FUSED_MINB_ALL` (sei kernel grandi in più altrimenti). Un pack con un'altra
-coppia è rifiutato da `peer_fused_shape` e il peer resta sul percorso di oggi con una riga su stderr.
+**Istanze compilate**: una per MINB (`peer_fused_kernel<2>`; `<3>` e `<4>` solo con la macro di compilazione
+`STRATA_PEER_FUSED_MINB_ALL`). L'istanza contiene i **cinque** corpi gate/up (IQ2_XXS 16, IQ2_XS 17, IQ3_XXS 18, IQ3_S
+21, IQ2_S 22) e i **due** corpi down (Q2_0 42, IQ4_NL 20): il tipo lo decide lo strato, non l'istanza. Un pack con un
+tipo fuori da questi (IQ4_XS 23, nibble, APR) è rifiutato da `peer_fused_shape` con lo strato nel messaggio e il peer
+resta sul percorso di oggi con una riga su stderr.
+
+### 5a. Pack misti: il tipo è dello strato
+
+Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS (`native_experts.txt` del pack `iq3_xxs`, 48 strati di esperti, n_embd 2560,
+n_ff 640, tutti con le stesse geometrie):
+
+| gate/up \ down | Q2_0 (42) | IQ4_NL (20) | strati |
+|---|---:|---:|---:|
+| IQ2_XXS (16) | 8 | 1 | 9 |
+| IQ2_XS (17) | 6 | 4 | 10 |
+| IQ3_XXS (18) | 3 | 3 | 6 |
+| IQ3_S (21) | 7 | 6 | 13 |
+| IQ2_S (22) | 6 | 4 | 10 |
+| **strati** | **30** | **18** | **48** |
+
+Per strato: `0 17/20 · 1 16/42 · 2 17/20 · 3 16/42 · 4 17/20 · 5 17/42 · 6 16/42 · 7 16/42 · 8 21/42 · 9 17/42 · 10 17/42
+· 11 16/42 · 12 22/42 · 13 16/42 · 14 17/42 · 15 22/42 · 16 16/42 · 17 22/42 · 18 21/42 · 19 17/42 · 20 21/42 · 21 22/42
+· 22 21/42 · 23 21/42 · 24 21/42 · 25 17/42 · 26 22/42 · 27 16/42 · 28 21/20 · 29 22/20 · 30 21/20 · 31 16/20 · 32 21/20
+· 33 21/42 · 34 21/20 · 35 18/20 · 36 18/42 · 37 21/20 · 38 22/20 · 39 17/20 · 40 22/42 · 41 18/42 · 42 22/20 · 43 21/20
+· 44 18/20 · 45 18/42 · 46 22/20 · 47 18/20`. Dieci coppie diverse, **nessuna** copre più di 8 strati: un'istanza per
+coppia non avrebbe mai acceso il kernel (al massimo 7-8 strati su 48 anche con una modalità mista kernel + percorso
+per-strato nella stessa finestra). Con il tipo per strato il kernel copre **48 strati su 48**.
+
+Che cosa serviva: (1) un prodotto IQ2_XS con la griglia in LDS (`DotG<17, SG>` e `GridOf<17>`, `iq_kernels.cu`: gli
+stessi interi di `vec_dot_iq2_xs_q8_1`, codici a 9 bit, segni a 7 bit + parità come IQ2_XXS, scale a due metà come
+IQ2_S); (2) il tipo 17 nella lista del gate/up fuso del **modo 8** (`fused_gu`, `iq_kernels.cu`), così il percorso
+per-strato del peer **e** il kernel fanno la stessa cosa per quegli strati; (3) `Window::lay` / `n_layers`, `Shape`
+con le maschere dei tipi (`gu_mask`, `d_mask`) e `grid_bytes`, `peer_fused_shape(lay, n_layers, …)` che controlla ogni
+strato; (4) `fused_open` che costruisce `fused_lays_` e `d_lay_` invece di pretendere un'istanza sola.
+
+**Attenzione (aritmetica)**: in modo 8 il percorso per-strato di IQ2_XS era `native_gu_multi_kernel<17>` (righe a 16
+lane, `row_dot_80_sub16`) + `swiglu_q8_1_entries_kernel`; ora è il gate/up fuso (somme a 32 lane + `warp_sum`, SwiGLU e
+q8_1 nel warp), come già per 16/18/21/22. Stessi prodotti interi, **altro ordine di somma in float**: i 10 strati IQ2_XS
+in modo 8 non sono bit per bit quelli di prima — su **entrambe** le schede, perché `STRATA_EXP_MODE=8` è globale
+(`config.json` della corsa `Qfus1`). Il modo 0 (default) non cambia. Il banco confronta kernel e percorso per-strato
+**nello stesso modo**: per il 17 verifica l'impianto (layout per strato, griglia, dispatch), non il confronto con il
+multi-kernel. Se si vuole l'identità con il vecchio percorso del 17, serve un corpo a 16 lane nel kernel (non fatto:
+più codice, nessun guadagno).
 
 ## 6. Host: `PeerExperts` in modalità fused (pezzo B)
 
 - `open()`: se `fused_env()` e `lay.native`: per ogni strato `native_expert_layout(f.gu_type, f.d_type, ...)` →
-  `peer_fused_shape(L, minb, blocks_cap, coop, shape, why)` (sotto `On(device_)`) deve riuscire con **la stessa** `(TG, TD)` su tutti gli strati; rifiuta
-  anche `had_gu`/`had_d` (APR: `hadamard_rows` non è nel kernel, prima versione) e `gu_nib`. Se qualcosa manca: stderr
-  `strata: STRATA_PEER_FUSED: … (<why>): the peer keeps the per-layer path` e `fused_on_ = false`. Se tutto va: alloca
-  pagina e buffer (§2b, §3), riempie `d_slot_ptr`, calcola i due puntatori device di `flag_out` (peer e padrona),
-  stampa una riga con shape, blocchi, cooperative sì/no.
+  `fused_lays_[l]`; poi **una** chiamata `peer_fused_shape(fused_lays_.data(), n_layers, minb, blocks_cap, coop, shape,
+  why)` (sotto `On(device_)`) che controlla ogni strato (tipi fra quelli del kernel, stessa `n_embd`/`n_ff`, niente
+  APR/nibble/tail) e il dispatch del device; rifiuta anche `had_gu`/`had_d` (APR: `hadamard_rows` non è nel kernel). Se
+  qualcosa manca: stderr `strata: STRATA_PEER_FUSED: … (<why>): the peer keeps the per-layer path` e `fused_on_ =
+  false`. Se tutto va: alloca pagina e buffer (§2b, §3), copia `fused_lays_` in `d_lay_`, riempie `d_slot_ptr`, calcola
+  i due puntatori device di `flag_out` (peer e padrona), stampa una riga con i tipi del pack (`{16 17 18 21 22}` /
+  `{20 42}`), blocchi, memoria dinamica e griglia, cooperative sì/no.
 - `fused_hook()` → `peer_fused::Hook` (membro, puntatore stabile) con `ctx = this`, le quattro funzioni statiche,
   `flag_out_host`, `flag_out_dev0` (nullo con `STRATA_PEER_FUSED_HOSTWAIT=1`: il grafo non aspetta, aspetta
   `finish()`), da passare a `Verifier::set_peer_fused` in `generate.cpp` dove si costruisce il verificatore del decode
@@ -197,9 +251,9 @@ coppia è rifiutato da `peer_fused_shape` e il peer resta sul percorso di oggi c
   finestra prima è uscito) altrimenti errore `peer fused: the previous window's kernel is still running`; (2) tabella
   §4 e invio delle righe cambiate; (3) azzera `flag_out`, `err`, `abort`, `exit`, `cnt[0..steps)`; `cudaMemsetAsync(d_sync)`;
   (4) risolve i puntatori device del peer per `w.seq_h`, `w.x_h`, `w.ids_h`, `w.ymiss_h` (cache per indirizzo: cambiano
-  solo se il verificatore rialloca); (5) riempie `peer_fused::Window` (geometria, puntatori, `L` dello strato
-  corrente? **no**: `L` è una per pack — `n_embd`, `n_ff`, tipi, offset uguali su ogni strato con lo stesso `(TG, TD)`;
-  `fused_begin` verifica che `lay.fmt[l]` dia la stessa `L` per `l ∈ [lb, le)`, altrimenti errore); (6) `++epoch_`,
+  solo se il verificatore rialloca); (5) riempie `peer_fused::Window` (geometria, puntatori, `lay = d_lay_`,
+  `n_layers`: il layout è **per strato**, il kernel legge `lay[l]` a ogni passo; `fused_begin` verifica che
+  `lay.fmt[l]` sia ancora quello di `fused_lays_[l]` per `l ∈ [lb, le)`, altrimenti errore); (6) `++epoch_`,
   `peer_fused_launch(window, shape, stream_, err)`, `cudaStreamQuery(stream_)`; `window_open_ = true`, `step_ = 0`.
 - `has(layer, e)`: `window_open_ ? own_win_[idx] >= 0 : res_[idx] >= 0`.
 - `launch(...)` con `window_open_`: calcola `groups`/`rows` **esattamente** come oggi (stesso ciclo su `kind == 2`,
@@ -248,8 +302,8 @@ coppia è rifiutato da `peer_fused_shape` e il peer resta sul percorso di oggi c
 | piano | ciclo su `i`: salta se `kind[i] != 2` o già visto (`kind[j]==2 && ids[j]==ids[i]`, j<i); gruppo = ordine di prima apparizione; righe del gruppo = le sue voci in ordine di `i`; `dst[r]=r`, `tok[r]=j/k`, `out_row[r]=j` | fase B: `owned(i)`, `first(i)` = min j ≤ i con `ids[j]==ids[i]`; gruppo di `i` = rango di `first(i)` fra i `first` posseduti; `start[g]` = somma delle taglie dei gruppi precedenti; riga di `i` = `start[g] + #{j<i : first(j)==first(i)}` | `kind[i]==2 ⇔ owned(i)` (§4, stessa tabella `own_win_`); `kind` è per esperto, quindi «già visto fra i kind 2» = «non è il primo del suo esperto» |
 | x | `cudaMemcpyAsync` di `n_tok × N` fp32 da `h_x_ + tb*N` (o da `x`) → `d_x_` | letta con `__ldcv` dalla stessa pagina | gli stessi 4 byte |
 | quantize | `quantize_q8_1_kernel`: thread `i` → `q8_1_store(x[i], y, i)`, un warp = un blocco q8_1 | fase C: il warp globale `wg` fa gli stessi 32 `i` con lo stesso `q8_1_store` | stesso codice, stesse 32 lane per blocco |
-| gate/up | `native_gu_fused_kernel<TG>` (`<<<(n_ff/32, cap_groups), 256, sh>>>`): blocco `(x, y)` = righe `x*32..`, gruppo `y` | fase D: `native_gu_fused_body<TG>(…, bx, g)` sugli stessi `(bx, g)`, ogni item fatto da un solo blocco | il corpo è lo stesso con `blockIdx` sostituito da parametri; nessuna somma attraversa i blocchi |
-| down | `native_down_lds_kernel<TD>` (`<<<(ceil(N/64), cap_groups), 256, sh>>>`) | fase E: `native_down_lds_body<TD>(…, bx, g)` | idem |
+| gate/up | `native_gu_fused_kernel<TG>` (`<<<(n_ff/32, cap_groups), 256, sh>>>`): blocco `(x, y)` = righe `x*32..`, gruppo `y`, TG = `L.gu_type` dello strato (16/17/18/21/22 in modo 8) | fase D: `native_gu_fused_core<TG>(…, bx, g, griglia, tile, sx)` con TG = `lay[l].gu_type`, sugli stessi `(bx, g)`, ogni item fatto da un solo blocco | il corpo è lo stesso con `blockIdx` sostituito da parametri e i buffer condivisi passati invece che dichiarati; nessuna somma attraversa i blocchi |
+| down | `native_down_lds_kernel<TD>` (`<<<(ceil(N/64), cap_groups), 256, sh>>>`), TD = `L.d_type` | fase E: `native_down_lds_body<TD>(…, bx, g)` con TD = `lay[l].d_type` | idem |
 | scatter | `scatter_rows_kernel`: `dst[rows[r]*w4 + i] = src[r*w4 + i]` | fase F: `__stwt` dello stesso `float4` nello stesso posto | i bit non cambiano col tipo di store |
 | riga vuota | il pool non azzera le righe `kind == 2`; il peer le scrive | idem; in più `cnt[s]` contro il conteggio dell'host (`fused_end`) | una voce non scritta è un errore, non un testo diverso |
 
@@ -259,12 +313,16 @@ da `:6334`, `fused_gu` e `lds_down_ok`) e rifiuta ogni altro esito, così «fuse
 esattamente «gate/up fuso modo 8 + down LDS».
 
 Prova: `tools/peer_fused_test.cu` (pezzo D) sullo stesso device confronta `memcmp` le righe del kernel con quelle di
-`quantize_q8_1_rows` + `native_expert_grouped` + `scatter_rows_f32` su blob sintetici con struttura valida, su più
-passi, gruppi vuoti compresi, con un «doorbell» fatto dall'host **nell'ordine del grafo** (i primi G passi suonati
-subito, poi flag(s) → doorbell di s+G) e, con G=2, passi vuoti forzati dietro passi con voci; con due device
-opzionalmente la padrona finta è un kernel sull'altra scheda.
+`quantize_q8_1_rows` + `native_expert_grouped` (con il layout **dello strato**) + `scatter_rows_f32` su blob sintetici
+con struttura valida, su più passi, gruppi vuoti compresi, con un «doorbell» fatto dall'host **nell'ordine del
+grafo** (i primi G passi suonati subito, poi flag(s) → doorbell di s+G) e, con G=2, passi vuoti forzati dietro passi
+con voci; con due device opzionalmente la padrona finta è un kernel sull'altra scheda. Di default il modello del
+banco è **misto**: le dieci coppie `(gate/up, down)` del pack vero, uno strato ciascuna nell'ordine di prima
+apparizione (`17/20 16/42 17/42 21/42 22/42 21/20 22/20 16/20 18/20 18/42`), slot per strato nel layout dello strato:
+una finestra attraversa ogni corpo e ogni cambio di tipo fra due passi consecutivi. `peer_fused_test 0 18 42` resta
+il modello uniforme di 4 strati.
 
-I corpi riusati (`native_gu_fused_body`, `native_down_lds_body`) **non** hanno `__restrict__` sui parametri: nel kernel
+I corpi riusati (`native_gu_fused_core`, `native_down_lds_body`) **non** hanno `__restrict__` sui parametri: nel kernel
 persistente piano, `q8` e `hq` vengono riscritti fra un passo e l'altro dello stesso lancio, e un ingresso `const
 __restrict__` autorizza `ld.global.nc` (cache di sola lettura, non coerente dentro il lancio, che `__threadfence` non
 invalida). I kernel `__global__` di oggi tengono il loro `__restrict__`: dopo l'inline le informazioni di non-alias
@@ -286,7 +344,7 @@ degli argomenti del kernel sono le stesse, il codice non cambia.
 
 | pezzo | file | simboli del contratto |
 |---|---|---|
-| **A kernel** | `src/kernels/cuda/peer_fused.cuh` (nuovo), `src/kernels/cuda/iq_kernels.cu` | `peer_fused_kernel`, `strata::kernels::peer_fused_shape/peer_fused_launch`, `native_gu_fused_body`/`native_down_lds_body` con `(bx, g)` |
+| **A kernel** | `src/kernels/cuda/peer_fused.cuh` (nuovo), `src/kernels/cuda/iq_kernels.cu` | `peer_fused_kernel<MINB>`, `strata::kernels::peer_fused_shape/peer_fused_launch`, `native_gu_fused_core`/`native_down_lds_body` con `(bx, g)`, `DotG<17>`/`GridOf<17>` |
 | **B host** | `src/core/peer_experts.cpp`, `include/strata/core/peer_experts.hpp`, `src/program/generate.cpp` | `PeerExperts::fused_*`, `peer_fused::Hook`, `Window`, `Err`, knob |
 | **C padrona** | `src/core/verify.cpp`, `include/strata/core/verify.hpp` | `Verifier::set_peer_fused`, `peer_fused::Hook`, `WindowHost` |
 | **D banco** | `tools/peer_fused_test.cu` (nuovo) | `Window`, `Plan`, `Sync`, `hq_offset`, `q8_bytes`, `peer_fused_shape/peer_fused_launch` |
@@ -298,7 +356,15 @@ i due corpi, tutti nello spazio anonimo di quel file; niente `-rdc`, nessun dupl
 
 ## 11. Non provato
 
-Niente di questo documento è compilato o misurato. Le stime di guadagno restano quelle di `PIPELINE3_PIANO.md` §1:
+Il kernel a istanza unica `(TG, TD)` è passato al banco bit per bit (3/11: 20 finestre, 970 voci identiche, ~85 µs a
+strato a T=3-4, dati sintetici 18/42) ma nel motore vero non si è mai acceso (pack misto, §5a). La versione a tipo
+per strato (§5a: `DotG<17>`, `native_gu_fused_core`, `Window::lay`, `Shape` a maschere, banco a modello misto) è
+**scritta e non compilata**: compilato no, installato no, provato no. Punti dove la compilazione può fermarsi:
+`native_gu_fused_core` (il parametro `float (*res)[64]` e `typename GridOf<TG>::T*`), la lambda generica `run` dentro
+`peer_fused_kernel` (cattura `pf_dyn` e la `L` locale), `pf_sx_bytes` dichiarata `__host__ __device__ constexpr` con
+`sizeof(block_q8_1)`, `kExpLds16` vista dal `.cuh`, `pf::mask_text` in `peer_experts.cpp`.
+
+Le stime di guadagno restano quelle di `PIPELINE3_PIANO.md` §1:
 il banco `ep_bench` dà 98-113 µs esposti per la forma persistente con letture di banda; i corpi veri costano quel che
 costano (120-230 µs di attesa in `finish` oggi, stimato come limite inferiore del lavoro GPU puro). Il kernel toglie
 copie, lanci, vuoti e l'host: quanto resta lo dice `spans_us_` di `fused_end` nella riga `strata decode peer:`.

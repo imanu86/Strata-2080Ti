@@ -122,17 +122,10 @@ const char* fused_err_name(uint32_t e) {
         case kErrTimeoutBarrier: return "timeout at a grid barrier";
         case kErrAbort: return "aborted by the host";
         case kErrPlanOverflow: return "more entries in a step than the plan holds";
-        case kErrBadWindow: return "a window geometry the kernel instance was not built for";
+        case kErrBadWindow: return "a window geometry the kernel was not built for";
+        case kErrBadType: return "a layer's gate/up or down type the kernel has no body for";
         default: return "unknown";
     }
-}
-
-/// Whether two layouts describe the same blob and the same kernels (the fused kernel takes ONE layout a window).
-bool same_layout(const strata::kernels::NativeExpertLayout& a, const strata::kernels::NativeExpertLayout& b) {
-    return a.gu_type == b.gu_type && a.d_type == b.d_type && a.n_embd == b.n_embd && a.n_ff == b.n_ff &&
-           a.gu_row == b.gu_row && a.d_row == b.d_row && a.up_off == b.up_off && a.down_off == b.down_off &&
-           a.bytes == b.bytes && a.tail_off == b.tail_off && a.had_block == b.had_block && a.gu_nib == b.gu_nib &&
-           a.d_signs == b.d_signs;
 }
 
 inline void store_u32(uint32_t* p, uint32_t v) { *(volatile uint32_t*) p = v; }
@@ -627,10 +620,11 @@ bool PeerExperts::hook_end(void* ctx, std::string& err) { return static_cast<Pee
 void PeerExperts::hook_flush(void* ctx) { static_cast<PeerExperts*>(ctx)->fused_flush(); }
 void PeerExperts::hook_abort(void* ctx) { static_cast<PeerExperts*>(ctx)->fused_abort(); }
 
-/// open()'s fused part, under the peer's device.  Resolves the kernel instance for the pack (the same on every
-/// layer), allocates the mapped page and the VRAM tables, fills the slot pointers and the hook.  A pack or a setting
-/// the fused kernel does not cover is refused with one line on stderr and `true` (the per-layer path stays); only a
-/// CUDA error returns false.
+/// open()'s fused part, under the peer's device.  Resolves the kernel's shape for the pack (one n_embd / n_ff, the
+/// gate/up and down types free to differ a layer: the kernel picks the body from the layer's layout in VRAM),
+/// allocates the mapped page, the VRAM tables and the layout table, fills the slot pointers and the hook.  A pack or
+/// a setting the fused kernel does not cover is refused with one line on stderr and `true` (the per-layer path
+/// stays); only a CUDA error returns false.
 bool PeerExperts::fused_open(std::string& err) {
     using namespace peer_fused;
     fused_on_ = false;
@@ -643,37 +637,33 @@ bool PeerExperts::fused_open(std::string& err) {
     if (!lay.native) return refuse("not a native pack");
     if (!peer_direct()) return refuse("STRATA_PEER_DIRECT=0: the kernel writes the mapped rows itself");
     if ((int64_t) lay.fmt.size() < n_layers_) return refuse("the pack's layout has fewer layers than the model");
+    if (n_layers_ <= 0) return refuse("no layers");
     // the knobs, read once here (the names are the contract's)
     const int minb = env_int(kEnvMinb, kMinBlocksDefault);
     const int blocks_cap = env_int(kEnvBlocks, 0);
     const bool coop = env_int(kEnvCoop, 1) != 0;
     const int wait_ms = env_int(kEnvWaitMs, 20000);
     wait_ns_ = wait_ms > 0 ? (unsigned long long) wait_ms * 1000000ull : kWaitNsDefault;
-    // every layer must resolve to the SAME instance and the same layout: the kernel takes one `L` a window
-    bool first = true;
+    // one layout a layer (s.3, d_lay_): the geometry must be the pack's one (the buffers are sized once), the types
+    // are the layer's own; peer_fused_shape checks every layer against the kernel's bodies and this device's dispatch
+    fused_lays_.assign((size_t) n_layers_, strata::kernels::NativeExpertLayout{});
     for (int64_t l = 0; l < n_layers_; ++l) {
         const auto& f = lay.fmt[(size_t) l];
         if (f.had_gu || f.had_d)
             return refuse("layer " + std::to_string(l) + " is Hadamard-folded (APR): hadamard_rows is not in the kernel");
         const auto L = strata::kernels::native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff);
         if (L.n_embd != H) return refuse("layer " + std::to_string(l) + ": n_embd " + std::to_string((long long) L.n_embd));
-        Shape s;
-        std::string why;
-        if (!strata::kernels::peer_fused_shape(L, minb, blocks_cap, coop, s, why))
-            return refuse("layer " + std::to_string(l) + ": " + why);
-        if (first) {
-            shape_ = s;
-            fused_L_ = L;
-            first = false;
-        } else if (s.gu_type != shape_.gu_type || s.d_type != shape_.d_type || !same_layout(L, fused_L_)) {
-            return refuse("layer " + std::to_string(l) + " has gate/up type " + std::to_string(f.gu_type) + ", down type " +
-                          std::to_string(f.d_type) + " (n_ff " + std::to_string((long long) f.n_ff) + ") while layer 0 has " +
-                          std::to_string(fused_L_.gu_type) + ", " + std::to_string(fused_L_.d_type) + " (n_ff " +
-                          std::to_string((long long) fused_L_.n_ff) + "): one kernel instance a window");
-        }
+        if (L.bytes == 0 || L.gu_row == 0 || L.d_row == 0)
+            return refuse("layer " + std::to_string(l) + ": no native layout for gate/up " + std::to_string(f.gu_type) + ", down " + std::to_string(f.d_type));
+        fused_lays_[(size_t) l] = L;
     }
-    if (first) return refuse("no layers");
-    if (shape_.blocks <= 0 || shape_.blocks_per_sm <= 0) return refuse("the kernel instance has no resident blocks on this device");
+    {
+        std::string why;
+        if (!strata::kernels::peer_fused_shape(fused_lays_.data(), (int) n_layers_, minb, blocks_cap, coop, shape_, why))
+            return refuse(why);
+    }
+    fused_L_ = fused_lays_[0];   // the geometry (n_embd, n_ff: the same on every layer, checked by peer_fused_shape)
+    if (shape_.blocks <= 0 || shape_.blocks_per_sm <= 0) return refuse("the kernel has no resident blocks on this device");
     if (fused_L_.n_ff % 32 != 0) return refuse("n_ff " + std::to_string((long long) fused_L_.n_ff) + " is not a multiple of 32");
     if (hq_offset(CAP, fused_L_.n_ff) + q8_bytes(CAP, fused_L_.n_ff) > strata::kernels::native_expert_scratch_bytes(CAP, fused_L_.n_ff))
         return refuse("the hq plane does not fit the scratch native_expert_grouped sizes");
@@ -707,7 +697,10 @@ bool PeerExperts::fused_open(std::string& err) {
         !ck(cudaMalloc((void**) &d_plan_, 2 * sizeof(Plan)), "fused plan", err) ||
         !ck(cudaMemset(d_plan_, 0, 2 * sizeof(Plan)), "fused plan zeroing", err) ||
         !ck(cudaMalloc((void**) &d_sync_, sizeof(Sync)), "fused sync words", err) ||
-        !ck(cudaMemset(d_sync_, 0, sizeof(Sync)), "fused sync words zeroing", err))
+        !ck(cudaMemset(d_sync_, 0, sizeof(Sync)), "fused sync words zeroing", err) ||
+        !ck(cudaMalloc((void**) &d_lay_, fused_lays_.size() * sizeof(strata::kernels::NativeExpertLayout)), "fused layout table", err) ||
+        !ck(cudaMemcpy(d_lay_, fused_lays_.data(), fused_lays_.size() * sizeof(strata::kernels::NativeExpertLayout), cudaMemcpyHostToDevice),
+            "fused layout table copy", err))
         return false;
     std::memset(h_own_, 0xFF, own_n * sizeof(int32_t));
     {   // slot -> blob address: the slots do not move (adapt refills a victim's slot in place, the same layer)
@@ -736,11 +729,12 @@ bool PeerExperts::fused_open(std::string& err) {
     hook_.flag_out_host = h_flag_out_;
     hook_.flag_out_dev0 = fused_hostwait() ? nullptr : flag_out_dev0_;   // HOSTWAIT: no graph node, finish() waits
     fused_on_ = true;
-    std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the peer serves each window with one persistent kernel: gate/up type %d, "
-                         "down type %d (n_embd %lld, n_ff %lld), minb %d, %d blocks (%d per SM x %d SMs), %zu B dynamic shared, "
-                         "%s launch, waits bounded at %d ms%s%s\n",
-                 shape_.gu_type, shape_.d_type, (long long) fused_L_.n_embd, (long long) fused_L_.n_ff, shape_.minb, shape_.blocks,
-                 shape_.blocks_per_sm, shape_.sms, shape_.dyn_shared, shape_.cooperative ? "cooperative" : "plain", wait_ms,
+    std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the peer serves each window with one persistent kernel: %lld layers, gate/up types {%s}, "
+                         "down types {%s} (n_embd %lld, n_ff %lld), minb %d, %d blocks (%d per SM x %d SMs), %zu B dynamic shared "
+                         "(grid %zu B), %s launch, waits bounded at %d ms%s%s\n",
+                 (long long) n_layers_, mask_text(shape_.gu_mask).c_str(), mask_text(shape_.d_mask).c_str(),
+                 (long long) fused_L_.n_embd, (long long) fused_L_.n_ff, shape_.minb, shape_.blocks,
+                 shape_.blocks_per_sm, shape_.sms, shape_.dyn_shared, shape_.grid_bytes, shape_.cooperative ? "cooperative" : "plain", wait_ms,
                  fused_hostwait() ? "; STRATA_PEER_FUSED_HOSTWAIT: the pool thread waits for the kernel's flag, no graph node" : "",
                  stamp() ? "; STRATA_PEER_STAMP: the spans come from the kernel's own stamps" : "");
     return true;
@@ -754,6 +748,9 @@ void PeerExperts::fused_close() {
     if (d_slot_ptr_) cudaFree(d_slot_ptr_);
     if (d_plan_) cudaFree(d_plan_);
     if (d_sync_) cudaFree(d_sync_);
+    if (d_lay_) cudaFree(d_lay_);
+    d_lay_ = nullptr;
+    fused_lays_.clear();
     h_page_ = nullptr;
     h_flag_out_ = m_flag_out_ = h_abort_ = m_abort_ = h_err_ = m_err_ = h_exit_ = m_exit_ = h_cnt_ = m_cnt_ = nullptr;
     h_stamp_fused_ = m_stamp_fused_ = nullptr;
@@ -845,12 +842,15 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
     if (w.n_embd != fused_L_.n_embd) { err = "peer experts: fused: the verifier's n_embd " + std::to_string((long long) w.n_embd) + " is not the kernel's " + std::to_string((long long) fused_L_.n_embd); return false; }
     for (int g = 0; g < w.G; ++g)
         if (w.gtb[g] < 0 || w.gte[g] < w.gtb[g] || w.gte[g] > w.T) { err = "peer experts: fused: group " + std::to_string(g) + " rows [" + std::to_string(w.gtb[g]) + ", " + std::to_string(w.gte[g]) + ") of " + std::to_string(w.T); return false; }
-    {   // one layout for the window: every layer of it must be the instance's (checked at open for the whole pack; here for the window)
+    {   // the window's layers are the ones the layout table (d_lay_) was built from at open: the pack does not change
+        // under a run, this only says so if it ever did
         const auto& lay = strata::kernels::cpu::expert_layout();
+        if ((int64_t) fused_lays_.size() < w.le) { err = "peer experts: fused: the layout table is shorter than the window"; return false; }
         for (int l = w.lb; l < w.le; ++l) {
             const auto& f = lay.fmt[(size_t) l];
-            if (f.gu_type != fused_L_.gu_type || f.d_type != fused_L_.d_type || f.n_embd != fused_L_.n_embd || f.n_ff != fused_L_.n_ff || f.had_gu || f.had_d) {
-                err = "peer experts: fused: layer " + std::to_string(l) + " has another layout than the kernel instance (gate/up " +
+            const auto& L = fused_lays_[(size_t) l];
+            if (f.gu_type != L.gu_type || f.d_type != L.d_type || f.n_embd != L.n_embd || f.n_ff != L.n_ff || f.had_gu || f.had_d) {
+                err = "peer experts: fused: layer " + std::to_string(l) + " has another layout than the kernel's table (gate/up " +
                       std::to_string(f.gu_type) + ", down " + std::to_string(f.d_type) + ", n_ff " + std::to_string((long long) f.n_ff) + ")";
                 return false;
             }
@@ -918,7 +918,8 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
     win.hq = (uint8_t*) d_scratch_ + hq_offset(CAP, fused_L_.n_ff);   // where native_expert_grouped puts hq
     win.out = d_out_;
     win.sync = d_sync_;
-    win.L = fused_L_;
+    win.lay = d_lay_;                    // one layout a layer: the kernel picks each step's bodies from it
+    win.n_layers = (int) n_layers_;
     // (6) one launch a window, then a query so WDDM hands it to the card now instead of at the next driver call
     std::string lerr;
     if (!strata::kernels::peer_fused_launch(win, shape_, stream_, lerr)) {

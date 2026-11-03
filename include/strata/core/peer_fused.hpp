@@ -7,11 +7,13 @@
 // With STRATA_PEER_FUSED=1 the peer gets one launch a window: a kernel whose blocks are all resident waits, step by
 // step, for the primary's doorbell (`m_seq_`, mapped host memory), reads the step's activation rows and routed ids
 // from the verifier's mapped pages, plans on the device from an ownership table, quantizes, runs the SAME device bodies
-// as today's kernels (native_gu_fused_body, native_down_lds_kernel's body), scatters the rows into the mapped
-// `m_ymiss_` rows with 16-byte streaming stores, fences (system scope) and raises an output flag the primary's graph
-// waits on with one wait_flag_ge node.  No host in the path: it plans the CPU misses as before, counts the peer's
-// entries for the end-of-window check, and flushes the stream under WDDM.  The rows are bit for bit those of today's
-// peer path.  Off (the default), nothing changes: no allocation, no graph node, the per-layer path.
+// as today's kernels (native_gu_fused_core, native_down_lds_body) for THE LAYER'S OWN TYPES (a mixed pack - Flash-Next
+// GSQ-RCO IQ3_XXS has five gate/up types and two down types over its 48 layers - is one kernel, the body chosen a
+// step from the layer's layout in VRAM), scatters the rows into the mapped `m_ymiss_` rows with 16-byte streaming
+// stores, fences (system scope) and raises an output flag the primary's graph waits on with one wait_flag_ge node.
+// No host in the path: it plans the CPU misses as before, counts the peer's entries for the end-of-window check, and
+// flushes the stream under WDDM.  The rows are bit for bit those of today's peer path in mode 8.  Off (the default),
+// nothing changes: no allocation, no graph node, the per-layer path.
 //
 // This header is the CONTRACT between the pieces (docs/PEER_FUSED.md s.10): the kernel side (src/kernels/cuda/
 // peer_fused.cuh, included inside iq_kernels.cu's translation unit), the host side (PeerExperts, peer_experts.cpp),
@@ -45,10 +47,19 @@ inline constexpr int kMaxSteps = 256;
 inline constexpr unsigned long long kWaitNsDefault = 20000000000ull;
 /// Default __launch_bounds__ minimum blocks per SM: <= 128 registers, no spills for the reused bodies (64-78 regs).
 inline constexpr int kMinBlocksDefault = 2;
-/// Dynamic shared memory the kernel asks for: max over the bodies, computed by peer_fused_shape from the layout
-/// (LDS_NT x n_embd/32 x sizeof(block_q8_1) for gate/up, LDS_NT x n_ff/32 x 36 for down); the static part (the IQ grid
-/// in shared memory + res[4][64]) is the bodies' own.  Here only the sanity cap: sm_75 has 64 KiB per SM.
+/// Dynamic shared memory the kernel asks for: computed by peer_fused_shape from the pack's layouts (the gate/up
+/// activations LDS_NT x n_embd/32 x sizeof(block_q8_1), the 4 x 64 result tile, the largest IQ grid among the pack's
+/// gate/up types; or LDS_NT x n_ff/32 x 36 for down; or phase B's plan scratch - the largest of the three).  Here only
+/// the sanity cap: sm_75 has 64 KiB per SM.
 inline constexpr size_t kDynSharedMax = 48 * 1024;
+
+/// The gate/up and down types the persistent kernel has a body for (docs/PEER_FUSED.md s.5): the IQ gate/up types
+/// native_expert_grouped runs as "fused gate/up (mode 8)" - IQ2_XXS (16), IQ2_XS (17), IQ3_XXS (18), IQ3_S (21),
+/// IQ2_S (22) - and the down types of the LDS down kernel - Q2_0 (42), IQ4_NL (20).  A pack may mix them freely layer
+/// by layer; every layer must have one of each.  Masks over these (bit t = type t) describe a pack in Shape.
+inline constexpr bool gu_type_fused(int t) { return t == 16 || t == 17 || t == 18 || t == 21 || t == 22; }
+inline constexpr bool d_type_fused(int t) { return t == 42 || t == 20; }
+inline constexpr uint32_t type_bit(int t) { return t >= 0 && t < 32 ? (1u << t) : 0u; }
 
 /// The peer's mapped page (cudaHostAllocPortable | cudaHostAllocMapped), one allocation of kPageBytes, laid out at
 /// fixed byte offsets so the host, the peer kernel and the primary's graph agree without a struct crossing the
@@ -81,7 +92,8 @@ enum Err : uint32_t {
     kErrTimeoutBarrier = 3,   ///< a block waited wait_ns at a grid barrier
     kErrAbort = 4,            ///< the host raised `abort`
     kErrPlanOverflow = 5,     ///< more than kCap entries in a step (cannot happen with a well-formed window)
-    kErrBadWindow = 6,        ///< steps > kMaxSteps, n_tok > kMaxTok or a geometry the instance was not built for
+    kErrBadWindow = 6,        ///< steps > kMaxSteps, n_tok > kMaxTok, a null pointer or a geometry the kernel was not built for
+    kErrBadType = 7,          ///< a step's layer has a gate/up or down type the kernel has no body for (lay[l]; fused_open checks the pack)
 };
 
 /// One step's plan, written by block 0 into VRAM and read by every block: peer_experts.cpp's `Meta`, same fields,
@@ -132,9 +144,10 @@ struct Window {
     int k = 0;               ///< routed experts a row
     int gtb[2] = {0, 0};     ///< first row of group g
     int gte[2] = {0, 0};     ///< one past the last row of group g
-    int64_t n_embd = 0;      ///< N (2560)
-    int64_t n_ff = 0;        ///< the expert's hidden width (640)
+    int64_t n_embd = 0;      ///< N (2560): the same on every layer (lay[l].n_embd)
+    int64_t n_ff = 0;        ///< the expert's hidden width (640): the same on every layer (lay[l].n_ff)
     int64_t n_expert = 0;    ///< experts a layer (512)
+    int n_layers = 0;        ///< entries of `lay`; every step's layer lb + s / G is below it
     uint32_t epoch = 0;      ///< the window's number, written to `exit` when the kernel leaves
     int nblocks = 0;         ///< the grid: every block resident (the barrier counts to it; < 65536, the barrier word's low half)
     unsigned long long wait_ns = kWaitNsDefault;   ///< bound of every wait
@@ -158,13 +171,19 @@ struct Window {
     void* hq = nullptr;                        ///< the gate/up body's output (scratch + peer_fused_hq_offset)
     float* out = nullptr;                      ///< kCap x n_embd compact rows
     Sync* sync = nullptr;
-    strata::kernels::NativeExpertLayout L;     ///< the pack's layout (one per (gu_type, d_type, n_embd, n_ff): the same on every layer)
+    /// n_layers layouts, one a layer (native_expert_layout(gu_type, d_type, n_embd, n_ff) of the pack's layer):
+    /// the step's bodies are chosen from lay[l].gu_type / lay[l].d_type and read its row strides and offsets.
+    /// Written by the host before the launch, never during a window.  Every layer: gu_type_fused, d_type_fused,
+    /// n_embd / n_ff as above, had_block 0, d_signs null, gu_nib false (fused_open and peer_fused_shape check).
+    const strata::kernels::NativeExpertLayout* lay = nullptr;
 };
 
-/// What peer_fused_shape resolved for a layout on a device: the kernel instance and its grid.
+/// What peer_fused_shape resolved for a pack on a device: the kernel instance and its grid.
 struct Shape {
-    int gu_type = -1, d_type = -1;   ///< the instance's TG / TD (18 IQ3_XXS, 21 IQ3_S, 22 IQ2_S; 42 Q2_0, 20 IQ4_NL)
+    uint32_t gu_mask = 0;            ///< the pack's gate/up types, bit t = type t (over gu_type_fused: 16, 17, 18, 21, 22)
+    uint32_t d_mask = 0;             ///< the pack's down types, bit t = type t (42, 20)
     int minb = kMinBlocksDefault;    ///< the __launch_bounds__ instance (2, or 3 / 4 when built)
+    size_t grid_bytes = 0;           ///< the largest IQ grid among the pack's gate/up types (part of dyn_shared)
     size_t dyn_shared = 0;           ///< dynamic shared bytes the launch passes
     int blocks_per_sm = 0;           ///< cudaOccupancyMaxActiveBlocksPerMultiprocessor, capped by STRATA_PEER_FUSED_BLOCKS
     int sms = 0;                     ///< multiprocessors of the device
@@ -217,18 +236,28 @@ inline size_t hq_offset(int64_t cap_entries, int64_t n_ff) {
 /// Bytes of one q8_1 image of `rows` activation rows of width `n_cols` (36 bytes a block of 32 values).
 inline size_t q8_bytes(int64_t rows, int64_t n_cols) { return (size_t) rows * (size_t) (n_cols / 32) * 36; }
 
+/// The pack's types as text for a message: "16 17 21" from a mask.
+inline std::string mask_text(uint32_t mask) {
+    std::string s;
+    for (int t = 0; t < 32; ++t)
+        if (mask & (1u << t)) { if (!s.empty()) s += ' '; s += std::to_string(t); }
+    return s.empty() ? "none" : s;
+}
+
 }  // namespace strata::core::peer_fused
 
 namespace strata::kernels {
 
-/// Resolves, for the layout `L` on the CURRENT device (the caller switched to the peer), whether native_expert_grouped
-/// would run exactly "fused gate/up (mode 8) + LDS down" for it, and with which kernel instance: exp_mode() == 8 on this
-/// device, gu_type in {18, 21, 22} (16 and 23 are not built for the fused server), d_type in {42, 20}, no nibble slot,
-/// no APR (had_block == 0, d_signs == nullptr), none of the STRATA_EXPERT_V2 / V2K / EXPDEC / GROUPED_V1 / GU_SWIGLU /
-/// DOWN_WS branches taken, g_exp_phase == 0, n_ff % 32 == 0, n_embd % 32 == 0.  Fills `out` (instance, dynamic shared
-/// bytes, occupancy-derived grid, cooperative launch availability) and returns true; or returns false with `why`.
-/// Called at PeerExperts::open, never inside a graph capture.
-bool peer_fused_shape(const NativeExpertLayout& L, int minb, int blocks_per_sm_cap, bool allow_cooperative,
+/// Resolves, for the pack's `n_layers` layouts `lay` (one a layer, in layer order) on the CURRENT device (the caller
+/// switched to the peer), whether native_expert_grouped would run exactly "fused gate/up (mode 8) + LDS down" for
+/// every one of them, and sizes the kernel: exp_mode() == 8 on this device, every layer's gu_type in {16, 17, 18, 21,
+/// 22} (16 only where the fused gate/up takes it, kExpLds16) and d_type in {42, 20}, one n_embd and one n_ff for the
+/// whole pack (both multiples of 32), no nibble slot, no APR (had_block == 0, d_signs == nullptr), none of the
+/// STRATA_EXPERT_V2 / V2K / EXPDEC / GROUPED_V1 / GU_SWIGLU / DOWN_WS branches taken, g_exp_phase == 0.  Fills `out`
+/// (the type masks, the largest grid, dynamic shared bytes, occupancy-derived grid, cooperative launch availability)
+/// and returns true; or returns false with `why` naming the layer.  Called at PeerExperts::open, never inside a graph
+/// capture.
+bool peer_fused_shape(const NativeExpertLayout* lay, int n_layers, int minb, int blocks_per_sm_cap, bool allow_cooperative,
                       strata::core::peer_fused::Shape& out, std::string& why);
 
 /// Launches the persistent kernel for one window on `stream` (the caller switched to the peer's device and zeroed

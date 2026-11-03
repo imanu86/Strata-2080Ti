@@ -5722,6 +5722,7 @@ __global__ void __launch_bounds__(256) native_down_amd_kernel(const unsigned lon
 template<int TY> struct GridOf;
 template<> struct GridOf<22> { using T = uint64_t; static constexpr int N = 1024; __device__ static const T* src() { return iq2s_grid; } };
 template<> struct GridOf<16> { using T = uint64_t; static constexpr int N = 256; __device__ static const T* src() { return iq2xxs_grid; } };
+template<> struct GridOf<17> { using T = uint64_t; static constexpr int N = 512; __device__ static const T* src() { return iq2xs_grid; } };   // IQ2_XS: 9-bit codes
 template<> struct GridOf<18> { using T = uint32_t; static constexpr int N = 256; __device__ static const T* src() { return iq3xxs_grid; } };
 template<> struct GridOf<21> { using T = uint32_t; static constexpr int N = 512; __device__ static const T* src() { return iq3s_grid; } };
 template<> struct GridOf<23> { using T = uint32_t; static constexpr int N = 1; __device__ static const T* src() { return iq3s_grid; } };   // IQ4_XS: no grid
@@ -5864,6 +5865,43 @@ template<int SG> struct DotG<16, SG> { __device__ static __forceinline__ float f
     }
     const int ls = aux32 >> 27 | 1;
     sumi = sumi * ls / 8;
+    const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs / 2].ds);
+    return d * sumi;
+} };
+
+// IQ2_XS: vec_dot_iq2_xs_q8_1 with the grid in LDS (PEER_FUSED: Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS has 10 of its 48
+// expert layers in IQ2_XS gate/up).  The codes are 9 bits of a uint16 (grid 512 x uint64), the signs its top 7 bits with
+// the parity bit as in IQ2_XXS (unpack_ksigns); the two 4-value halves scale with ls0 / ls1 as in IQ2_S.  The same
+// integers as the constant-memory version, the same floats.
+template<int SG> struct DotG<17, SG> { __device__ static __forceinline__ float f(const void* vbq, const block_q8_1* bq8_1, int kbx, int iqs,
+                                                      const uint64_t* grid) {
+    const block_iq2_xs* bq2 = (const block_iq2_xs*) vbq + kbx;
+    const int2 q2_packed = make_int2(get_int_b2(bq2->qs, iqs + 0), get_int_b2(bq2->qs, iqs + 1));
+    const uint16_t* q2 = (const uint16_t*) &q2_packed;
+    const int ls0 = bq2->scales[iqs / 2] & 0x0F;
+    const int ls1 = bq2->scales[iqs / 2] >> 4;
+    int sumi0 = 0, sumi1 = 0;
+#pragma unroll
+    for (int l0 = 0; l0 < 8; l0 += 2) {
+        const uint2 grid_pos = *(const uint2*) (grid + (q2[l0 / 2] & 0x1FF));
+        const int u0 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 0);
+        const int u1 = get_int_b4(bq8_1[iqs / 2].qs, l0 + 1);
+        int& acc = l0 < 4 ? sumi0 : sumi1;
+        if constexpr (SG == 1) {
+            const uint32_t v = (uint32_t) (q2[l0 / 2] >> 9) & 0x7Fu, sg = v | ((__popc(v) & 1u) << 7);
+            const int m0 = nib_mask(sg), m1 = nib_mask(sg >> 4);
+            acc = ggml_cuda_dp4a((int) grid_pos.x ^ m0, u0, acc);
+            acc = ggml_cuda_dp4a((int) grid_pos.y ^ m1, u1, acc);
+            acc -= ggml_cuda_dp4a(m1, u1, ggml_cuda_dp4a(m0, u0, 0));
+        } else {
+            const uint32_t signs = unpack_ksigns((uint8_t) (q2[l0 / 2] >> 9));
+            const int signs0 = __vcmpne4(signs & 0x08040201, 0);
+            const int signs1 = __vcmpne4(signs & 0x80402010, 0);
+            acc = ggml_cuda_dp4a((int) __vsub4(grid_pos.x ^ signs0, signs0), u0, acc);
+            acc = ggml_cuda_dp4a((int) __vsub4(grid_pos.y ^ signs1, signs1), u1, acc);
+        }
+    }
+    const int sumi = (sumi0 * ls0 + sumi1 * ls1 + (sumi0 + sumi1) / 2) / 4;
     const float d = __half2float(bq2->d) * __low2float(bq8_1[iqs / 2].ds);
     return d * sumi;
 } };
@@ -6068,18 +6106,22 @@ __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned lon
 // native_down_lds_body above: in the persistent kernel the plan, xq and hq are rewritten between steps, and a
 // `const __restrict__` input could be read through the read-only cache (ld.global.nc), which is not coherent inside
 // a launch.  The __global__ wrappers keep their __restrict__ (the same noalias facts after inlining).
+// The shared buffers are arguments of the core (native_gu_fused_core): the grid staging area (GridOf<TG>::N words of
+// GridOf<TG>::T), the 4 x 64 result tile and the dynamic activation buffer.  native_gu_fused_body declares them as the
+// kernel always did (static __shared__ for the grid and the tile, the extern dynamic buffer for the activations) and
+// calls the core: the same code after inlining.  The persistent peer server (peer_fused.cuh) runs the five IQ gate/up
+// bodies of a mixed pack in ONE kernel, and five static grids plus five tiles would be ~22 KiB of shared memory a
+// block that only one body uses at a time: it hands the core slices of its own dynamic buffer instead.
 template<int TG>
-__device__ __forceinline__ void native_gu_fused_body(const unsigned long long* grp_ptr,
+__device__ __forceinline__ void native_gu_fused_core(const unsigned long long* grp_ptr,
                                                      const int32_t* grp_start,
                                                      const int32_t* n_groups,
                                                      const int32_t* ent_tok,
                                                      const block_q8_1* xq, NativeExpertLayout L,
-                                                     block_q8_1* hq, int bx, int g) {
+                                                     block_q8_1* hq, int bx, int g,
+                                                     typename GridOf<TG>::T* sgrid, float (*res)[64], int* sx_raw) {
     using GT = typename GridOf<TG>::T;
     using F = Fmt<TG>;
-    __shared__ GT sgrid[GridOf<TG>::N];
-    __shared__ float res[LDS_NT][64];
-    extern __shared__ int sx_raw[];
     if (g >= *n_groups) return;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const GT* gsrc = GridOf<TG>::src();
@@ -6150,6 +6192,19 @@ __device__ __forceinline__ void native_gu_fused_body(const unsigned long long* g
             if (lane == 0) y->ds = q8_1_ds(d, sum);
         }
     }
+}
+template<int TG>
+__device__ __forceinline__ void native_gu_fused_body(const unsigned long long* grp_ptr,
+                                                     const int32_t* grp_start,
+                                                     const int32_t* n_groups,
+                                                     const int32_t* ent_tok,
+                                                     const block_q8_1* xq, NativeExpertLayout L,
+                                                     block_q8_1* hq, int bx, int g) {
+    using GT = typename GridOf<TG>::T;
+    __shared__ GT sgrid[GridOf<TG>::N];
+    __shared__ float res[LDS_NT][64];
+    extern __shared__ int sx_raw[];
+    native_gu_fused_core<TG>(grp_ptr, grp_start, n_groups, ent_tok, xq, L, hq, bx, g, sgrid, res, sx_raw);
 }
 template<int TG>
 __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned long long* __restrict__ grp_ptr,
@@ -6382,7 +6437,11 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #endif
 #endif
 #if STRATA_EXP_LAYOUTS
-    const bool fused_gu = !nib_layout(L) && em0 == 8 && ((kExpLds16 && L.gu_type == 16) || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23) &&
+    // IQ2_XS (17) in mode 8 too (PEER_FUSED, lab/upsync-v0.2.9): DotG<17> with the grid in LDS, the same body as the
+    // other IQ types, so a mixed pack (Flash-Next GSQ-RCO IQ3_XXS: 10 of 48 expert layers in IQ2_XS) takes one path in
+    // mode 8 on the peer and in its persistent server alike.  Mode 0 (the default) does not change: there IQ2_XS keeps
+    // native_gu_multi_kernel's 16-lane rows + swiglu_q8_1_entries_kernel (another summation order, not the same bits).
+    const bool fused_gu = !nib_layout(L) && em0 == 8 && ((kExpLds16 && L.gu_type == 16) || L.gu_type == 17 || L.gu_type == 18 || L.gu_type == 21 || L.gu_type == 22 || L.gu_type == 23) &&
                           L.n_ff % 32 == 0;
     if (fused_gu && g_exp_phase != 2) {
         const dim3 gl((unsigned) (L.n_ff / 32), (unsigned) cap_groups);
@@ -6392,6 +6451,7 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
 #define STRATA_GU_FUSED(K)                                                                                   \
         switch (L.gu_type) {                                                                                 \
             case 16: K<16><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
+            case 17: K<17><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
             case 18: K<18><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
             case 21: K<21><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \
             case 23: K<23><<<gl, 256, sh, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;      \

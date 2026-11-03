@@ -1,20 +1,23 @@
 // tools/peer_fused_test.cu - PEER_FUSED (docs/PEER_FUSED.md s.8, lab/upsync-v0.2.9): the persistent expert server of
 // STRATA_PEER_FUSED=1 (peer_fused_kernel, launched through peer_fused_launch) against today's peer path, bit for bit.
 //
-// No model, no engine: `n_slots` synthetic expert blobs with a VALID structure (fp16 block scales, finite and small;
-// random code bytes - the kernels only index 8-bit lookups and dp4a with them), an ownership table layer x expert
-// with ~40% of the pairs on a slot, and the verifier's mapped pages faked on the host: `seq` (the doorbell), `x`
-// (kMaxTok x n_embd fp32), `ids` (kMaxTok x k int32), `ymiss` (kMaxTok x k x n_embd fp32).  Per window the host plays
-// the primary IN THE ORDER OF ITS GRAPH (verify.cpp record_window: pre(l, 0), pre(l, 1), post(l, 0), pre(l + 1, 0),
-// post(l, 1), ...): it writes the rows and ids of the first G steps, fences, rings them, then for every step s spins on
-// `flag_out >= s + 1`, snapshots the step's rows of `ymiss` and only then rings step s + G - so with G = 2 the doorbell
-// of s + 1 is up while the kernel still works on s, as in the engine.  When the kernel has left (cudaStreamSynchronize), every step is
-// recomputed with the path peer_experts.cpp runs today, on the same device and a second stream - the host plan of
+// No model, no engine: a synthetic model of `nl` layers whose expert layers may MIX types (as Qwen3.8-Flash-Next
+// GSQ-RCO IQ3_XXS does: five gate/up types and two down types over 48 layers), `n_slots` synthetic expert blobs a
+// layer with a VALID structure (fp16 block scales, finite and small; random code bytes - the kernels only index 8- or
+// 9-bit lookups and dp4a with them), an ownership table layer x expert with ~40% of the pairs on a slot of that
+// layer, and the verifier's mapped pages faked on the host: `seq` (the doorbell), `x` (kMaxTok x n_embd fp32), `ids`
+// (kMaxTok x k int32), `ymiss` (kMaxTok x k x n_embd fp32).  Per window the host plays the primary IN THE ORDER OF ITS
+// GRAPH (verify.cpp record_window: pre(l, 0), pre(l, 1), post(l, 0), pre(l + 1, 0), post(l, 1), ...): it writes the
+// rows and ids of the first G steps, fences, rings them, then for every step s spins on `flag_out >= s + 1`,
+// snapshots the step's rows of `ymiss` and only then rings step s + G - so with G = 2 the doorbell of s + 1 is up
+// while the kernel still works on s, as in the engine.  When the kernel has left (cudaStreamSynchronize), every step
+// is recomputed with the path peer_experts.cpp runs today, on the same device and a second stream - the host plan of
 // PeerExperts::launch (kind == 2 <=> owned, groups in order of first appearance, Meta ptr/start/dst/tok/out_row),
-// cudaMemcpyAsync of the rows, quantize_q8_1_rows, native_expert_grouped (mode 8: fused gate/up + LDS down),
-// scatter_rows_f32 into a separate mapped page `ymiss_ref` - and the rows are memcmp'd: entry j of the step at
-// (gtb * k + j) * n_embd.  Entries the peer does not own must keep the sentinel the host wrote before the ring (the
-// pool's CPU rows live there).  cnt[s] is checked against groups << 16 | rows and the stamps against each other.
+// cudaMemcpyAsync of the rows, quantize_q8_1_rows, native_expert_grouped with THE LAYER'S layout (mode 8: fused
+// gate/up + LDS down), scatter_rows_f32 into a separate mapped page `ymiss_ref` - and the rows are memcmp'd: entry j
+// of the step at (gtb * k + j) * n_embd.  Entries the peer does not own must keep the sentinel the host wrote before
+// the ring (the pool's CPU rows live there).  cnt[s] is checked against groups << 16 | rows and the stamps against
+// each other.
 //
 // The reference runs AFTER the window, not beside it: the persistent kernel keeps every SM's register budget of its
 // blocks while it spins, and a second kernel on the same device might never get a slot (the engine never needs one:
@@ -31,10 +34,16 @@
 // the kernel must leave with err == kErrAbort, exit == epoch, flag_out == UINT32_MAX (the error exit raises it so the
 // primary's waits pass), the stream drained within 2 s; (b) wait_ns = 200 ms and no doorbell at all: err ==
 // kErrTimeoutSeq, flag_out == UINT32_MAX.  Exit code 0 only if every row of every window is equal and both endurance
-// windows behave; 2 if peer_fused_shape refuses the layout on this device (its `why` is printed).
+// windows behave; 2 if peer_fused_shape refuses the pack on this device (its `why` is printed).
 //
-//   peer_fused_test [device=0] [gu_type=18] [d_type=42] [n_expert=512] [n_slots=64] [windows=20] [seed]
+//   peer_fused_test [device=0] [gu_type=0] [d_type=0] [n_expert=512] [n_slots=16] [windows=20] [seed]
 //                   [--primary D]
+//
+// gu_type 0 (the default): the MIXED model - the ten (gate/up, down) pairs of Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS's
+// expert layers (tools/iq_pack.py native_experts.txt), one layer each in their order of first appearance: (17, 20),
+// (16, 42), (17, 42), (21, 42), (22, 42), (21, 20), (22, 20), (16, 20), (18, 20), (18, 42) - so one window crosses
+// every body of the kernel and every type change between two consecutive steps.  A gu_type > 0 is a uniform model of
+// 4 layers of (gu_type, d_type), as before.  n_slots is per layer.
 //
 // --primary D: the fake primary is a kernel on device D (the 3080 Ti) that writes x / ids into the mapped pages and
 // rings `seq` (the form of k_push in tools/ep_bench.cu: streaming stores, system fence, the flag), then a kernel that
@@ -77,10 +86,14 @@ namespace {
 constexpr int64_t N = 2560;      // n_embd of Qwen3.8-Flash-Next
 constexpr int64_t FF = 640;      // the expert's hidden width
 constexpr int K = 10;            // routed experts a row
-constexpr int NL = 4;            // layers of the synthetic model: steps a window = NL * G
 constexpr uint8_t kSentKernel = 0xA5;   // the bytes of a ymiss row nobody wrote (the kernel's page)
 constexpr uint8_t kSentRef = 0x5A;      // the same for the reference page: an unwritten row never compares equal
 constexpr double kFlagWaitS = 20.0;     // the host's bound on a step's flag (the engine's layer wait is 20 s too)
+
+// the mixed model: the pack's ten (gate/up, down) pairs in their order of first appearance (layers 0, 1, 5, 8, 12,
+// 28, 29, 31, 35, 36 of Qwen3.8-Flash-Next GSQ-RCO IQ3_XXS)
+constexpr int kMixed[][2] = { {17, 20}, {16, 42}, {17, 42}, {21, 42}, {22, 42}, {21, 20}, {22, 20}, {16, 20}, {18, 20}, {18, 42} };
+constexpr int kMixedLayers = (int) (sizeof kMixed / sizeof kMixed[0]);
 
 using Clock = std::chrono::steady_clock;
 double secs_since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
@@ -119,11 +132,20 @@ struct Rng {
 };
 
 // values a block of the type holds (the GGUF block the kernels index): 0 = not a type this generator knows
-int qk_of(int t) { return t == 18 || t == 21 || t == 22 ? 256 : t == 20 ? 32 : t == 42 ? 64 : 0; }
+int qk_of(int t) { return t == 16 || t == 17 || t == 18 || t == 21 || t == 22 ? 256 : t == 20 ? 32 : t == 42 ? 64 : 0; }
+
+// one layer of the synthetic model: its types, its layout, the GGUF block sizes of its gate/up and down rows
+struct Layer {
+    int gu = 0, d = 0;
+    NativeExpertLayout L;
+    size_t gu_blk = 0, d_blk = 0;
+};
 
 // one synthetic blob at `b` in the layout: random bytes, then a finite, small fp16 scale at the start of every block
-// of every gate, up and down row (the GGUF blocks of IQ3_XXS / IQ3_S / IQ2_S / Q2_0 / IQ4_NL all begin with `d`)
-void fill_blob(uint8_t* b, const NativeExpertLayout& L, size_t gu_blk, size_t d_blk, Rng& rng) {
+// of every gate, up and down row (the GGUF blocks of IQ2_XXS / IQ2_XS / IQ3_XXS / IQ3_S / IQ2_S / Q2_0 / IQ4_NL all
+// begin with `d`)
+void fill_blob(uint8_t* b, const Layer& ly, Rng& rng) {
+    const NativeExpertLayout& L = ly.L;
     const size_t n8 = L.bytes / 8;
     for (size_t i = 0; i < n8; ++i) { const uint64_t v = rng.u64(); std::memcpy(b + i * 8, &v, 8); }
     for (size_t i = n8 * 8; i < L.bytes; ++i) b[i] = (uint8_t) rng.u64();
@@ -135,10 +157,10 @@ void fill_blob(uint8_t* b, const NativeExpertLayout& L, size_t gu_blk, size_t d_
         }
     };
     for (int64_t r = 0; r < L.n_ff; ++r) {
-        stamp(b + (size_t) r * L.gu_row, L.gu_row, gu_blk);
-        stamp(b + L.up_off + (size_t) r * L.gu_row, L.gu_row, gu_blk);
+        stamp(b + (size_t) r * L.gu_row, L.gu_row, ly.gu_blk);
+        stamp(b + L.up_off + (size_t) r * L.gu_row, L.gu_row, ly.gu_blk);
     }
-    for (int64_t r = 0; r < L.n_embd; ++r) stamp(b + L.down_off + (size_t) r * L.d_row, L.d_row, d_blk);
+    for (int64_t r = 0; r < L.n_embd; ++r) stamp(b + L.down_off + (size_t) r * L.d_row, L.d_row, ly.d_blk);
 }
 
 // the host plan of PeerExperts::launch, field for field (peer_experts.cpp :322-346): distinct owned experts in routing
@@ -248,6 +270,7 @@ const char* err_name(uint32_t e) {
         case pf::kErrAbort: return "kErrAbort";
         case pf::kErrPlanOverflow: return "kErrPlanOverflow";
         case pf::kErrBadWindow: return "kErrBadWindow";
+        case pf::kErrBadType: return "kErrBadType";
         default: return "?";
     }
 }
@@ -298,14 +321,14 @@ void* dev_ptr(void* host) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    int pos[6] = {0, 18, 42, 512, 64, 20};
+    int pos[6] = {0, 0, 0, 512, 16, 20};
     uint64_t seed = (uint64_t) std::chrono::system_clock::now().time_since_epoch().count();
     int primary = -1, npos = 0;
     for (int a = 1; a < argc; ++a) {
         const std::string s = argv[a];
         if (s == "--primary" && a + 1 < argc) { primary = std::atoi(argv[++a]); continue; }
         if (s == "--help" || s == "-h") {
-            std::printf("peer_fused_test [device=0] [gu_type=18] [d_type=42] [n_expert=512] [n_slots=64] [windows=20] [seed] [--primary D]\n");
+            std::printf("peer_fused_test [device=0] [gu_type=0 (mixed model)] [d_type=0] [n_expert=512] [n_slots=16 a layer] [windows=20] [seed] [--primary D]\n");
             return 0;
         }
         if (npos < 6) pos[npos] = std::atoi(argv[a]);
@@ -323,12 +346,23 @@ int main(int argc, char** argv) {
         std::printf("devices: %d; device %d, primary %d\n", nd, device, primary);
         return 1;
     }
+
+    // ---- the synthetic model: the mixed one (gu_type 0) or 4 uniform layers
+    std::vector<Layer> layers;
+    if (gu_type == 0) {
+        for (int l = 0; l < kMixedLayers; ++l) { Layer ly; ly.gu = kMixed[l][0]; ly.d = kMixed[l][1]; layers.push_back(ly); }
+    } else {
+        for (int l = 0; l < 4; ++l) { Layer ly; ly.gu = gu_type; ly.d = d_type; layers.push_back(ly); }
+    }
+    const int nl = (int) layers.size();
     {
         cudaDeviceProp p;
         CK(cudaGetDeviceProperties(&p, device));
-        std::printf("peer_fused_test: CUDA%d %s sm_%d%d SMs %d | gu %d d %d n_expert %lld n_slots %d windows %d seed %llu",
-                    device, p.name, p.major, p.minor, p.multiProcessorCount, gu_type, d_type, (long long) n_expert, n_slots,
-                    windows, (unsigned long long) seed);
+        std::printf("peer_fused_test: CUDA%d %s sm_%d%d SMs %d | %s model, %d layers:", device, p.name, p.major, p.minor,
+                    p.multiProcessorCount, gu_type == 0 ? "mixed" : "uniform", nl);
+        for (const Layer& ly : layers) std::printf(" %d/%d", ly.gu, ly.d);
+        std::printf(" | n_expert %lld n_slots %d a layer windows %d seed %llu", (long long) n_expert, n_slots, windows,
+                    (unsigned long long) seed);
         if (primary >= 0) {
             cudaDeviceProp q;
             CK(cudaGetDeviceProperties(&q, primary));
@@ -339,63 +373,79 @@ int main(int argc, char** argv) {
         std::printf("\n");
     }
 
-    // the layout and the kernel instance for it on this device (s.5): mode 8 is the fused server's precondition
+    // the layouts and the kernel's shape for them on this device (s.5): mode 8 is the fused server's precondition
     const int em = env_int("STRATA_EXP_MODE", -1);
     if (em != 8) strata::kernels::native_expert_set_mode(8, 0);
     CK(cudaSetDevice(device));
-    const NativeExpertLayout L = strata::kernels::native_expert_layout(gu_type, d_type, N, FF);
-    const int gu_qk = qk_of(gu_type), d_qk = qk_of(d_type);
-    if (gu_qk == 0 || d_qk == 0 || L.bytes == 0) {
-        std::printf("the synthetic generator knows gate/up 18 / 21 / 22 and down 42 / 20 only (got %d / %d)\n", gu_type, d_type);
-        return 2;
+    std::vector<NativeExpertLayout> lays((size_t) nl);
+    for (int l = 0; l < nl; ++l) {
+        Layer& ly = layers[(size_t) l];
+        ly.L = strata::kernels::native_expert_layout(ly.gu, ly.d, N, FF);
+        const int gu_qk = qk_of(ly.gu), d_qk = qk_of(ly.d);
+        if (gu_qk == 0 || d_qk == 0 || ly.L.bytes == 0) {
+            std::printf("the synthetic generator knows gate/up 16 / 17 / 18 / 21 / 22 and down 42 / 20 only (layer %d: %d / %d)\n", l, ly.gu, ly.d);
+            return 2;
+        }
+        ly.gu_blk = strata::kernels::iq_row_bytes(ly.gu, gu_qk);
+        ly.d_blk = strata::kernels::iq_row_bytes(ly.d, d_qk);
+        lays[(size_t) l] = ly.L;
     }
-    const size_t gu_blk = strata::kernels::iq_row_bytes(gu_type, gu_qk), d_blk = strata::kernels::iq_row_bytes(d_type, d_qk);
     pf::Shape shape;
     {
         std::string why;
         const int minb = env_int(pf::kEnvMinb, pf::kMinBlocksDefault);
         const int cap = env_int(pf::kEnvBlocks, 0);
         const bool coop = env_int(pf::kEnvCoop, 1) != 0;
-        if (!strata::kernels::peer_fused_shape(L, minb, cap, coop, shape, why)) {
-            std::printf("peer_fused_shape refused the layout on CUDA%d: %s\n", device, why.c_str());
+        if (!strata::kernels::peer_fused_shape(lays.data(), nl, minb, cap, coop, shape, why)) {
+            std::printf("peer_fused_shape refused the model on CUDA%d: %s\n", device, why.c_str());
             return 2;
         }
-        std::printf("shape: instance <%d, %d> minb %d, dyn shared %zu B, %d blocks/SM x %d SMs = %d blocks, %s launch\n",
-                    shape.gu_type, shape.d_type, shape.minb, shape.dyn_shared, shape.blocks_per_sm, shape.sms, shape.blocks,
-                    shape.cooperative ? "cooperative" : "plain");
+        std::printf("shape: gate/up types {%s}, down types {%s}, minb %d, dyn shared %zu B (grid %zu B), %d blocks/SM x %d SMs = %d blocks, %s launch\n",
+                    pf::mask_text(shape.gu_mask).c_str(), pf::mask_text(shape.d_mask).c_str(), shape.minb, shape.dyn_shared,
+                    shape.grid_bytes, shape.blocks_per_sm, shape.sms, shape.blocks, shape.cooperative ? "cooperative" : "plain");
     }
     const unsigned long long wait_ns = (unsigned long long) std::max(1, env_int(pf::kEnvWaitMs, 20000)) * 1000000ull;
+    NativeExpertLayout* d_lay = nullptr;
+    CK(cudaMalloc((void**) &d_lay, lays.size() * sizeof(NativeExpertLayout)));
+    CK(cudaMemcpy(d_lay, lays.data(), lays.size() * sizeof(NativeExpertLayout), cudaMemcpyHostToDevice));
 
     Rng rng(seed);
 
-    // ---- the slots: n_slots synthetic blobs in one arena, 256-byte strides
-    const size_t stride = (L.bytes + 255) / 256 * 256;
-    uint8_t* d_arena = nullptr;
-    CK(cudaMalloc((void**) &d_arena, stride * (size_t) n_slots));
-    std::vector<unsigned long long> slot_ptr((size_t) n_slots);
+    // ---- the slots: n_slots synthetic blobs a layer in the layer's layout (an arena a layer, 256-byte strides);
+    // the global slot index is l * n_slots + s, so the ownership table of layer l deals only its own slots
+    std::vector<uint8_t*> d_arena((size_t) nl, nullptr);
+    std::vector<unsigned long long> slot_ptr((size_t) nl * (size_t) n_slots);
     {
-        std::vector<uint8_t> blob(L.bytes);
-        for (int s = 0; s < n_slots; ++s) {
-            fill_blob(blob.data(), L, gu_blk, d_blk, rng);
-            CK(cudaMemcpy(d_arena + stride * (size_t) s, blob.data(), L.bytes, cudaMemcpyHostToDevice));
-            slot_ptr[(size_t) s] = (unsigned long long) (uintptr_t) (d_arena + stride * (size_t) s);
+        size_t total = 0;
+        for (int l = 0; l < nl; ++l) {
+            const Layer& ly = layers[(size_t) l];
+            const size_t stride = (ly.L.bytes + 255) / 256 * 256;
+            CK(cudaMalloc((void**) &d_arena[(size_t) l], stride * (size_t) n_slots));
+            std::vector<uint8_t> blob(ly.L.bytes);
+            for (int s = 0; s < n_slots; ++s) {
+                fill_blob(blob.data(), ly, rng);
+                CK(cudaMemcpy(d_arena[(size_t) l] + stride * (size_t) s, blob.data(), ly.L.bytes, cudaMemcpyHostToDevice));
+                slot_ptr[(size_t) l * (size_t) n_slots + (size_t) s] = (unsigned long long) (uintptr_t) (d_arena[(size_t) l] + stride * (size_t) s);
+            }
+            total += stride * (size_t) n_slots;
         }
+        std::printf("slots: %d a layer x %d layers, %.1f MiB of blobs\n", n_slots, nl, (double) total / (1024.0 * 1024.0));
     }
     unsigned long long* d_slot_ptr = nullptr;
-    CK(cudaMalloc((void**) &d_slot_ptr, sizeof(unsigned long long) * (size_t) n_slots));
-    CK(cudaMemcpy(d_slot_ptr, slot_ptr.data(), sizeof(unsigned long long) * (size_t) n_slots, cudaMemcpyHostToDevice));
+    CK(cudaMalloc((void**) &d_slot_ptr, sizeof(unsigned long long) * slot_ptr.size()));
+    CK(cudaMemcpy(d_slot_ptr, slot_ptr.data(), sizeof(unsigned long long) * slot_ptr.size(), cudaMemcpyHostToDevice));
 
-    // ---- the ownership table: ~40% of the pairs on a slot, the slots dealt from a shuffled order (distinct while
-    // n_slots lasts, then the order again: a slot read by two experts is harmless to the comparison)
-    std::vector<int32_t> own((size_t) NL * (size_t) n_expert, -1);
-    std::vector<std::vector<int32_t>> unowned((size_t) NL);
+    // ---- the ownership table: ~40% of the pairs on a slot of the layer, the slots dealt from a shuffled order
+    // (distinct while n_slots lasts, then the order again: a slot read by two experts is harmless to the comparison)
+    std::vector<int32_t> own((size_t) nl * (size_t) n_expert, -1);
+    std::vector<std::vector<int32_t>> unowned((size_t) nl);
     {
-        std::vector<int32_t> deal((size_t) n_slots);
-        for (int s = 0; s < n_slots; ++s) deal[(size_t) s] = s;
-        std::shuffle(deal.begin(), deal.end(), rng.g);
-        size_t next = 0;
         int owned_pairs = 0;
-        for (int l = 0; l < NL; ++l)
+        for (int l = 0; l < nl; ++l) {
+            std::vector<int32_t> deal((size_t) n_slots);
+            for (int s = 0; s < n_slots; ++s) deal[(size_t) s] = l * n_slots + s;
+            std::shuffle(deal.begin(), deal.end(), rng.g);
+            size_t next = 0;
             for (int64_t e = 0; e < n_expert; ++e) {
                 if (rng.below(100) < 40) {
                     own[(size_t) l * (size_t) n_expert + (size_t) e] = deal[next++ % (size_t) n_slots];
@@ -404,14 +454,14 @@ int main(int argc, char** argv) {
                     unowned[(size_t) l].push_back((int32_t) e);
                 }
             }
-        std::printf("ownership: %d of %lld pairs on the peer (%d slots of %zu B)\n", owned_pairs, (long long) (NL * n_expert),
-                    n_slots, L.bytes);
+        }
+        std::printf("ownership: %d of %lld pairs on the peer\n", owned_pairs, (long long) (nl * n_expert));
     }
     int32_t* d_own = nullptr;
     CK(cudaMalloc((void**) &d_own, own.size() * 4));
     CK(cudaMemcpy(d_own, own.data(), own.size() * 4, cudaMemcpyHostToDevice));
 
-    // ---- the kernel's VRAM (s.3) and the reference's
+    // ---- the kernel's VRAM (s.3) and the reference's (n_ff is the pack's one: the scratch and hq are sized once)
     pf::Plan* d_plan = nullptr;
     void* d_q8 = nullptr;
     uint8_t* d_scratch = nullptr;
@@ -504,6 +554,7 @@ int main(int argc, char** argv) {
     base.n_embd = N;
     base.n_ff = FF;
     base.n_expert = n_expert;
+    base.n_layers = nl;
     base.nblocks = shape.blocks;
     base.wait_ns = wait_ns;
     base.seq = P.seq_d;
@@ -523,7 +574,7 @@ int main(int argc, char** argv) {
     base.hq = d_scratch + pf::hq_offset(pf::kCap, FF);
     base.out = d_out;
     base.sync = d_sync;
-    base.L = L;
+    base.lay = d_lay;
 
     uint32_t epoch = 0;
     bool all_ok = true;
@@ -651,14 +702,16 @@ int main(int argc, char** argv) {
         plan_host(r.ids.data(), r.kind.data(), n, K, own_l, slot_ptr.data(), r.plan, r.groups, r.rows);
     };
 
-    // ---- the reference of one step on s_ref (today's path, peer_experts.cpp :361-382), compared to the snapshot
+    // ---- the reference of one step on s_ref (today's path, peer_experts.cpp launch, with the layer's own layout),
+    // compared to the snapshot
     auto check_step = [&](const StepRec& r, int win) -> bool {
         const int n = r.n_tok * K;
+        const Layer& ly = layers[(size_t) r.l];
         bool ok = true;
         const uint32_t expect = ((uint32_t) r.groups << 16) | (uint32_t) r.rows;
         if (r.cnt != expect) {
-            std::printf("  FAIL finestra %d passo %d (strato %d): cnt %ux%u, host %dx%d\n", win, r.s, r.l, r.cnt >> 16, r.cnt & 0xffffu,
-                        r.groups, r.rows);
+            std::printf("  FAIL finestra %d passo %d (strato %d, %d/%d): cnt %ux%u, host %dx%d\n", win, r.s, r.l, ly.gu, ly.d,
+                        r.cnt >> 16, r.cnt & 0xffffu, r.groups, r.rows);
             ok = false;
         }
         if (r.st1 < r.st0 || r.st0 == 0) {
@@ -671,7 +724,7 @@ int main(int argc, char** argv) {
             CK(cudaMemcpyAsync(d_x_ref, r.x.data(), (size_t) r.n_tok * N * sizeof(float), cudaMemcpyHostToDevice, s_ref));
             CK(cudaMemcpyAsync(d_plan_ref, h_plan_ref, sizeof(pf::Plan), cudaMemcpyHostToDevice, s_ref));
             strata::kernels::quantize_q8_1_rows(d_x_ref, r.n_tok, N, d_q8_ref, s_ref);
-            strata::kernels::native_expert_grouped(L, d_plan_ref->ptr, d_plan_ref->start, d_plan_ref->count, d_plan_ref->dst,
+            strata::kernels::native_expert_grouped(ly.L, d_plan_ref->ptr, d_plan_ref->start, d_plan_ref->count, d_plan_ref->dst,
                                                    d_plan_ref->tok, r.groups, r.rows, d_q8_ref, d_scratch_ref, d_out_ref, s_ref);
             strata::kernels::scatter_rows_f32(d_out_ref, P.ymiss_ref_d + (size_t) r.tb * K * N, d_plan_ref->out_row, r.rows, N, s_ref);
             CK(cudaStreamSynchronize(s_ref));
@@ -691,8 +744,8 @@ int main(int argc, char** argv) {
             std::memcpy(&b, want + c * 4, 4);
             int cr = -1;
             for (int q = 0; q < r.rows; ++q) if (r.plan.out_row[q] == j) { cr = q; break; }
-            std::printf("  FAIL finestra %d passo %d (strato %d, tb %d): voce %d (riga compatta %d, token %d, esperto %d, %s) colonna %lld: "
-                        "kernel %08x, riferimento %08x\n", win, r.s, r.l, r.tb, j, cr, j / K, r.ids[(size_t) j],
+            std::printf("  FAIL finestra %d passo %d (strato %d, gate/up %d, down %d, tb %d): voce %d (riga compatta %d, token %d, esperto %d, %s) "
+                        "colonna %lld: kernel %08x, riferimento %08x\n", win, r.s, r.l, ly.gu, ly.d, r.tb, j, cr, j / K, r.ids[(size_t) j],
                         r.kind[(size_t) j] == 2 ? "del peer" : "non del peer: sentinella attesa", (long long) c, a, b);
             ok = false;
         }
@@ -704,7 +757,7 @@ int main(int argc, char** argv) {
         const int T = 1 + (int) rng.below((uint32_t) pf::kMaxTok);
         const int G = T >= 2 && rng.below(2) ? 2 : 1;
         const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
-        const int steps = NL * G;
+        const int steps = nl * G;
         pf::Window w = base;
         w.steps = steps; w.G = G; w.T = T;
         w.gtb[0] = gtb[0]; w.gtb[1] = gtb[1]; w.gte[0] = gte[0]; w.gte[1] = gte[1];
@@ -787,7 +840,7 @@ int main(int argc, char** argv) {
     if (all_ok) {
         const int T = 1 + (int) rng.below((uint32_t) pf::kMaxTok);
         pf::Window w = base;
-        w.steps = NL; w.G = 1; w.T = T;
+        w.steps = nl; w.G = 1; w.T = T;
         w.gtb[0] = 0; w.gtb[1] = T; w.gte[0] = T; w.gte[1] = T;
         bool ok = begin_window(w);
         std::string why;
@@ -829,7 +882,7 @@ int main(int argc, char** argv) {
     // (b) wait_ns = 200 ms, no doorbell at all: kErrTimeoutSeq, exit == epoch, the stream drained
     if (all_ok) {
         pf::Window w = base;
-        w.steps = NL; w.G = 1; w.T = 1;
+        w.steps = nl; w.G = 1; w.T = 1;
         w.gtb[0] = 0; w.gtb[1] = 1; w.gte[0] = 1; w.gte[1] = 1;
         w.wait_ns = 200ull * 1000000ull;
         bool ok = begin_window(w);
@@ -862,13 +915,14 @@ int main(int argc, char** argv) {
         cudaFreeHost(h_px); cudaFreeHost(h_pids);
         CK(cudaSetDevice(device));
     }
-    cudaFree(d_arena); cudaFree(d_slot_ptr); cudaFree(d_own);
+    for (uint8_t* a : d_arena) cudaFree(a);
+    cudaFree(d_slot_ptr); cudaFree(d_own); cudaFree(d_lay);
     cudaFree(d_plan); cudaFree(d_q8); cudaFree(d_scratch); cudaFree(d_out); cudaFree(d_sync);
     cudaFree(d_x_ref); cudaFree(d_q8_ref); cudaFree(d_scratch_ref); cudaFree(d_out_ref); cudaFree(d_plan_ref);
     cudaFreeHost(h_plan_ref);
     cudaFreeHost(P.page_h); cudaFreeHost(P.seq_h); cudaFreeHost(P.x_h); cudaFreeHost(P.ids_h);
     cudaFreeHost(P.ymiss_h); cudaFreeHost(P.ymiss_ref_h); cudaFreeHost(P.pwords_h);
-    std::printf("%s: %d finestre, %lld voci del peer, seme %llu\n", all_ok ? "PASS" : "FAIL", windows, (long long) peer_entries_total,
-                (unsigned long long) seed);
+    std::printf("%s: %d finestre (%s, %d strati), %lld voci del peer, seme %llu\n", all_ok ? "PASS" : "FAIL", windows,
+                gu_type == 0 ? "modello misto" : "modello uniforme", nl, (long long) peer_entries_total, (unsigned long long) seed);
     return all_ok ? 0 : 1;
 }

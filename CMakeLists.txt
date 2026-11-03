@@ -627,8 +627,9 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(peer_fused_test PRIVATE strata_kernels strata_core CUDA::cudart)
   endif()
   # PEER_FUSED s.5: the kernel is built at __launch_bounds__(256, 2) (STRATA_PEER_FUSED_MINB unset or 2); the 3- and
-  # 4-blocks-per-SM instances (STRATA_PEER_FUSED_MINB=3|4) are six more large kernels in iq_kernels.cu, so they exist
-  # only in a build that asks for them.  Off (the default) leaves iq_kernels.cu's compile exactly as it is.
+  # 4-blocks-per-SM instances (STRATA_PEER_FUSED_MINB=3|4) are two more large kernels in iq_kernels.cu (one instance
+  # holds every type's body), so they exist only in a build that asks for them.  Off (the default) leaves
+  # iq_kernels.cu's compile exactly as it is.
   option(STRATA_PEER_FUSED_MINB_ALL "Also build the __launch_bounds__(256, 3) and (256, 4) instances of the STRATA_PEER_FUSED persistent kernel (STRATA_PEER_FUSED_MINB=3|4)" OFF)
   if(STRATA_ENABLE_CUDA AND STRATA_PEER_FUSED_MINB_ALL)
     set_property(SOURCE src/kernels/cuda/iq_kernels.cu APPEND PROPERTY COMPILE_DEFINITIONS STRATA_PEER_FUSED_MINB_ALL)
