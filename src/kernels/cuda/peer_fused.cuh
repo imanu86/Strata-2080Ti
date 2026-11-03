@@ -49,6 +49,12 @@
 //     doorbell and before it rewrites plan[s & 1], it waits (VRAM, bounded -> kErrTimeoutDone) until done[s & 1] holds
 //     every block's increment of step s - 2.  A block at step s - 2 waiting lready can therefore never read the plan of
 //     step s, and the done thresholds stay exact (cnt and the stamps of every step are written).  No other block waits.
+//     The primary's doorbell of step s + G also REWRITES the rows and ids of step s (the same group's rows), and with
+//     the skip it no longer waits flag(s) first: block 0 reads the step's ids and then the host's empty word (w.empty,
+//     kOffEmpty) - raised, the host found the step empty and the ids read do not count (groups = 0, as the host);
+//     not raised, the host had not written it when the ids were read, and the next doorbell follows the host's word
+//     (launch -> CPU rows -> m_flag_ -> graph), so the ids were the step's own.  w.test_delay_ns (the bench) makes
+//     that race certain.
 //   w.xq / w.xq_seq (STRATA_PEER2_STAGE): the primary publishes the step's rows already quantized (peer_fused_publish_q8,
 //     the same q8_1_store): block 0 waits xq_seq >= ring before lready on a step WITH entries, and phase C copies the
 //     n_tok x n_embd/32 q8_1 blocks (16 B a thread, __ldcv) into q8 instead of reading n_tok x n_embd floats and
@@ -171,7 +177,7 @@ __device__ bool pf_grid_barrier(const pf::Window& w, int nblocks, int* s_ok) {
 /// dynamic shared buffer (the bodies are not running in this block yet).  Thread 0 leaves groups / rows in
 /// *s_groups / *s_rows; the caller fences, syncs and publishes lready.
 __device__ __forceinline__ void pf_plan(const pf::Window& w, pf::Plan* plan, int l, int tb, int n, int* scratch,
-                                        int* s_groups, int* s_rows) {
+                                        int* s_groups, int* s_rows, const uint32_t* empty_word, uint32_t want, int* s_skip) {
     int* s_id = scratch;                   // the entry's expert id
     int* s_first = s_id + pf::kCap;        // the first entry (<= i) of the same expert
     int* s_lead = s_first + pf::kCap;      // 1: owned and the first of its expert - a group's lead
@@ -182,10 +188,18 @@ __device__ __forceinline__ void pf_plan(const pf::Window& w, pf::Plan* plan, int
     if (live) e = __ldcv(w.ids + (size_t) tb * (size_t) w.k + tid);
     if (tid < pf::kCap) s_id[tid] = e;
     __syncthreads();
+    // s.11.1 (Window::empty): the ids are in shared, so every load of them has completed; NOW the host's empty word.
+    // Raised: the host found this step empty, and the ids above may already be the next doorbell's (the primary rang
+    // it without waiting this step's flag) - nothing is owned, groups = 0, as the host counted.  Not raised: the host
+    // had not written it when the ids were read, and the next doorbell follows the host's word (then m_flag_), so the
+    // ids read were this step's own and the plan below is the host's plan.
+    if (tid == 0) *s_skip = (empty_word != nullptr && pf_ld(empty_word) == want) ? 1 : 0;
+    __syncthreads();
+    const bool skip = *s_skip != 0;
     int first = tid;
     bool owned = false;
     if (live) {
-        owned = e >= 0 && (int64_t) e < w.n_expert && w.own[(size_t) l * (size_t) w.n_expert + e] >= 0;
+        owned = !skip && e >= 0 && (int64_t) e < w.n_expert && w.own[(size_t) l * (size_t) w.n_expert + e] >= 0;
         for (int j = 0; j < tid; ++j) if (s_id[j] == e) { first = j; break; }
     }
     const int lead = (live && owned && first == tid) ? 1 : 0;
@@ -232,6 +246,7 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
     extern __shared__ int pf_dyn[];   // the bodies' dynamic buffer (their own extern declarations alias it)
     __shared__ int s_ok;
     __shared__ int s_groups, s_rows;
+    __shared__ int s_skip;   // s.11.1: the host's empty word of the step said "nothing here" (pf_plan)
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int nblocks = (int) gridDim.x;
     bool ok = true;
@@ -246,7 +261,8 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
                    w.flag_out == nullptr || w.abort == nullptr || w.err == nullptr || w.exit == nullptr || w.cnt == nullptr ||
                    w.stamp == nullptr || w.own == nullptr || w.slot_ptr == nullptr || w.plan == nullptr || w.q8 == nullptr ||
                    w.hq == nullptr || w.out == nullptr || w.sync == nullptr ||
-                   (w.xq != nullptr) != (w.xq_seq != nullptr);   // s.11.2: the staged rows come with their ring, or neither
+                   (w.xq != nullptr) != (w.xq_seq != nullptr) ||   // s.11.2: the staged rows come with their ring, or neither
+                   (w.ahead != 0 && w.empty == nullptr);           // s.11.1: a doorbell ahead of the flags needs the host's empty words
         for (int g = 0; g < w.G && g < 2; ++g) {
             const int nt = w.gte[g] - w.gtb[g];
             if (w.gtb[g] < 0 || nt < 0 || nt > pf::kMaxTok || (int64_t) nt * w.k > pf::kCap) bad = true;
@@ -306,8 +322,12 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
             }
             __syncthreads();
             if (!s_ok) { ok = false; break; }
-            // ---- B: the plan, then its word in VRAM for the other blocks
-            pf_plan(w, plan, l, tb, n, pf_dyn, &s_groups, &s_rows);
+            if (w.test_delay_ns != 0) {   // the bench's hook: let the next doorbell land before the ids are read
+                if (tid == 0) { const unsigned long long td = pf_now_ns(); while (pf_now_ns() - td < w.test_delay_ns) pf_pause(256); }
+                __syncthreads();
+            }
+            // ---- B: the plan (the ids, then the host's empty word: s.11.1), then its word in VRAM for the other blocks
+            pf_plan(w, plan, l, tb, n, pf_dyn, &s_groups, &s_rows, w.empty != nullptr ? w.empty + s : nullptr, want, &s_skip);
             __threadfence();
             __syncthreads();
             if (tid == 0) {

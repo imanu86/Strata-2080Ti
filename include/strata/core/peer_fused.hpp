@@ -219,6 +219,16 @@ struct Window {
     /// block's done count of step s - 2 (VRAM, bounded by wait_ns -> kErrTimeoutDone).  0: the primary waits every
     /// flag and the invariant holds by itself, no wait.
     int ahead = 0;
+    /// With ahead: the empty words (kOffEmpty) as this device sees them (mapped).  The primary's doorbell of step s + G
+    /// rewrites the rows and ids of step s (the same group's rows), and with the skip it no longer waits flag(s) first:
+    /// block 0 therefore reads the step's ids and THEN empty[s] - raised (== s + 1): the host found the step empty,
+    /// the ids it read do not count (they may already be the next step's), groups = 0; not raised: the host had not
+    /// written it when the ids were read, and the next doorbell comes only after the host's word (then m_flag_), so the
+    /// ids were the step's own.  Null with ahead 0.
+    const uint32_t* empty = nullptr;
+    /// A test hook (the bench only; PeerExperts never sets it): block 0 waits this long after a step's doorbell before
+    /// it reads the ids, so the doorbell after it can land first - the race `empty` settles, made certain.
+    unsigned long long test_delay_ns = 0;
     /// STRATA_PEER2_STAGE: the primary's xq page as this device sees it (mapped): kMaxTok rows of n_embd/32 q8_1 blocks,
     /// the step's rows at gtb * n_embd/32; phase C copies them into q8 instead of quantizing x.  Null: phase C of before.
     const void* xq = nullptr;

@@ -315,6 +315,7 @@ private:
     bool skip_ = false;                               ///< STRATA_PEER2_SKIP / STRATA_PEER_SKIP (read once at fused_open, by ordinal)
     bool stage_ = false;                              ///< STRATA_PEER2_STAGE (the second server only)
     uint32_t* h_empty_ = nullptr;                     ///< kOffEmpty, host view: launch() writes empty[s] = s + 1 on an empty step
+    const uint32_t* m_empty_ = nullptr;               ///< the same words as the peer's kernel reads them (Window::empty: ids first, then the word)
     const uint32_t* empty_dev0_ = nullptr;            ///< the same words as the primary sees them (the graph's wait_flag_ge_any)
     uint32_t* h_xq_seq_ = nullptr;     uint32_t* m_xq_seq_ = nullptr;   uint32_t* xq_seq_dev0_ = nullptr;   ///< kOffXqSeq: host, the peer, the primary
     uint8_t* h_xq_ = nullptr;          uint8_t* m_xq_ = nullptr;        uint8_t* xq_dev0_ = nullptr;        ///< the xq page (kMaxTok rows of q8_1): host, the peer, the primary

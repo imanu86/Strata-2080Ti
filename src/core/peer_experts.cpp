@@ -785,6 +785,7 @@ bool PeerExperts::fused_open(std::string& err) {
     m_stamp_fused_ = (unsigned long long*) (m_page + kOffStamp);
     // s.11: the empty words (host-written, primary-read) and the xq ring (primary-written, peer-read) live in the page
     h_empty_ = skip_ ? (uint32_t*) (h_page_ + kOffEmpty) : nullptr;
+    m_empty_ = skip_ ? (const uint32_t*) (m_page + kOffEmpty) : nullptr;
     h_xq_seq_ = stage_ ? (uint32_t*) (h_page_ + kOffXqSeq) : nullptr;
     m_xq_seq_ = stage_ ? (uint32_t*) (m_page + kOffXqSeq) : nullptr;
     if (stage_) {   // the xq page: kMaxTok rows of n_embd/32 q8_1 blocks, written by the primary, read by the kernel
@@ -869,6 +870,7 @@ void PeerExperts::fused_close() {
     if (h_xq_) cudaFreeHost(h_xq_);
     h_xq_ = m_xq_ = xq_dev0_ = nullptr;
     h_empty_ = nullptr;
+    m_empty_ = nullptr;
     empty_dev0_ = nullptr;
     h_xq_seq_ = m_xq_seq_ = xq_seq_dev0_ = nullptr;
     skip_ = stage_ = false;
@@ -1072,6 +1074,7 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
     // s.11: with the skip the primary rings ahead of the flags on empty steps (the kernel guards its own double buffer);
     // with the stage the kernel copies the primary's q8_1 rows from the xq page.  Off: 0 / null, the kernel of before.
     win.ahead = skip_ ? 1 : 0;
+    win.empty = skip_ ? m_empty_ : nullptr;   // the kernel reads a step's ids, then this word: raised = the host found it empty
     win.xq = stage_ ? (const void*) m_xq_ : nullptr;
     win.xq_seq = stage_ ? (const uint32_t*) m_xq_seq_ : nullptr;
     // (6) one launch a window, then a query so WDDM hands it to the card now instead of at the next driver call

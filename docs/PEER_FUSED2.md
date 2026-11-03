@@ -276,6 +276,21 @@ padrona aspetta tutto il giro (~decine di µs sul riser) per niente. Con il salt
   nuovo. Il kernel serve comunque ogni passo (`cnt[s] = 0`, stamp, flag): il controllo di `fused_end` resta intero.
 - **`fused_end`**: la padrona può finire la finestra mentre il kernel sta ancora servendo gli ultimi passi vuoti
   (microsecondi): il drain fa 500 µs di attesa attiva prima dei sonni da 1 ms, così la coda non costa mai 1 ms.
+- **Gli `ids` del passo e il doorbell successivo** (caduta di 1fe8d044 nel motore: `plan mismatch at step 0: device 2
+  x 2, host 0 x 0`; il banco `--skip` passava). Il doorbell di `s + G` riscrive **le stesse righe** di `m_ids_`/`m_x_`
+  del passo `s` (stesso gruppo), e con il salto la padrona lo suona senza aspettare `flag(s)`: la 3060, lenta sul
+  riser, poteva leggere gli `ids` di `s + 2` al posto di quelli di `s`, trovare esperti suoi e pianificare dove
+  l'host (che aveva letto gli `ids` giusti) contava zero. Il banco non lo vedeva perché il suo kernel legge gli `ids`
+  entro ~1 µs dal doorbell e l'host riscrive decine di µs dopo (istantanea delle righe). Rimedio, nel kernel
+  (`Window::empty`, la pagina vista dal server): il blocco 0 legge gli `ids` del passo, **poi** la parola vuota
+  `empty[s]`. Alzata → l'host ha trovato il passo vuoto, gli `ids` letti non contano (possono già essere quelli
+  dopo), `groups = 0` come l'host. Non alzata → l'host non l'aveva ancora scritta quando gli `ids` sono stati letti,
+  e il doorbell successivo viene **dopo** la parola (`launch` → righe CPU → `m_flag_(s)` → grafo → doorbell), quindi
+  gli `ids` letti erano quelli del passo e il piano del kernel è quello dell'host (stessa tabella). Un passo non
+  vuoto non cambia: la padrona aspetta il suo flag e le righe restano intatte. Una lettura mappata in più per passo.
+  Nel banco `--skip` accende `Window::test_delay_ns` (200 µs, `--skip-delay N`, 0 = niente): il blocco 0 aspetta
+  dopo il doorbell prima di leggere gli `ids`, così il doorbell successivo di un passo vuoto arriva **prima** della
+  lettura, ogni volta — con il codice di 1fe8d044 il banco cade come il motore, con il rimedio passa.
 - Il server 1 ha lo stesso codice dietro `STRATA_PEER_SKIP`, default 0: sull'x16 il giro a vuoto vale pochi µs e la
   2080 Ti ha quasi sempre voci; si accende per misurare.
 
@@ -336,9 +351,18 @@ rispetto a `SHARE=0`, come per una tier più piccola. Detto, non nascosto.
 scritta dall'host come fa `launch`; con `--primary` il kernel-padrona legge flag **o** parola come `wait_flag_ge_any`;
 entrambi i kernel con `ahead = 1`; `cnt` e stamp letti a fine finestra) e `--stage` (con `--second`: ogni finestra è
 servita **due volte** sugli stessi passi, la seconda con le righe q8_1 del server 2 pubblicate dall'host — quantizzate
-sulla prima scheda con `quantize_q8_1_rows`, gli stessi byte del riferimento — e stampa per passo `2o server voci n:
-senza stage X us, con stage Y us`; entrambe le corse confrontate bit per bit). Codici d'errore nuovi nel banco e nel
-motore: `kErrTimeoutXq` (8), `kErrTimeoutDone` (9).
+sulla prima scheda con `quantize_q8_1_rows` **prima che i kernel della finestra partano** (`StepRec::xq`), gli stessi
+byte del riferimento; durante la finestra `publish` fa solo la copia nella pagina e alza `xq_seq` — e stampa per
+passo `2o server voci n: senza stage X us, con stage Y us`; entrambe le corse confrontate bit per bit). Codici
+d'errore nuovi nel banco e nel motore: `kErrTimeoutXq` (8), `kErrTimeoutDone` (9).
+
+Prima versione del banco (1fe8d044, 3/11 sera): `--stage` falliva alla finestra 0 con `err kErrTimeoutSeq` del **primo**
+server, righe giuste. Causa: `publish` quantizzava le righe su `s_ref`, cioè sulla prima scheda, mentre il kernel
+persistente del primo server teneva tutti i suoi SM (lo stesso motivo per cui il riferimento gira dopo la finestra):
+il `cudaStreamSynchronize` dell'host restava fermo finché quel kernel usciva per timeout del doorbell (20 s), poi il
+banco finiva la finestra sulle righe del secondo e trovava l'errore. Il motore non ha il problema: il nodo
+`peer_fused_publish_q8` gira sulla padrona, che non ha kernel persistenti. Corretto spostando la quantizzazione prima
+di `begin_window`.
 
 ```
 set CUDA_DEVICE_ORDER=PCI_BUS_ID
