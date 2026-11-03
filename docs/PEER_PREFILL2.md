@@ -139,26 +139,37 @@ pezzo, ~5 ms a strato, con il server che a regime riceve 20-30 righe a strato. T
    confrontava due EWMA del pezzo intero per token, con e senza server, e sceglieva ON a torto (0,762 contro 0,807
    ms/token, prompt il 12 % più lento): il costo per token cambia con T (il primo pezzo ha 4089 token, gli altri di
    più) e con la **posizione** (l'attenzione cresce col contesto), e le due EWMA erano fatte di pezzi in posizioni
-   diverse. Ora: due eventi sulla padrona per ogni strato MoE (`ev_m0` all'inizio del MoE, `ev_m1` dopo la
-   `combine`), sempre; la misura del pezzo è la **somma degli span MoE** (niente attenzione → niente posizione;
-   scala con le righe del pezzo). Si confrontano solo **coppie di pezzi adiacenti con lo stesso T**: un pezzo ON
-   seguito da uno OFF, `guadagno = (MoE_off − MoE_on) / MoE_off`, EWMA 0,5 (`gain_ewma`); la modalità è ON solo con
-   `gain_ewma > 2 %` (`kGainOn`). **Si parte spenti**: da OFF una coppia di prova (ON, poi OFF) ogni 16 pezzi
-   (`kTrialEvery`), **mai sul pezzo 0 di un prompt** (un prompt da un pezzo non prova mai; il primo pezzo può anche
-   essere più corto e la coppia sarebbe nulla); da ON una coppia di controllo (il pezzo ON in corso, poi uno OFF)
-   ogni 8 (`kCheckEvery`). Una coppia non attraversa due prompt (`run` azzera il mezzo pezzo pendente). Modalità,
-   guadagno e costi **persistono fra i prompt** (vivono nel `PeerPrefill`).
+   diverse. La sesta stesura (`bb02371b`) misurava la somma degli span MoE della padrona con eventi a ogni strato:
+   (a) lo span MoE non contiene il costo host (che l'host paga prima e la scheda sconta altrove), quindi vedeva un
+   guadagno (+11 %) con il prompt più lento; (b) 96 eventi con timing a pezzo sotto WDDM spezzano l'invio dei
+   comandi e **costano anche da spenti** (827 contro 965 a 4K con un pezzo OFF); (c) la stampa sovrascriveva il
+   valore ON con quello OFF. Ora: **nessun evento sulla padrona fuori da un pezzo ON**; la misura del pezzo è il
+   **tempo a parete** dal piano di un pezzo al piano del successivo (l'host si ferma a ogni strato per il download
+   del routing, quindi è il tempo vero del pezzo, costo host compreso). Si confrontano solo **coppie di pezzi
+   adiacenti con lo stesso T**, un pezzo ON e uno OFF, con **ordine alternato** da una coppia all'altra (ON-OFF, poi
+   OFF-ON: la deriva di posizione — l'attenzione cresce col contesto — si annulla sulle coppie); `guadagno =
+   (parete_off − parete_on) / parete_off`, EWMA 0,5 (`gain_ewma`); la modalità è ON solo con `gain_ewma > 2 %`
+   (`kGainOn`). **Si parte spenti**: da OFF una coppia di prova ogni 16 pezzi (`kTrialEvery`), **mai sul pezzo 0 di
+   un prompt** (un prompt da un pezzo non prova mai; il primo pezzo può anche essere più corto e la coppia sarebbe
+   nulla); da ON una coppia di controllo ogni 8 (`kCheckEvery`). Una coppia non attraversa due prompt (`run` azzera
+   il mezzo pezzo pendente e l'orologio). Modalità, guadagno, ordine e costi **persistono fra i prompt** (vivono
+   nel `PeerPrefill`). Da spenti il pezzo costa solo un azzeramento del piano e la copia dei conteggi per strato.
 
-Riga per pezzo (sempre, una per pezzo): `strata prefill: second server GPU B (stage on CUDAx), chunk c (k of its
-prompt) ON|OFF [(pair, first|second)]: sent P pairs (R rows) over L layers (D dropped: too few rows for the host's
-cost); server S ms, the primary stalled W ms for it, estimated saving E ms; primary MoE M ms over L layers[; pair: ON
-a ms vs OFF b ms at T tokens = gain g% (EWMA G% over n pairs)]; server fixed F us + r us a row (model m0), host in
-its issue h us a layer; budget factor f0 -> f1; mode x -> y`. A fine prompt le somme e `pair gain EWMA`.
+Riga per pezzo (sempre, una per pezzo, dal secondo in poi: la riga descrive il pezzo appena finito): `strata
+prefill: second server GPU B (stage on CUDAx), chunk c (k of its prompt) ON|OFF [(pair, first|second)]: sent P pairs
+(R rows) over L layers (D dropped: too few rows for the host's cost); server S ms, the primary stalled W ms for it,
+estimated saving E ms; chunk wall C ms at T tokens[; pair: ON a ms vs OFF b ms at T tokens = gain g% (EWMA G% over n
+pairs)]; server fixed F us + r us a row (model m0), host in its issue h us a layer; budget factor f0 -> f1; mode x ->
+y`. A fine prompt le somme e `pair gain EWMA`. L'ultimo pezzo di un prompt viene letto al piano del primo pezzo del
+prompt dopo (la sua riga dice `-1 of its prompt`).
 
-**Sul riser, atteso**: il banco manda per primo il 4K (un pezzo): OFF, nessuna prova → lettura = versione spenta.
-32K/128K: pezzo 0 OFF; pezzo 1 ON (coppia, prima metà) con `host … us a layer` ~1-2 ms e stallo; pezzo 2 OFF
-(seconda metà): `pair: ON a vs OFF b = gain −5…−10 % (EWMA …) ; mode off -> off`; poi OFF fino al pezzo 17, altra
-coppia. Costo delle prove: ~1 pezzo ON ogni 16 → lettura entro l'1-2 % della versione spenta a 128K, uguale a 4K.
+**Sul riser, atteso**: il banco manda per primo il 4K (un pezzo): OFF, nessuna prova, nessun evento → lettura =
+versione spenta (entro l'1 %). 32K/128K: pezzo 0 OFF; pezzo 1 ON (coppia, prima metà) con `host … us a layer` ~1-2 ms
+e stallo; pezzo 2 OFF (seconda metà): `pair: ON a vs OFF b at 7680 tokens = gain −5…−10 % (EWMA …); mode off -> off`;
+poi OFF fino al pezzo 18, altra coppia nell'ordine inverso (OFF poi ON). Costo delle prove: ~1 pezzo ON ogni 16 →
+lettura entro l'1-2 % della versione spenta a 128K, entro l'1 % a 32K (una coppia su 5 pezzi: ~2 % del tempo di un
+pezzo ON in più… se il pezzo ON costa il 10 % in più, 2 % del totale: al limite del criterio; `kTrialEvery` a 32
+lo dimezza, a scapito della velocità con cui l'Oculink si accende).
 **Sull'Oculink, atteso**: la prima coppia dà guadagno positivo (blob tolti a una padrona davvero in streaming,
 costo fisso del server ~0,5-1 ms), `mode off -> on`, poi una coppia di controllo ogni 8 e il fattore che sale.
 
@@ -356,9 +367,11 @@ motore con `4512b587`, banco tutto PASS): misura di banda con eventi su 8 copie,
 costo per riga misurato nel piano. Prova con `076e7d90` (M): bande vere, fattore a 0,03-0,04, stallo 2-3 ms, ma
 lettura 878/1274/1297 contro 963/1376/1464 spenta. Quinta stesura (`4d38da47`, §2.3): costo fisso per strato separato,
 tempo host dell'emissione misurato e filtro per strato, ON/OFF su due EWMA per token del pezzo intero — sceglieva ON
-a torto (803/1182/1290). Sesta stesura: misura della sola parte MoE, coppie di pezzi adiacenti a T uguale, si parte
-spenti, prove ogni 16 da spenti e controlli ogni 8 da accesi, mai sul pezzo 0 di un prompt. **Non compilata, non
-provata.** `STRATA_PEER2_PREFILL_ROW_US` resta a 1: il costo vero lo misura l'anello.
+a torto (803/1182/1290). Sesta stesura (`bb02371b`): misura della sola parte MoE con eventi per strato, coppie di
+pezzi adiacenti — la coppia stampava lo stesso numero due volte (variabile sovrascritta), lo span MoE non vedeva il
+costo host, e gli eventi costavano anche da spenti (827/1181/1301). Settima stesura: niente eventi sulla padrona fuori
+dai pezzi ON, tempo a parete del pezzo dall'orologio dell'host, coppie con ordine alternato, stampa corretta.
+**Non compilata, non provata.** `STRATA_PEER2_PREFILL_ROW_US` resta a 1: il costo vero lo misura l'anello.
 
 Rischi funzionali:
 - **Bit fra schede** (§5): se il banco dice che le righe della 3060 differiscono negli ultimi bit per i tipi senza
