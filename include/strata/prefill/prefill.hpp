@@ -149,6 +149,25 @@ public:
     static uint64_t bytes_needed_no_ring(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
                                          bool src = true);
 
+    /// Layer-major prefill (EP split 4b, C2): the device bytes `lm_prepare` carves for a super-chunk of `S` tokens read
+    /// in sub-chunks of `T` tokens, in host mode (the residual rows stay in pinned RAM; the device holds the rows of
+    /// two sub-chunks in turn) - what a region given to `set_lm_region` must hold for that super-chunk.  Pure: the
+    /// pack's fixed widths, so a caller can price `lm_bytes_needed(min(S_target, n), chunk)` beside `bytes_needed(chunk)`
+    /// when it sizes a loan.  `S` a multiple of `T`.
+    static uint64_t lm_bytes_needed(const core::ModelGeometry& g, int64_t S, int64_t T);
+    /// The super-chunk's device buffers come from THIS region (`bytes` from `base`, on this stage's device) instead of
+    /// a cudaMalloc on the free VRAM: the tail of a borrowed expert-cache part, after the chunk's own buffers.  It
+    /// applies to the NEXT prompt this stage reads (every `lm_prepare` of it, including the re-sizes lm_prepare_chain
+    /// makes), and the caller keeps it valid until that prompt's `lm_release` - i.e. between its lend and its refill
+    /// of the slots.  With a region the super-chunk is sized to `bytes` (no VRAM query, no margin), the residual rows
+    /// stay in pinned RAM (host mode, as a split's later stages already do) and `lm_release` frees nothing of it.  The
+    /// pinned host buffers (rows, routing, tables) are the stage's own, kept between prompts as before.  Null (the
+    /// default): today's behaviour, and with --peer-device (core::peer_portable()) `lm_prepare` keeps declining with
+    /// "a peer GPU" as it always has; a region is also what lifts that refusal for this stage (C1).  Per stage: a layer
+    /// split's stages each set their own; not forwarded along `next`.  The caller sets it again after every lend (the
+    /// loan's `first` moves per request) and to null when the stage reads without a loan.
+    void set_lm_region(void* base, uint64_t bytes);
+
     /// The streamed ring's byte budget as a slot count for this pack (the measured slot count x Q2_0's blob, over
     /// max_blob, never past ring_cap()):
     /// what the auto chunk scan treats as a full ring.  A slot is one whole blob, so a pack with bigger blobs than

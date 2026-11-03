@@ -67,23 +67,58 @@ public:
     /// Whether the primary (device 0) and the peer can read each other's memory directly (NVLink / PCIe P2P).
     bool p2p() const { return p2p_; }
 
-    // ---- STRATA_EP_SPLIT_PREFILL=1 (opt-in, lab/upsync-v0.2.9, docs/EP_SPLIT_PREFILL.md s.2, s.6): the peer card
-    // also runs a prompt STAGE (layers [K, n_layers) with its own dense weights and session), whose prompt path takes
-    // this tier's cache and residency table as its RESIDENT tier (`Prefill::init(..., &cache(), res_table(), ...)`).
-    // Nothing of the tier is lent: the slots stay the decode's (the fused kernel holds them by index in d_slot_ptr,
-    // adapt rotates them between windows), the stage allocates its own prompt buffers.  Off, none of this is called.
+    // ---- STRATA_EP_SPLIT_PREFILL=1 (opt-in, lab/upsync-v0.2.9, docs/EP_SPLIT_PREFILL.md s.2, s.6, s.13.2): the peer
+    // card also runs a prompt STAGE (layers [K, n_layers) with its own dense weights and session), whose prompt path
+    // takes this tier's cache and residency table as its RESIDENT tier (`Prefill::init(..., &cache(), res_table(), ...)`).
+    // Tappa 4b: the TAIL of the tier (the slots >= `first`, the coldest pairs: the tier is filled in rank order) IS
+    // LENT to that prompt path for the length of a prompt read, exactly as the primary's cache lends its own tail
+    // ("the prompt path borrows N cache slots", generate.cpp `lend` / `refill`): the stage's prompt buffers are laid
+    // out in the lent slots (`Prefill::relayout`), the pairs that lived there leave res_ (kNotResident: has() says no,
+    // the stage streams them, the primary's PeerPrefill does not plan them here), and before the next decode window
+    // the same slots are refilled from the source arena (`ExpertCache::fill_slot_queued` + `sync_queued`, on the
+    // cache's own queue) and res_ restored.  Between `lend_guard(true)` and `lend_guard(false)` the tier is LENT:
+    // adapt() does nothing, fused_begin() refuses, apply_pending() finds nothing (the caller quiesce()d before the
+    // lend, so no copy of an earlier adapt is in flight when relayout writes the slots).  Never lent during a fused
+    // window or an adapt: generate.cpp lends after quiesce(), refills before the first window.  The slots never
+    // move (d_slot_ptr_ is slot -> address, filled once at open): a lent slot keeps its layer's blob size and gets
+    // the SAME pair back at refill.  Off, none of this is called and nothing of the tier is lent.
     /// The tier's cache, read-only: the stage's prompt path reads a resident expert in its slot (a hit) and streams
-    /// the rest from host memory itself.  No slot is ever lent or claimed through this handle.
+    /// the rest from host memory itself.  No slot is lent or claimed through this handle (see cache_mut()).
     const ExpertCache& cache() const { return cache_; }
+    /// The tier's cache, writable (tappa 4b): the handle generate.cpp's `lend` / `refill` use for the peer's part:
+    /// `device_slot(first)` as the borrowed region a `Prefill::relayout` lays the stage's prompt buffers in, and
+    /// `fill_slot_queued` / `sync_queued` (under the peer's device) to put the pairs back in the same slots at refill.
+    /// Never used to open, close, grow or shrink the cache: the slots' count, sizes and addresses stay the open()'s.
+    ExpertCache& cache_mut() { return cache_; }
     /// The tier's residency table, n_layers x n_expert -> the peer's slot or kNotResident: the same format as the
     /// primary's `host_res` (`Prefill::init(..., host_res, ...)`).  Valid while the tier is open (res_ is sized once
     /// at open and never reallocated after it; adapt / apply_pending change entries in place, between decode
-    /// windows).  Outside a fused window it is the table has() answers from, so the stage and the pool thread agree.
+    /// windows; lend / refill, through res_table_mut(), between a prompt's lend and its refill).  Outside a fused
+    /// window it is the table has() answers from, so the stage and the pool thread agree.
     const int32_t* res_table() const { return res_.data(); }
-    /// Before a staged prompt read: lands the swaps of an earlier adapt() (apply_pending(true): res_ is final) and
-    /// waits for the tier's two streams, so no copy into a slot is in flight while the stage reads the slots.  false
-    /// with `err` when a fused window is still open (a kernel that may still write the slots: never in the design,
-    /// said with an error and not with a different text) or on a CUDA error.  A closed tier: nothing to do, true.
+    /// The same table, writable (tappa 4b): generate.cpp's `lend` puts kNotResident in the entries of the pairs whose
+    /// slot is >= `first` (the lent tail) and its `refill` puts the slot back once the pair's bytes are in it again.
+    /// Entries only: res_ is never resized or reallocated through this (the pointer stays the one handed out).  Written
+    /// from the request thread while no fused window is open and no adapt is in flight (the lend guard says so).
+    int32_t* res_table_mut() { return res_.data(); }
+    /// Tappa 4b: raises / lowers the lend guard.  `on` with `slots` lent: from here until lend_guard(false) adapt()
+    /// returns true without swapping, fused_begin() fails with "tier slots are lent to the prompt path" (never in
+    /// the design: an error, not a different text) and apply_pending() has nothing pending (the caller quiesce()d
+    /// first).  has() / launch() / finish() do not change: a lent pair is kNotResident in res_, which is enough.
+    /// `false` clears the count.  Not called with the variable off.
+    void lend_guard(bool on, int64_t slots = 0) {
+        lent_slots_ = on ? slots : 0;
+        lent_.store(on, std::memory_order_release);
+    }
+    bool lent() const { return lent_.load(std::memory_order_acquire); }   ///< the guard is up
+    int64_t lent_slots() const { return lent_slots_; }                     ///< slots lent now (0 when not lent); for the log line
+    /// Before a staged prompt read, and (tappa 4b) inside generate.cpp's `lend` BEFORE the relayout and the guard:
+    /// lands the swaps of an earlier adapt() (apply_pending(true): res_ is final, pending_ empty) and waits for the
+    /// tier's two streams, so no copy into a slot is in flight while the stage reads, or the relayout writes, the
+    /// slots.  false with `err` when a fused window is still open (a kernel that may still write the slots: never in
+    /// the design, said with an error and not with a different text) or on a CUDA error.  A closed tier: nothing to
+    /// do, true.  Harmless with the guard already up (nothing pending, idle streams: the prompt's refill runs on the
+    /// cache's queue, not on these streams).
     bool quiesce(std::string& err);
 
     /// Starts the peer's share of one layer: the entries i with kind[i] == 2 (x: n_tok rows of n_embd floats).
@@ -182,6 +217,12 @@ private:
     std::vector<int32_t> res_;                        ///< [n_layers * n_expert] -> peer slot or -1 (sized at open, never reallocated after: res_table() hands it out)
     std::vector<std::pair<int32_t, int32_t>> pending_;   ///< (residency index, slot) once the copies land
     int64_t resident_ = 0, entries_ = 0, experts_ = 0, swaps_ = 0;
+    // ---- STRATA_EP_SPLIT_PREFILL tappa 4b (docs/EP_SPLIT_PREFILL.md s.13.2): the lend guard.  Up between
+    // generate.cpp's lend and refill of the tier's tail; atomic because adapt() runs on the decode's adapt thread
+    // and the guard is set from the request thread (the design never overlaps them: the atomic makes the read
+    // well-defined, not the overlap allowed).  lent_slots_ is plain: written and read on the request thread.
+    std::atomic<bool> lent_{false};
+    int64_t lent_slots_ = 0;
     cudaStream_t stream_ = nullptr, refill_ = nullptr;
     cudaEvent_t refill_ev_ = nullptr;
     float* h_x_ = nullptr;   float* d_x_ = nullptr;   // n_tok x n_embd

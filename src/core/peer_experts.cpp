@@ -1,6 +1,10 @@
 // src/core/peer_experts.cpp - see include/strata/core/peer_experts.hpp.
 // STRATA_EP_SPLIT_PREFILL (docs/EP_SPLIT_PREFILL.md): with the variable on, the prompt path of the peer card's stage
-// reads this cache and res_ as its resident tier (cache(), res_table()); nothing of the tier is lent to it.
+// reads this cache and res_ as its resident tier (cache(), res_table()).  Tappa 4b (s.13.2): the tier's tail is LENT
+// to that prompt path for a prompt read (cache_mut(), res_table_mut(), lend_guard()): generate.cpp lays the stage's
+// prompt buffers in the slots >= first after a quiesce(), marks their pairs kNotResident, and refills the same slots
+// from the source arena before the next decode window.  With the guard up adapt() does not swap and fused_begin()
+// refuses.  Off, none of it is called and the tier is never lent.
 #include "strata/core/peer_experts.hpp"
 
 #include "strata/core/device.hpp"   // primary_device() (STRATA_PRIMARY_DEVICE)
@@ -210,6 +214,8 @@ void PeerExperts::close() {
     stamp_layer_ = -1;
     stream_ = refill_ = nullptr;
     refill_ev_ = nullptr;
+    lent_.store(false, std::memory_order_release);   // tappa 4b: a closed tier lends nothing
+    lent_slots_ = 0;
     device_ = -1;
 }
 
@@ -325,6 +331,10 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
     // guard (ExpertCache::set_slot_guard, Prefill::slot_guard_bytes); it is NOT asked here because strata_prefill links
     // strata_engine (this file), so the call would be circular: the stage falls back to the gather for those experts
     // (slower, the same bits), as docs/EP_SPLIT_PREFILL.md s.10 says.  Not an allocation, not a behavior change.
+    // Tappa 4b (s.13.2): the slots are sized a layer (open_sized), so `slot_offsets()` exists and generate.cpp's
+    // `split_lend_slots` / `relayout` can take the tier's tail (the slots >= first: the pairs picked last here, the
+    // coldest in rank order) as the stage's prompt buffers, as it does with the primary's cache.  The fill order
+    // below is what makes the tail the cold end: slot 0 is the hottest pair the primary does not hold.
     const bool opened = lay.native ? cache_.open_sized(sizes, n_layers, n_expert, err)
                                    : cache_.open((int64_t) pick.size(), n_layers, n_expert, (int64_t) lay.max_blob, err);
     if (!opened) { err = "peer experts: " + err; close(); return false; }
@@ -543,6 +553,9 @@ bool PeerExperts::finish(float* out, std::string& err) {
 bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, std::string& err) {
     // STRATA_PEER_FUSED: the window's kernel may be reading any slot right now; the swaps wait for the next gap
     if (window_open_) return true;
+    // STRATA_EP_SPLIT_PREFILL tappa 4b: the tier's tail holds the stage's prompt buffers (lend_guard): no slot is
+    // free to swap into, and res_ is the prompt's to write; the swaps wait for the refill.  true, nothing queued.
+    if (lent_.load(std::memory_order_acquire)) return true;
     if (!pending_.empty() || max_swaps <= 0) return true;
     const auto t0 = std::chrono::steady_clock::now();
     struct Timed {   // the host time of this call (the decode's adapt thread), whichever way it returns
@@ -598,6 +611,10 @@ bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, 
 }
 
 void PeerExperts::apply_pending(bool wait) {
+    // STRATA_EP_SPLIT_PREFILL tappa 4b: with the lend guard up pending_ is empty by contract (generate.cpp's lend
+    // calls quiesce() -> apply_pending(true) BEFORE raising it, and adapt() queues nothing while it is up), so this
+    // returns on the first line; no guard check here, on purpose: if the contract were ever broken, holding the
+    // entries back would make them land on slots the refill has meanwhile given back to their own pairs.
     if (pending_.empty()) return;
     if (noswitch()) {   // STRATA_PEER_NOSWITCH: the event query works on any device's event
         const cudaError_t q = wait ? cudaEventSynchronize(refill_ev_) : cudaEventQuery(refill_ev_);
@@ -614,11 +631,13 @@ void PeerExperts::apply_pending(bool wait) {
     pending_.clear();
 }
 
-// STRATA_EP_SPLIT_PREFILL (docs/EP_SPLIT_PREFILL.md s.6): before the stage reads the slots.  The window check comes
+// STRATA_EP_SPLIT_PREFILL (docs/EP_SPLIT_PREFILL.md s.6, s.13.2): before the stage reads the slots, and inside
+// generate.cpp's `lend` before the relayout writes the tail and the guard goes up (tappa 4b).  The window check comes
 // FIRST: a fused window's kernel lives on stream_ waiting for a doorbell, and synchronizing that stream would wait with
 // it; the design never calls this with a window open (adapt and the fused server run between decode windows, the prompt
-// after them), so an open window is reported, not waited for.  Then the swaps of an earlier adapt() land (res_ final),
-// and both streams drain: no copy into a slot in flight while the stage reads them.  No allocation, nothing swapped.
+// after them), so an open window is reported, not waited for.  Then the swaps of an earlier adapt() land (res_ final,
+// pending_ empty: what the lend guard relies on), and both streams drain: no copy into a slot in flight while the stage
+// reads them or the relayout overwrites them.  No allocation, nothing swapped.
 bool PeerExperts::quiesce(std::string& err) {
     if (device_ < 0) return true;   // no tier: nothing to quiesce
     if (window_open_.load(std::memory_order_acquire)) {
@@ -842,6 +861,9 @@ bool PeerExperts::fused_map(const void* host, void** dev, std::string& err) {
 bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err) {
     using namespace peer_fused;
     if (!fused_on_) { err = "peer experts: fused: the fused server is off"; return false; }
+    // STRATA_EP_SPLIT_PREFILL tappa 4b: a window over slots that hold the stage's prompt buffers would read them as
+    // experts; the design refills before the first window (generate.cpp), so this is an error, never a different text
+    if (lent_.load(std::memory_order_acquire)) { err = "peer experts: tier slots are lent to the prompt path"; return false; }
     On on(device_);
     // (1) the previous window's kernel must have left: two persistent grids on one card would deadlock each other
     {

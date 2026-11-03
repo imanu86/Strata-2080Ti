@@ -4664,6 +4664,33 @@ int main(int argc, char** argv) {
     }();
     const int64_t ep_K = strata::core::ep_split::env_layer();   // the peer stage's first layer (meaningful with ep_on)
     static const bool ep_trace = strata::core::ep_split::env_trace();
+    // Tappa 4b (docs/EP_SPLIT_PREFILL.md s.13.2): the peer stage's prompt buffers are BORROWED from the tail of the peer
+    // tier's slots for the length of a prompt read (the stage is one more participant of the prompt path's loan, below)
+    // and given back before the reply, instead of a reserve held off the tier for the whole session (tappa 4).
+    // STRATA_EP_SPLIT_LOAN=0 keeps tappa 4's reserve (the A/B arm).  Meaningful with ep_on only.
+    // (not const: the tier's open below keeps tappa 4's reserve, and turns this off, when the tier it projects could
+    // not lend the stage its buffers - a loan nobody can grant must not drop the reserve that took its place)
+    bool ep_loan = ep_on && [] {
+        const char* v = std::getenv("STRATA_EP_SPLIT_LOAN");
+        return v == nullptr || v[0] == '\0' || std::atoi(v) != 0;
+    }();
+    // Tappa 4b A-LM (s.13.3, opt-in STRATA_EP_SPLIT_LM=1): the two stages walk the prompt layer-major (a super-chunk
+    // of up to 32768 tokens per layer), the super-chunk's buffers in the same loan after the chunk's own, the chunk
+    // held at 4096 and the primary's prompt path computing none of its experts on the peer (no set_peer).  Its bits
+    // differ from the chunk-major read by construction (the experts are summed by id): compared only with another
+    // layer-major run, never asked to be identical to today's.  Needs the loan - a REAL one: it is turned off again
+    // (with a line) where the loan cannot exist: --no-prefill-borrow (pf_borrow, below), a tier that cannot lend
+    // (peer.open), or a scan that left CUDA0 or the EP part without a loan (after the chunk scan).  Off, the chunk-major
+    // read with set_peer runs as without the variable, so the walk's side effects never apply without the walk.
+    bool ep_lm = ep_loan && [] {
+        const char* v = std::getenv("STRATA_EP_SPLIT_LM");
+        return v != nullptr && std::atoi(v) != 0;
+    }();
+    if (ep_on && !ep_loan) {
+        const char* v = std::getenv("STRATA_EP_SPLIT_LM");
+        if (v != nullptr && std::atoi(v) != 0)
+            std::fprintf(stderr, "strata ep-split: STRATA_EP_SPLIT_LM=1 needs the tier loan (STRATA_EP_SPLIT_LOAN=1): ignored\n");
+    }
     strata::core::NativeEmbed native_embed;
     if (native_pack) {
         if (o.native_preset.empty() || o.spec < 2 || o.keep_canonical ||
@@ -5568,6 +5595,15 @@ int main(int argc, char** argv) {
     // for buffers that cannot be priced exactly yet because the sessions do not exist.  `plan_lend` uses the
     // exact `Prefill::bytes_needed` as soon as it can.
     const bool pf_borrow = !o.no_prefill_borrow && !o.expert_profile.empty();
+    // Tappa 4b A-LM: the layer-major walk lives in the loan (the super-chunk's region is set after every lend), and the
+    // loan lives in the prompt path's borrowing: without pf_borrow there is no part to lend, no region, and lm_prepare
+    // declines with "a peer GPU" - the walk's side effects (the chunk held at 4096, no set_peer) would then apply to a
+    // read that stays chunk-major.  Off here, before the chunk cap and the set_peer decision see it.
+    if (ep_lm && !pf_borrow) {
+        ep_lm = false;
+        std::fprintf(stderr, "strata ep-split: STRATA_EP_SPLIT_LM=1 needs the prompt path's loan of cache slots (not with "
+                             "--no-prefill-borrow): ignored, the stages read chunk-major with the peer's prompt share\n");
+    }
     // (#340: the estimate predates the streamed ring: from 1024-token chunks the prompt path also holds a ring of
     // whole expert blobs, which a split without borrowing sizes at 96 (Prefill::set_ring_override below) and books
     // here - without it a `--no-prefill-borrow` split filled the cards and the draft head no longer fit)
@@ -8132,36 +8168,105 @@ int main(int argc, char** argv) {
             return 1;
         }
         const auto tp0 = Clock::now();
-        // STRATA_EP_SPLIT_PREFILL: the stage's prompt path owns its buffers on the peer card (no loan from the peer
-        // tier: its slots are the decode's), so the peer's reserve rises by what they need before the tier is filled
-        // (s.4b).  Below 128 slots left the tier refuses to open, with its own message.
+        // STRATA_EP_SPLIT_PREFILL, tappa 4 (STRATA_EP_SPLIT_LOAN=0): the stage's prompt path owns its buffers on the
+        // peer card, so the peer's reserve rises by what they need before the tier is filled (s.4b).  Below 128 slots
+        // left the tier refuses to open, with its own message.
+        // Tappa 4b (the default, s.13.2): the buffers are borrowed from the tier's tail during a prompt read and given
+        // back before the reply, like the primary's own loan: no reserve for them (the tier is the one the mega-kernel
+        // alone has, less the stage's dense weights and session).  STRATA_EP_SPLIT_RESERVE_MIB=N then forces N MiB of
+        // reserve ON TOP of --peer-reserve-mib (default 0); without the loan it is tappa 4's hand-set reserve as before.
+        // The loan needs the prompt path's borrowing (pf_borrow); without it the stage keeps tappa 4's reserve.
         int64_t ep_reserve_add = 0;
+        bool ep_loan_reserve = ep_loan && pf_borrow;
         if (ep_on) {
             uint64_t pb = 0;
             {
                 const strata::core::OnDevice on(ep_stage->dev);
                 pb = strata::prefill::Prefill::bytes_needed_owned(g, ep_stage->ss, o.prefill_chunk, srcp != nullptr);
             }
-            ep_reserve_add = strata::core::ep_split::reserve_add_mib(pb);
-            std::fprintf(stderr, "%s\n", strata::core::ep_split::line_on(ep_K, g.n_layers, ep_stage->dev,
-                                                                         (int64_t) (pb >> 20), o.peer_reserve_mib,
-                                                                         o.peer_reserve_mib + ep_reserve_add).c_str());
+            // The reserve is dropped BEFORE the tier is filled and before the chunk scan says whether the tier can lend
+            // at all: a tier that then cannot (the scan leaves the EP part with first < 0) would make the stage allocate
+            // its buffers on a card filled up to --peer-reserve-mib, without the reserve tappa 4 would have held - the
+            // chunk falls for every participant (own_fits), or init fails with "do not fit".  So the tier the open
+            // below will build is projected here with its own arithmetic (free VRAM less the reserve, --peer-slots,
+            // a slot = max_blob bytes - the count the scan's split_lend_slots uses) against the loan the scan will ask
+            // of it: with --prefill N the chunk itself (the scan only walks down from auto's ceiling; an explicit chunk
+            // must fit as it is), with auto the 1024-token chunk auto falls back to when nothing is lendable.  A tier
+            // that cannot lend that keeps tappa 4's reserve, and the loan (and the walk) are off: said in one line.
+            if (ep_loan_reserve) {
+                const auto& lay = strata::kernels::cpu::expert_layout();
+                const strata::core::OnDevice on(ep_stage->dev);
+                size_t fb = 0, tb = 0;
+                if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); fb = 0; }
+                const uint64_t reserve = (uint64_t) std::max<int64_t>(o.peer_reserve_mib, 128) << 20;   // as PeerExperts::open
+                uint64_t budget = (uint64_t) fb > reserve ? (uint64_t) fb - reserve : 0;
+                if (o.peer_slots > 0) budget = std::min<uint64_t>(budget, (uint64_t) o.peer_slots * lay.max_blob);
+                const int64_t proj_chunk = o.prefill_auto ? std::min<int64_t>(1024, o.prefill_chunk) : o.prefill_chunk;
+                const uint64_t need = proj_chunk == o.prefill_chunk
+                                          ? pb
+                                          : strata::prefill::Prefill::bytes_needed_owned(g, ep_stage->ss, proj_chunk, srcp != nullptr);
+                const int64_t lend_pct = [] {   // the scan's kAutoLendPct (its own block scope: the same rule)
+                    const char* v = std::getenv("STRATA_PREFILL_LEND_PCT");
+                    return v ? (int64_t) std::atoi(v) : (int64_t) (strata::prefill::Prefill::pinned_share() >= 0.9 ? 90 : 85);
+                }();
+                const uint64_t floor_b = 128ull * lay.max_blob;   // the scan's 128-slot floor
+                const bool lendable = need + floor_b <= budget && (!o.prefill_auto || need * 100 <= (uint64_t) lend_pct * budget);
+                if (!lendable) {
+                    std::fprintf(stderr, "strata ep-split: the peer tier CUDA%d will have about %llu MiB of slots (%llu MiB free, "
+                                         "reserve %lld MiB): it cannot lend the stage its %lld-token prompt buffers (%llu MiB%s) "
+                                         "and keep 128 slots, so tappa 4's reserve stays (STRATA_EP_SPLIT_LOAN off for this run%s)\n",
+                                 ep_stage->dev, (unsigned long long) (budget >> 20), (unsigned long long) ((uint64_t) fb >> 20),
+                                 (long long) o.peer_reserve_mib, (long long) proj_chunk, (unsigned long long) (need >> 20),
+                                 (o.prefill_auto ? ", at most " + std::to_string(lend_pct) + "% of the tier" : std::string{}).c_str(),
+                                 ep_lm ? "; STRATA_EP_SPLIT_LM=1 ignored with it" : "");
+                    ep_loan_reserve = false;
+                    ep_loan = false;
+                    ep_lm = false;
+                }
+            }
+            if (ep_loan_reserve) {
+                const char* v = std::getenv("STRATA_EP_SPLIT_RESERVE_MIB");
+                ep_reserve_add = v != nullptr && v[0] != '\0' ? std::max<int64_t>(0, std::atoll(v)) : 0;
+                std::fprintf(stderr, "strata ep-split: on: layers [%lld, %lld) on CUDA%d; prompt buffers (%lld MiB at %lld tokens) "
+                                     "borrowed from the peer tier's slots during a prompt read, given back before the reply "
+                                     "(reserve %lld MiB%s; STRATA_EP_SPLIT_LOAN=0 keeps a reserve for them instead)\n",
+                             (long long) ep_K, (long long) g.n_layers, ep_stage->dev, (long long) (pb >> 20),
+                             (long long) o.prefill_chunk, (long long) (o.peer_reserve_mib + ep_reserve_add),
+                             ep_reserve_add > 0 ? ", STRATA_EP_SPLIT_RESERVE_MIB added" : "");
+                if (ep_lm)
+                    std::fprintf(stderr, "strata ep-split: STRATA_EP_SPLIT_LM=1: the stages walk the prompt layer-major (chunk held "
+                                         "at 4096, the super-chunk's buffers in the same loan); its bits differ from the "
+                                         "chunk-major read by construction: compare it with a layer-major run only\n");
+            } else {
+                ep_reserve_add = strata::core::ep_split::reserve_add_mib(pb);
+                std::fprintf(stderr, "%s\n", strata::core::ep_split::line_on(ep_K, g.n_layers, ep_stage->dev,
+                                                                             (int64_t) (pb >> 20), o.peer_reserve_mib,
+                                                                             o.peer_reserve_mib + ep_reserve_add).c_str());
+            }
             // The tier is filled from what is free NOW minus the reserve: the stage's dense weights and session, taken
             // before this point, are slots the tier does not get either (about 1,450 at 1.66 MiB a slot for 1.75 GiB of
-            // dense weights and a 0.6 GiB session), on top of the prompt buffers above.  Pairs that leave the tier are
-            // computed by the CPU in the decode, which rounds differently: the reply can differ from the same engine
-            // without the variable.  Said here with the --peer-reserve-mib that gives a run WITHOUT the variable the
-            // same tier (the comparison the plan asks for: docs/EP_SPLIT_PREFILL.md s.12).
+            // dense weights and a 0.6 GiB session), on top of the prompt buffers' reserve when there is one.  Pairs that
+            // leave the tier are computed by the CPU in the decode, which rounds differently: the reply can differ from
+            // the same engine without the variable.  Said here with the --peer-reserve-mib that gives a run WITHOUT the
+            // variable the same tier (the comparison the plan asks for: docs/EP_SPLIT_PREFILL.md s.12, s.13.8).
             {
                 const strata::core::OnDevice on(ep_stage->dev);
                 size_t fb = 0, tb = 0;
                 cudaMemGetInfo(&fb, &tb);
                 const double taken_mib = std::max(0.0, ep_free0_gib * 1024.0 - (double) fb / 1048576.0);
-                std::fprintf(stderr, "strata ep-split: CUDA%d: the stage holds %.0f MiB of dense weights, session and streams "
-                                     "before the peer tier, plus %lld MiB of reserve for its prompt buffers: the tier is "
-                                     "smaller by both (the same tier without the variable: --peer-reserve-mib %lld)\n",
-                             ep_stage->dev, taken_mib, (long long) ep_reserve_add,
-                             (long long) (o.peer_reserve_mib + ep_reserve_add + (int64_t) (taken_mib + 0.5)));
+                if (ep_loan_reserve)
+                    std::fprintf(stderr, "strata ep-split: CUDA%d: the stage holds %.0f MiB of dense weights, session and streams "
+                                         "before the peer tier: the tier is smaller by that (the same tier without the variable: "
+                                         "--peer-reserve-mib %lld); its prompt buffers are borrowed from the tier's tail during a "
+                                         "prompt read, not reserved\n",
+                                 ep_stage->dev, taken_mib,
+                                 (long long) (o.peer_reserve_mib + ep_reserve_add + (int64_t) (taken_mib + 0.5)));
+                else
+                    std::fprintf(stderr, "strata ep-split: CUDA%d: the stage holds %.0f MiB of dense weights, session and streams "
+                                         "before the peer tier, plus %lld MiB of reserve for its prompt buffers: the tier is "
+                                         "smaller by both (the same tier without the variable: --peer-reserve-mib %lld)\n",
+                                 ep_stage->dev, taken_mib, (long long) ep_reserve_add,
+                                 (long long) (o.peer_reserve_mib + ep_reserve_add + (int64_t) (taken_mib + 0.5)));
             }
         }
         if (!peer.open(o.peer_device, profile, xcache, *srcp, g.n_layers, g.n_expert,
@@ -9088,6 +9193,18 @@ int main(int argc, char** argv) {
                          (unsigned long long) pin_mib);
         }
     }
+    // Tappa 4b A-LM (STRATA_EP_SPLIT_LM=1, s.13.3): the chunk stops at 4096: the loan must hold the chunk's buffers AND
+    // the super-chunk's (T 4096 / S 32768: ~3.0 GiB, within what CUDA0's cache can lend; at 7168 it does not fit).
+    if (ep_lm) {
+        constexpr int64_t kLmChunkCap = 4096;
+        o.prefill_auto_cap = o.prefill_auto_cap > 0 ? std::min<int64_t>(o.prefill_auto_cap, kLmChunkCap) : kLmChunkCap;
+        o.prefill_auto_max = std::min<int64_t>(o.prefill_auto_max, kLmChunkCap);
+        if (o.prefill_chunk > kLmChunkCap) {
+            std::fprintf(stderr, "strata ep-split: STRATA_EP_SPLIT_LM=1: prompt chunk %lld -> %lld tokens (the super-chunk's "
+                                 "buffers share the loan with the chunk's)\n", (long long) o.prefill_chunk, (long long) kLmChunkCap);
+            o.prefill_chunk = kLmChunkCap;
+        }
+    }
     if (o.prefill_auto_cap > 0) auto_ceiling = std::min<int64_t>(auto_ceiling, o.prefill_auto_cap);   // #1630
     // The auto scan used to walk a fixed list of sizes - 32768, 16384, 8192, 6144, ... - and take the first that
     // fit.  That list is coarse exactly where a rig needs it: this one affords ~8,700 tokens and was handed 8192,
@@ -9929,6 +10046,15 @@ int main(int argc, char** argv) {
             int64_t lent_chunk = 0;
             std::vector<std::pair<int32_t, int32_t>> lent;
             int64_t rc_floor = 0;          // STRATA_RAM_CORE: the fixed core's slots [0, rc_floor) are never lent
+            // the residency table whose entries name slots of THIS cache: `host_res` for CUDA0 and the split stages
+            // (one table, slot numbers per owning cache: see above), the peer tier's own table (PeerExperts::
+            // res_table_mut) for the EP stage's part (tappa 4b: lend marks and refill restores entries there, and
+            // res_upload does not touch it - the peer builds its window table from it at every fused_begin)
+            int32_t* res = nullptr;
+            // A-LM: the super-chunk (tokens) the loan in force was priced for (lm_S_for at the lend), 0 when the loan
+            // holds no region: a later segment of the request whose super-chunk would be larger re-lends, so the
+            // region is never the first segment's size for the whole request
+            int64_t lent_lm_S = 0;
         };
         // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
         // per layer), otherwise max_blob each.
@@ -9936,11 +10062,38 @@ int main(int argc, char** argv) {
             return strata::program::split_lend_slots(xc.slots(), xc.bytes(), xc.slot_offsets(),
                                                      (uint64_t) strata::kernels::cpu::expert_layout().max_blob, need);
         };
+        // Tappa 4b A-LM (STRATA_EP_SPLIT_LM=1, s.13.3): the layer-major super-chunk's device buffers come out of the SAME
+        // loan, at its end, after the chunk's own (Prefill::set_lm_region after every lend), so every part's loan is
+        // priced for both.  S: the super-chunk, 32768 tokens (prefill.cpp's kLmDefaultOnTokens) at the start's scan,
+        // the request's prompt rounded up to the chunk once it is known (lend sets lm_tokens_hint) - a multiple of
+        // the chunk in both cases.  A prompt under two chunks gets NO region (0): lm_prepare declines it anyway ("a
+        // short prompt": min_s = 2T, prefill.cpp), so a region for it would only turn slots of every part into
+        // streamed experts for a read that stays chunk-major (the 4K bench).  STRATA_PREFILL_LM_TOKENS / _LM_FORCE
+        // lower lm_prepare's floor (T / 1): then one chunk is enough.  Off: 0 bytes, and nothing here changes.
+        int64_t lm_tokens_hint = 0;
+        static const bool lm_one_chunk_ok = [] {   // lm_prepare's min_s is T or 1 instead of 2T (prefill.cpp)
+            const char* t = std::getenv("STRATA_PREFILL_LM_TOKENS");
+            const char* f = std::getenv("STRATA_PREFILL_LM_FORCE");
+            return (t != nullptr && std::atoll(t) > 0) || (f != nullptr && f[0] == '1');
+        }();
+        auto lm_S_for = [&](int64_t c) -> int64_t {
+            if (!ep_lm || c <= 0) return 0;
+            const int64_t cap = std::max<int64_t>(c, 32768 / c * c);
+            if (lm_tokens_hint <= 0) return cap;
+            if (lm_tokens_hint < 2 * c && !lm_one_chunk_ok) return 0;   // a short prompt: no walk, no region
+            return std::max<int64_t>(c, std::min<int64_t>(cap, (lm_tokens_hint + c - 1) / c * c));
+        };
+        auto lm_bytes_for = [&](int64_t c) -> uint64_t {
+            const int64_t S = lm_S_for(c);
+            return S > 0 ? strata::prefill::Prefill::lm_bytes_needed(g, S, c) : 0;
+        };
+        // what a part's loan must hold beyond the chunk's own buffers: the super-chunk's region, 256-aligned (A-LM; 0 otherwise)
+        auto lm_extra_for = [&](int64_t c) -> uint64_t { return ep_lm ? 256 + lm_bytes_for(c) : 0; };
         auto part_slots = [&](const PfPart& p, int64_t c) -> int64_t {
             // counted on the part's own device, as `init` and the other `bytes_needed` callers in this block are: the
             // count follows `init`, whose per-device choices (prompt_f16) are the stage device's, not CUDA0's
             const strata::core::OnDevice on(p.dev);
-            return cache_slots_for(*p.cache, strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr));
+            return cache_slots_for(*p.cache, strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr) + lm_extra_for(c));
         };
         auto part_bytes = [&](const PfPart& p, int32_t first) -> uint64_t {
             strata::core::ExpertCache& xc = *p.cache;
@@ -9995,6 +10148,16 @@ int main(int argc, char** argv) {
         }
         std::vector<PfPart> pf_parts;
         int64_t pf_plan_chunk = 0;   // #2824: the host-aware plan's chunk for prompts longer than o.prefill_chunk (0: none)
+        // Tappa 4b (s.13.2): the EP stage's part, LAST in pf_parts (index ep_pi; SIZE_MAX: none - the variable or the
+        // loan off, or nothing to borrow from): its cache is the peer tier, its table the peer's res_, its layers ALL
+        // of them (lb 0, le n_layers): the tier holds pairs of every layer, and a pair of any layer that sits in a
+        // lent slot leaves the table (has() says no: the primary's PeerPrefill does not plan it on the peer, the
+        // stage streams it from RAM).  The index-keyed uses below (own_fits, init_prompt_paths, rc_floor) address
+        // CUDA0 and the split stages by position, which the EP part - after them - does not disturb.
+        size_t ep_pi = SIZE_MAX;
+        auto ep_part = [&]() -> PfPart* { return ep_pi < pf_parts.size() ? &pf_parts[ep_pi] : nullptr; };
+        auto ep_has_loan = [&]() -> bool { const PfPart* p = ep_part(); return p != nullptr && p->first >= 0; };
+        auto is_ep_part = [&](const PfPart& p) -> bool { return ep_pi < pf_parts.size() && &p == &pf_parts[ep_pi]; };
         // a cache too small to lend the prompt path its buffers would make it allocate them on top - on a card
         // whose cache already filled its reserve, that is the over-subscription the auto sizing avoids - so the
         // chunk is the largest one EVERY participant can lend (a smaller chunk only reads slower)
@@ -10003,6 +10166,12 @@ int main(int argc, char** argv) {
             for (auto& st : stages)
                 pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});
             for (size_t i = 0; i < pf_parts.size() && i < rc_floor.size(); ++i) pf_parts[i].rc_floor = rc_floor[i];
+            for (PfPart& p : pf_parts) p.res = host_res.data();
+            if (ep_loan && peer.valid()) {
+                ep_pi = pf_parts.size();
+                pf_parts.push_back({&peer.cache_mut(), &ep_stage->ss, &ep_stage->sp, ep_stage->dev, 0, g.n_layers, -1, -1, 0, {}});
+                pf_parts[ep_pi].res = peer.res_table_mut();
+            }
             // The two tests plan_lend makes for CUDA0 alone, one participant at a time: a loan must leave the
             // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
@@ -10049,7 +10218,8 @@ int main(int argc, char** argv) {
                     if (p.cache == &xcache) budget = std::min(budget, std::max<int64_t>(0, xcache.slots() - el_lend_floor));
                     budget = std::min(budget, std::max<int64_t>(0, p.cache->slots() - p.rc_floor));   // STRATA_RAM_CORE
                     const uint64_t avail = part_bytes(p, (int32_t) (p.cache->slots() - budget));
-                    const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr);
+                    const uint64_t nonring = strata::prefill::Prefill::bytes_needed_no_ring(g, *p.ses, c, srcp != nullptr) +
+                                             lm_extra_for(c);   // (A-LM: the super-chunk's region is not ring either)
                     room = std::min(room, (int64_t) ((avail - std::min(avail, nonring)) / (uint64_t) kBlob));
                 }
                 return room;
@@ -10117,9 +10287,16 @@ int main(int argc, char** argv) {
                 const int64_t ring0 = small0 >= chunk ? 0 : ring_room(chunk, nullptr, cap0);
                 auto restore_ring = [&] { strata::prefill::Prefill::set_ring_budget((int) ring0, small0); };
                 restore_ring();
+                // Tappa 4b: the plan's tiers are CUDA0's cache and the split stages', as before the EP part existed.  The
+                // peer tier's pairs are NOT left out of the RAM copy (stage_pairs lists the split stages and the helper
+                // tiers only), so they are already counted in resident_bytes: adding the tier to gpu_cache would take
+                // them off the file tier twice, and adding its loan to lend_of would price it as unbacked (lend_kept is
+                // CUDA0's region: resident_lent_slots) although its experts come back from RAM.  The VRAM fit (fits)
+                // still asks every participant, the EP part included.
                 uint64_t gc_bytes = 0;
                 int64_t gc_slots = 0;
                 for (const PfPart& p : pf_parts) {
+                    if (is_ep_part(p)) continue;
                     gc_bytes += (uint64_t) std::max<int64_t>(0, (int64_t) p.cache->bytes());
                     gc_slots += p.cache->slots();
                 }
@@ -10129,6 +10306,7 @@ int main(int argc, char** argv) {
                         bytes = 0;
                         slots = 0;
                         for (const PfPart& p : pf_parts) {
+                            if (is_ep_part(p)) continue;   // (its loan is RAM-backed: see above)
                             const int64_t k = part_slots(p, c);
                             if (k <= 0) continue;
                             slots += k;
@@ -10160,6 +10338,15 @@ int main(int argc, char** argv) {
                                  (long long) chunk_vram, (long long) alone, dev, prop.name,
                                  (long long) p.cache->slots(), (long long) alone,
                                  (long long) part_slots(p, alone), pct.c_str());
+                    // tappa 4b: the EP part is the peer tier, not a split stage - the helper-tier advice below does not
+                    // apply (a helper tier and --peer-device exclude each other); what frees its slots is said instead
+                    if (is_ep_part(p)) {
+                        std::fprintf(stderr, "strata serve:   that is the peer tier (STRATA_EP_SPLIT_PREFILL): the stage's prompt "
+                                             "buffers are borrowed from its tail; a lower --peer-reserve-mib or a higher "
+                                             "--peer-slots leaves it more to lend, and STRATA_EP_SPLIT_LOAN=0 keeps a "
+                                             "reserve for them instead of a loan (docs/EP_SPLIT_PREFILL.md s.13.2)\n");
+                        continue;
+                    }
                     // the helper tiers start at CUDA1 without a split (and are enabled in order)
                     std::fprintf(stderr, "strata serve:   a card this small can serve as a helper expert cache "
                                          "instead of a split stage: without --layer-split, with %s "
@@ -10199,8 +10386,10 @@ int main(int argc, char** argv) {
                     const char* v = std::getenv("STRATA_SPLIT_OWN_BUFFERS");
                     return v == nullptr || v[0] != '0';
                 }();
-                if (pf_parts.size() > 1 && own_ok) {
+                // (tappa 4b: the EP part does not make a split of one GPU - CUDA0 keeps its loan exactly as before)
+                if (pf_parts.size() - (ep_pi != SIZE_MAX ? 1 : 0) > 1 && own_ok) {
                     for (PfPart& p : pf_parts) {
+                        if (is_ep_part(p)) continue;   // tappa 4b: the EP stage borrows from the tier - that is the point (s.13.2)
                         const strata::core::OnDevice on(p.dev);
                         size_t fb = 0, tb = 0;
                         if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
@@ -10265,6 +10454,19 @@ int main(int argc, char** argv) {
         borrow = nullptr;
         borrow_bytes = 0;
 #endif
+        // Tappa 4b A-LM: the walk needs BOTH stages' loans (the super-chunk's region sits in each; a stage without one
+        // declines with "a peer GPU" and the whole chain reads chunk-major).  A scan that left CUDA0 or the EP part
+        // without a loan (nothing lendable, an explicit chunk no part can lend, Metal) turns the walk off here, before
+        // set_peer decides: the read is then the chunk-major one with the peer's prompt share, as without the variable.
+        // The chunk cap (4096) was applied before the scan and stays: said.  part_slots priced the regions into every
+        // part's `first`; lend re-prices without them (lm_extra_for is 0 from here), so the loans only get smaller.
+        if (ep_lm && (pf_parts.empty() || pf_parts[0].first < 0 || !ep_has_loan())) {
+            ep_lm = false;
+            std::fprintf(stderr, "strata ep-split: STRATA_EP_SPLIT_LM=1: %s has no loan of cache slots after the chunk scan, so "
+                                 "the stages read chunk-major with the peer's prompt share (the chunk stays at %lld tokens)\n",
+                         pf_parts.empty() || pf_parts[0].first < 0 ? "CUDA0" : "the peer tier",
+                         (long long) o.prefill_chunk);
+        }
         bool any_loan = borrow != nullptr;
         for (size_t i = 1; i < pf_parts.size(); ++i) any_loan = any_loan || pf_parts[i].first >= 0;
         if (nib::any_on()) {
@@ -10302,11 +10504,28 @@ int main(int argc, char** argv) {
             if (borrow != nullptr)
                 std::fprintf(stderr, "strata serve: the prompt path borrows %lld CUDA0 cache slots (%.2f GiB)\n",
                              (long long) (xcache.slots() - lend_first), (double) borrow_bytes / 1073741824.0);
-            for (size_t i = 1; i < pf_parts.size(); ++i)   // one loan per stage, from that stage's own cache
-                if (pf_parts[i].first >= 0) std::fprintf(stderr, "strata serve:   CUDA%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
+            for (size_t i = 1; i < pf_parts.size(); ++i) {   // one loan per stage, from that stage's own cache
+                if (pf_parts[i].first < 0) continue;
+                if (i == ep_pi) {
+                    // tappa 4b: the EP stage's loan is the peer tier's tail.  K: the pairs of the primary's layers [0, ep_K)
+                    // that live there now - the primary's chunk-major read would have had the peer compute them (PeerPrefill)
+                    // and streams them from RAM instead while they are lent (s.13.2 point 2; <= 4% of a chunk, S)
+                    const PfPart& p = pf_parts[i];
+                    int64_t k_prim = 0;
+                    for (int64_t l = 0; l < ep_K; ++l)
+                        for (int64_t ex = 0; ex < g.n_expert; ++ex)
+                            if (p.res[(size_t) (l * g.n_expert + ex)] >= p.first) ++k_prim;
+                    std::fprintf(stderr, "strata serve:   CUDA%d prompt path borrows %lld of its %lld tier slots (%.2f GiB), %lld of them "
+                                         "pairs of layers [0, %lld) the primary's chunk-major read would have had computed there\n",
+                                 p.dev, (long long) (p.cache->slots() - p.first), (long long) p.cache->slots(),
+                                 (double) part_bytes(p, p.first) / 1073741824.0, (long long) k_prim, (long long) ep_K);
+                    continue;
+                }
+                std::fprintf(stderr, "strata serve:   CUDA%d prompt path borrows %lld of its %lld slots (%.2f GiB)\n",
                              pf_parts[i].dev, (long long) (pf_parts[i].cache->slots() - pf_parts[i].first),
                              (long long) pf_parts[i].cache->slots(),
                              (double) part_bytes(pf_parts[i], pf_parts[i].first) / 1073741824.0);
+            }
             // A split's RAM copy keeps the experts of the slots the prompt path borrows (the lend regions sized above):
             // every borrowed expert not kept is streamed from the GGUF mmap during every chunk.  Say both counts side
             // by side - they used to differ whenever a ring override (STRATA_SPLIT_RING) was set, because the regions
@@ -10342,15 +10561,23 @@ int main(int argc, char** argv) {
                                          ? o.prefill_auto_max : 0;
         auto init_prompt_paths = [&]() -> int {   // 0: ready; 1: failed (err set); 2: failed with "do not fit"
             // STRATA_EP_SPLIT_PREFILL: the peer stage's prompt path first (CUDA0's hands its chunks to it): layers
-            // [ep_K, last], its own session, the peer tier's cache and residency table as its resident tier, its own
-            // buffers (no loan: the tier's slots are never lent), on its stream (s.3.2)
+            // [ep_K, last], its own session, the peer tier's cache and residency table as its resident tier, on its
+            // stream (s.3.2).  Its buffers: tappa 4b, the tail of the tier from the EP part's `first` on (lent per
+            // request by `lend`, refilled by `refill`, like a split stage's); tappa 4 (STRATA_EP_SPLIT_LOAN=0, or
+            // nothing to borrow), its own on the card's reserve (nullptr, 0).
             if (ep_on) {
                 GpuStage& ep = *ep_stage;
                 ep.sp.set_stage(ep_K, -1, nullptr);
                 const strata::core::OnDevice on(ep.dev);
                 if (share_pool) ep.sp.set_cpu_pool(&pool);   // one stage at a time takes it for a chunk (prefill.cpp)
+                void* ep_sb = nullptr;
+                uint64_t ep_sbb = 0;
+                if (const PfPart* pp = ep_part(); pp != nullptr && pp->first >= 0) {
+                    ep_sb = peer.cache_mut().device_slot(pp->first);
+                    ep_sbb = part_bytes(*pp, pp->first);
+                }
                 if (!ep.sp.init(ep.wt, g, ep.ss, srcp, &peer.cache(), peer.res_table(), o.prefill_chunk, (void*) ep.stream,
-                                err, nullptr, 0)) {
+                                err, ep_sb, ep_sbb)) {
                     err = "EP prefill, CUDA" + std::to_string(ep.dev) + " prompt path: " + err;
                     return err.find("do not fit") != std::string::npos ? 2 : 1;
                 }
@@ -10401,7 +10628,9 @@ int main(int argc, char** argv) {
                         return false;
                     }
                 }
-                if (ep_on) {   // the peer stage's own buffers against its card's free VRAM (the peer's reserve)
+                // the peer stage's own buffers against its card's free VRAM (the peer's reserve); tappa 4b: with the
+                // tier's loan it has no own buffers and the loan was sized by the scan, like the other participants'
+                if (ep_on && !ep_has_loan()) {
                     const strata::core::OnDevice on(ep_stage->dev);
                     size_t fb = 0, tb = 0;
                     cudaMemGetInfo(&fb, &tb);
@@ -10483,12 +10712,22 @@ int main(int argc, char** argv) {
                 size_t fb = 0, tb = 0;
                 cudaMemGetInfo(&fb, &tb);
                 const uint64_t owned = strata::prefill::Prefill::bytes_needed_owned(g, ep_stage->ss, o.prefill_chunk, srcp != nullptr);
-                std::fprintf(stderr, "strata ep-split: CUDA%d: prompt buffers %llu MiB at the %lld-token chunk, %llu MiB free on the "
-                                     "card after them (the reserve was sized at %lld tokens; STRATA_EP_SPLIT_RESERVE_MIB=%llu "
-                                     "would give the peer tier the rest)\n",
-                             ep_stage->dev, (unsigned long long) (owned >> 20), (long long) o.prefill_chunk,
-                             (unsigned long long) (fb >> 20), (long long) (o.prefill_auto ? o.prefill_auto_max : o.prefill_chunk),
-                             (unsigned long long) ((owned + strata::core::ep_split::kReserveHeadroomBytes + ((1ull << 20) - 1)) >> 20));
+                if (const PfPart* pp = ep_part(); pp != nullptr && pp->first >= 0)
+                    // tappa 4b: no reserve was raised; what is free now is the card's --peer-reserve-mib (less the peer's own
+                    // prompt-share buffers) and stays so: the stage's buffers live in the tier's lent tail during a prompt
+                    std::fprintf(stderr, "strata ep-split: CUDA%d: prompt buffers %llu MiB at the %lld-token chunk, laid out in the "
+                                         "peer tier's last %lld slots (%.2f GiB) during a prompt read; %llu MiB free on the card "
+                                         "beside the tier\n",
+                                 ep_stage->dev, (unsigned long long) (owned >> 20), (long long) o.prefill_chunk,
+                                 (long long) (pp->cache->slots() - pp->first), (double) part_bytes(*pp, pp->first) / 1073741824.0,
+                                 (unsigned long long) (fb >> 20));
+                else
+                    std::fprintf(stderr, "strata ep-split: CUDA%d: prompt buffers %llu MiB at the %lld-token chunk, %llu MiB free on the "
+                                         "card after them (the reserve was sized at %lld tokens; STRATA_EP_SPLIT_RESERVE_MIB=%llu "
+                                         "would give the peer tier the rest)\n",
+                                 ep_stage->dev, (unsigned long long) (owned >> 20), (long long) o.prefill_chunk,
+                                 (unsigned long long) (fb >> 20), (long long) (o.prefill_auto ? o.prefill_auto_max : o.prefill_chunk),
+                                 (unsigned long long) ((owned + strata::core::ep_split::kReserveHeadroomBytes + ((1ull << 20) - 1)) >> 20));
             }
             if (!o.mtp.empty()) {
                 // the peer stage's final residual rows of a chunk cross to CUDA0 into this buffer for the drafter's
@@ -10506,7 +10745,14 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        if (peer.valid() && o.peer_prefill_rows != 0) {
+        // Tappa 4b A-LM (STRATA_EP_SPLIT_LM=1): the primary's prompt path computes none of its experts on the peer (no
+        // PeerPrefill: a stage with one has no layer-major form, prefill.cpp lm_prepare); the pairs of [0, ep_K) its
+        // cache lacks stream from RAM once per super-chunk instead of once per chunk - which is the walk's point.
+        if (peer.valid() && o.peer_prefill_rows != 0 && ep_lm)
+            std::fprintf(stderr, "strata ep-split: STRATA_EP_SPLIT_LM=1: the primary's prompt path computes none of its experts "
+                                 "on the peer (no peer prompt share): layers [0, %lld) walk layer-major and stream what "
+                                 "CUDA0's cache lacks from RAM once per super-chunk\n", (long long) ep_K);
+        if (peer.valid() && o.peer_prefill_rows != 0 && !ep_lm) {
             const int64_t rows = o.peer_prefill_rows > 0 ? o.peer_prefill_rows : o.prefill_chunk * K / 2;
             if (!sp.set_peer(&peer, rows, err)) {
                 std::fprintf(stderr, "strata serve: %s - the prompt path stays on the primary GPU\n", err.c_str());
@@ -16459,7 +16705,7 @@ int main(int argc, char** argv) {
                     const int np = refill_parts && !refill_blocking() ? srcp->blob_parts(i / g.n_expert, i % g.n_expert, parts) : 0;
                     if (np > 0) {   // the GGUF read in place: the tensors' pieces go from the mapping to the slot, no assembled copy
                         if (!p.cache->fill_slot_queued_parts(slot, parts, np, e)) return false;
-                        host_res[(size_t) i] = slot;
+                        p.res[(size_t) i] = slot;   // (the part's own table: host_res, or the peer tier's for the EP part)
                         continue;
                     }
                     const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
@@ -16468,7 +16714,7 @@ int main(int argc, char** argv) {
                                                             : p.cache->fill_slot_queued(slot, b, e, nb)))
                         return false;
                     if (!refill_blocking()) srcp->note_async_read(b, nullptr);   // #1237
-                    host_res[(size_t) i] = slot;
+                    p.res[(size_t) i] = slot;
                 }
                 return true;
             };
@@ -16482,6 +16728,13 @@ int main(int argc, char** argv) {
 #endif
                 p.lent.clear();
                 p.lent_chunk = 0;
+                // A-LM: the slots are experts again, so the super-chunk's region in them is gone (prefill.hpp's contract:
+                // null when the stage reads without a loan; the next lend sets it again)
+                if (ep_lm) p.sp->set_lm_region(nullptr, 0);
+                p.lent_lm_S = 0;
+                // tappa 4b: the peer tier's tail is whole again (the pairs are back in their slots, res_ restored): the
+                // tier may adapt and open fused windows again
+                if (is_ep_part(p)) peer.lend_guard(false);
                 return true;
             };
             auto refill_one = [&](PfPart& p, std::string& e) -> bool {
@@ -16507,6 +16760,9 @@ int main(int argc, char** argv) {
                         if (!p.lent.empty() && !refill_one(p, e)) return false;
                 }
                 if (n_parts > 0) res_upload();
+                // tappa 4b: a lend whose tail held no pair raised the guard with nothing to refill: every exit of the
+                // prompt passes here, so the tier is free to adapt and open windows again
+                if (ep_pi != SIZE_MAX && peer.lent()) peer.lend_guard(false);
                 if (trace && n_parts > 0) {
                     std::fprintf(stderr, "strata trace: refilled %lld slots on %lld stage(s) in %.1f ms\n",
                                  (long long) n_lent, (long long) n_parts,
@@ -16538,15 +16794,27 @@ int main(int argc, char** argv) {
                     return false;
                 }
                 bool any = false;
+                lm_tokens_hint = tokens;   // A-LM: the super-chunk's region for THIS segment's prompt (part_slots prices it)
                 for (PfPart& p : pf_parts) {
-                    if (p.first < 0) continue;
+                    if (p.first < 0) {
+                        if (ep_lm) p.sp->set_lm_region(nullptr, 0);   // no loan: no region (prefill.hpp's contract)
+                        continue;
+                    }
                     if (!p.lent.empty()) {
-                        if (want <= p.lent_chunk) continue;            // its current loan already covers this
+                        // its current loan already covers this: the chunk, and (A-LM) the super-chunk this segment asks
+                        // for - a later, longer segment of a cut request (root_at / message_at / turn_at) re-lends, so
+                        // the region is never the first segment's size for the whole request (lm_prepare fits the
+                        // super-chunk to the region: 8192 where 32768 was meant reads the experts four times as often)
+                        if (want <= p.lent_chunk && (!ep_lm || lm_S_for(want) <= p.lent_lm_S)) continue;
                         // ONLY this participant's loan goes back: `refill` would return the other participants'
                         // loans too, and their buffers are still laid out in their caches - marking those slots
                         // resident again would hand the next window a prompt buffer in place of an expert
                         if (!refill_one(p, e)) return false;
                     }
+                    // tappa 4b: the peer tier's tail is about to be written (relayout) and its table marked: an earlier
+                    // adapt's copies must have landed first (apply_pending + both streams idle: PeerExperts::quiesce).
+                    // The quiesce before the staged read (`run`) stays, and finds nothing to do.
+                    if (is_ep_part(p) && !peer.quiesce(e)) return false;
                     const strata::core::OnDevice on(p.dev);
                     int64_t want_p = want;
                     int32_t first = p.first_now;
@@ -16576,19 +16844,46 @@ int main(int argc, char** argv) {
                                          (long long) need_p, (long long) (p.cache->slots() - p.first));
                         first = (int32_t) (p.cache->slots() - need_p);
                     }
+                    // A-LM (STRATA_EP_SPLIT_LM=1): the loan is two regions - the chunk's own buffers from `first` on, the
+                    // super-chunk's at the END of the loan (256-aligned), which part_slots priced in; relayout gets the bytes
+                    // before it, never the whole tail, so the two cannot overlap.  Set at every lend: `first` moves per request.
+                    uint64_t lm_bytes = 0, lm_off = 0;
+                    const uint64_t region = part_bytes(p, first);
+                    if (ep_lm) {
+                        lm_bytes = lm_bytes_for(want_p);   // 0: a prompt under two chunks - no walk, so no region (lm_S_for)
+                        if (lm_bytes > 0) {
+                            const uint64_t own = strata::prefill::Prefill::bytes_needed(g, *p.ses, want_p, srcp != nullptr);
+                            if (region < lm_bytes || (region - lm_bytes) / 256 * 256 < own) {
+                                e = "prefill: STRATA_EP_SPLIT_LM: the loan does not hold the chunk's buffers and the super-chunk's "
+                                    "(" + std::to_string(region >> 20) + " MiB lent, " + std::to_string(own >> 20) + " + " +
+                                    std::to_string(lm_bytes >> 20) + " MiB needed)";
+                                return false;
+                            }
+                            lm_off = (region - lm_bytes) / 256 * 256;
+                        }
+                    }
                     if (want_p != p.sp->chunk() || first != p.first_now) {
-                        if (!p.sp->relayout(want_p, p.cache->device_slot(first), part_bytes(p, first), e)) return false;
+                        if (!p.sp->relayout(want_p, p.cache->device_slot(first), ep_lm && lm_bytes > 0 ? lm_off : region, e)) return false;
                         p.first_now = first;
+                    }
+                    // (the region is at the END of the loan: a loan laid out without one, then given one at the same
+                    // `first` and chunk, needs no relayout - the chunk's buffers end before lm_off, checked above)
+                    if (ep_lm) {
+                        p.sp->set_lm_region(lm_bytes > 0 ? (void*) (p.cache->device_slot(first) + lm_off) : nullptr, lm_bytes);
+                        p.lent_lm_S = lm_bytes > 0 ? lm_S_for(want) : 0;   // the ask this loan covers (the same key the re-lend test uses)
                     }
                     for (int64_t l = p.lb; l < p.le; ++l)              // THIS participant's layers only
                         for (int64_t ex = 0; ex < g.n_expert; ++ex) {
                             const size_t i = (size_t) (l * g.n_expert + ex);
-                            if (host_res[i] >= first) {
-                                p.lent.emplace_back((int32_t) i, host_res[i]);
-                                host_res[i] = strata::core::kNotResident;
-                                any = true;
+                            if (p.res[i] >= first) {                   // the part's own table (the peer tier's for the EP part)
+                                p.lent.emplace_back((int32_t) i, p.res[i]);
+                                p.res[i] = strata::core::kNotResident;
+                                if (p.res == host_res.data()) any = true;   // (the peer's table is not uploaded: res_upload)
                             }
                         }
+                    // tappa 4b: the tier is lent from here to the refill (adapt does nothing, fused_begin refuses): lowered
+                    // when this part's pairs are back (refill_wait), or by `refill` itself when the tail held no pair
+                    if (is_ep_part(p)) peer.lend_guard(true, p.cache->slots() - first);
                     p.lent_chunk = want_p;
                 }
                 for (const PfPart& p : pf_parts)

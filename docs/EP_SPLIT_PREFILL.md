@@ -374,3 +374,355 @@ acceso; la riga `ep-split` con passaggi e ms; la riga `prompt buffers … free o
 avvio con `STRATA_EP_SPLIT_RESERVE_MIB`. Banco D: `ep_split_test` sulla stessa scheda e, se ce ne sono
 due, fra due schede: byte identici in entrambe le direzioni, `kv_mode 0` e 1, fusione dei checkpoint contro un
 checkpoint della sessione piena a stato uguale.
+
+## 13. Tappa 4b: i buffer del prompt in prestito dal tier del peer, e la camminata per strato (3/11, letto `1fe8e46d`)
+
+Scritto dopo le misure del 3/11 (`corse_2080ti\20261101_tre_schede\corse\Z4*`, build `1fe8e46d`). Righe lette su
+`1fe8e46d` (quelle del §1-§12 sono di `8cb752a4`: alcune sono scivolate). Convenzione come sopra: **M** misurato,
+**S** stimato.
+
+### 13.0 In tre righe
+
+1. **La divisione a strati di oggi NON legge per strato.** In tutte le corse del banco (oltre 160), Z4rif comprese, la
+   camminata layer-major è accesa di default e poi **declinata a ogni prompt**: `strata prefill: layer-major off for
+   this prompt: no VRAM for a super-chunk (596 MiB free)` (M, `Z4rif1/engine.log`). Nessun log ha mai la riga di
+   riepilogo `strata prefill: layer-major (layers …)`. I 914/1898/2240 di Z4rif sono **chunk-major a 8192**. Quindi
+   la causa (1) del compito («col peer il prompt va a blocchi, la divisione usa il layer-major») non spiega il
+   divario: entrambe leggono a blocchi. La lettura per strato resta una leva **mai misurata su questo banco**, con
+   bit diversi dal chunk-major (§13.3): si fa, ma dietro la sua variabile e con il suo riferimento.
+2. **Il prestito dal tier del peer è il pezzo sicuro.** La tappa 4 perde 4928 MiB di riserva fissa per i buffer del
+   prompt (M: `3000 -> 7928 MiB`) più 2692 MiB di densi+sessione: il tier scende da 10971 a 6372 slot (M) e la CPU
+   calcola 2,2-5,0 esperti a strato-finestra contro 0,9-1,5 (M): ecco il −20/−30 % in scrittura. Con il prestito la
+   riserva torna a 3000 e il tier a **~9350 slot** (S: 10971 − 2692 MiB / 1,66 MiB): scrittura stimata 85-96 t/s
+   contro 94-100 del mega-kernel da solo e 61-87 della tappa 4.
+3. **La sessione degli strati 20-47 non vale la pena di stringerla**: 604 MiB in tutto (M), di cui 231 MiB di K/V
+   residente; scendere a 8192 celle libera ~105 slot (1 % del tier) e costa alla lettura lo streaming del K/V a ogni
+   blocco (§13.4). Si lascia com'è.
+
+### 13.1 Che cosa dicono i log (M) e dove sta nel codice
+
+| cosa | Z4rif (divisione 20) | Z4fus (mega-kernel solo) | Z4ep (tappa 4) |
+|---|---|---|---|
+| lettura 4K / 32K / 128K t/s | 877-938 / 1892-1910 / 2208-2256 | 948-993 / 1373-1387 / 1448-1465 | 822-872 / 1525-1540 / 1703-1727 |
+| scrittura t/s | 99-109 / 72-112 / 104-105 | 89-100 / 99-103 / 95-102 | 61-73 / 77-79 / 81-87 |
+| chunk | 8192 | 7680 | 7168 |
+| CUDA0: cache / prestito | 3556 / 2559 slot | 2559 / 2119 | 2365 / 2000 (−144 slot: `ep_R_dev0` 320 MiB, `generate.cpp:7331-7337`) |
+| 2080 Ti: esperti residenti | 9088 slot, tutti di `[20, 48)` (prestito 2025 nel prompt → 7063) | tier 10971, 48 strati | tier 6372, 48 strati (≈ 3700 in `[20, 48)`) |
+| 2080 Ti: riserva | — | 3000 MiB (2190 liberi dopo i buffer di `set_peer`) | 7928 MiB = 3000 + 4928 (buffer propri 3390 MiB a 7168 + 512; sizing a 8192) |
+| 2080 Ti: lo stadio | densi `[20,48)` + sessione + testa; 252 MiB liberi a fine avvio | — | 2692 MiB (densi+flussi 2088, sessione 604) |
+| layer-major | acceso di default, **declinato**: «no VRAM for a super-chunk (596 MiB free)» | n/a (un solo stadio) | **declinato**: «a peer GPU» |
+| CPU a strato-finestra (scrittura) | 0,4-1,6 esperti | 0,9-1,5 | 2,2-5,0 |
+
+Il codice che decide tutto questo:
+
+- **Camminata per strato**: `prefill.cpp:7384-7398` (`run`: `prefill_layer_major_resolve` → `lm_prepare_chain` →
+  `run_layer_major`), default `sm120_series.hpp:112-119` (acceso con 2+ stadi CUDA, «KL-checked, not bitwise»).
+  `lm_prepare` (`prefill.cpp:6047-6207`): declina con `m.pp || helper_ || core::peer_portable()` (`:6068`, «a peer
+  GPU»); vuole almeno **due chunk** (`min_s = 2·T`, `:6117`), punta a S = 32768 (`kLmDefaultOnTokens`, `:6026`) e
+  **dimensiona i buffer del super-chunk dalla VRAM libera della scheda** (`cudaMemGetInfo` meno 512 MiB di margine
+  quando è acceso di default, `:6132-6134`, `lm_margin_bytes` `:6017-6023`), poi li alloca con `cudaMalloc`
+  (`:6176-6181`) e li libera a fine prompt (`lm_release`). Byte per token in modo host (`dev_bytes`, `:6127-6131`,
+  costanti `:173`: N 2560, HC 4, D 10240, K 10): (2N + HC + 2K)·4 + N·2 = **25,7 KB**, più le tabelle (~0,2 KB) e
+  `R2` = T·D·4 (40 KB a token di chunk). A T 8192 il minimo è 2·8192·25,9 KB + 8192·40 KB ≈ **760 MB + 512 MiB di
+  margine = 1,27 GiB**: CUDA0 ne ha 596 MiB (M), lo stadio 1 di Z4rif 252 (M). Per questo non parte mai. Gli stadi
+  dopo il primo tengono le righe in RAM bloccata (`mode = 2`, `:6142`, `R_host` S·D·4 = 1,34 GB a 32768). Gli esperti
+  li legge come il chunk-major: residenti via `m.host_res`/`m.cache->device_slot` (`:6456`, `:6510`, `:6687`, gather
+  → nessuna guardia MMQ_DIRECT richiesta), gli altri dall'anello di staging (`m.stage_dev`) riempito dallo `Stager`.
+  Con `peer_portable()` vero `fused_ring()` è falso (`:300`) → buffer MMQ a misura piena → i requisiti di `lm_run`
+  (`grp_gu/grp_d/Xq/H/Hq`, `:6096`; niente `fused_bufs`, `:6114`) sono soddisfatti: il rifiuto `:6068` è prudenziale,
+  non tecnico, **tranne** per uno stadio che ha un `PeerPrefill` (`m.pp`, `set_peer` `:2269`): quello non ha forma
+  layer-major.
+- **Prestiti del prompt path** (`generate.cpp`): `PfPart` `:9921-9932` (cache, sessione, prompt path, device, strati
+  `[lb, le)` che può prestare, `first`, `lent`); un `PfPart` per CUDA0 e uno per stadio (`:10001-10004`); `fits_one`
+  `:10010-10016` (pavimento 128 slot, tetto `kAutoLendPct` nello scan auto); la scelta del chunk «il più grande che
+  OGNI partecipante può prestare» (`scan`, `:10072-10095`); `first = slots − part_slots(chunk)` `:10188-10191`;
+  `init_prompt_paths` `:10343-10383` passa `sb/sbb` (`device_slot(first)`, `part_bytes`) a `Prefill::init`; lo stadio
+  EP oggi riceve `nullptr, 0` (`:10352-10353`, buffer propri). Per richiesta: `lend` `:16522-16605` (per ogni parte:
+  `relayout(want_p, device_slot(first), part_bytes)`, poi **le coppie dei suoi strati con `host_res[i] >= first`**
+  vanno in `p.lent` e la tabella a `kNotResident`, `res_upload`), `refill_issue/refill_wait/refill` `:16454-16517`
+  (dall'arena `srcp->blob_stable` nello **stesso slot** con `fill_slot_queued`, tabella ripristinata, `res_upload`).
+  Chiamate: `lend` prima di ogni parte a blocchi `:17472`, `refill` prima delle finestre `:17464` e a fine prompt
+  `:17648`. `own_fits` `:10390-10412` salta chi ha un prestito e controlla lo stadio EP contro la sua VRAM libera
+  (`:10404-10410`).
+- **Riserva della tappa 4**: `generate.cpp:8135-8171` (`bytes_needed_owned` al chunk massimo dello scan →
+  `ep_split::reserve_add_mib` = byte + 512 MiB, `ep_split.cpp:662-669`, `kReserveHeadroomBytes` `ep_split.hpp:54`) →
+  `peer.open(..., o.peer_reserve_mib + ep_reserve_add, ...)`. Il tier si riempie da ciò che è libero meno la riserva
+  (`peer_experts.cpp:305-322`), **in ordine di rango** (slot 0 la coppia più calda, la coda le più fredde), con slot a
+  misura di strato (`open_sized`, `:328`, quindi `slot_offsets()` esiste e `split_lend_slots` funziona come per gli
+  stadi). `adapt` (`:543-598`) scambia le vittime meno usate per strato sullo stream `refill_`, `apply_pending`
+  (`:600-615`) pubblica in `res_`; `quiesce` (`:622-633`) fa atterrare tutto. `has()` fuori finestra risponde da
+  `res_` (`peer_experts.hpp:57-60`); dentro la finestra da `own_win_`, costruita a `fused_begin` da `res_` e
+  `host_res`; `d_slot_ptr_` (`:228`) è slot → indirizzo e non cambia mai.
+- **Stadio EP**: `generate.cpp:5411-5457` (densi `[K, 48)` con `trim`, stream, mrope), sessione `:6361-6380`
+  (`session_bytes/init(g, o.max_context, K, …)`), `set_peer` dello stadio 0 `:10509-10516` (`rows = chunk·K/2`,
+  `--peer-prefill-rows 0` lo spegne), `ep_to_primary` `:17413-17431`, `peer.quiesce` prima del passaggio in avanti
+  `:16740` (dentro la lettura, **dopo** il `lend`: va anticipato, §13.2).
+
+### 13.2 Disegno (b): il tier del peer presta la coda al prompt path dello stadio EP
+
+Il prestito esiste già, parametrizzato per partecipante: **lo stadio EP diventa un `PfPart` in più**, con il tier
+del peer come cache e `res_` del peer come tabella. Niente riserva per i buffer del prompt: il tier è quello del
+mega-kernel da solo meno densi e sessione dello stadio.
+
+1. **Avvio** (`generate.cpp`): `ep_reserve_add = 0` (la riga `line_on` dice «prompt buffers borrowed from the tier»;
+   `STRATA_EP_SPLIT_RESERVE_MIB` resta per forzare una riserva in più, default 0). Nuovo knob
+   `STRATA_EP_SPLIT_LOAN` (default 1 con la variabile accesa; `0` = tappa 4 com'è oggi, l'A/B). `peer.open` a
+   riserva `o.peer_reserve_mib` come senza la variabile.
+2. **Parte in più**: `pf_parts.push_back({&peer.cache_mut(), &ep.ss, &ep.sp, ep.dev, 0, g.n_layers, …, res =
+   peer.res_table_mut()})`: `PfPart` prende un campo `int32_t* res` (default `host_res.data()`), usato da `lend` e
+   `refill_issue` al posto di `host_res`. `lb = 0, le = n_layers` perché il tier copre tutti gli strati: una coppia
+   di qualunque strato che sta in uno slot prestato **esce dalla tabella** (`has()` → falso, `peer_experts.hpp:59`),
+   così il `PeerPrefill` dello stadio 0 non la calcola (la manda in streaming, come fa per le coppie che il peer non
+   ha) e lo stadio EP la manda in streaming dalla RAM sul x16. `res_upload` non tocca il peer (il suo `d_own_` nasce
+   a ogni `fused_begin` da `res_`, dopo il `refill`).
+3. **Scan del chunk**: `fits_one` e `ring_room` valgono invariati (`p.cache != &xcache`, `rc_floor 0`): il tier presta
+   ~2000 dei ~9350 slot (21 % < `kAutoLendPct`), quindi **CUDA0 resta il partecipante che decide il chunk**, come
+   oggi. `own_fits` salta lo stadio EP quando ha il prestito (`:10404`: `if (ep_on && !loan_ep)`).
+4. **`init_prompt_paths`**: `ep.sp.init(..., sb = peer.cache().device_slot(first), sbb = part_bytes, ...)` al posto di
+   `nullptr, 0` (`:10352`). Il resto identico.
+5. **Per richiesta**: `lend` chiama **prima** `peer.quiesce(e)` per la parte del peer (le copie di `refill_` di un
+   `adapt` precedente devono essere atterrate prima che il `relayout` scriva negli slot; oggi il `quiesce` sta a
+   `:16740`, dopo il `lend`: va spostato nel `lend`, e `:16740` resta innocuo), poi `relayout` sotto `OnDevice(ep.dev)`
+   e la marcatura in `res_`. `refill_issue` sul device del peer con `p.cache->fill_slot_queued` (il `ExpertCache` del
+   peer, `expert_cache.hpp:228`; la coda è della cache, indipendente da `stream_/refill_` del peer) e `sync_queued`;
+   su Windows `srcp->release` come per le altre parti. I `refill` ai punti `:17464` e `:17648` coprono ogni uscita
+   della richiesta, errori compresi, perché la parte del peer segue la stessa lista. `adapt`, `apply_pending`,
+   `fused_begin` girano solo fra le finestre, cioè **dopo** il `refill`: la coda è già tornata.
+6. **Guardia nel peer** (pezzo B): `lend_guard(bool)`; con la guardia alzata `adapt()` torna subito (`:545`-stile),
+   `apply_pending` non ha nulla in `pending_` (il `quiesce` l'ha svuotato), `fused_begin` rifiuta con errore (mai
+   nel disegno). Accessori: `ExpertCache& cache_mut()`, `int32_t* res_table_mut()`, `int64_t lent_slots()` per la
+   riga di log.
+7. **Riga di log**: `strata serve:   CUDA1 prompt path borrows N of its M tier slots (x GiB), K of them pairs of
+   layers [0, 20) the primary's chunk-major read would have had computed there` — la K misura il costo del punto 2.
+
+**Che cosa cambia nei bit.** La scrittura: il tier ha più coppie (9350 contro 6372) e il mega-kernel ne serve di
+più; lo stesso avvertimento del §10 vale verso `Xfus` a cache diversa (il confronto giusto è `Xfus'` con
+`--peer-reserve-mib 3000 + 2692`, cioè la riga `the stage holds …` continua a stamparlo). La lettura: lo stadio EP
+vede nel tier (durante il prompt, prestito escluso) ~7350·28/48 ≈ **4300** coppie di `[20, 48)` contro ~3700 della
+tappa 4 (S: tier più grande, coda prestata), lo stadio 0 trova nel peer ~3060 coppie di `[0, 20)` contro ~2650 (S)
+ma ne perde ~830 nella coda prestata (S: 2000·20/48), che vanno in streaming sull'Oculink: +1,0 GB a blocco a
+6,7 GB/s ≈ +0,15 s su un blocco da 7168 che dura ~4,2 s (M a 1716 t/s): **≤ 4 %**, in sovrapposizione. Lettura
+stimata: **come la tappa 4 ± 3 %** (830-880 / 1500-1580 / 1680-1780). Il divario verso Z4rif resta e ha altre
+cause (M): la residenza di `[20, 48)` (7063 slot nel prompt contro ~4300: ~2700 esperti in più in streaming a
+blocco, ≈ 3,3 GB a 13 GB/s ≈ +0,25 s ≈ 6 %), il chunk (8192 contro 7168: §13.2bis), e la contesa sulla 2080 Ti
+(`PeerPrefill` dello stadio 0 con il suo 35 % di streaming + lo stadio EP sullo stesso x16; si misura con
+`--peer-prefill-rows 0`, nessun codice). Il criterio −10 % su 900/1850/2210 **non lo decide questo pezzo**.
+
+**13.2bis (facoltativo, pezzo A2): le righe del drafter nel prestito di CUDA0.** `ep_R_dev0` (320 MiB, allocato
+dopo la cache, `generate.cpp:7331-7337`) toglie 144 slot a `xcache` **e** fa scendere il chunk da 7680 a 7168 (M:
+Z4fus/Z4ep). Serve solo durante il prompt: può stare **in coda alla regione prestata di CUDA0** (gli ultimi
+`T·hc·n_embd·4` byte della coda, `device_slot(slots) − rows_bytes`), con `part_slots` della parte 0 che conta
+`bytes_needed(c) + rows_bytes(c)` e `relayout` che riceve `part_bytes − rows_bytes`. Il prestito di CUDA0 sale di
+~185 slot (2119 + 185 = 2304 ≤ 2559 − 128), `xcache` torna a 2559 e il chunk a 7680; `ep_rows_bytes` esce dalla
+riserva del sizing automatico. Il puntatore si ricalcola a ogni `lend` (il `first` cambia per richiesta). Decide la
+chat principale: è un guadagno certo (M) ma allarga A.
+
+### 13.3 Disegno (a): la camminata per strato con lo stadio EP (`STRATA_EP_SPLIT_LM=1`, spenta di default)
+
+Tre cose la bloccano oggi, nessuna è un kernel: il rifiuto `peer_portable()` (`prefill.cpp:6068`), il `PeerPrefill`
+dello stadio 0 (`m.pp`, senza forma layer-major), la VRAM libera per i buffer del super-chunk (596 MiB su CUDA0:
+mai abbastanza, anche per Z4rif). Il disegno:
+
+- **C1 (`prefill.cpp`)**: `lm_prepare` declina con `m.pp != nullptr`, con `helper_` e con `peer_portable()` **solo se
+  nessuno ha dato allo stadio una regione** (`set_lm_region`, cioè senza `STRATA_EP_SPLIT_LM=1`): testo «a peer GPU»
+  in tutti e tre i casi, come oggi. Con una regione il `peer_portable()` non declina più (il path è MMQ pieno,
+  `fused_ring()` falso, `:300`: i buffer che `lm_run` vuole ci sono) e un `m.pp` residuo dice «this stage computes part
+  of its experts on a peer GPU (set_peer)». Il flag `cudaHostAllocPortable` non c'entra con la camminata. **Nessun
+  cambio con le variabili spente**: la regione è nulla, quindi anche un peer senza `set_peer` (`--peer-prefill-rows 0`,
+  o un `set_peer` fallito) con `STRATA_PREFILL_LAYER_MAJOR=1` esplicito resta chunk-major con la stessa riga di
+  prima (la prima stesura di C1 toglieva il rifiuto per tutti: lo avrebbe cambiato).
+- **C2 (`prefill.cpp/.hpp`)**: i buffer del super-chunk da una **regione data dal chiamante** invece che da
+  `cudaMalloc` sulla VRAM libera: `static uint64_t lm_bytes_needed(const ModelGeometry&, int64_t S, int64_t T)` (la
+  formula di `dev_bytes(s, r_dev = false)`, modo host), `void set_lm_region(void* base, uint64_t bytes)` (null:
+  oggi). In `lm_prepare` con regione: `room = bytes` (niente `cudaMemGetInfo`, niente margine), `mode` forzato a host
+  (`r_dev = false`, le righe in `R_host` come già per gli stadi dopo il primo), `lb.dev = base`, `lm_release` non
+  libera. `R_host`, `idsw_host`, `tab_host` restano in RAM bloccata (`host_grow`, tenuti fra un prompt e l'altro).
+  `lm_prepare_chain` invariato. Generico: serve anche alla divisione a strati senza peer, che oggi non parte mai.
+- **A-LM (`generate.cpp`, con `STRATA_EP_SPLIT_LM=1`)**: (i) `sp.set_peer` **non** si chiama (lo stadio 0 legge le
+  coppie di `[0, 20)` che `xcache` non ha dalla RAM sull'Oculink, **una volta per super-chunk** invece che per blocco:
+  è il punto della camminata; `--peer-prefill-rows 0` di oggi fa lo stesso senza la camminata); (ii) il chunk si
+  ferma a **4096** (`o.prefill_auto_cap`-stile): la regione prestata deve tenere buffer del chunk + super-chunk:
+  a T 4096 / S 32768 ≈ 1,8 GiB + 0,16 (anello) + 1,02 GiB ≈ **3,0 GiB ≤ 4,0 GiB** prestabili da CUDA0 (2431 slot ×
+  1,66), a T 7168 non entra (3,25 + 1,14 = 4,4 GiB); (iii) `part_slots(p, c)` conta `bytes_needed(c) + lm_bytes_needed(
+  min(S_target, n_prompt↑c), c)` per **ogni** parte (CUDA0 e peer; con la divisione a strati anche gli stadi: così
+  Z4rif può finalmente girare layer-major ed essere il riferimento giusto); (iv) dopo ogni `lend`:
+  `p.sp->set_lm_region(device_slot(first) + bytes_needed(c), lm_bytes)` e `relayout(c, device_slot(first),
+  bytes_needed(c))` (misura esatta, non tutta la coda). Un prompt sotto 2·T (4K) legge chunk-major in un blocco da
+  4096, come oggi; 32K = 1 super-chunk, 128K = 4 super-chunk pari (`lm_even`).
+- **Bit**: la camminata somma gli esperti per id, non nell'ordine k del router (`prefill.cpp:5981-5983`,
+  `sm120_series.hpp:112`: «KL-checked, not bitwise»). **Il testo differisce dal chunk-major per costruzione**: la
+  regola del proprietario «testo identico» vale solo LM contro LM, con la divisione a strati anch'essa layer-major
+  (iii). Va detto nel confronto, non nascosto.
+- **Stima** (S, mai misurato qui): la camminata divide per S/T = 8 lo streaming a blocco dello stadio 0
+  (≈ 6500-9200 esperti × 1,2 MiB ≈ 8-11 GB sull'Oculink a 6,7 GB/s ≈ 1,2-1,7 s di un blocco da ~4,2 s) e dello
+  stadio EP (≈ 10000 × 1,2 MiB sul x16 ≈ 0,9 s). Se quello streaming oggi non si sovrappone al calcolo, il
+  guadagno massimo è ~25-40 % sulla lettura a 32K/128K; se si sovrappone, ~0. Su 2× A4000 (solo streaming) pagava;
+  qui lo dice solo la corsa. Costo certo: il chunk più piccolo (4096) rende più lento il chunk-major di ripiego e
+  il 4K; e il sub-chunk più piccolo fa più passaggi di mano (`R_host`) per super-chunk.
+
+### 13.4 La sessione degli strati 20-47 sulla 2080 Ti: lasciarla com'è
+
+M: 604 MiB (`18.69 → 18.10 GiB free`). Dentro (S da `layer.hpp:318`, `kv_stream.hpp:4`): K/V residente 7 QSA ×
+32768 celle × 1056 B = 231 MiB; righe pooled dell'indicizzatore 7 × (262144/4 + 2) × 128 × 4 = 224 MiB (a
+`max_context`, non si tocca); GDN 21 × 2 MiB = 42; code, rope, passi il resto. Scendere a 8192 celle residenti per
+la sola sessione EP: −173 MiB ≈ **105 slot (1,1 % del tier)**, cioè ~0,1 esperti CPU a strato-finestra: non
+misurabile. Costo: sopra 8K la selezione dello stadio pesca le pagine K/V dalla copia host a ogni blocco (la mappa
+di `kv_mode 1`), a 128K ≈ 968 MB a blocco sul **x16 che già porta gli esperti**: ~75 ms, 2 % del blocco, in contesa.
+E il mover vuole le due `QsaState` uguali nel formato (§5): una variabile in più per niente. **No.** Densi (2088 MiB
+con flussi) e pooled (224) sono il grosso e non si spostano finché lo stadio esiste.
+
+### 13.5 Stime
+
+| | tappa 4 (M) | 4b = A+B (S) | 4b + LM (S) |
+|---|---|---|---|
+| tier del peer | 6372 slot | ~9350 (`10971 − 2692 MiB / 1,66`) | ~9350 |
+| scrittura 4K / 32K / 128K | 61-73 / 77-79 / 81-87 | **85-96** (finestra ~25,5-31 ms: CPU 1,4-2,7 esperti a strato-finestra, interpolato fra Z4fus e Z4ep) | uguale |
+| lettura | 822-872 / 1525-1540 / 1703-1727 | ± 3 % (830-880 / 1500-1580 / 1680-1780) | 4K uguale (chunk-major a 4096); 32K/128K **tra +0 e +35 %**, bit diversi |
+| refill a fine prompt | CUDA0 2000 slot sull'Oculink ≈ 0,5 s | + peer 2000 slot sul x16 ≈ 0,26 s **in parallelo** (`refill` emette tutte le parti, poi attende): ≈ 0,5 s | + le righe del drafter: 0 |
+| RAM bloccata | +2,5 GiB (§2) | uguale | + `R_host` 1,34 GB per stadio |
+| VRAM CUDA0 | −144 slot (`ep_R_dev0`) | uguale; con A2 torna a 2559 e chunk 7680 | chunk 4096 |
+
+Lavoro (S): A ~200 righe in `generate.cpp` (parte del peer, `quiesce` nel `lend`, `own_fits`, riga di log, riserva
+a 0; +60 con A2; +80 con A-LM), B ~80 righe, C ~120 righe. Compilato no, installato no, provato no.
+
+### 13.6 Rischi
+
+- **Coppie di `[0, 20)` nella coda prestata**: lo stadio 0 le manda in streaming (≤ 4 %, S). Se pesa: una coda
+  «fredda» ordinata per strato cambierebbe il tier (bit della scrittura): non ora. La riga di log la conta.
+- **`relayout` scrive negli slot mentre una copia di `adapt` è in volo**: coperto da `peer.quiesce` **dentro** il
+  `lend` (oggi sta dopo, `:16740`). Il `fused_begin` con la guardia alzata è un errore, mai un testo diverso.
+- **Refill dalla fonte giusta**: il tier è stato riempito da `src.blob` (`peer_experts.cpp:341`); il `refill_issue`
+  usa `srcp->blob_stable` come per CUDA0: stessa arena. Un blob non stabile (`#4695`, Windows) passa per `blob_parts`
+  come oggi.
+- **Tabella condivisa**: `res_` è la stessa che `res_table()` ha dato allo stadio EP e che `has()` legge dal filo del
+  pool. Durante il prompt non c'è pool né finestra; la scrittura in `lend`/`refill` avviene dal filo della
+  richiesta, con gli stream fermi. Nessun lock in più.
+- **Scan del chunk**: `part_slots` sul device del peer con `ep.ss` (28 strati: i buffer dipendono dalla sessione per
+  la selezione QSA); se il tier non potesse prestare (mai, con 9350 slot) il ramo «allocates its own» di oggi
+  resta e la riserva è 0: lo stadio fallirebbe l'`init` con «do not fit», mai un testo diverso. Con
+  `STRATA_EP_SPLIT_LOAN=0` si torna alla riserva calcolata.
+- **LM e checkpoint a metà prompt**: `layer_major_mid()` salta i checkpoint dentro un super-chunk (come per la
+  divisione); con EP le parti del §6 arrivano da `on_stage_chunk` a fine super-chunk su entrambi gli stadi: da
+  verificare nel banco, non per costruzione.
+- **LM e bit**: §13.3. Mai confrontare LM con chunk-major chiedendo «identico».
+- **Righe citate**: sono di `1fe8e46d`; `generate.cpp` cambia spesso. I pezzi cercano i simboli, non le righe.
+
+### 13.7 Pezzi (file disgiunti, solo scrittura; compila, prova e salva la chat principale)
+
+| pezzo | file | cosa |
+|---|---|---|
+| **A** | `src/program/generate.cpp` | la parte del peer in `pf_parts` (`PfPart::res`), `quiesce` nel `lend`, `init_prompt_paths` con `sb/sbb` per lo stadio EP, `own_fits`, riserva a 0 + `STRATA_EP_SPLIT_LOAN`, riga di log con le coppie di `[0, K)`; A2 facoltativo (righe del drafter nella coda di CUDA0); A-LM dietro `STRATA_EP_SPLIT_LM` (niente `set_peer`, chunk 4096, `part_slots` + `lm_bytes_needed`, `set_lm_region` dopo il `lend`). Usa solo: `PeerExperts::cache_mut/res_table_mut/lend_guard/lent_slots` (B) e `Prefill::lm_bytes_needed/set_lm_region` (C) |
+| **B** | `include/strata/core/peer_experts.hpp`, `src/core/peer_experts.cpp` | `cache_mut()`, `res_table_mut()`, `lend_guard(bool)` + `lent_slots()`; `adapt` torna subito con la guardia; `fused_begin` rifiuta con errore; commenti del contratto (`:70-82`) aggiornati: il tier **presta** la coda |
+| **C** | `include/strata/prefill/prefill.hpp`, `src/prefill/prefill.cpp` | C1 (`lm_prepare` declina su `m.pp`/`helper_`, non su `peer_portable()`), C2 (`lm_bytes_needed`, `set_lm_region`, `lm_prepare`/`lm_release` con regione, modo host forzato) |
+
+Ordine per compilare: B, C, poi A. A compila anche senza A-LM (C1/C2 restano inerti senza `set_lm_region`).
+
+### 13.8 Prova (chat principale)
+
+Stessa coda del §12, build nuova: `Xeps4b{n}` (variabile + prestito) contro `Xeps{n}` (`STRATA_EP_SPLIT_LOAN=0`) e
+`Xfus'` a cache uguale (`--peer-reserve-mib 3000 + 2692`). Criteri: scrittura ≥ 85 t/s su tutte e tre le lunghezze
+e testo **identico a `Xfus'`** sul primo turno con `--adapt-swaps 0`; lettura non sotto `Xeps` −3 %; la riga del
+prestito del peer con K coppie di `[0, 20)`; il tempo di `refill` (riga `strata trace: refilled … on 2 stage(s)`)
+≤ 0,6 s; nessun `strata.exe` rimasto acceso. Poi, a parte, `STRATA_EP_SPLIT_LM=1` contro un `Xrif` **anch'esso
+layer-major** (la riga `strata prefill: layer-major (layers 0..20)` deve esistere in entrambi): lettura 32K/128K e
+KL, non bit.
+
+### 13.9 Integrazione (3/11, sul worktree `lab/upsync-v0.2.9` dopo `1fe8e46d`): com'è scritto davvero
+
+Letto il diff dei tre pezzi contro HEAD e fatto quadrare. **Compilato no, provato no, commit no.** Dove il codice si
+discosta dal disegno dei §13.2-13.3, vale il codice; qui la lista.
+
+**Variabili e default** (`generate.cpp`, accanto a `ep_K`): `STRATA_EP_SPLIT_LOAN` (default 1, vale solo con
+`ep_on`; `0` = riserva della tappa 4), `STRATA_EP_SPLIT_LM` (default 0; senza il prestito è ignorata con una riga),
+`STRATA_EP_SPLIT_RESERVE_MIB` col prestito = riserva **in più** forzata (default 0), senza il prestito = come in
+tappa 4 (`reserve_add_mib`). Il prestito nasce solo se `pf_borrow` (niente `--no-prefill-borrow`) e c'è la tabella
+di residenza (`d_res`): la parte del peer è l'**ultima** di `pf_parts` (`ep_pi`; `ep_part()`, `ep_has_loan()`,
+`is_ep_part(p)`), con `lb 0, le n_layers`, `rc_floor 0`, `res = peer.res_table_mut()`; tutte le altre parti hanno
+`res = host_res.data()`, e `lend`/`refill_issue` scrivono `p.res` (per CUDA0 e stadi è la stessa memoria di prima).
+
+**Per richiesta**: `lend` → per la parte del peer `peer.quiesce(e)` **prima** di `relayout` e della marcatura, poi
+`peer.lend_guard(true, slots − first)` **dopo** la marcatura (anche se la coda non aveva coppie); `refill_wait`
+abbassa la guardia dopo `sync_queued`; `refill` la abbassa anche quando non c'era nulla da rimettere. Il `quiesce`
+dentro `run` resta e non trova nulla. Firma di B: `lend_guard(bool on, int64_t slots = 0)`, `lent()`,
+`lent_slots()`. `fused_begin` con la guardia alzata = errore «tier slots are lent to the prompt path»; `adapt` torna
+subito; `apply_pending` non controlla la guardia di proposito (vedi commento in `peer_experts.cpp`).
+
+**A-LM** (`STRATA_EP_SPLIT_LM=1`): niente `sp.set_peer`; chunk fermo a 4096 (`prefill_auto_cap`, `prefill_auto_max`,
+`prefill_chunk`); `part_slots` e `ring_room` contano `bytes_needed(c) + 256 + lm_bytes_needed(g, S, c)` per ogni parte,
+S = `min(32768↓c, prompt↑c)` (32768 nello scan iniziale; `lm_tokens_hint` dal `lend`). **La regione del super-chunk
+sta in FONDO al prestito**: `lm_off = (region − lm_bytes)` allineato in giù a 256, `relayout(c, device_slot(first),
+lm_off)` e `set_lm_region(device_slot(first) + lm_off, lm_bytes)`, a ogni `lend` di ogni parte con prestito (non
+«`device_slot(first) + bytes_needed(c)`» come scritto in §13.3 iv: stesso scopo, più tollerante). `init` e `relayout`
+sono allocatori a bump dalla base (`prefill.cpp` `Alloc o; o.base = borrow`), quindi non toccano il fondo. Una parte
+senza prestito (`first < 0`) non riceve mai la regione e `lm_prepare` declina con «a peer GPU»: la camminata non
+parte e lo dice la riga `layer-major off for this prompt`.
+
+**C1 corretto in integrazione**: `lm_prepare` declina con `peer_portable()` quando `m.lm.region == nullptr`
+(§13.3); la stesura iniziale lo toglieva per tutti e cambiava il comportamento a variabili spente con
+`--peer-prefill-rows 0` o `set_peer` fallito più `STRATA_PREFILL_LAYER_MAJOR=1`.
+
+**Invarianza a variabili spente** (verificata riga per riga sul diff): `ep_on` falso → `ep_loan`, `ep_lm` falsi,
+`ep_pi = SIZE_MAX`, nessuna parte del peer; `lm_extra_for` = 0 (`part_slots`, `ring_room` invariati); `region` in
+`lend` = `part_bytes(p, first)` com'era; `p.res == host_res.data()` per tutte le parti, `any` come prima; le righe
+di log del prestito stampano le stesse di prima (il `continue` sostituisce l'`if`); `prefill.cpp`: regione nulla →
+`cudaMemGetInfo`, margine, `cudaMalloc`, `cudaFree`, stesso testo di `lm_run`; `dev_bytes(s, false)` =
+`lm_bytes_needed` è la formula di prima al byte; `peer_experts`: nulla chiama `lend_guard`, `lent_` resta falso.
+`host_plan_chunk` (#2824) vede CUDA0 e gli stadi della divisione a strati come prima: la parte del peer è esclusa
+da `gc_bytes`/`gc_slots` e da `lend_of` (vedi le correzioni sotto); il fit in VRAM (`fits`) la include.
+
+**Correzioni della revisione (3/11, stesso worktree; compilato no, provato no)**:
+1. **Regione del super-chunk dimensionata sul primo segmento** (`lend`): `PfPart::lent_lm_S` tiene il super-chunk
+   (`lm_S_for(want)`) per cui il prestito in corso è stato prezzato; il «`want <= lent_chunk` → continue» vale solo
+   se anche `lm_S_for(want) <= lent_lm_S`, altrimenti `refill_one` e nuovo prestito con la regione giusta. Una
+   richiesta tagliata (system 8K + messaggio 100K) non cammina più a super-chunk da 8192.
+2. **`ep_lm` solo con un prestito vero**: spento con una riga (i) senza `pf_borrow` (`--no-prefill-borrow`), prima
+   del tetto del chunk; (ii) prima di `peer.open`, se la proiezione del tier non regge il prestito (punto 4); (iii)
+   dopo lo scan, se CUDA0 o la parte EP restano con `first < 0` (il chunk resta a 4096: detto nella riga). Spento,
+   `set_peer` si chiama come senza la variabile. `ep_loan` ed `ep_lm` non sono più `const`.
+3. **Piano #2824** (`host_plan_chunk`): la parte EP è esclusa da `gc_bytes`/`gc_slots` e da `lend_of`. Le coppie del
+   tier del peer stanno nella copia in RAM (`stage_pairs` elenca solo stadi e tier helper), quindi contarle in
+   `gpu_cache` le toglieva due volte dal `file_tier`, e il suo prestito finiva in `unbacked` pur tornando dalla RAM.
+4. **Riserva tolta prima di sapere se il tier presta**: prima di `peer.open` si proietta il tier con la sua stessa
+   aritmetica (VRAM libera − riserva, `--peer-slots`, slot = `max_blob`) contro il prestito che lo scan chiederà
+   (`--prefill N`: N; auto: 1024, il chunk di ripiego quando nulla è prestabile), con il pavimento di 128 slot e, in
+   auto, il tetto `STRATA_PREFILL_LEND_PCT`. Se non regge: riserva della tappa 4, `ep_loan` ed `ep_lm` spenti, una
+   riga. (`d_res` non è ancora noto lì: il caso senza tabella resta come in §13.6.)
+5. **WARNING #448 sulla parte EP**: niente consiglio «--expert-cache-device1» (incompatibile con `--peer-device`);
+   dice che è il tier del peer e cosa gli lascia più slot (`--peer-reserve-mib`, `--peer-slots`,
+   `STRATA_EP_SPLIT_LOAN=0`).
+6. **`lm_release` con regione prestata** (`prefill.cpp`): oltre a `m.cs` sincronizza anche `m.copy` (prima lo faceva
+   `cudaFree` per tutto il dispositivo): le H2D di `issue_up` in volo su un'uscita anticipata non possono più
+   atterrare su uno slot che il `refill` ha già rimesso a esperto.
+7. **`set_lm_region` azzerata**: in `refill_wait` (slot tornati esperti) e nel `lend` per una parte senza prestito
+   (`first < 0`), come chiede il contratto in `prefill.hpp`.
+8. **Prompt sotto due chunk**: `lm_S_for` restituisce 0 (nessuna regione) quando `lm_tokens_hint < 2·chunk`, perché
+   `lm_prepare` declina comunque con «a short prompt» (`min_s = 2T`); con `STRATA_PREFILL_LM_TOKENS` o
+   `STRATA_PREFILL_LM_FORCE` (pavimento T o 1) basta un chunk e la regione resta. Nel `lend` `lm_bytes == 0` non è
+   più un errore: `relayout` con tutto il prestito, `set_lm_region(nullptr, 0)`. Il banco 4K non perde più slot.
+
+**Punti probabili di errore in compilazione** (da guardare per primi):
+1. `generate.cpp` `lend`: `p.cache->device_slot(first) + lm_off` (uint8_t* + uint64_t → void*: ok), `ep_lm ? lm_off :
+   region` (entrambi uint64_t).
+2. `generate.cpp` 10105: l'aggregato di `PfPart` con 10 elementi e due membri col default (`rc_floor`, `res`): già
+   fatto così alle righe sopra.
+3. `generate.cpp`: `if (const PfPart* pp = ep_part(); …)` (C++17, già usato a `:16025`); `SIZE_MAX` già usato.
+4. `prefill.cpp` `dev_bytes`: lambda con due `return` entrambi `uint64_t` (`lm_bytes_needed` e l'espressione castata).
+5. `prefill.cpp` `lm_bytes_needed` è `static` nell'hpp e usa `N, HC, D, K` (`:173`, file scope) e `lm_table_ints`
+   (namespace anonimo sopra): deve stare **dopo** quel namespace, com'è.
+6. `peer_experts.hpp`: `std::atomic<bool>` inline con `<atomic>` incluso; `PeerExperts` non copiabile per via
+   dell'atomico (già aveva stream/eventi: nessun copy in giro, da verificare se qualcuno lo sposta).
+7. Avvisi: `total_b` in `lm_prepare` ora usato solo nel ramo `else`; `(void) g` in `lm_bytes_needed`.
+
+**Rischi funzionali da provare al banco** (non di sintassi):
+- Un `ERR` fra `lend` e `refill` lascia la guardia alzata: i rami che ho visto finiscono con `return 1`, ma in
+  `--serve` va verificato che ogni uscita della richiesta passi da `refill` (`:17644`, `:17828`).
+- Il WARNING #448 sulla parte EP ora ha il suo testo (correzione 5); con ~9350 slot non dovrebbe scattare.
+- `STRATA_EP_SPLIT_LOAN=1` senza `d_res` (nessuna tabella): riserva 0 e lo stadio fallisce l'`init` con «do not fit»
+  (§13.6, accettato; la proiezione della correzione 4 non vede `d_res`, che nasce dopo).
+- La proiezione del tier (correzione 4) conta gli slot a `max_blob`: su un pack nativo il tier reale ha più slot
+  (blob per strato ≤ `max_blob`), quindi la proiezione è prudente e può tenere la riserva dove lo scan avrebbe
+  prestato. Da leggere nella riga «will have about N MiB of slots» contro il «peer GPU 1: N experts» che segue.
+- Il ri-prestito per segmento (correzione 1) paga un `refill_one` + `lend` in più sulla parte che cresce: 120-310
+  ms per passaggio di stato, da contare nelle misure delle richieste tagliate.
+- `--batch` e `--prefill-head-alias` sono rifiutati da `ep_split::admit`: la guardia su `fused_begin` non può
+  scattare per le finestre fra i blocchi.

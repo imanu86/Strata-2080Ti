@@ -1172,6 +1172,11 @@ struct Prefill::Impl {
         int64_t S = 0;                       // tokens of a super-chunk (0: not allocated)
         bool r_dev = false;                  // its residual rows in VRAM (else R_host, copied per sub-chunk)
         void* dev = nullptr;                 // the one device allocation the pointers below are carved from
+        bool dev_lent = false;               // `dev` is the caller's region (set_lm_region): lm_release frees nothing
+        // set_lm_region (EP split 4b, C2): the region the next prompt's super-chunk buffers are carved from instead of
+        // a cudaMalloc (null: cudaMalloc on the free VRAM, as before); valid until that prompt's lm_release
+        void* region = nullptr;
+        uint64_t region_bytes = 0;
         float *mixed = nullptr, *acc = nullptr, *inj = nullptr, *R = nullptr, *w = nullptr;
         uint16_t* mixed_h = nullptr;         // the FFN half's FP16 rows (the FP16 path's inputs, port 2026-10-24)
         int32_t *ids = nullptr, *tab = nullptr;
@@ -1279,7 +1284,7 @@ void Prefill::release() {
     if (impl_->kv_released) cudaEventDestroy(impl_->kv_released);
     if (impl_->kv_ready) cudaEventDestroy(impl_->kv_ready);
     if (impl_->grp_host) cudaFreeHost(impl_->grp_host);
-    if (impl_->lm.dev) cudaFree(impl_->lm.dev);
+    if (impl_->lm.dev && !impl_->lm.dev_lent) cudaFree(impl_->lm.dev);   // (a lent region is the caller's)
     if (impl_->lm.R_host) cudaFreeHost(impl_->lm.R_host);
     if (impl_->lm.tab_host) cudaFreeHost(impl_->lm.tab_host);
     if (impl_->lm.idsw_host) cudaFreeHost(impl_->lm.idsw_host);
@@ -6030,14 +6035,37 @@ int64_t lm_entries_max(int64_t rows, int64_t G) { return NE + rows / std::max<in
 int64_t lm_table_ints(int64_t rows, int64_t G) { return 5 * rows + 3 * lm_entries_max(rows, G); }
 }  // namespace
 
+// EP split 4b (C2): the device bytes of a super-chunk's buffers in host mode - the formula lm_prepare sizes with
+// (dev_bytes, r_dev = false), so a caller pricing a lent region and lm_prepare carving it agree to the byte:
+// mixed, acc (S x N floats), mixed_h (S x N halves), inj (S x HC), ids and w (S x K), the routing tables, R2 (the
+// device rows of one sub-chunk) and the 256-byte rounding of each piece.  The geometry is the pack's fixed widths.
+uint64_t Prefill::lm_bytes_needed(const core::ModelGeometry& g, int64_t S, int64_t T) {
+    (void) g;
+    const int64_t G = T * K;
+    const uint64_t per = (uint64_t) (2 * N + HC + 2 * K) * 4 + (uint64_t) N * 2;
+    return (uint64_t) S * per + (uint64_t) lm_table_ints(S * K, G) * 4 + 4096 + (uint64_t) T * D * 4 + 256;
+}
+
+void Prefill::set_lm_region(void* base, uint64_t bytes) {
+    if (!impl_) return;
+    impl_->lm.region = base;
+    impl_->lm.region_bytes = base != nullptr ? bytes : 0;
+}
+
 void Prefill::lm_release() {
     Impl& m = *impl_;
     const core::OnDevice on_device(m.device);
     if (m.lm.dev) {
         cudaStreamSynchronize(m.cs);
-        cudaFree(m.lm.dev);
+        // a lent region (set_lm_region) is the caller's: given back by its refill.  cudaFree synchronized the whole device;
+        // without it the copy stream must be drained here too: lm_run's host-mode row uploads (issue_up, one sub-chunk
+        // ahead, into R2 - carved from this region) are still in flight on an early exit, and the caller's refill writes
+        // experts into these slots next - a late upload would land on an expert blob, silently
+        if (m.lm.dev_lent) cudaStreamSynchronize(m.copy);
+        else cudaFree(m.lm.dev);
     }
     m.lm.dev = nullptr;
+    m.lm.dev_lent = false;
     m.lm.mixed = m.lm.acc = m.lm.inj = m.lm.R = m.lm.w = m.lm.R2 = nullptr;
     m.lm.mixed_h = nullptr;
     m.lm.ids = m.lm.tab = nullptr;
@@ -6061,11 +6089,19 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     const core::ModelGeometry& g = *m.g;
     const core::OnDevice on_device(m.device);   // a layer split's later stage is sized on its own GPU
     // layer split (2026-10-24): each stage runs its own layers layer-major over the same super-chunk and hands the
-    // super-chunk's rows to the next one (lm_prepare_chain); the peer GPU's expert share and the stage helper have
-    // no layer-major form
+    // super-chunk's rows to the next one (lm_prepare_chain); a stage whose experts are partly computed on a peer GPU
+    // (set_peer's PeerPrefill, `m.pp`) and the stage helper have no layer-major form.  A portable peer (--peer-device,
+    // peer_portable()) declines as it always has - UNLESS the caller lent this stage a region for the super-chunk
+    // (set_lm_region: the EP split's STRATA_EP_SPLIT_LM=1, generate.cpp's lend): with peer_portable() the prompt path
+    // is full MMQ (fused_ring() is false), so the buffers lm_run wants (grp_gu/grp_d/Xq/H/Hq, no fused layout) are
+    // there, and the experts the peer holds are read as the chunk-major path reads them (EP split 4b, C1).  Without a
+    // region nothing changes: a peer without set_peer (--peer-prefill-rows 0, or a set_peer that failed) and an explicit
+    // STRATA_PREFILL_LAYER_MAJOR=1 still get "a peer GPU", the same text and the same chunk-major read as before.
     const bool split = stage_lb_ != 0 || stage_le_ != g.n_layers || next_ != nullptr;
     if (hand_in_ != nullptr) { why = "a layer split's chunk hand-off is in use"; return 0; }
-    if (m.pp || helper_ != nullptr || core::peer_portable()) { why = "a peer GPU"; return 0; }
+    // (the specific text only with a lent region: without one every peer reason reads "a peer GPU", as before)
+    if (m.pp) { why = m.lm.region != nullptr ? "this stage computes part of its experts on a peer GPU (set_peer)" : "a peer GPU"; return 0; }
+    if (helper_ != nullptr || (core::peer_portable() && m.lm.region == nullptr)) { why = "a peer GPU"; return 0; }
     // the PLE block (layer 1) reads the token history: on a split it runs in a first stage that holds layers 0 and 1
     // (a later stage never reaches it)
     if (split && m.ss->ple.ready() && stage_lb_ <= 1 && !(stage_lb_ == 0 && stage_le_ >= 2)) {
@@ -6124,22 +6160,33 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
         S = std::min(S, cap);
     }
     const int64_t G = m.T * K;
+    // host mode is lm_bytes_needed (the formula a caller prices a lent region with); VRAM mode adds the super-chunk's
+    // residual rows on the device and drops the two sub-chunk rows
     const auto dev_bytes = [&](int64_t s, bool r_dev) {
-        const uint64_t per = (uint64_t) (2 * N + HC + 2 * K) * 4 + (uint64_t) N * 2 + (r_dev ? (uint64_t) D * 4 : 0);
-        return (uint64_t) s * per + (uint64_t) lm_table_ints(s * K, G) * 4 + 4096 +
-               (r_dev ? 0 : (uint64_t) m.T * D * 4 + 256);
+        if (!r_dev) return lm_bytes_needed(g, s, m.T);
+        const uint64_t per = (uint64_t) (2 * N + HC + 2 * K) * 4 + (uint64_t) N * 2 + (uint64_t) D * 4;
+        return (uint64_t) s * per + (uint64_t) lm_table_ints(s * K, G) * 4 + 4096;
     };
+    // EP split 4b (C2): a region the caller lent (set_lm_region) is the room, as it is - no VRAM query, no margin
+    const bool lent = m.lm.region != nullptr;
     size_t free_b = 0, total_b = 0;
-    cudaMemGetInfo(&free_b, &total_b);
-    const int64_t room = (int64_t) free_b - lm_margin_bytes(lm_by_default_);
-    m.lm.free_mib = (int64_t) (free_b >> 20);
+    int64_t room = 0;
+    if (lent) {
+        room = (int64_t) m.lm.region_bytes;
+        m.lm.free_mib = (int64_t) (m.lm.region_bytes >> 20);
+    } else {
+        cudaMemGetInfo(&free_b, &total_b);
+        room = (int64_t) free_b - lm_margin_bytes(lm_by_default_);
+        m.lm.free_mib = (int64_t) (free_b >> 20);
+    }
     auto fit = [&](bool r_dev) {   // the largest super-chunk (a multiple of the chunk) that fits `room`
         int64_t s = S;
         while (s >= min_s && (int64_t) dev_bytes(s, r_dev) > room) s -= m.T;
         return s >= min_s ? s : (int64_t) 0;
     };
-    // a stage after the first: its rows arrive in R_host (the previous stage writes them there), so they stay there
-    const int mode = stage_lb_ > 0 ? 2 : lm_r_env();
+    // a stage after the first: its rows arrive in R_host (the previous stage writes them there), so they stay there;
+    // a lent region holds no super-chunk's rows either (it is sized by lm_bytes_needed, host mode)
+    const int mode = (stage_lb_ > 0 || lent) ? 2 : lm_r_env();
     bool r_dev = false;
     int64_t s_use = 0;
     if (mode == 1) { s_use = fit(true); r_dev = true; }
@@ -6149,7 +6196,8 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
         if (sv == S) { s_use = sv; r_dev = true; } else s_use = fit(false);
     }
     if (s_use <= 0) {
-        why = "no VRAM for a super-chunk (" + std::to_string(free_b >> 20) + " MiB free)";
+        why = lent ? "no room in the lent region for a super-chunk (" + std::to_string(m.lm.region_bytes >> 20) + " MiB)"
+                   : "no VRAM for a super-chunk (" + std::to_string(free_b >> 20) + " MiB free)";
         return 0;
     }
     Impl::LmBufs& lb = m.lm;
@@ -6174,12 +6222,15 @@ int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     }
     const uint64_t bytes = dev_bytes(s_use, r_dev);
     void* d = nullptr;
-    if (cudaMalloc(&d, bytes) != cudaSuccess) {
+    if (lent) {
+        d = m.lm.region;   // fit() measured `bytes` against the region (host mode: the formula is lm_bytes_needed)
+    } else if (cudaMalloc(&d, bytes) != cudaSuccess) {
         cudaGetLastError();
         why = "the super-chunk's buffers (" + std::to_string(bytes >> 20) + " MiB) do not fit";
         return 0;
     }
     lb.dev = d;
+    lb.dev_lent = lent;
     uint8_t* q = (uint8_t*) d;
     auto carve_b = [&](size_t b) { uint8_t* p = q; q += (b + 255) & ~(size_t) 255; return p; };
     lb.mixed = (float*) carve_b((size_t) s_use * N * 4);
@@ -7249,12 +7300,14 @@ bool Prefill::lm_run(const std::vector<Seg>& segs, int depth, const std::vector<
         return false;
     }
     stats_.ms_total += ms_since(t_start);
-    std::fprintf(stderr, "strata prefill: layer-major (layers %lld..%lld): %lld tokens in %lld super-chunk(s) of up to %lld (R in %s, %lld MiB VRAM free before), "
+    // (a lent region: its size, where the free VRAM stands otherwise; the default text is unchanged)
+    const std::string lm_room = std::to_string((long long) lb.free_mib) + (lb.dev_lent ? " MiB lent by the caller" : " MiB VRAM free before");
+    std::fprintf(stderr, "strata prefill: layer-major (layers %lld..%lld): %lld tokens in %lld super-chunk(s) of up to %lld (R in %s, %s), "
                          "%lld expert blobs streamed (%.1f MB), %lld resident, %lld expert groups (%lld on the FP16 path); %.0f ms (host: "
                          "enqueueing the attention halves %.0f, the experts %.0f: waiting for the attention halves "
                          "%.0f, the routing tables %.0f)\n",
                  (long long) LB, (long long) LE, (long long) n, (long long) lm_supers, (long long) S,
-                 lb.r_dev ? "VRAM" : "pinned RAM", (long long) lb.free_mib,
+                 lb.r_dev ? "VRAM" : "pinned RAM", lm_room.c_str(),
                  (long long) lm_streamed, (double) lm_bytes / 1e6, (long long) lm_resident, (long long) lm_groups,
                  (long long) lm_groups_f16, ms_since(t_start), ms_attn, ms_experts, ms_wait_a, ms_host_tables);
     if (pt.on) {
