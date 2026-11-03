@@ -118,6 +118,45 @@ misurato e il fattore, lo stallo scende verso lo zero e il fattore si assesta do
 padrona. Un prompt da un pezzo solo (4K) non ha retroazione: paga il primo piano. Sull'Oculink la stessa riga mostrerà
 costo per riga ~5 µs e fattore che sale fino a 4 finché la soglia dei byte (non il budget) limita i candidati.
 
+### 2.3 Il risultato vero: ON/OFF sul tempo del pezzo (quinta stesura, dopo la prova con `076e7d90`)
+
+Con l'anello del §2.2 le bande sono vere (3060 0,38, padrona 6,72 GB/s), il fattore scende a 0,03-0,04 con stallo di
+2-3 ms a pezzo — **e la lettura resta sotto la versione spenta** (878/1274/1297 contro 963/1376/1464, M): +255 ms a
+pezzo, ~5 ms a strato, con il server che a regime riceve 20-30 righe a strato. Tre cose che il §2.2 non vedeva:
+
+1. **Il costo fisso per strato del server** (~6 ms sul riser: decine di chiamate CUDA, copie piccole, due prodotti su
+   gruppi minuscoli) finiva nel «costo per riga» (240 µs «a riga» con 26 righe a strato). Ora `layer_us_eff` è l'EWMA
+   dello **span più piccolo** fra gli strati del pezzo (quelli con meno righe ≈ il solo costo fisso) e `row_us_eff`
+   è ciò che resta sopra di esso; il piano parte da `max(layer_us, layer_us_eff)`.
+2. **Il risparmio era teorico, il costo della padrona reale.** I blob mandati al server non sono più in `seq` (il
+   `continue` del piano precede `seq.push_back`: non vengono portati), ma la padrona paga per strato il **tempo host
+   per emettere il lavoro del server** (`peer_layer`: ~40 chiamate CUDA su un altro device sotto WDDM, con due
+   `cudaSetDevice`) più copie 2D, eventi e un'attesa fra device: quando l'host è il collo del prompt, è tempo di
+   pezzo. Ora si misura (`host_ms_chunk` → `host_us_layer`, EWMA) e **uno strato è mandato solo se il suo risparmio
+   stimato copre due volte quel costo** (`layers_dropped` nella riga): sul riser uno strato da 20-30 righe non
+   conviene mai.
+3. **L'anello guarda il tempo vero del pezzo.** Due eventi sulla padrona per ogni strato MoE (`ev_m0` all'inizio
+   del MoE, `ev_m1` dopo la `combine`), sempre, con o senza server: lo span del pezzo (primo `ev_m0` → ultimo
+   `ev_m1`, per token) alimenta due EWMA, **con** e **senza** server, secondo la modalità del pezzo. La modalità
+   (`mode_on`) resta ON solo se i pezzi con il server sono almeno l'1 % più veloci per token di quelli senza; in
+   entrambe le modalità un pezzo ogni 8 (`kProbeEvery`) è una **prova** dell'altra, e finché una delle due non ha
+   una misura il pezzo dopo la prende. Modalità, fattore e costi misurati **persistono fra i prompt** (vivono nel
+   `PeerPrefill`): sul riser, dopo il primo prompt lungo, i prompt da un pezzo (4K) partono OFF e costano come la
+   versione spenta (una prova ON ogni 8 pezzi complessivi); sull'Oculink restano ON e il fattore sale.
+
+Riga per pezzo (sempre, una per pezzo): `strata prefill: second server GPU B (stage on CUDAx), chunk c ON|OFF
+[(probe)]: sent P pairs (R rows) over L layers (D dropped: too few rows for the host's cost); server S ms, the primary
+stalled W ms for it, estimated saving E ms; primary chunk C ms = t ms/token (EWMA with a over n chunks, without b over
+m); server fixed F us + r us a row (model m0), host in its issue h us a layer; budget factor f0 -> f1; mode x -> y`.
+A fine prompt le somme e le due EWMA.
+
+**Sul riser, atteso**: pezzo 0 ON (fattore 1, costo del modello) con stallo e `host … us a layer` nell'ordine di
+1-2 ms; pezzo 1 OFF (prova della modalità senza misura); dal pezzo 2 `mode on -> off` se l'EWMA ON è più lenta,
+poi OFF con una prova ON ogni 8 pezzi, nella quale il filtro dei due costi host lascia passare solo strati con
+abbastanza righe (pochi o nessuno): lettura ≈ versione spenta, meno ~1/8 del costo di una prova. **Sull'Oculink,
+atteso**: costo fisso ~0,5-1 ms, costo host simile ma risparmio reale per strato (blob tolti a una padrona che
+sull'x4 è davvero in streaming): EWMA ON < OFF, `mode on`, fattore che sale.
+
 ### 2.1 Esempio numerico: riser x1 Gen2 contro Oculink x4
 
 Numeri: blob 1,6 MiB; padrona 3080 Ti sull'Oculink a 6,7 GB/s (M) → un blob le costa **250 µs**; per strato lo stadio 0
@@ -309,8 +348,10 @@ su `0 0`, poi su `0 1`; su `0 2` ci si aspetta FAIL con relativo ~1e-7 (sm_75).
 Misura utile arrivata con la seconda stesura (M): sul riser la 3060 fa **0,37–0,38 GB/s** compresi i prodotti
 (113 MiB in ~295 ms per strato a 9 040 righe); la padrona su se stessa 5,5 GB/s. Quarta stesura (dopo la prova nel
 motore con `4512b587`, banco tutto PASS): misura di banda con eventi su 8 copie, anello chiuso per pezzo (§2.2),
-costo per riga misurato nel piano. **Non compilata, non provata.** `STRATA_PEER2_PREFILL_ROW_US` resta a 1: il costo
-vero lo misura l'anello dal primo pezzo in poi.
+costo per riga misurato nel piano. Prova con `076e7d90` (M): bande vere, fattore a 0,03-0,04, stallo 2-3 ms, ma
+lettura 878/1274/1297 contro 963/1376/1464 spenta. Quinta stesura (§2.3): costo fisso per strato separato, tempo host
+dell'emissione misurato e filtro per strato, modalità ON/OFF decisa sul tempo vero del pezzo con prove ogni 8.
+**Non compilata, non provata.** `STRATA_PEER2_PREFILL_ROW_US` resta a 1: il costo vero lo misura l'anello.
 
 Rischi funzionali:
 - **Bit fra schede** (§5): se il banco dice che le righe della 3060 differiscono negli ultimi bit per i tipi senza

@@ -944,6 +944,26 @@ struct PeerPrefill {
     double chunk_saved_ms = 0.0;    // this chunk's estimated saving of the primary's streaming (at the measured bw0)
     double stall_ms_total = 0.0, server_ms_total = 0.0;   // sums over the chunks read (the end line)
     int64_t chunks_read = 0;        // chunks whose events were read
+    // ---- the loop on the REAL result (s.2.3): the primary's chunk time with and without the server.  ev_m0 / ev_m1 are
+    // recorded on the primary's stream at the start and the end of EVERY MoE layer while this server exists; the
+    // chunk's span (first ev_m0 -> last ev_m1, per token) feeds one of two EWMAs by the chunk's mode.  `mode_on` is
+    // decided from the two: the server is used only while its chunks are faster than the chunks without it; in
+    // either mode every kProbeEvery-th chunk runs the OTHER mode (a probe), so a riser switches itself off and an
+    // Oculink switches itself on, and both keep being re-measured.  The host's time inside the server's issue
+    // (peer_layer) is measured too: on WDDM those calls are the primary's cost when the host is the critical path.
+    static constexpr int kProbeEvery = 8;
+    std::vector<cudaEvent_t> ev_m0, ev_m1;   // [n_layers] on the primary (timing): the layer's MoE start / after its combine
+    int chunk_first_l = -1, chunk_last_l = -1;   // the chunk's first and last MoE layer with the events recorded
+    bool mode_on = true;            // the plan is made (true) or empty (false) - the decided mode
+    bool chunk_on = true;           // the mode this chunk was planned in (a probe may differ from mode_on)
+    bool chunk_probe = false;       // this chunk is a probe of the other mode
+    int64_t chunk_T = 0;            // the chunk's tokens (the span is normalized per token)
+    double ewma_on = 0.0, ewma_off = 0.0;    // ms per token of the primary's chunk span, by mode (0 = not measured yet)
+    int64_t chunks_on = 0, chunks_off = 0;   // chunks measured by mode
+    double layer_us_eff = 0.0;      // the server's measured FIXED cost per layer (us, EWMA of its smallest layer spans)
+    double host_ms_chunk = 0.0;     // this chunk's host time inside the server's issue (peer_layer)
+    double host_us_layer = 0.0;     // the same per layer, EWMA (us)
+    int64_t layers_dropped = 0;     // layers whose plan was dropped because the saving did not cover the primary's cost
     ~PeerPrefill() {
         if (host_xq) cudaFreeHost(host_xq);
         if (dev < 0) return;
@@ -970,6 +990,8 @@ struct PeerPrefill {
         if (ev_in) cudaEventDestroy(ev_in);
         for (cudaEvent_t e : ev_w0) if (e) cudaEventDestroy(e);   // (the closed loop's, on the primary)
         for (cudaEvent_t e : ev_w1) if (e) cudaEventDestroy(e);
+        for (cudaEvent_t e : ev_m0) if (e) cudaEventDestroy(e);
+        for (cudaEvent_t e : ev_m1) if (e) cudaEventDestroy(e);
         if (x_stream) { cudaStreamSynchronize(x_stream); cudaStreamDestroy(x_stream); }
         if (ev_x) cudaEventDestroy(ev_x);
         if (host_x) cudaFreeHost(host_x);
@@ -2647,9 +2669,12 @@ bool Prefill::set_peer2(core::PeerExperts* peer, std::string& err) {
         const size_t nl = (size_t) m.g->n_layers;
         pp->ev_w0.assign(nl, nullptr);
         pp->ev_w1.assign(nl, nullptr);
+        pp->ev_m0.assign(nl, nullptr);
+        pp->ev_m1.assign(nl, nullptr);
         pp->ev_used.assign(nl, 0);
         for (size_t l = 0; l < nl; ++l)
-            if (cudaEventCreate(&pp->ev_w0[l]) != cudaSuccess || cudaEventCreate(&pp->ev_w1[l]) != cudaSuccess) {
+            if (cudaEventCreate(&pp->ev_w0[l]) != cudaSuccess || cudaEventCreate(&pp->ev_w1[l]) != cudaSuccess ||
+                cudaEventCreate(&pp->ev_m0[l]) != cudaSuccess || cudaEventCreate(&pp->ev_m1[l]) != cudaSuccess) {
                 err = "prefill second server: the timing events on this card";
                 return false;
             }
@@ -3795,6 +3820,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 std::fill(P2.plan.begin() + (ptrdiff_t) base, P2.plan.begin() + (ptrdiff_t) (base + (size_t) m.g->n_expert), 0);
                 if (!(mmq_plan().any && mmq_plan().layer[(size_t) l]) || mmq_plan().wmma_only[(size_t) l]) return;
                 if (P2.bits_only && !mmq_plan().group_sort[(size_t) l]) return;   // (bits by construction: whole tiles on every card)
+                if (!P2.chunk_on) return;   // s.2.3: this chunk runs without the server (the decided mode, or an OFF probe)
                 const double blob = (double) lay0.blob_bytes(l);
                 const double row_bytes = (double) P2.xq_rb + (double) N * 4;
                 struct Cand { int32_t e; double c, t_server, saving; };
@@ -3822,8 +3848,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     return ra != rb2 ? ra > rb2 : a.e < b.e;
                 });
                 const double t_blob0 = blob / (P2.bw0_gbs * 1e3);   // us the primary streams one blob in
-                double t_used = P2.layer_us;
+                // the server's fixed cost a layer: the configured one or the measured one (s.2.3), whichever is larger
+                double t_used = std::max(P2.layer_us, P2.layer_us_eff);
                 int64_t taken = 0;
+                double saved_us = 0.0;
                 for (const Cand& cd : cands) {
                     // the budget: the primary's streaming time of the experts it still streams on this layer, times the
                     // configured fraction, times the closed loop's factor (s.2.2)
@@ -3832,12 +3860,22 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     t_used += cd.t_server;
                     ++taken;
                     P2.plan[base + (size_t) cd.e] = 1;
-                    P2.est_saved_ms += t_blob0 * 1e-3;
-                    P2.chunk_saved_ms += t_blob0 * 1e-3;
+                    saved_us += t_blob0;
+                }
+                // s.2.3: a layer is worth sending only if what it saves the primary (its blobs' streaming) covers what
+                // the layer costs the primary with the server - the host's time to issue the server's work (measured,
+                // EWMA) twice over.  On a riser a layer of 20-30 rows never does: dropped, not sent.
+                if (taken > 0 && saved_us < 2.0 * P2.host_us_layer) {
+                    std::fill(P2.plan.begin() + (ptrdiff_t) base, P2.plan.begin() + (ptrdiff_t) (base + (size_t) m.g->n_expert), 0);
+                    ++P2.layers_dropped;
+                    taken = 0;
+                    saved_us = 0.0;
                 }
                 if (taken > 0) ++P2.layers_in;
                 P2.planned += taken;
                 P2.chunk_planned += taken;
+                P2.est_saved_ms += saved_us * 1e-3;
+                P2.chunk_saved_ms += saved_us * 1e-3;
             };
             // the closed loop's fold (docs/PEER_PREFILL2.md s.2.2): the chunk before this one is read - the primary's
             // stall before the server's rows and the server's span, a layer - and the factor and the measured row
@@ -3850,32 +3888,58 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     cudaError_t q = cudaEventQuery(P2.ev_last);
                     if (q == cudaErrorNotReady) q = cudaEventSynchronize(P2.ev_last);
                     if (q != cudaSuccess) (void) cudaGetLastError();
-                    double stall_ms = 0.0, server_ms = 0.0;
+                    // (1) the server's part: the primary's stall before its rows and the server's spans, a layer; the
+                    // server's fixed cost a layer from its smallest spans (the layers with the fewest rows)
+                    double stall_ms = 0.0, server_ms = 0.0, min_span_ms = 1e30;
                     int64_t layers = 0;
                     for (size_t l2 = 0; q == cudaSuccess && l2 < P2.ev_used.size(); ++l2) {
                         if (!P2.ev_used[l2]) continue;
                         float a = 0.0f, b = 0.0f;
                         if (cudaEventElapsedTime(&a, P2.ev_w0[l2], P2.ev_w1[l2]) == cudaSuccess) stall_ms += a;
                         else (void) cudaGetLastError();
-                        if (cudaEventElapsedTime(&b, P2.ev_s0[l2], P2.ev_s1[l2]) == cudaSuccess) server_ms += b;
+                        if (cudaEventElapsedTime(&b, P2.ev_s0[l2], P2.ev_s1[l2]) == cudaSuccess) { server_ms += b; min_span_ms = std::min(min_span_ms, (double) b); }
                         else (void) cudaGetLastError();
                         ++layers;
                     }
+                    // (2) the primary's chunk: first MoE start -> last MoE end, per token, into the EWMA of the chunk's mode
+                    double chunk_ms = 0.0;
+                    bool chunk_measured = false;
+                    if (q == cudaSuccess && P2.chunk_first_l >= 0 && P2.chunk_last_l >= P2.chunk_first_l && P2.chunk_T > 0) {
+                        float c = 0.0f;
+                        if (cudaEventElapsedTime(&c, P2.ev_m0[(size_t) P2.chunk_first_l], P2.ev_m1[(size_t) P2.chunk_last_l]) == cudaSuccess) {
+                            chunk_ms = c;
+                            chunk_measured = true;
+                            const double per_tok = chunk_ms / (double) P2.chunk_T;
+                            double& ew = P2.chunk_on ? P2.ewma_on : P2.ewma_off;
+                            ew = ew > 0.0 ? 0.5 * ew + 0.5 * per_tok : per_tok;
+                            if (P2.chunk_on) ++P2.chunks_on; else ++P2.chunks_off;
+                        } else {
+                            (void) cudaGetLastError();
+                        }
+                    }
+                    const double f0 = P2.factor;
+                    const bool was_on = P2.mode_on;
                     if (q == cudaSuccess && layers > 0) {
                         // the stall's span holds the copy of the rows into Dm too (rows x N x 4 over the primary's link)
                         const double copy_ms = (double) P2.chunk_rows * (double) N * 4.0 / (P2.bw0_gbs * 1e6);
                         stall_ms = std::max(0.0, stall_ms - copy_ms);
-                        // the server's measured cost per row: its span less the fixed cost a layer, over its rows (EWMA)
+                        // the server's fixed cost a layer (EWMA of the smallest span) and its cost per row above it
+                        if (min_span_ms < 1e29) {
+                            const double fixed_us = min_span_ms * 1e3;
+                            P2.layer_us_eff = P2.layer_us_eff > 0.0 ? 0.5 * P2.layer_us_eff + 0.5 * fixed_us : fixed_us;
+                        }
                         if (P2.chunk_rows > 0) {
-                            const double eff = (server_ms * 1e3 - (double) layers * P2.layer_us) / (double) P2.chunk_rows;
+                            const double eff = (server_ms * 1e3 - (double) layers * std::max(P2.layer_us, P2.layer_us_eff)) / (double) P2.chunk_rows;
                             if (eff > 0.0) P2.row_us_eff = P2.row_us_eff > 0.0 ? 0.5 * P2.row_us_eff + 0.5 * eff : eff;
                         }
+                        // the host's time in the server's issue, a layer (EWMA): the primary's cost of a layer with the server
+                        const double host_us = P2.host_ms_chunk * 1e3 / (double) layers;
+                        P2.host_us_layer = P2.host_us_layer > 0.0 ? 0.5 * P2.host_us_layer + 0.5 * host_us : host_us;
                         // the factor: the stall against the estimated saving.  Stall above a quarter of the saving: the
                         // server cost more than it gave, halve; above a twentieth: trim; a stall under a hundredth and
                         // under a millisecond: there was slack, widen.  Bounded [0.02, 4].
                         const double saved = P2.chunk_saved_ms;
                         const double ratio = saved > 0.0 ? stall_ms / saved : (stall_ms > 0.0 ? 1e9 : 0.0);
-                        const double f0 = P2.factor;
                         if (ratio > 0.25) P2.factor *= 0.5;
                         else if (ratio > 0.05) P2.factor *= 0.8;
                         else if (ratio < 0.01 && stall_ms < 1.0) P2.factor *= 1.25;
@@ -3883,14 +3947,40 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         P2.stall_ms_total += stall_ms;
                         P2.server_ms_total += server_ms;
                         ++P2.chunks_read;
+                    }
+                    // (3) the mode, on the real result: with both EWMAs, the server stays on only while its chunks are
+                    // at least 1 % faster per token than the chunks without it
+                    if (P2.ewma_on > 0.0 && P2.ewma_off > 0.0) P2.mode_on = P2.ewma_on < 0.99 * P2.ewma_off;
+                    if (chunk_measured || layers > 0) {
                         const double model_row_us = ((double) P2.xq_rb + (double) N * 4) / (P2.bw_gbs * 1e3) + P2.row_us;
-                        std::fprintf(stderr, "strata prefill: second server GPU %d (stage on CUDA%d), chunk %lld: sent %lld pairs (%lld rows) over "
-                                             "%lld layers; server %.0f ms, the primary stalled %.0f ms for it, estimated saving %.0f ms; row cost "
-                                             "measured %.1f us (model %.1f: link + compute); budget factor %.2f -> %.2f\n",
-                                     P2.dev, m.device, (long long) (P2.chunks - 1), (long long) P2.chunk_planned, (long long) P2.chunk_rows,
-                                     (long long) layers, server_ms, stall_ms, saved, P2.row_us_eff, model_row_us, f0, P2.factor);
+                        std::fprintf(stderr, "strata prefill: second server GPU %d (stage on CUDA%d), chunk %lld %s: sent %lld pairs (%lld rows) "
+                                             "over %lld layers (%lld dropped: too few rows for the host's cost); server %.0f ms, the primary stalled "
+                                             "%.0f ms for it, estimated saving %.0f ms; primary chunk %.0f ms = %.3f ms/token (EWMA with %.3f over %lld "
+                                             "chunks, without %.3f over %lld); server fixed %.0f us + %.1f us a row (model %.1f), host in its issue "
+                                             "%.0f us a layer; budget factor %.2f -> %.2f; mode %s -> %s\n",
+                                     P2.dev, m.device, (long long) (P2.chunks - 1), P2.chunk_on ? (P2.chunk_probe ? "ON (probe)" : "ON") : (P2.chunk_probe ? "OFF (probe)" : "OFF"),
+                                     (long long) P2.chunk_planned, (long long) P2.chunk_rows, (long long) layers, (long long) P2.layers_dropped,
+                                     server_ms, stall_ms, P2.chunk_saved_ms, chunk_ms, P2.chunk_T > 0 ? chunk_ms / (double) P2.chunk_T : 0.0,
+                                     P2.ewma_on, (long long) P2.chunks_on, P2.ewma_off, (long long) P2.chunks_off, P2.layer_us_eff, P2.row_us_eff,
+                                     model_row_us, P2.host_us_layer, f0, P2.factor, was_on ? "on" : "off", P2.mode_on ? "on" : "off");
                     }
                 }
+                // the next chunk's mode: the decided one, except that a chunk every kProbeEvery is a probe of the other
+                // mode (and, until both modes have a measure, the other mode is tried on the second chunk)
+                P2.chunk_probe = false;
+                P2.chunk_on = P2.mode_on;
+                if (P2.chunks > 0) {
+                    const bool other_unmeasured = P2.mode_on ? P2.ewma_off <= 0.0 : P2.ewma_on <= 0.0;
+                    if (other_unmeasured || P2.chunks % PeerPrefill::kProbeEvery == PeerPrefill::kProbeEvery - 1) {
+                        P2.chunk_on = !P2.mode_on;
+                        P2.chunk_probe = true;
+                    }
+                }
+                P2.chunk_T = T;
+                P2.chunk_first_l = -1;
+                P2.chunk_last_l = -1;
+                P2.layers_dropped = 0;
+                P2.host_ms_chunk = 0.0;
                 std::fill(P2.ev_used.begin(), P2.ev_used.end(), 0);
                 P2.ev_last = nullptr;
                 P2.chunk_planned = 0;
@@ -5691,7 +5781,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // the list of servers: the second's block lies first in the row layout (kind order 3, 1, 2 above),
                         // the first's right after it; each one's rows_peer* is its block's length
                         peer2_now = use_mmq && m.pp2 && !order_peer2.empty();
-                        if (peer2_now && !peer_layer(*m.pp2, order_peer2, rows_local, rows_peer2, false)) return false;
+                        if (m.pp2 && pre_mmq) {   // s.2.3: the layer's MoE start on the primary's stream, every MoE layer
+                            cudaEventRecord(m.pp2->ev_m0[(size_t) l], m.cs);
+                            if (m.pp2->chunk_first_l < 0) m.pp2->chunk_first_l = (int) l;
+                        }
+                        if (peer2_now) {
+                            const auto th0 = std::chrono::steady_clock::now();
+                            const bool ok2 = peer_layer(*m.pp2, order_peer2, rows_local, rows_peer2, false);
+                            m.pp2->host_ms_chunk += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - th0).count();
+                            if (!ok2) return false;
+                        }
                         peer_now = use_mmq && m.pp && !order_peer.empty();
                         if (peer_now && !peer_layer(*m.pp, order_peer, rows_local + rows_peer2, rows_peer, true)) return false;
                         if (ps_on) {   // multi-GPU: this layer's peer-ring entries the routing did not pick give their slots back
@@ -6152,6 +6251,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     else
                         moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs,
                                     use_mmq && !fused_l && lay.native && lay.fmt[(size_t) l].tail_off ? m.row_sd : nullptr);
+                    if (m.pp2 && use_mmq) {   // s.2.3: the layer's MoE end (after the combine), every MoE layer
+                        cudaEventRecord(m.pp2->ev_m1[(size_t) l], m.cs);
+                        m.pp2->chunk_last_l = (int) l;
+                        m.pp2->ev_last = m.pp2->ev_m1[(size_t) l];
+                    }
                     // debug: STRATA_DBG_NAN=1 reports the first layer of a chunk whose MoE produced non-finite values
                     if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {
                         cudaStreamSynchronize(m.cs);
@@ -6450,11 +6554,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
             std::fprintf(stderr, "strata prefill timing (second server GPU %d): MoE layers with rows %lld, rows/layer %.0f, experts/layer %.1f; "
                                  "the cost model planned %lld of %lld candidate pairs over %lld layers, estimated %.0f ms of the primary's "
                                  "streaming saved (links: server %.2f GB/s, primary %.2f GB/s); closed loop over %lld chunks read: server "
-                                 "%.0f ms, the primary stalled %.0f ms, row cost measured %.1f us, budget factor now %.2f\n",
+                                 "%.0f ms, the primary stalled %.0f ms, server fixed %.0f us + %.1f us a row, host %.0f us a layer, budget factor "
+                                 "now %.2f, mode %s (primary chunk %.3f ms/token with the server over %lld chunks, %.3f without over %lld)\n",
                          P2.dev, (long long) P2.layers, P2.layers ? (double) P2.rows / P2.layers : 0.0,
                          P2.layers ? (double) P2.experts / P2.layers : 0.0, (long long) P2.planned, (long long) P2.cand,
                          (long long) P2.layers_in, P2.est_saved_ms, P2.bw_gbs, P2.bw0_gbs, (long long) P2.chunks_read,
-                         P2.server_ms_total, P2.stall_ms_total, P2.row_us_eff, P2.factor);
+                         P2.server_ms_total, P2.stall_ms_total, P2.layer_us_eff, P2.row_us_eff, P2.host_us_layer, P2.factor,
+                         P2.mode_on ? "on" : "off", P2.ewma_on, (long long) P2.chunks_on, P2.ewma_off, (long long) P2.chunks_off);
         }
     }
     if (kva_run || kva.capture) {
