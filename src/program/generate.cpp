@@ -10575,6 +10575,13 @@ int main(int argc, char** argv) {
         ver.set_remote_expert_opt(remote_opt.get());
         if (pcie_balance() && n_stages == 1) ver.set_pcie_balance(&drive.d.pcie_model);
         if (batch_mtp) ver.set_batch_graph_limit(64);   // --batch-mtp only: slot rotation makes many layouts (LRU); 0.1.39 keeps all
+        // STRATA_PEER_FUSED (docs/PEER_FUSED.md s.6): the decode verifier drives the peer's persistent kernel through the
+        // peer's hook (begin / end / flush / abort, the graph's wait on its flag).  The window's ownership comes from the
+        // primary's residency table (drive.d.host_res above) and the peer's own.  Set before init, like the hand-off flags.
+        if (peer.fused_on()) {
+            peer.fused_set_host_res(host_res.empty() ? nullptr : host_res.data());
+            ver.set_peer_fused(peer.fused_hook());
+        }
         if (!ver.init(wt, g, ss, vh, native_head.loaded() || prefill_head_alias_bound ? &native_head : nullptr,
                       batch_max_t(), err) ||
             (use_mtp && !prefill_head_alias_bound && !mtp.bind(last_st && !mtp_off_last ? last_st->wt : wt, last_st ? &last_st->head : &native_head,
@@ -17420,6 +17427,7 @@ int main(int argc, char** argv) {
             const int64_t peer_swaps0 = peer.swaps();
             const size_t peer_spans0 = peer.spans_us().size();   // STRATA_PEER_STAMP: the GPU spans before this request
             const double peer_span_us0 = peer.span_us_total;
+            const int64_t peer_fwin0 = peer.fused_windows(), peer_fsteps0 = peer.fused_steps();   // STRATA_PEER_FUSED
             double dt_run = 0, dt_commit = 0, dt_draft = 0;
             double dt_adapt_wait = 0, dt_adapt_join = 0;   // the tier's wait before a window / join after the draft (ms, summed)
             const int64_t dt_sw0 = ajob ? a_swapped : adapt_nswaps;
@@ -18973,27 +18981,40 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata decode adapt overlap: %lld windows took swaps still landing, a layer waited %.2f ms in all so far\n",
                                  (long long) aov_flips, ver.ms_gate);
                 if (peer.valid()) {   // the peer's part of "per-layer host": launch() (in plan) and finish() (in CPU)
-                    std::string span;   // STRATA_PEER_STAMP: the peer stream's GPU span per layer (p50 / p90) and per window
-                    if (strata::core::PeerExperts::stamp() && peer.spans_us().size() > peer_spans0) {
+                    // STRATA_PEER_FUSED: the windows the persistent kernel served and their steps (layer x group);
+                    // with it "launch" is the host's count of the step and "finish" its wait only under HOSTWAIT
+                    const bool fused = peer.fused_on();
+                    std::string span;   // STRATA_PEER_STAMP / fused: the peer's GPU span per layer or step (p50 / p90) and per window
+                    if ((strata::core::PeerExperts::stamp() || fused) && peer.spans_us().size() > peer_spans0) {
                         std::vector<float> sp(peer.spans_us().begin() + (ptrdiff_t) peer_spans0, peer.spans_us().end());
                         const size_t i50 = sp.size() / 2, i90 = std::min(sp.size() - 1, sp.size() * 9 / 10);
                         std::nth_element(sp.begin(), sp.begin() + (ptrdiff_t) i50, sp.end());
                         const float p50 = sp[i50];
                         std::nth_element(sp.begin(), sp.begin() + (ptrdiff_t) i90, sp.end());
                         const float p90 = sp[i90];
-                        char buf[160];
-                        std::snprintf(buf, sizeof buf, "; GPU span per layer p50 %.0f us, p90 %.0f us, %.2f ms/window over %zu layers (STRATA_PEER_STAMP)",
-                                      p50, p90, (peer.span_us_total - peer_span_us0) * 1e-3 / w, sp.size());
+                        char buf[200];
+                        std::snprintf(buf, sizeof buf, "; GPU span per %s p50 %.0f us, p90 %.0f us, %.2f ms/window over %zu %s (%s)",
+                                      fused ? "step" : "layer", p50, p90, (peer.span_us_total - peer_span_us0) * 1e-3 / w, sp.size(),
+                                      fused ? "steps" : "layers", fused ? "the kernel's stamps, doorbell seen -> flag raised" : "STRATA_PEER_STAMP");
                         span = buf;
+                    }
+                    std::string fused_note;
+                    if (fused) {
+                        char buf[200];
+                        std::snprintf(buf, sizeof buf, " (STRATA_PEER_FUSED: %lld windows fused, %.1f steps/window served by the kernel%s)",
+                                      (long long) (peer.fused_windows() - peer_fwin0),
+                                      (double) (peer.fused_steps() - peer_fsteps0) / std::max<double>(1.0, (double) (peer.fused_windows() - peer_fwin0)),
+                                      strata::core::PeerExperts::fused_hostwait() ? ", HOSTWAIT" : "");
+                        fused_note = buf;
                     }
                     // the peer's adapt(): its host time runs on the adapt thread and shows in "adapt join" when it outlasts the draft
                     std::fprintf(stderr, "strata decode peer: per window: %.2f ms host in launch + %.2f ms waiting in finish over %.1f layers "
-                                         "with a share; per layer-window: %.2f entries, %.2f experts; adapt %.2f ms host, %.1f swaps/window%s%s%s\n",
+                                         "with a share; per layer-window: %.2f entries, %.2f experts; adapt %.2f ms host, %.1f swaps/window%s%s%s%s\n",
                                  (peer.ms_launch - peer_launch0) / w, (peer.ms_wait - peer_wait0) / w, (double) (peer.launches - peer_launches0) / w,
                                  (double) (peer.entries() - peer_entries0) / (w * L), (double) (peer.experts() - peer_experts0) / (w * L),
                                  (peer.ms_adapt - peer_adapt0) / w, (double) (peer.swaps() - peer_swaps0) / w,
                                  strata::core::PeerExperts::noswitch() ? " (STRATA_PEER_NOSWITCH)" : "",
-                                 strata::core::PeerExperts::refill_flush() ? " (STRATA_PEER_REFILL_FLUSH)" : "", span.c_str());
+                                 strata::core::PeerExperts::refill_flush() ? " (STRATA_PEER_REFILL_FLUSH)" : "", fused_note.c_str(), span.c_str());
                 }
                 for (int st = 0; st < n_stages; ++st) {   // every stage's GPU profile, not only the first card's
                     const std::string pr = stage_ver(st).profile_report();
@@ -19955,6 +19976,11 @@ int main(int argc, char** argv) {
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2) ver.set_taps(df2.tap_layers());
 #endif
+        // STRATA_PEER_FUSED: this decode verifier drives the peer's persistent kernel too (see the serve path)
+        if (peer.fused_on()) {
+            peer.fused_set_host_res(host_res.empty() ? nullptr : host_res.data());
+            ver.set_peer_fused(peer.fused_hook());
+        }
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;

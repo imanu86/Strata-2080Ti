@@ -17,9 +17,12 @@
 
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/expert_source.hpp"
+#include "strata/core/peer_fused.hpp"      // STRATA_PEER_FUSED: the persistent-kernel contract (Hook, Window, Shape)
+#include "strata/kernels/iq_kernels.hpp"   // NativeExpertLayout
 
 #include <cuda_runtime.h>
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -48,8 +51,13 @@ public:
     bool valid() const { return device_ >= 0; }
     int device() const { return device_; }
 
-    /// Whether the peer holds (layer, expert) right now.
-    bool has(int64_t layer, int64_t expert) const { return res_[(size_t) (layer * n_expert_ + expert)] >= 0; }
+    /// Whether the peer holds (layer, expert) right now.  STRATA_PEER_FUSED: inside a fused window the answer comes
+    /// from the window's ownership table (own_win_, what the kernel on the peer plans with), not from res_, so the
+    /// host's plan and the device's plan agree even when poll_pending / apply_pending move res_ mid-window.
+    bool has(int64_t layer, int64_t expert) const {
+        const size_t idx = (size_t) (layer * n_expert_ + expert);
+        return window_open_.load(std::memory_order_relaxed) ? own_win_[idx] >= 0 : res_[idx] >= 0;
+    }
 
     /// The device address of (layer, expert)'s blob on the peer, or null when it is not resident.
     const uint8_t* slot_ptr(int64_t layer, int64_t expert) {
@@ -107,10 +115,46 @@ public:
     /// same: the stamps say how long the peer's stream is busy for a layer, against the host's launch + finish.
     static bool stamp();
     /// the GPU spans (us) of the layers finished so far, in order; the decode timing line reads a window range of them
+    /// (STRATA_PEER_FUSED: one span a step, from the kernel's own stamps: doorbell seen -> flag raised)
     const std::vector<float>& spans_us() const { return spans_us_; }
     double span_us_total = 0;                         ///< their sum (us)
 
+    // ---- STRATA_PEER_FUSED=1 (opt-in, lab/upsync-v0.2.9, docs/PEER_FUSED.md s.6): the peer's expert server as ONE
+    // persistent kernel per verify window.  The verifier drives it through fused_hook() (Verifier::set_peer_fused):
+    // begin before the graph launch, end after the window's sync, flush in its wait loop, abort from
+    // release_gpu_waits.  Inside a window launch() only counts (groups, rows) for the end-of-window check and
+    // finish() returns at once (or spins on the kernel's flag with STRATA_PEER_FUSED_HOSTWAIT=1); has() answers from
+    // the window's ownership table.  Off, or outside a fused window (the prompt path, a run without the hook):
+    // has / launch / finish are exactly the ones above.
+    /// STRATA_PEER_FUSED=1, read once.
+    static bool fused_env();
+    /// The fused server is on: fused_env(), a native pack whose every layer resolves to the same fused kernel instance,
+    /// and the buffers allocated at open().
+    bool fused_on() const { return fused_on_; }
+    /// The verifier's handle (stable: a member).  Null when the fused server is off.
+    const peer_fused::Hook* fused_hook() const { return fused_on_ ? &hook_ : nullptr; }
+    /// The primary's residency table (drive.d.host_res; may be null before the token graph's table exists): with the
+    /// peer's own res_ it gives the window's ownership (own = res_ >= 0 && host_res < 0).  Set before the first window.
+    void fused_set_host_res(const int32_t* host_res) { host_res_fused_ = host_res; }
+    /// The hook's four entry points (see the Hook comment in peer_fused.hpp).
+    bool fused_begin(const peer_fused::WindowHost& w, std::string& err);
+    bool fused_end(std::string& err);
+    void fused_flush();
+    void fused_abort();
+    int64_t fused_windows() const { return fused_windows_; }   ///< windows served by the persistent kernel
+    int64_t fused_steps() const { return fused_steps_; }       ///< steps (layer x group) those windows carried
+    static bool fused_hostwait();                              ///< STRATA_PEER_FUSED_HOSTWAIT=1, read once
+
 private:
+    static bool hook_begin(void* ctx, const peer_fused::WindowHost& w, std::string& err);
+    static bool hook_end(void* ctx, std::string& err);
+    static void hook_flush(void* ctx);
+    static void hook_abort(void* ctx);
+    bool fused_open(std::string& err);        ///< open()'s fused part: shape, page, buffers, hook (false = a CUDA error)
+    void fused_close();                       ///< frees what fused_open allocated (the kernel already left)
+    cudaError_t fused_query();                ///< cudaStreamQuery(stream_) without the device switch, under it if refused
+    cudaError_t fused_drain(double limit_s);  ///< polls fused_query until not cudaErrorNotReady or the limit
+    bool fused_map(const void* host, void** dev, std::string& err);   ///< the peer's device pointer of a mapped host page (cached)
     int device_ = -1;
     bool p2p_ = false;
     int64_t n_layers_ = 0, n_expert_ = 0;
@@ -136,6 +180,46 @@ private:
     unsigned long long* m_stamp_ = nullptr;           ///< the same page as the peer sees it
     int64_t stamp_layer_ = -1;                        ///< the layer whose stamps the next finish() reads
     std::vector<float> spans_us_;
+
+    // ---- STRATA_PEER_FUSED (docs/PEER_FUSED.md s.2b, s.3, s.4)
+    bool fused_on_ = false;
+    /// A fused window is open: has/launch/finish take the fused path and adapt() does not touch the slots.  It stays
+    /// true as long as the window's kernel may still be running (fused_abort leaves it up when its 5 s drain gives up:
+    /// a kernel that has not left still reads the slots); the next fused_begin / fused_end lowers it once the stream
+    /// is idle.  Atomic: written by the pool thread and by fused_abort, which release_gpu_waits may call from the
+    /// stall watchdog's thread; read by the pool thread (has) and the adapt thread.
+    std::atomic<bool> window_open_{false};
+    peer_fused::Shape shape_;                         ///< the kernel instance and grid peer_fused_shape resolved at open
+    strata::kernels::NativeExpertLayout fused_L_;     ///< the pack's layout (the same on every layer, checked at open)
+    peer_fused::Hook hook_;                           ///< what the verifier holds (fused_hook())
+    const int32_t* host_res_fused_ = nullptr;         ///< the primary's residency table (fused_set_host_res)
+    // the peer's mapped page (kPageBytes, Portable | Mapped): host view and the peer's device view of each word
+    uint8_t* h_page_ = nullptr;
+    uint32_t* h_flag_out_ = nullptr;   uint32_t* m_flag_out_ = nullptr;
+    uint32_t* h_abort_ = nullptr;      uint32_t* m_abort_ = nullptr;
+    uint32_t* h_err_ = nullptr;        uint32_t* m_err_ = nullptr;
+    uint32_t* h_exit_ = nullptr;       uint32_t* m_exit_ = nullptr;
+    uint32_t* h_cnt_ = nullptr;        uint32_t* m_cnt_ = nullptr;
+    unsigned long long* h_stamp_fused_ = nullptr;   unsigned long long* m_stamp_fused_ = nullptr;
+    const uint32_t* flag_out_dev0_ = nullptr;       ///< flag_out as the primary device sees it (the graph's wait node)
+    // VRAM
+    int32_t* d_own_ = nullptr;                        ///< n_layers x n_expert: the peer's slot or -1 (what the kernel plans with)
+    unsigned long long* d_slot_ptr_ = nullptr;        ///< cache_.slots(): slot -> device address of its blob
+    peer_fused::Plan* d_plan_ = nullptr;              ///< [2]: the kernel's double-buffered step plan
+    peer_fused::Sync* d_sync_ = nullptr;              ///< the kernel's barrier / ready / done words
+    // host
+    int32_t* h_own_ = nullptr;                        ///< pinned n_layers x n_expert: the rows the per-layer copies go up from
+    std::vector<int32_t> own_win_;                    ///< the window's ownership table (the one truth: has() reads it)
+    std::vector<int32_t> own_shadow_;                 ///< what d_own_ holds (only the changed layers are copied)
+    std::vector<uint32_t> expect_;                    ///< [kMaxSteps] the host's groups << 16 | rows a step
+    int step_ = 0;                                    ///< steps launch() counted in the open window
+    int win_steps_ = 0;                               ///< steps the open window has
+    int win_G_ = 1, win_lb_ = 0;                      ///< for the mismatch message (step -> layer)
+    uint32_t epoch_ = 0;                              ///< the window's number (the kernel writes it to `exit`)
+    unsigned long long wait_ns_ = peer_fused::kWaitNsDefault;   ///< STRATA_PEER_FUSED_WAIT_MS
+    int64_t fused_windows_ = 0, fused_steps_ = 0;
+    struct MappedPtr { const void* host = nullptr; void* dev = nullptr; };
+    MappedPtr map_cache_[4];                          ///< seq / x / ids / ymiss: the peer's device pointers, by host address
 };
 
 }  // namespace strata::core

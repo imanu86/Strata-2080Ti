@@ -614,6 +614,26 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_include_directories(qsa_rows_bench PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(qsa_rows_bench PRIVATE strata_kernels CUDA::cudart)
   endif()
+  # PEER_FUSED (docs/PEER_FUSED.md s.8, lab/upsync-v0.2.9): the persistent expert server of STRATA_PEER_FUSED=1
+  # (peer_fused_kernel, included inside iq_kernels.cu) against today's peer path - quantize_q8_1_rows +
+  # native_expert_grouped + scatter_rows_f32 - memcmp on the rows, on synthetic blobs, over several steps with empty
+  # groups and a host-made doorbell; GPU, no model.  A .cu because its fake primary can be a kernel on a second card.
+  # Not in the default build: `cmake --build <dir> --target peer_fused_test`.  CUDA only, like the benches above: the
+  # kernel's cooperative launch, mapped-memory polling and system fences are the CUDA runtime's (not on gfx906, whose
+  # .cu files compile as HIP: __stwt, __nanosleep and %globaltimer are not there, and peer_fused.cuh is HIP-guarded).
+  if(STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
+    add_executable(peer_fused_test EXCLUDE_FROM_ALL tools/peer_fused_test.cu)
+    target_include_directories(peer_fused_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(peer_fused_test PRIVATE strata_kernels strata_core CUDA::cudart)
+  endif()
+  # PEER_FUSED s.5: the kernel is built at __launch_bounds__(256, 2) (STRATA_PEER_FUSED_MINB unset or 2); the 3- and
+  # 4-blocks-per-SM instances (STRATA_PEER_FUSED_MINB=3|4) are six more large kernels in iq_kernels.cu, so they exist
+  # only in a build that asks for them.  Off (the default) leaves iq_kernels.cu's compile exactly as it is.
+  option(STRATA_PEER_FUSED_MINB_ALL "Also build the __launch_bounds__(256, 3) and (256, 4) instances of the STRATA_PEER_FUSED persistent kernel (STRATA_PEER_FUSED_MINB=3|4)" OFF)
+  if(STRATA_ENABLE_CUDA AND STRATA_PEER_FUSED_MINB_ALL)
+    set_property(SOURCE src/kernels/cuda/iq_kernels.cu APPEND PROPERTY COMPILE_DEFINITIONS STRATA_PEER_FUSED_MINB_ALL)
+    message(STATUS "Strata: STRATA_PEER_FUSED_MINB_ALL - the MINB 3 and 4 instances of the peer's persistent kernel are built too")
+  endif()
   # the QSA selection (block scores on the warp kernel and the tensor-core one, top-k): a GPU bench with a
   # scorer-vs-scorer comparison and an FP64 accuracy gate (synthetic, no model); the ctest runs a 32K context under a
   # 262144-cell capacity (the top-k dispatch follows the capacity) and exits non-zero on a failed gate

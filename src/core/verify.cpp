@@ -612,10 +612,26 @@ bool Verifier::release_gpu_waits(int timeout_ms) {
     // the words the spin kernels read (wait_flag_ge, wait_flag_ge_or) are mapped host memory, so a store here
     // reaches them with no API call; UINT32_MAX is past every ring.  (E-6's skip words are device memory, but
     // wait_flag_ge_or also returns on its flag.)  A host function raising flag B later only raises.
-    for (uint32_t* p : {h_flag_, h_flagA_, h_flagB_, hflag_in_h_})   // + an overlapped split's hand-off wait
+    uint32_t* const peer_flag = peer_hook_ != nullptr ? peer_hook_->flag_out_host : nullptr;   // the fused peer's output flag
+    for (uint32_t* p : {h_flag_, h_flagA_, h_flagB_, hflag_in_h_,   // + an overlapped split's hand-off wait
+                        peer_flag})
         if (p != nullptr) *(volatile uint32_t*) p = UINT32_MAX;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     strata_store_fence();
+    // STRATA_PEER_FUSED: the graph's waits on the peer's flag are up; now the kernel itself - the abort word makes it
+    // leave at its next poll and PeerExperts drains its stream (bounded, 5 s) before this card's streams are drained.
+    // A step that was in flight may have written its ring over the UINT32_MAX above between the two (the kernel does
+    // not read the flag before it writes it): once the kernel has left (or the drain gave up) the word goes up again,
+    // so no wait node of this card can sit on a small value forever (#267).  The kernel itself writes UINT32_MAX when
+    // it leaves on the abort; this is the belt to that suspender.
+    if (peer_hook_ != nullptr && peer_hook_->abort != nullptr) {
+        peer_hook_->abort(peer_hook_->ctx);
+        if (peer_flag != nullptr) {
+            *(volatile uint32_t*) peer_flag = UINT32_MAX;
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            strata_store_fence();
+        }
+    }
     const OnDevice on_device(device_);
     const Clock::time_point t0 = Clock::now();
     for (cudaStream_t s : {cs_, copy_}) {
@@ -1236,6 +1252,16 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                              cudaMemcpyHostToDevice) == cudaSuccess;
         }
         if (!ok2) { cudaGetLastError(); all_resident_ = false; device_plan_ = false; }
+    }
+    // STRATA_PEER_FUSED (docs/PEER_FUSED.md s.7): the fused peer server plans every step of the window from this
+    // verifier's own mapped pages (seq, x, ids, ymiss) over [lb_, le_) with lb_ = 0, and counts the peer's entries
+    // against the host plan: neither a layer split (another stage's pages, another ring) nor the device plan (a group
+    // the host never publishes) fit it.  (The peer itself refuses --layer-split; decided here after device_plan_ is.)
+    // A later stage of a split (lb_ > 0, next_ == nullptr) is refused too: its windows are prelaunched by the stage
+    // before it (prelaunch skips run's begin), and the peer's pages are the first stage's.
+    if (peer_hook_ != nullptr && (next_ != nullptr || device_plan_ || lb_ != 0 || le_ != g.n_layers)) {
+        err = "verify: STRATA_PEER_FUSED needs no layer split and no device plan";
+        return false;
     }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers%s\n", max_t,
                  (double) count.used / 1048576.0,
@@ -2336,6 +2362,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 copy_or_zero_from_mapped(parts_out, m_ymiss_ + (size_t) tb * K * N, (long long) n * K * N,
                                          skip_ + grp, ring, cs);
             } else {
+                // STRATA_PEER_FUSED (docs/PEER_FUSED.md s.1, s.7): the peer's persistent kernel writes its rows of this
+                // step into the mapped m_ymiss_ rows and raises its output flag to `ring` (fence, system scope) - one
+                // wait node a step, before the CPU rows' wait, in the plain window graphs only: the batch windows and the
+                // head bet (STRUCT-A) run no fused window, so their graphs must not wait on a flag nobody raises.  The
+                // copy below stays the same: p_dst skips this GPU's hit rows, the peer's rows come with the CPU's.
+                if (peer_hook_ != nullptr && peer_hook_->flag_out_dev0 != nullptr && !batch_rec_ && rec_from_ < 0 &&
+                    rec_to_ < 0)
+                    wait_flag_ge(peer_hook_->flag_out_dev0, ring, cs);   // the peer's share is in the mapped rows
                 const bool fuse_rows = fuse_rows_on() && !prof_on_ && !remote_opt_ && dec_batch && m_bal_ == nullptr;   // 143-amdk
                 if (!fuse_rows) {
                     if (m_bal_ != nullptr)   // set_pcie_balance: ... and ends as it waits for the CPU's rows
@@ -3073,6 +3107,9 @@ bool Verifier::prelaunch(int T, const int32_t* tokens, int64_t pos0, std::string
     if (T < 1 || T > max_t_ || exec_t == nullptr) { err = "verify: prelaunch before the window was captured"; return false; }
     if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
     if (pos0 + T > ss_->qsa_states[ss_->qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
+    // STRATA_PEER_FUSED: a prelaunched window skips run's begin, and its graph waits on the peer's flag (init refuses
+    // the split already; this is the belt)
+    if (peer_hook_ != nullptr) { err = "verify: STRATA_PEER_FUSED does not serve a prelaunched window"; return false; }
     const Clock::time_point t0 = Clock::now();
     stage_inputs(T, tokens, pos0);
     if (trace_h_ != nullptr) std::memset(trace_h_, 0, trace_n_ * 8);
@@ -3142,6 +3179,42 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const Clock::time_point t0 = Clock::now();
     if (!pre && !staged_) stage_inputs(T, tokens, pos0);
     staged_ = false;
+    const int G = groups_[T] > 0 ? groups_[T] : 1;
+    const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
+    const int64_t steps = (le_ - lb_) * G;
+    // STRATA_PEER_FUSED (docs/PEER_FUSED.md s.7): the peer's persistent kernel for this window goes up after the inputs
+    // are staged (h_seq_ / h_flag_ are zero again) and BEFORE the graph launch, whose wait_flag_ge nodes on the peer's
+    // output flag it serves; it comes down with `end` after the window's sync.  The guard aborts it on every other way
+    // out of this function (a launch error, a timeout, a layer that never rang, a bad PLE gather): no kernel outlives
+    // its window - the abort word makes it leave at its next poll and PeerExperts drains its stream, bounded.  Only
+    // the doorbell graph: the zero-doorbell one (ar_on) publishes no step, so the peer serves it as today.
+    struct PeerWindow {
+        const strata::core::peer_fused::Hook* hook = nullptr;
+        bool open = false;   ///< begin succeeded and end has not closed it
+        ~PeerWindow() { if (open && hook != nullptr && hook->abort != nullptr) hook->abort(hook->ctx); }
+    } pw;
+    if (peer_hook_ != nullptr && !ar_on() && !pre) {
+        strata::core::peer_fused::WindowHost w;
+        w.T = T;
+        w.G = G;
+        w.lb = (int) lb_;
+        w.le = (int) le_;
+        w.k = (int) ss.k;
+        w.n_embd = g.n_embd;
+        w.gtb[0] = gtb[0]; w.gtb[1] = gtb[1];
+        w.gte[0] = gte[0]; w.gte[1] = gte[1];
+        w.seq_h = h_seq_;
+        w.x_h = h_x_;
+        w.ids_h = h_ids_;
+        w.ymiss_h = h_ymiss_;
+        if (peer_hook_->begin == nullptr || !peer_hook_->begin(peer_hook_->ctx, w, err)) {
+            if (peer_hook_->begin == nullptr) err = "verify: STRATA_PEER_FUSED: the peer hook has no begin";
+            if (peer_hook_->abort != nullptr) peer_hook_->abort(peer_hook_->ctx);   // nothing may be left running
+            return false;
+        }
+        pw.hook = peer_hook_;
+        pw.open = true;
+    }
     const bool do_ple = ss.ple.ready() && ple_stage();
     uint32_t ple_rows[kVerifyMaxT * PLE_N_HEADS];
     if (do_ple) {
@@ -3229,9 +3302,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     }
     volatile uint32_t* const seq = h_seq_;
     volatile uint32_t* const flag = h_flag_;
-    const int G = groups_[T] > 0 ? groups_[T] : 1;
-    const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
-    const int64_t steps = (le_ - lb_) * G;
+    // (G, gtb / gte and steps are set above, before the fused peer's window is opened with them)
     if (ar_on() && !test_stall) {
         if (flag_raised) {
             // up before the launch (early_ple_flag_mode)
@@ -3266,6 +3337,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
 #else
                 const cudaError_t q = cudaStreamQuery(cs_);
 #endif
+                if (pw.open && pw.hook->flush != nullptr) pw.hook->flush(pw.hook->ctx);   // WDDM: the peer's stream too
                 if (q != cudaErrorNotReady && *seq < want) {
                     trace_ev("NEVER-RANG", k, l, (int64_t) q);
                     trace_dump(stderr);
@@ -3392,6 +3464,13 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     trace_ev("SYNCED", -1, -1, (int64_t) se);
     if (se != cudaSuccess) { err = std::string("verify: ") + cudaGetErrorString(se); return false; }
     if (handoff_failed(err)) return false;   // a stale hand-off: nothing of this window is used
+    if (pw.open) {   // STRATA_PEER_FUSED: the kernel has left, no error word, the device's counts are the host's
+        if (pw.hook->end == nullptr || !pw.hook->end(pw.hook->ctx, err)) {
+            if (pw.hook->end == nullptr) err = "verify: STRATA_PEER_FUSED: the peer hook has no end";
+            return false;   // (the guard aborts: a kernel still running leaves at its next poll)
+        }
+        pw.open = false;
+    }
     if (ar_on() && h_plan_err_ != nullptr && *(volatile uint32_t*) h_plan_err_ != 0) {   // #871: refresh_ar saw the table whole
         *(volatile uint32_t*) h_plan_err_ = 0;
         err = "verify: the all-resident plan met an expert that is not in VRAM (the residency table changed during the window)";
@@ -4873,6 +4952,10 @@ bool Verifier::capture_all(std::string& err) {
     if (g_ == nullptr) { err = "verify: capture_all before init"; return false; }
     if (remote_opt_ != nullptr) { err = "verify: pipelined windows do not serve --remote-expert-opt"; return false; }
     if (released_.load()) { err = "verify: an earlier window never finished on the GPU (#267); restart the engine"; return false; }
+    // STRATA_PEER_FUSED: the pipelined windows (pl_launch) launch the same exec_ graphs as run, with the wait node on
+    // the peer's output flag, but never open a fused window (no begin): nobody would raise that flag.  Refused here,
+    // at the entry of the pipelined decode, rather than hang 20 s at the first window.
+    if (peer_hook_ != nullptr) { err = "verify: STRATA_PEER_FUSED does not serve the pipelined windows (--pipeline-windows)"; return false; }
     struct NoEvict {   // every size is wanted at once here: a capture must not free another size's graph
         bool& f;
         explicit NoEvict(bool& flag) : f(flag) { f = true; }

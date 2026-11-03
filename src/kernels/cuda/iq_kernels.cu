@@ -11,6 +11,7 @@
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/q8_1_finite.hpp"
+#include "strata/core/peer_fused.hpp"   // STRATA_PEER_FUSED: the contract of peer_fused.cuh (included below, inside the namespace)
 #include "s26_tsum.cuh"
 
 #include <cuda_fp16.h>
@@ -5968,16 +5969,24 @@ __global__ void __launch_bounds__(256) native_gu_lds_kernel(const unsigned long 
 
 // ---- 7 (down): the group's q8_1 h rows in LDS, the tokens inside the k loop, the R2 row pairs of mode 2 -
 // the same per-(row, entry) sums in the same order: bitwise the mode-2 output.
+// The body is a device function taking the block's place in the grid as parameters (bx = the row block, g = the
+// group) so two callers share it: native_down_lds_kernel (blockIdx.x, blockIdx.y, as before) and the persistent
+// peer server of STRATA_PEER_FUSED (peer_fused.cuh), which walks the same (bx, g) items one block each.  The sums,
+// their order and the stores are the kernel's: the block index only became an argument.
+// No __restrict__ on the body's parameters: inside the persistent kernel the plan, hq and out are rewritten by other
+// blocks between the steps of one launch, and a `const __restrict__` input is the licence for ld.global.nc (the
+// read-only cache, not coherent inside a launch and not invalidated by __threadfence).  The __global__ wrappers keep
+// their __restrict__: after inlining, the kernel's own noalias arguments carry the same information, so their code
+// does not change.
 template<int TD>
-__global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned long long* __restrict__ grp_ptr,
-                                                              const int32_t* __restrict__ grp_start,
-                                                              const int32_t* __restrict__ n_groups,
-                                                              const int32_t* __restrict__ ent_dst,
-                                                              const block_q8_1* __restrict__ hq, NativeExpertLayout L,
-                                                              float* __restrict__ out) {
+__device__ __forceinline__ void native_down_lds_body(const unsigned long long* grp_ptr,
+                                                     const int32_t* grp_start,
+                                                     const int32_t* n_groups,
+                                                     const int32_t* ent_dst,
+                                                     const block_q8_1* hq, NativeExpertLayout L,
+                                                     float* out, int bx, int g) {
     using F = Fmt<TD>;
     extern __shared__ int sh_raw[];   // LDS_NT entries x hb blocks of q8_1
-    const int g = blockIdx.y;
     if (g >= *n_groups) return;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const uint8_t* blob = (const uint8_t*) grp_ptr[g];
@@ -5994,7 +6003,7 @@ __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned lon
         }
         __syncthreads();
         for (int p = 0; p < LDS_RB / 16; ++p) {
-            const int r0 = blockIdx.x * LDS_RB + p * 16 + warp, r1 = r0 + 8;
+            const int r0 = bx * LDS_RB + p * 16 + warp, r1 = r0 + 8;
             if (r0 >= nrow) break;
             const bool two = r1 < nrow;
             const uint8_t* w0 = blob + L.down_off + (size_t) r0 * L.d_row;
@@ -6033,6 +6042,15 @@ __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned lon
         }
     }
 }
+template<int TD>
+__global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned long long* __restrict__ grp_ptr,
+                                                              const int32_t* __restrict__ grp_start,
+                                                              const int32_t* __restrict__ n_groups,
+                                                              const int32_t* __restrict__ ent_dst,
+                                                              const block_q8_1* __restrict__ hq, NativeExpertLayout L,
+                                                              float* __restrict__ out) {
+    native_down_lds_body<TD>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out, blockIdx.x, blockIdx.y);
+}
 
 // ---- 8: mode 7's gate/up with SwiGLU and the q8_1 quantization in the epilogue.  A block takes h rows
 // [r0, r0 + 32): gate rows r0.. and up rows r0.. (64 weight rows, the same per-(row, entry) sums as mode 7), so
@@ -6044,19 +6062,24 @@ __global__ void __launch_bounds__(256) native_down_lds_kernel(const unsigned lon
 // (IQ3_XXS / IQ3_S, sm_75 and sm_86) a layer's 280-300 blocks (n_ff 640 / 32 x 14-15 experts) run in two waves on the
 // 68 SMs of an RTX 2080 Ti, at 4 blocks an SM the second wave is a tail).  Register allocation only: the same sums in
 // the same order.  (A MINB template argument of 1 is not the same as no argument: ptxas then gave 87-95 registers.)
+// The block's place in the grid is an argument (bx = the 32-row block, g = the group): the two kernels pass
+// blockIdx.x / blockIdx.y, the persistent peer server of STRATA_PEER_FUSED (peer_fused.cuh) walks the same (bx, g)
+// items one block each.  Nothing else changed.  No __restrict__ on the body's parameters, as for
+// native_down_lds_body above: in the persistent kernel the plan, xq and hq are rewritten between steps, and a
+// `const __restrict__` input could be read through the read-only cache (ld.global.nc), which is not coherent inside
+// a launch.  The __global__ wrappers keep their __restrict__ (the same noalias facts after inlining).
 template<int TG>
-__device__ __forceinline__ void native_gu_fused_body(const unsigned long long* __restrict__ grp_ptr,
-                                                     const int32_t* __restrict__ grp_start,
-                                                     const int32_t* __restrict__ n_groups,
-                                                     const int32_t* __restrict__ ent_tok,
-                                                     const block_q8_1* __restrict__ xq, NativeExpertLayout L,
-                                                     block_q8_1* __restrict__ hq) {
+__device__ __forceinline__ void native_gu_fused_body(const unsigned long long* grp_ptr,
+                                                     const int32_t* grp_start,
+                                                     const int32_t* n_groups,
+                                                     const int32_t* ent_tok,
+                                                     const block_q8_1* xq, NativeExpertLayout L,
+                                                     block_q8_1* hq, int bx, int g) {
     using GT = typename GridOf<TG>::T;
     using F = Fmt<TG>;
     __shared__ GT sgrid[GridOf<TG>::N];
     __shared__ float res[LDS_NT][64];
     extern __shared__ int sx_raw[];
-    const int g = blockIdx.y;
     if (g >= *n_groups) return;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const GT* gsrc = GridOf<TG>::src();
@@ -6064,7 +6087,7 @@ __device__ __forceinline__ void native_gu_fused_body(const unsigned long long* _
     const uint8_t* blob = (const uint8_t*) grp_ptr[g];
     const int nb = (int) (L.n_embd / F::qk), xb = (int) (L.n_embd / 32), hb = (int) (L.n_ff / 32);
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
-    const int r0 = blockIdx.x * 32;
+    const int r0 = bx * 32;
     const block_q8_1* sx = (const block_q8_1*) sx_raw;
     auto wrow = [&](int i) -> const uint8_t* {   // i < 32: gate row r0 + i, else up row r0 + i - 32
         return blob + (i < 32 ? (size_t) 0 : L.up_off) + (size_t) (r0 + (i & 31)) * L.gu_row;
@@ -6122,7 +6145,7 @@ __device__ __forceinline__ void native_gu_fused_body(const unsigned long long* _
             }
             const float d = q8_1_finite(amax / 127.0f);   // #606, as q8_1_store: finite blocks bit for bit
             const int8_t q = q8_1_quant(xi, d, amax);
-            block_q8_1* y = hq + (size_t) (c0 + warp) * hb + blockIdx.x;
+            block_q8_1* y = hq + (size_t) (c0 + warp) * hb + bx;
             y->qs[lane] = q;
             if (lane == 0) y->ds = q8_1_ds(d, sum);
         }
@@ -6135,7 +6158,7 @@ __global__ void __launch_bounds__(256) native_gu_fused_kernel(const unsigned lon
                                                               const int32_t* __restrict__ ent_tok,
                                                               const block_q8_1* __restrict__ xq, NativeExpertLayout L,
                                                               block_q8_1* __restrict__ hq) {
-    native_gu_fused_body<TG>(grp_ptr, grp_start, n_groups, ent_tok, xq, L, hq);
+    native_gu_fused_body<TG>(grp_ptr, grp_start, n_groups, ent_tok, xq, L, hq, blockIdx.x, blockIdx.y);
 }
 template<int TG>
 __global__ void __launch_bounds__(256, 4) native_gu_fused_kernel_minb4(const unsigned long long* __restrict__ grp_ptr,
@@ -6144,7 +6167,7 @@ __global__ void __launch_bounds__(256, 4) native_gu_fused_kernel_minb4(const uns
                                                                        const int32_t* __restrict__ ent_tok,
                                                                        const block_q8_1* __restrict__ xq, NativeExpertLayout L,
                                                                        block_q8_1* __restrict__ hq) {
-    native_gu_fused_body<TG>(grp_ptr, grp_start, n_groups, ent_tok, xq, L, hq);
+    native_gu_fused_body<TG>(grp_ptr, grp_start, n_groups, ent_tok, xq, L, hq, blockIdx.x, blockIdx.y);
 }
 
 // dflash2-kern: Strix Halo (gfx1151) takes mode 8 (gate/up + SwiGLU + q8_1 in one launch, the group's activations in LDS) for the
@@ -6520,6 +6543,13 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
     }
     check("native_expert_grouped/down");
 }
+
+// STRATA_PEER_FUSED (lab/upsync-v0.2.9, docs/PEER_FUSED.md): the peer GPU's expert server as one persistent kernel a
+// window.  Included here, inside this translation unit, because the kernel reuses native_gu_fused_body /
+// native_down_lds_body and everything they stand on (Fmt, DotG, GridOf, the IQ grids, q8_1_store, LDS_NT / LDS_RB) and
+// its host side re-makes native_expert_grouped's dispatch decision (exp_mode, g_exp_phase, g_grouped_v1, nib_layout,
+// sm75_down_em, down_ws_on): no -rdc, no second copy of the tables.
+#include "peer_fused.cuh"
 
 }  // namespace strata::kernels
 

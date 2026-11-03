@@ -25,6 +25,7 @@
 
 #include "strata/core/expert_source.hpp"
 #include "strata/core/layer.hpp"
+#include "strata/core/peer_fused.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
 #include "strata/kernels/window_limits.hpp"
@@ -200,6 +201,15 @@ public:
     void set_handoff_flags(uint32_t* in_host, uint32_t* in_dev, uint32_t* out_host, uint32_t* out_dev) {
         hflag_in_h_ = in_host; hflag_in_d_ = in_dev; hflag_out_h_ = out_host; hflag_out_d_ = out_dev;
     }
+    /// STRATA_PEER_FUSED=1 (opt-in; docs/PEER_FUSED.md s.7): the peer GPU's expert server runs as ONE persistent kernel
+    /// per window.  `h` is PeerExperts' hook (fused_hook(): begin / end / flush / abort and the output flag's two
+    /// views).  With it, every doorbell window's graph waits on the peer's output flag (`flag_out_dev0`, one
+    /// wait_flag_ge node a step, before its wait on m_flag_), `run` opens the window with `begin` after staging and
+    /// closes it with `end` after the sync, and release_gpu_waits raises the flag and aborts the kernel.  Refused
+    /// at `init` with a layer split (set_next) or the device plan.  The zero-doorbell graph (ar_on), the batch
+    /// windows and the head bet never call it: the peer serves them on its per-layer path.  Null (the default):
+    /// nothing changes.  Set before `init`.
+    void set_peer_fused(const strata::core::peer_fused::Hook* h) { peer_hook_ = h; }
     /// The next stage: `run` and `commit` continue into it (its pool calls get `next_user`); sampling settings
     /// and `final_R` are the last stage's.
     void set_next(Verifier* next, void* next_user) { next_ = next; next_user_ = next_user; }
@@ -582,6 +592,7 @@ private:
     uint32_t* herr_d_ = nullptr;
     uint32_t* hdrop_h_ = nullptr;        ///< STRATA_TEST_HANDOFF_DROP: the writing stage withholds its flag (mapped)
     uint32_t* hdrop_d_ = nullptr;
+    const strata::core::peer_fused::Hook* peer_hook_ = nullptr;   ///< set_peer_fused: the fused peer server (null: off)
     bool handoff_failed(std::string& err) const;   ///< the bounded hand-off wait timed out in the last window
     int prelaunched_ = 0;                ///< prelaunch ran for a window of this size: run skips staging + launch
     /// The overlapped split: stage this window's inputs and launch its graph now (the graph waits on the hand-off
