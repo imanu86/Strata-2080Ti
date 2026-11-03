@@ -219,6 +219,19 @@ public:
     /// rows per layer; the rest of the peer's experts are read by this GPU over P2P).  Allocates the peer's buffers for
     /// chunks of up to init's `chunk` tokens.  Needs P2P between the two cards.
     bool set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& err);
+    /// STRATA_PEER2_PREFILL=1 (docs/PEER_PREFILL2.md): the SECOND expert server (--peer-device A,B, `peer` opened with
+    /// ordinal 1) computes, for every streamed prompt chunk, the rows of those of its experts the COST MODEL sends it:
+    /// per expert and per chunk, the routed rows' q8_1 bytes over and the FP32 rows back (bytes on this card's link
+    /// proportional to the routed rows) against the expert's blob streamed from RAM (the blob's bytes), the cheaper on
+    /// this card's link wins, within the primary's streaming time of the layer on the server's own link (measured at
+    /// this call, or STRATA_PEER_PREFILL_BW_GBS / STRATA_PREFILL_BW_GBS).  The rows land in this card's Dm at their
+    /// own rows: the combine sums them as it would its own.  Needs the MMQ prompt path and a chunk of at least
+    /// stream_all_min() tokens; the variable off, a null or closed `peer`: nothing is set, true.  False with `err`
+    /// (its buffers, the links' measure): the caller goes on without the second server's share.  Independent of
+    /// set_peer: a stage may have both, one or none.
+    bool set_peer2(core::PeerExperts* peer, std::string& err);
+    /// STRATA_PEER2_PREFILL=1, read once.
+    static bool peer2_prefill_env();
 
     /// Plan v0.3 P6: called after every chunk with the chunk's final multi-stream residual rows (device,
     /// T x hc*n_embd, valid until the next chunk) and the chunk's first position; the MTP draft layer builds its

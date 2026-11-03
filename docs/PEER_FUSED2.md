@@ -41,6 +41,7 @@ passo, prima quello del server 1 poi quello del server 2, poi le righe CPU come 
 | `STRATA_PEER_SKIP` | 0 | lo stesso per il server 1 (§11.1) |
 | `STRATA_PEER2_STAGE` | 0 | la padrona pubblica le righe del passo già quantizzate q8_1 per il server 2: 2,9 KB a token sul riser invece di 10 (§11.2) |
 | `STRATA_PEER2_SHARE` | 0 | frazione 0..0,5: all'apertura il server 1 lascia al server 2 una coppia ogni 1/f delle sue candidate calde (§11.3) |
+| `STRATA_PEER2_PREFILL` | 0 | 1: il server 2 legge anche il prompt, col modello di costo (`PEER_PREFILL2.md`; con le sue `STRATA_PEER_PREFILL_BW_GBS`, `STRATA_PREFILL_BW_GBS`, `STRATA_PEER2_PREFILL_*`) |
 
 `--peer-adapt-swaps`, `--peer-prefill-rows`, `STRATA_PEER_HOT`, `STRATA_PEER_*` restano del server 1. Le variabili
 `STRATA_PEER2_*` le legge solo il `PeerExperts` aperto con `ordinal` 1 (`peer_fused.hpp`: `kEnvOn2`, `kEnvWaitMs2`,
@@ -67,7 +68,10 @@ Ordine dei device nelle prove: `CUDA_DEVICE_ORDER=PCI_BUS_ID`, `CUDA_VISIBLE_DEV
 - `res_table()` / `cache_mut()` / `lend_guard()` (tappa 4b) e `set_peer` del prompt restano del **server 1**: lo stadio
   EP, il prestito della coda e la quota del prompt sul peer non vedono il server 2. Il percorso del prompt tratta le
   coppie del server 2 come non residenti (le legge dall'arena host): corretto, e voluto (riser lento). Le tappe 4/4b
-  funzionano come prima; la nuova modalità non le richiede.
+  funzionano come prima; la nuova modalità non le richiede. **Dal 3/11 sera** il server 2 può leggere anche il prompt,
+  dietro `STRATA_PEER2_PREFILL=1` (default 0) e un modello di costo per esperto e per pezzo: `PEER_PREFILL2.md`
+  (`set_peer2`, righe q8_1 in ingresso e righe FP32 in uscita per le sole righe instradate, budget per strato dal
+  tempo di streaming della padrona; con la tappa 4b serve entrambi gli stadi). Spenta, questo punto vale com'è.
 - Candidati dell'adapt della **padrona** (`generate.cpp`, `cand`): esclusi anche quelli che `peer2.has(l, e)`, come
   già quelli del server 1 (uno slot della 3060 non va sprecato per una coppia che la padrona poi si riprende).
 

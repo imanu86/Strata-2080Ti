@@ -10846,6 +10846,35 @@ int main(int argc, char** argv) {
                 (void) cudaGetLastError();   // a failed allocation here must not end the engine at the next kernel's check
             }
         }
+        // STRATA_PEER2_PREFILL=1 (docs/PEER_PREFILL2.md): the SECOND server reads the prompt too, with the cost model -
+        // on CUDA0's prompt path (layers [0, n) or, with the EP prefill, [0, K)) and on the EP stage's (layers [K, n),
+        // its own PeerPrefill on the second server's card, its own link measure: the two stages run their chunks in
+        // a pipeline and the second server serves both, on two streams).  Each stage's share is its own: a stage
+        // whose set_peer2 fails reads as without the variable, said in one line.  Not with STRATA_EP_SPLIT_LM=1 (a
+        // stage with a server share has no layer-major form, as with set_peer).  Default 0: the second server's pairs
+        // are streamed from RAM by the prompt path, as before.
+        if (peer2.valid() && strata::prefill::Prefill::peer2_prefill_env()) {
+            if (ep_lm) {
+                std::fprintf(stderr, "strata serve: STRATA_PEER2_PREFILL=1 is not used with STRATA_EP_SPLIT_LM=1 (a stage with a server "
+                                     "share has no layer-major form): the second server's pairs are streamed from RAM\n");
+            } else {
+                if (!sp.set_peer2(&peer2, err)) {
+                    std::fprintf(stderr, "strata serve: %s - CUDA%d's prompt path streams the second server's pairs from RAM\n",
+                                 err.c_str(), primary_device);
+                    err.clear();
+                    (void) cudaGetLastError();
+                }
+                if (ep_stage) {
+                    const strata::core::OnDevice on(ep_stage->dev);
+                    if (!ep_stage->sp.set_peer2(&peer2, err)) {
+                        std::fprintf(stderr, "strata serve: %s - the EP stage on CUDA%d streams the second server's pairs from RAM\n",
+                                     err.c_str(), ep_stage->dev);
+                        err.clear();
+                        (void) cudaGetLastError();
+                    }
+                }
+            }
+        }
         // a layer split: a one-chunk prompt runs the stages one after the other, so each stage's prompt path gets the
         // next stage's GPU (the last one the first's) to stream and compute a share of its experts meanwhile
         if (multi_gpu && !stages.empty()) {
@@ -16927,6 +16956,9 @@ int main(int argc, char** argv) {
                     // adapt's copies must have landed first (apply_pending + both streams idle: PeerExperts::quiesce).
                     // The quiesce before the staged read (`run`) stays, and finds nothing to do.
                     if (is_ep_part(p) && !peer.quiesce(e)) return false;
+                    // two servers with STRATA_PEER2_PREFILL: the second's slots are read by the prompt paths too (its
+                    // adapt is off unless STRATA_PEER2_ADAPT=1; quiesced the same way, nothing to do otherwise)
+                    if (is_ep_part(p) && peer2.valid() && !peer2.quiesce(e)) return false;
                     const strata::core::OnDevice on(p.dev);
                     int64_t want_p = want;
                     int32_t first = p.first_now;
@@ -17145,6 +17177,7 @@ int main(int argc, char** argv) {
                         // quiesced before every stage read: an earlier adapt's copies have landed and its residency
                         // table (the stage's resident tier) does not move while the stage reads its slots.
                         if (!peer.quiesce(e)) return false;
+                        if (peer2.valid() && !peer2.quiesce(e)) return false;   // (STRATA_PEER2_PREFILL: the stages read its slots)
                         const int64_t c0 = ep_sync.valid_for(ep_ids32.data(), q);
                         if (c0 < q) {
                             if (cudaStreamSynchronize(main_stream) != cudaSuccess) {

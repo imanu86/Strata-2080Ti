@@ -636,6 +636,16 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_include_directories(ep_split_test PRIVATE include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(ep_split_test PRIVATE strata_engine strata_kernels strata_core CUDA::cudart)
   endif()
+  # PEER_PREFILL2 (docs/PEER_PREFILL2.md s.6, lab/upsync-v0.2.9): the second expert server's prompt rows of
+  # STRATA_PEER2_PREFILL=1 (prefill.cpp's rows-in path: the routed rows' q8_1 bytes over, FP32 rows back through mapped
+  # host memory) against the primary's own MMQ path, bit for bit, on synthetic blobs held slot for slot on both cards;
+  # GPU, no model.  Links strata_prefill for the MMQ kernels (its public strata_mmq); exit 77 in a build without MMQ.
+  # Not in the default build: `cmake --build <dir> --target peer_prefill2_test`.  CUDA only, like ep_split_test above.
+  if(STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
+    add_executable(peer_prefill2_test EXCLUDE_FROM_ALL tools/peer_prefill2_test.cpp)
+    target_include_directories(peer_prefill2_test PRIVATE include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(peer_prefill2_test PRIVATE strata_prefill strata_kernels strata_core CUDA::cudart)
+  endif()
   # PEER_FUSED s.5: the kernel is built at __launch_bounds__(256, 2) (STRATA_PEER_FUSED_MINB unset or 2); the 3- and
   # 4-blocks-per-SM instances (STRATA_PEER_FUSED_MINB=3|4) are two more large kernels in iq_kernels.cu (one instance
   # holds every type's body), so they exist only in a build that asks for them.  Off (the default) leaves
