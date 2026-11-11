@@ -32,6 +32,15 @@
 //   7  checkpoint_merge_tail against a checkpoint of a session built with the same bytes; different ids refused
 //   8  errors: kv_mode 2 in the range (a copy of the QsaState array with the mode forced), c1 > max_cells; a range
 //      refusal writes nothing
+//   Tappa 4c (docs/EP_SPLIT_PREFILL.md s.14):
+//   9  tail_region: the dense weights' region at the end of a tier (uniform and sized slots, the keep floor, a
+//      region larger than the arena)
+//   10 the overlapped handover: the cells cross chunk by chunk without the running state (the page and the pooled
+//      row two chunks share are written twice), then the last chunk with it - the full session equals one whole
+//      handover byte for byte; in kv_mode 1 a resident block inside the range leaves the map, one outside stays
+//   11 DenseMirror: capture, overwrite, restore (waited) gives the bytes back at the same address; another address
+//      is refused; restore before capture is refused
+//   12 staged_read and the threshold's default
 //
 //   ep_split_test [primary_dev=0] [peer_dev=0] [max_cells=8192] [kv_resident=0]
 //
@@ -349,6 +358,14 @@ bool table_all_free(const Carved& c, int64_t q) {
     copy_bytes(tab.data(), st.page_table, tab.size() * sizeof(int32_t), "read page_table");
     return std::all_of(tab.begin(), tab.end(), [](int32_t x) { return x == -1; });
 }
+/// kv_mode 1: the slot the page table names for `block` (-1: not resident).
+int32_t table_entry(const Carved& c, int64_t q, int64_t block) {
+    const QsaState& st = c.ss.qsa_states[q];
+    const OnDevice on(c.dev);
+    int32_t v = -1;
+    copy_bytes(&v, st.page_table + block, sizeof(int32_t), "read page_table entry");
+    return v;
+}
 
 std::string stats_line(const ep::Stats& st) {
     return "cells [" + num(st.cells0) + ", " + num(st.cells1) + "), qsa " + num(st.qsa_layers) + ", gdn " + num(st.gdn_layers) +
@@ -528,6 +545,162 @@ int main(int argc, char** argv) {
         ok();
     }
 
+    // ---------------------------------------------------------------- 9: the dense weights' region at the tier's end (tappa 4c)
+    g_check = "9 tail_region";
+    {
+        // uniform slots: 100 slots of 1000 bytes
+        ep::TailRegion r = ep::tail_region(100, nullptr, 1000, 100000, 2500, 128);
+        expect(r.first < 0, "a region that leaves fewer than `keep` slots was accepted");
+        r = ep::tail_region(100, nullptr, 1000, 100000, 2500, 10);
+        expect(r.first >= 0, "a 2500-byte region in a 100000-byte arena refused");
+        expect(r.offset % ep::kTailAlign == 0 && r.offset <= 100000 - 2500 && 100000 - r.offset < 2500 + ep::kTailAlign,
+               "offset " + num((int64_t) r.offset) + " is not the aligned-down start of the last 2500 bytes");
+        // slot s is [1000 s, 1000 (s + 1)): the first slot whose end lies past the offset
+        expect(r.first == (int64_t) (r.offset / 1000), "first " + num(r.first) + " for offset " + num((int64_t) r.offset));
+        expect(r.bytes == 2500, "bytes " + num((int64_t) r.bytes));
+        // sized slots: offsets 0, 300, 1000, 1500, 4000 (4 slots, arena 4000 bytes); a 700-byte region starts at
+        // 3300 -> aligned down to 3072 -> overlaps slot 3 only ([1500, 4000))
+        const uint64_t off[5] = {0, 300, 1000, 1500, 4000};
+        r = ep::tail_region(4, off, 0, 4000, 700, 0);
+        expect(r.first == 3 && r.offset == 3072, "sized slots: first " + num(r.first) + ", offset " + num((int64_t) r.offset));
+        // a region reaching into slot 2 ([1000, 1500)): 2600 bytes -> start 1400 -> aligned 1280 -> slot 2
+        r = ep::tail_region(4, off, 0, 4000, 2600, 0);
+        expect(r.first == 2 && r.offset == 1280, "sized slots, two slots: first " + num(r.first) + ", offset " + num((int64_t) r.offset));
+        // keep 3 of 4: that region would leave 2 -> refused
+        r = ep::tail_region(4, off, 0, 4000, 2600, 3);
+        expect(r.first < 0, "the keep floor was not applied on sized slots");
+        // larger than the arena, empty arena, zero bytes: refused without touching the result's bytes
+        expect(ep::tail_region(4, off, 0, 4000, 5000, 0).first < 0, "a region larger than the arena was accepted");
+        expect(ep::tail_region(0, nullptr, 1000, 0, 100, 0).first < 0, "an empty arena gave a region");
+        expect(ep::tail_region(4, off, 0, 4000, 0, 0).first < 0, "a zero-byte region was accepted");
+        ok();
+    }
+
+    // ---------------------------------------------------------------- 10: the overlapped handover (tappa 4c, s.14.3)
+    g_check = "10 overlapped handover";
+    {
+        // full: fresh bytes, then the tail's cells chunk by chunk (no running state), then the last chunk with it;
+        // ref: the same fresh bytes, then ONE whole handover.  The two must be identical, and equal the host contract.
+        im_full = make_image(full, g, 0x1A);
+        write_image(full, g, im_full);
+        write_image(ref, g, im_full);
+        const int64_t page = shapes.page_size;
+        const int64_t n_blocks_range = (kN + page - 1) / page;   // blocks [0, ceil(kN / page))
+        int64_t n_pages_q = 0;
+        for (int64_t j = 0; j < tail.ss.qsa_alloc; ++j) {   // kv_mode 1: a stale block inside the range, one outside it
+            const int64_t q = tail.ss.qsa_ord0 + j;
+            n_pages_q = full.ss.qsa_states[q].n_pages;
+            plant_resident(full, g, q, 1, 0, 0xE0 + (uint64_t) j * 16);
+            if (n_pages_q - 1 >= n_blocks_range) plant_resident(full, g, q, n_pages_q - 1, 1, 0xF0 + (uint64_t) j * 16);
+        }
+        // chunks that do not fall on page boundaries: the page they share is written twice
+        const int64_t cuts[] = {0, 301, 602, 903, kN};
+        int64_t last_from = 0;
+        const int64_t h0 = m.handovers();
+        for (int i = 0; i + 1 < (int) (sizeof cuts / sizeof cuts[0]); ++i) {
+            stats = ep::Stats{};
+            expect(m.to_primary(tail.ss, full.ss, cuts[i], cuts[i + 1], false, stats, err), "chunk handover: ", err);
+            expect(stats.gdn_layers == 0 && stats.state_bytes == 0, "a chunk handover moved the running state: " + stats_line(stats));
+            last_from = cuts[i];
+        }
+        stats = ep::Stats{};
+        expect(m.to_primary(tail.ss, full.ss, last_from, kN, true, stats, err), "last chunk with the running state: ", err);
+        expect(stats.gdn_layers == gdn_in_range && stats.state_bytes > 0, "the last handover did not move the running state: " + stats_line(stats));
+        expect(m.handovers() == h0 + 5, "handovers " + num(m.handovers() - h0) + " (want 5)");
+        stats = ep::Stats{};
+        expect(m.to_primary(tail.ss, ref.ss, 0, kN, true, stats, err), "whole handover into ref: ", err);
+        const Image got = read_image(full, g), got_ref = read_image(ref, g);
+        expect(same_image(got, got_ref, where), "chunk by chunk differs from one whole handover: " + where);
+        want = im_full;
+        apply_move(want, im_tail, full, g, 0, kN, true);
+        expect(same_image(got, want, where), "chunk by chunk differs from the host contract: " + where);
+        if (kv_mode == 1) {
+            // the eviction is per block: every block of the range left the map, a resident block past it stays
+            // (unless the range was most of the map or held more than kResetAboveResident resident blocks: then the
+            // whole map was reset, and the block past the range is gone too - said, not failed)
+            const bool partial = n_blocks_range * 2 < n_pages_q && n_blocks_range <= ep::kResetAboveResident;
+            for (int64_t j = 0; j < tail.ss.qsa_alloc; ++j) {
+                const int64_t q = tail.ss.qsa_ord0 + j;
+                expect(table_entry(full, q, 1) == -1, "block 1 of QSA ordinal " + num(q) + " is still resident after the handover");
+                if (n_pages_q - 1 >= n_blocks_range) {
+                    const int32_t far = table_entry(full, q, n_pages_q - 1);
+                    if (partial) expect(far == 1, "block " + num(n_pages_q - 1) + " of QSA ordinal " + num(q) + " (outside the range) was evicted");
+                    else std::printf("   (the range is most of the map: the whole map was reset, block %lld -> %d)\n", (long long) (n_pages_q - 1), far);
+                }
+            }
+        }
+        std::printf("   5 handovers, the last with the state: %s, %.2f ms\n", stats_line(stats).c_str(), stats.ms);
+        ok();
+    }
+
+    // ---------------------------------------------------------------- 11: the dense mirror (tappa 4c, s.14.2)
+    g_check = "11 DenseMirror";
+    {
+        const uint64_t bytes = (uint64_t) 3 << 20 | 0x1234;   // not a multiple of anything
+        const std::vector<uint8_t> weights = pattern(0xDE5E, (size_t) bytes), other = pattern(0x0DD, (size_t) bytes);
+        uint8_t* dev = nullptr;
+        cudaStream_t s = nullptr;
+        {
+            const OnDevice on(peer);
+            cuda_ok(cudaMalloc((void**) &dev, (size_t) bytes), "cudaMalloc the dense region");
+            cuda_ok(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), "stream");
+            cuda_ok(cudaMemcpy(dev, weights.data(), (size_t) bytes, cudaMemcpyHostToDevice), "upload the weights");
+        }
+        ep::DenseMirror mir;
+        err.clear();
+        expect(!mir.valid() && !mir.restore(dev, s, true, err) && !err.empty(), "restore before capture was accepted");
+        expect(mir.capture(dev, bytes, peer, err), "capture: ", err);
+        expect(mir.valid() && mir.bytes() == bytes && mir.device() == peer && mir.dev_base() == dev, "the mirror's shape");
+        std::printf("   mirror of %llu bytes in %s RAM\n", (unsigned long long) bytes, mir.pinned() ? "pinned" : "pageable");
+        {   // the experts write over the region (what a refill does)
+            const OnDevice on(peer);
+            cuda_ok(cudaMemcpy(dev, other.data(), (size_t) bytes, cudaMemcpyHostToDevice), "overwrite the region");
+        }
+        err.clear();
+        expect(!mir.restore(dev + 256, s, true, err) && !err.empty(), "a restore to another address was accepted");
+        expect(mir.restore(dev, s, true, err), "restore: ", err);
+        expect(mir.restores() == 1 && mir.last_ms() >= 0.0, "restores " + num(mir.restores()));
+        std::vector<uint8_t> back((size_t) bytes);
+        {
+            const OnDevice on(peer);
+            cuda_ok(cudaMemcpy(back.data(), dev, (size_t) bytes, cudaMemcpyDeviceToHost), "read the region back");
+        }
+        expect(same_vec(back, weights, "dense region", where), where);
+        // the queued form: ordered on the stream before a later copy on the same stream
+        {
+            const OnDevice on(peer);
+            cuda_ok(cudaMemcpy(dev, other.data(), (size_t) bytes, cudaMemcpyHostToDevice), "overwrite the region again");
+        }
+        expect(mir.restore(dev, s, false, err), "queued restore: ", err);
+        expect(mir.last_ms() == 0.0 && mir.restores() == 2, "a queued restore reported a time");
+        {
+            const OnDevice on(peer);
+            cuda_ok(cudaMemcpyAsync(back.data(), dev, (size_t) bytes, cudaMemcpyDeviceToHost, s), "read back on the stream");
+            cuda_ok(cudaStreamSynchronize(s), "stream sync");
+        }
+        expect(same_vec(back, weights, "dense region after the queued restore", where), where);
+        mir.close();
+        expect(!mir.valid() && mir.bytes() == 0, "close left the mirror valid");
+        {
+            const OnDevice on(peer);
+            (void) cudaStreamDestroy(s);
+            (void) cudaFree(dev);
+        }
+        ok();
+    }
+
+    // ---------------------------------------------------------------- 12: the threshold (tappa 4c, s.14.1)
+    g_check = "12 staged_read";
+    {
+        expect(ep::staged_read(100, 0) && ep::staged_read(0, 0), "min_tokens 0 is not 'always staged'");
+        expect(!ep::staged_read(16383, 16384) && ep::staged_read(16384, 16384) && ep::staged_read(200000, 16384), "the threshold is not inclusive at min_tokens");
+        expect(!ep::staged_read(0, 1), "an empty read above a threshold of 1");
+        if (std::getenv(ep::kEnvMinTokens) == nullptr)
+            expect(ep::env_min_tokens() == ep::kMinTokensDefault, "the default threshold is " + num(ep::env_min_tokens()) + ", want " + num(ep::kMinTokensDefault));
+        if (std::getenv(ep::kEnvOn) == nullptr) expect(ep::env_level() == 0 && !ep::env_on(), "the level reads on with the variable unset");
+        ok();
+    }
+
     // ---------------------------------------------------------------- 5: the drafter's rows
     g_check = "5 rows_to_primary";
     {
@@ -541,11 +714,14 @@ int main(int argc, char** argv) {
             const OnDevice on(peer);
             cuda_ok(cudaMalloc(&src, bytes), "cudaMalloc rows on the peer");
             cuda_ok(cudaMemcpy(src, rows.data(), bytes, cudaMemcpyHostToDevice), "upload rows");
+            // the mover's streams are non-blocking: without this its D2H can read src before the upload lands (11/11: FAIL on two cards)
+            cuda_ok(cudaDeviceSynchronize(), "sync the upload");
         }
         {
             const OnDevice on(primary);
             cuda_ok(cudaMalloc(&dst, bytes), "cudaMalloc rows on the primary");
             cuda_ok(cudaMemset(dst, 0xFF, bytes), "memset rows");
+            cuda_ok(cudaDeviceSynchronize(), "sync the memset");   // the same, for the memset racing the mover's H2D
         }
         expect(m.rows_to_primary(src, dst, T, fpr, err), "rows_to_primary: ", err);
         {

@@ -31,6 +31,14 @@ public:
     /// Layer split: load only blocks [lb, le) (every other `blk.N.` projection belongs to another GPU's stage; the
     /// PLE tensors are loaded everywhere).  Process-wide, read by the next `load`; (-1, -1) = all layers.
     static void set_layer_range(int lb, int le);
+    /// Tappa 4c (docs/EP_SPLIT_PREFILL.md s.14.2): the next `load` carves its matrices (the GGUF copies, the packed
+    /// copies, the STRATA_HC_Q8 rows) from [base, base + bytes) back to back, 256-aligned, instead of one cudaMalloc
+    /// each; the Q8_1 scratch and the hc_bf16_view scratches stay cudaMalloc's (they are read in the decode too).  The
+    /// matrices then belong to the region's owner: the destructor does not free them.  Process-wide, read by the next
+    /// `load`; the caller clears it with (nullptr, 0) afterwards.  `placement_used()`: bytes carved so far (what the
+    /// region's owner must mirror).  A full region fails the load like a full card ("native dense upload ...").
+    static void set_placement(void* base, uint64_t bytes);
+    static uint64_t placement_used();
     /// Layer split: the device bytes `load` would allocate for the matrices of layers [lb, le) - the same walk and
     /// filters, each matrix rounded up to the granule cudaMalloc backs it with - reading the GGUF headers and `table`
     /// only, so it allocates nothing and needs no device (#1238).  `table` must hold every tensor the shards carry.
@@ -66,5 +74,7 @@ private:
     void* scratch_ = nullptr;
     uint64_t bytes_ = 0;
     uint64_t allocated_ = 0;
+    const uint8_t* placed_lo_ = nullptr;   ///< tappa 4c: the placement this load carved from (its matrices are not ours to free)
+    const uint8_t* placed_hi_ = nullptr;
 };
 } // namespace strata::core

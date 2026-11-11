@@ -101,6 +101,124 @@ int64_t env_reserve_mib() {
     return mib;
 }
 
+// ---- tappa 4c (s.14): read once; meaningful at level 2 only (generate.cpp asks them behind env_level() == 2)
+
+int env_level() {
+    static const int level = (int) std::max<int64_t>(0, env_i64(kEnvOn, 0));
+    return level;
+}
+
+int64_t env_min_tokens() {
+    static const int64_t n = std::max<int64_t>(0, env_i64(kEnvMinTokens, kMinTokensDefault));
+    return n;
+}
+
+bool env_dense_loan() {
+    static const bool on = env_i64(kEnvDenseLoan, 1) != 0;
+    return on;
+}
+
+bool env_overlap() {
+    static const bool on = env_i64(kEnvOverlap, 1) != 0;
+    return on;
+}
+
+bool env_dense_sync() {
+    static const bool on = env_flag(kEnvDenseSync);
+    return on;
+}
+
+// ---------------------------------------------------------------- tappa 4c: pure rules
+
+TailRegion tail_region(int64_t slots, const uint64_t* slot_offsets, uint64_t slot_bytes, uint64_t cache_bytes,
+                       uint64_t bytes, int64_t keep) {
+    TailRegion r;
+    r.bytes = bytes;
+    if (slots <= 0 || cache_bytes == 0 || bytes == 0 || bytes > cache_bytes) return r;
+    if (slot_offsets == nullptr && slot_bytes == 0) return r;
+    // the region ends at the arena's end and starts at the aligned-down offset that still holds `bytes`
+    const uint64_t off = (cache_bytes - bytes) / kTailAlign * kTailAlign;
+    // the first slot whose END lies past the region's start: slot s is [start(s), end(s)); end(s) > off <=> overlap
+    int64_t first = slots;
+    for (int64_t s = slots - 1; s >= 0; --s) {
+        const uint64_t end = slot_offsets != nullptr ? slot_offsets[s + 1] : (uint64_t) (s + 1) * slot_bytes;
+        if (end <= off) break;
+        first = s;
+    }
+    if (first >= slots) return r;             // (cannot happen with bytes > 0: the last slot ends at cache_bytes)
+    if (first < std::max<int64_t>(keep, 0)) return r;   // fewer than `keep` slots would stay
+    r.first = first;
+    r.offset = off;
+    return r;
+}
+
+// ---------------------------------------------------------------- tappa 4c: the dense mirror
+
+DenseMirror::~DenseMirror() { close(); }
+
+void DenseMirror::close() {
+    if (host_ != nullptr) {
+        if (pinned_) (void) cudaFreeHost(host_);
+        else std::free(host_);
+    }
+    host_ = nullptr;
+    pinned_ = false;
+    bytes_ = 0;
+    device_ = -1;
+    dev_base_ = nullptr;
+    last_ms_ = 0;
+    restores_ = 0;
+    (void) cudaGetLastError();
+}
+
+bool DenseMirror::capture(const void* dev_base, uint64_t bytes, int device, std::string& err) {
+    close();
+    if (dev_base == nullptr || bytes == 0) return fail(err, "dense mirror: nothing to capture");
+    if (device < 0) return fail(err, "dense mirror: a device index is negative");
+    // Portable: the stage's card reads it; Mapped would be pointless (no kernel reads a page of it).  A pinned
+    // allocation of ~2 GiB can fail under WDDM: the pageable copy keeps the engine running, at the pageable rate.
+    void* h = nullptr;
+    cudaError_t e = cudaHostAlloc(&h, (size_t) bytes, cudaHostAllocPortable);
+    if (e == cudaSuccess && h != nullptr) {
+        pinned_ = true;
+    } else {
+        (void) cudaGetLastError();
+        h = std::malloc((size_t) bytes);
+        if (h == nullptr) return fail(err, "dense mirror: the host copy could not be allocated");
+        pinned_ = false;
+    }
+    host_ = h;
+    bytes_ = bytes;
+    device_ = device;
+    dev_base_ = dev_base;
+    const OnDevice on(device);
+    e = cudaMemcpy(host_, dev_base, (size_t) bytes, cudaMemcpyDeviceToHost);
+    if (e != cudaSuccess) {
+        cuda_fail(err, "dense mirror: D2H", e);
+        close();
+        return false;
+    }
+    return true;
+}
+
+bool DenseMirror::restore(void* dev_base, cudaStream_t stream, bool wait, std::string& err) {
+    if (!valid()) return fail(err, "dense mirror: nothing captured");
+    if (dev_base != dev_base_) return fail(err, "dense mirror: the restore address is not the captured one (the WeightRefs point at the captured one)");
+    const OnDevice on(device_);
+    const auto t0 = std::chrono::steady_clock::now();
+    cudaError_t e = cudaMemcpyAsync(dev_base, host_, (size_t) bytes_, cudaMemcpyHostToDevice, stream);
+    if (e != cudaSuccess) return cuda_fail(err, "dense mirror: H2D", e);
+    last_ms_ = 0;
+    if (wait) {
+        e = cudaStreamSynchronize(stream);
+        if (e != cudaSuccess) return cuda_fail(err, "dense mirror: H2D sync", e);
+        last_ms_ = ms_since(t0);
+    }
+    ++restores_;
+    progress_beat();
+    return true;
+}
+
 // ---------------------------------------------------------------- admission (docs/EP_SPLIT_PREFILL.md s.7, in table order)
 
 bool admit(const Config& c, std::string& why) {
@@ -681,6 +799,17 @@ std::string line_on(int64_t lb, int64_t le, int dev, int64_t prompt_mib, int64_t
 
 std::string line_off(const std::string& why) {
     return "strata: STRATA_EP_SPLIT_PREFILL off: " + why;
+}
+
+std::string line_request(int64_t fresh, int64_t min_tokens, bool staged) {
+    char buf[256];
+    if (staged)
+        std::snprintf(buf, sizeof buf, "strata ep-split: %lld tokens to read: staged read on two cards (threshold %lld)",
+                      (long long) fresh, (long long) min_tokens);
+    else
+        std::snprintf(buf, sizeof buf, "strata ep-split: %lld tokens to read: the primary reads every layer with the servers' "
+                                       "prompt shares (below the threshold %lld)", (long long) fresh, (long long) min_tokens);
+    return buf;
 }
 
 std::string line_trace(const char* dir, const Stats& st) {

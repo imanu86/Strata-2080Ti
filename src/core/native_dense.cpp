@@ -38,6 +38,27 @@ uint64_t alloc_bytes(uint64_t bytes) {
     return bytes < kSmallAlloc ? bytes : (bytes + kAllocGranule - 1) / kAllocGranule * kAllocGranule;
 }
 int g_layer_lb = -1, g_layer_le = -1;   // set_layer_range; -1: every layer
+// Tappa 4c (docs/EP_SPLIT_PREFILL.md s.14.2, set_placement): a REGION the next `load` carves its matrices from, back
+// to back and 256-aligned, instead of one cudaMalloc per matrix - the EP stage's dense weights live in the peer tier's
+// tail, whose address is fixed, so the WeightRefs never move and generate.cpp can copy the same bytes back there
+// before every staged read.  Process-wide like g_layer_lb, read by the next `load`, cleared by it (one placement per
+// load).  Null: every allocation is cudaMalloc's, as before.
+uint8_t* g_place_base = nullptr;
+uint64_t g_place_bytes = 0, g_place_used = 0;
+constexpr uint64_t kPlaceAlign = 256;
+bool placed_ptr(const void* p) {
+    return g_place_base != nullptr && p >= g_place_base && p < g_place_base + g_place_bytes;
+}
+/// cudaMalloc, or a bump from the placement when one is set (cudaErrorMemoryAllocation when it is full: the caller's
+/// message then names the matrix, as for a card that is full).
+cudaError_t place_alloc(void** p, uint64_t bytes) {
+    if (g_place_base == nullptr) return cudaMalloc(p, (size_t) bytes);
+    const uint64_t at = (g_place_used + kPlaceAlign - 1) / kPlaceAlign * kPlaceAlign;
+    if (bytes > g_place_bytes || at > g_place_bytes - bytes) { *p = nullptr; return cudaErrorMemoryAllocation; }
+    *p = g_place_base + at;
+    g_place_used = at + bytes;
+    return cudaSuccess;
+}
 bool in_range(const std::string& name) {
     if (g_layer_lb < 0 || name.rfind("blk.", 0) != 0) return true;
     const int l = std::atoi(name.c_str() + 4);
@@ -179,7 +200,7 @@ bool bf16_as_q8_0(const strata::TensorInfo& tensor, const WeightRef& ref) {
            ref.ne0 > 0 && ref.ne0 <= INT_MAX && ref.ne1 > 0 && ref.ne1 <= INT_MAX && ref.ne0 % 32 == 0 &&
            tensor.shape[0] == (uint64_t) ref.ne0 && tensor.shape[1] == (uint64_t) ref.ne1;
 }
-struct DeviceFree { void operator()(void* p) const { if (p) cudaFree(p); } };
+struct DeviceFree { void operator()(void* p) const { if (p && !placed_ptr(p)) cudaFree(p); } };   // (a placed matrix is the region's: never freed)
 using DevicePtr = std::unique_ptr<void, DeviceFree>;
 struct Pending {
     WeightRef* ref;
@@ -208,6 +229,12 @@ bool NativeDense::served_names(const std::vector<std::string>& shards, bool incl
 }
 
 void NativeDense::set_layer_range(int lb, int le) { g_layer_lb = lb; g_layer_le = le; }
+void NativeDense::set_placement(void* base, uint64_t bytes) {
+    g_place_base = static_cast<uint8_t*>(base);
+    g_place_bytes = base != nullptr ? bytes : 0;
+    g_place_used = 0;
+}
+uint64_t NativeDense::placement_used() { return g_place_used; }
 // The byte walk `load` does for the layers [lb, le), without the allocations: the same filters in the same order,
 // reading the GGUF headers and the canonical table only, so it needs no device.  A later stage's projections are not
 // on the card when the split search prices that stage, and `load` runs one cudaMalloc per matrix (#1238).  The two
@@ -278,7 +305,8 @@ NativeDense::~NativeDense() {
                 if (b != nullptr && std::find(weights_.begin(), weights_.end(), b) != weights_.end()) b = nullptr;
     for (const void* p : packed_keys_) strata::kernels::native_q8_0_packed_unregister(p);
     if (scratch_) cudaFree(scratch_);
-    for (void* p : weights_) cudaFree(p);
+    for (void* p : weights_)   // (a matrix placed in a caller's region is the region's memory: tappa 4c)
+        if (!(placed_lo_ != nullptr && p >= placed_lo_ && p < placed_hi_)) cudaFree(p);
 }
 
 bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err,
@@ -290,6 +318,10 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
     };
     if (scratch_ || !weights_.empty()) { err = "native dense: already loaded"; return false; }
     if (shards.empty()) { err = "native dense: at least one GGUF shard is required"; return false; }
+    // tappa 4c: the matrices this load places in the caller's region are the region's, never cudaFree'd (the
+    // destructor reads these two; the globals may be cleared by the caller long before it)
+    placed_lo_ = g_place_base;
+    placed_hi_ = g_place_base != nullptr ? g_place_base + g_place_bytes : nullptr;
     try {
         std::vector<Pending> pending;
         std::set<std::string> seen;
@@ -376,7 +408,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     const uint64_t n = (uint64_t) ref.ne0 * (uint64_t) ref.ne1;
                     const std::vector<uint8_t> q8 = q8_0_of_bf16((const uint16_t*) gguf.tensor_data(tensor), n);
                     void* allocation = nullptr;
-                    auto status = cudaMalloc(&allocation, q8.size());
+                    auto status = place_alloc(&allocation, q8.size());
                     DevicePtr data(allocation);
                     if (status == cudaSuccess) status = cudaMemcpy(data.get(), q8.data(), q8.size(), cudaMemcpyHostToDevice);
                     if (status != cudaSuccess) {
@@ -401,7 +433,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 const auto bytes = strata::kernels::native_mmvq_weight_bytes(
                     tensor.type, (int) ref.ne0, (int) ref.ne1);
                 void* allocation = nullptr;
-                auto status = cudaMalloc(&allocation, bytes);
+                auto status = place_alloc(&allocation, bytes);
                 DevicePtr data(allocation);
                 if (status == cudaSuccess)
                     status = cudaMemcpy(data.get(), gguf.tensor_data(tensor), bytes, cudaMemcpyHostToDevice);
@@ -421,7 +453,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     strata::kernels::native_q8_0_pack_host(gguf.tensor_data(tensor), host.data(), (int) ref.ne0,
                                                            (int) ref.ne1);
                     void* packed_allocation = nullptr;
-                    auto packed_status = cudaMalloc(&packed_allocation, bytes);
+                    auto packed_status = place_alloc(&packed_allocation, bytes);
                     packed.reset(packed_allocation);
                     if (packed_status == cudaSuccess)
                         packed_status = cudaMemcpy(packed.get(), host.data(), bytes, cudaMemcpyHostToDevice);
@@ -468,7 +500,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     void* p = nullptr;
                     std::vector<uint8_t> q8;
                     if (f32_inject) q8 = q8_0_of((const float*) gguf.tensor_data(tensor), (uint64_t) ref.ne0 * (uint64_t) ref.ne1);
-                    if (cudaMalloc(&p, bytes) != cudaSuccess ||
+                    if (place_alloc(&p, bytes) != cudaSuccess ||
                         cudaMemcpy(p, f32_inject ? (const void*) q8.data() : gguf.tensor_data(tensor), bytes,
                                    cudaMemcpyHostToDevice) != cudaSuccess) {
                         err = "native dense (STRATA_HC_Q8) upload " + tensor.name; return false;
@@ -495,7 +527,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 }
                 const uint64_t nb = (uint64_t) ref.elements / 32, bytes = nb * 34;
                 void* p = nullptr;
-                if (cudaMalloc(&p, bytes) != cudaSuccess) { err = "native dense (STRATA_HC_Q8) alloc " + name; return false; }
+                if (place_alloc(&p, bytes) != cudaSuccess) { err = "native dense (STRATA_HC_Q8) alloc " + name; return false; }
                 weights_.push_back(p);
                 if (skipped) {
                     std::vector<uint16_t> host;

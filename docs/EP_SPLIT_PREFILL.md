@@ -726,3 +726,264 @@ da `gc_bytes`/`gc_slots` e da `lend_of` (vedi le correzioni sotto); il fit in VR
   ms per passaggio di stato, da contare nelle misure delle richieste tagliate.
 - `--batch` e `--prefill-head-alias` sono rifiutati da `ep_split::admit`: la guardia su `fused_begin` non può
   scattare per le finestre fra i blocchi.
+
+## 14. Tappa 4c: soglia, densi in prestito, passaggio sovrapposto (11/11, scritto su `8eb601e3`, ramo `lab/tappa4c`)
+
+Scritto dopo le misure dell'11/11 (3080 Ti padrona su Oculink x4 Gen4, 2080 Ti primo server su x16 Gen3, 3060 secondo
+server su Oculink x4 Gen3). Tutto dietro **`STRATA_EP_SPLIT_PREFILL=2`**: con `=1` il motore è la tappa 4b, bit per
+bit (`ep_4c` falso: nessun ramo nuovo, `ep_staged` resta vero, la gamma di strati di `sp` è quella dell'`init`); con la
+variabile assente nulla esiste. **Compilato no, installato no, provato no.** Convenzione: **M** misurato, **S** stimato.
+
+### 14.0 In tre righe
+
+1. **Da dove partiamo (M, 11/11).** Divisione a strati 20: lettura 897 / 1816-1821 / 2128-2133 (4K / 32K / 128K),
+   scrittura 97-105, finestra 23,0 ms. Due server (`--peer-device 1,2`, mega-kernel, `STRATA_PEER2_PREFILL=1`): lettura
+   969 / 1489 / 1567, scrittura 104,8-109,3, finestra 23,5 ms. Tappa 4b con un server sul riser (03/11): lettura
+   853 / 1525-1538 / 1655-1740, scrittura 77-95, passaggio di stato 123-344 ms a richiesta; con due server sul riser
+   scrittura 79-82. Il conto: la 4b legge come la divisione ma scrive peggio dei due server, perché la 2080 Ti tiene
+   2,7 GiB di densi+sessione per tutta la sessione (~1600 posti esperti in meno) e paga il passaggio di stato.
+2. **Che cosa fa la 4c.** (1) Sotto una soglia di token nuovi la richiesta si legge **come i due server di oggi** (la
+   padrona su 48 strati, le quote di `set_peer` e `set_peer2`, la 3060 compresa; lo stadio dorme, niente passaggi);
+   sopra, a stadi come la 4b. (2) I **densi dello stadio stanno negli ultimi slot del tier** del peer: caricati lì dopo
+   `peer.open`, copiati una volta in RAM bloccata, e in VRAM **solo durante una lettura a stadi** (il `lend` li
+   ricopia dallo specchio nei posti che ha appena preso, il `refill` ci rimette gli esperti): in scrittura il tier ha
+   quei ~1300 posti. (3) Le celle di un chunk finito **passano alla padrona dal filo dello stadio** mentre lo stadio
+   legge il chunk dopo; alla fine passa solo l'ultimo chunk con lo stato ricorrente.
+3. **Numeri attesi (S).** Scrittura **~100-110 t/s** su tutte le lunghezze (il tier torna a ~10 900 meno i ~360 posti
+   della sessione: i due server da soli fanno 105-109); lettura sotto la soglia **= due server** (969 / 1489 a 4K /
+   32K), sopra **= 4b ± 3 %** meno il costo del prestito dei densi durante il prompt (circa −2 %, §14.2). Il passaggio
+   di stato a fine prompt scende da 123-344 ms a **~20 ms** (S), più ~10 ms per chunk sovrapposti.
+
+### 14.1 Soglia (`STRATA_EP_SPLIT_MIN_TOKENS`, default 16384)
+
+Il pareggio fra «due server» e «a stadi» si stima dai numeri M interpolando la velocità fra i tre punti misurati e
+aggiungendo alla lettura a stadi un costo fisso di **0,3-0,5 s** (passaggio di stato 4b 123-344 ms + ricarica dei densi
+~175 ms, §14.2; con la sovrapposizione del §14.3 il primo scende, ma qui si tiene il valore misurato):
+
+| token nuovi | due server (M interp.) | a stadi = divisione 20 (M interp.) + 0,4 s | a stadi = 4b (M interp.) + 0,4 s |
+|---:|---:|---:|---:|
+| 8K | 1043 t/s → 7,9 s | 1028 t/s → 8,4 s (+6 %) | ~980 → 8,8 s (+11 %) |
+| 12K | 1118 → 11,0 s | 1160 → 11,0 s (pari) | ~1100 → 11,6 s (+5 %) |
+| 16K | 1192 → 13,7 s | 1291 → 13,1 s (−5 %) | ~1230 → 13,7 s (pari) |
+| 32K | 1489 → 22,0 s | 1816 → 18,4 s (−16 %) | 1525 → 21,9 s (pari) |
+| 128K | 1567 → 83,6 s | 2128 → 62,0 s (−26 %) | ~1700 → 77,5 s (−7 %) |
+
+Due cose si leggono nella tabella. **Il default 16384** è il primo punto dove la lettura a stadi può vincere **e** il
+primo con due chunk da 8192, cioè dove la pipeline a due stadi si sovrappone almeno per un chunk (a un chunk solo i due
+stadi girano in serie: ecco il 4K a 897 contro 969). E **il guadagno vero della 4c sta nella scrittura**, non nella
+lettura: con `STRATA_PEER2_PREFILL=1` i due server leggono a 32K quanto la 4b misurata (1489 contro 1525); la lettura
+a stadi vince solo se recupera la residenza della divisione (colonna di mezzo) e comunque dai 32K-128K. La soglia va
+quindi **misurata**, non creduta: le corse del §14.8 con `STRATA_EP_SPLIT_MIN_TOKENS=0` (sempre a stadi) e con il
+default dicono dove sta il pareggio su questa macchina; se la colonna di destra è quella vera, 32768 o 65536 è il
+default giusto e si cambia il numero, non il codice.
+
+**Come è fatto** (`generate.cpp`, per richiesta, dopo `read_from`): `fresh = n − read_from`;
+`ep_staged = staged_read(fresh, soglia)`; `sp.set_stage(0, ep_staged ? K : n_layers, ep_staged ? &ep.sp : nullptr)`.
+`Prefill::init` ha dimensionato i buffer di passaggio di mano una volta (con `next_`), e `run_impl` legge `stage_lb_`,
+`stage_le_` e `next_` a ogni corsa (`prefill.cpp:3729`, `:7022`, `:7704`): la gamma si cambia fra una richiesta e
+l'altra senza rifare l'`init`. Il callback `on_chunk` sta su **entrambi** i percorsi (`run_impl` lo chiama solo
+sull'ultimo stadio, quello senza `next_`: `:7121`), così il `set_stage` decide chi riferisce; `on_stage_chunk` esce
+subito quando la lettura non è a stadi, e i checkpoint a metà prompt prendono la via semplice (`checkpoint_at(done,
+nullptr)`), come senza la variabile. Nel `lend` la parte del peer **non viene prestata** (il tier tiene ogni coppia per
+la quota della padrona, i densi restano in RAM); `ep_to_primary`, il `to_peer` di `run` e le righe del drafter sono
+saltati. La sessione dello stadio **resta indietro** di quel che la padrona ha letto da sola: la prossima lettura a
+stadi copia prima ciò che manca (`Sync::valid_for` → `to_peer(c0, q)`), come dopo una risposta. Sempre a stadi con
+`STRATA_EP_SPLIT_LM=1` (regioni e percorso senza `set_peer` sono della lettura a stadi) e con DFlash2 (`reserve_taps`
+ha dimensionato i tap per gli strati dello stadio). Una riga per richiesta quando il modo cambia (sempre con
+`STRATA_EP_SPLIT_TRACE=1`): `strata ep-split: N tokens to read: staged read … / the primary reads every layer …`.
+
+### 14.2 Densi del secondo stadio non residenti in scrittura (`STRATA_EP_SPLIT_DENSE_LOAN`, default 1)
+
+**Perché nel tier e non «strato per strato dalla RAM».** I pesi sono puntatori: `WeightTable` tiene `WeightRef::data`
+nell'arena, `NativeDense` attacca `native_data` e registra le copie «packed» **per puntatore** nei kernel
+(`native_q8_0_packed_register`), e il prompt path li legge così. Spostarli a ogni prompt vorrebbe un rebase di tutta la
+tabella e delle registrazioni; trasmetterli strato per strato in un anello vorrebbe lo stesso rebase per strato, più
+2,1 GiB a chunk sul x16 che già porta ~11 GB di esperti (+20 % di traffico per chunk). Invece **un indirizzo fisso**:
+gli ultimi slot del tier del peer esistono per tutta la sessione, stanno in fondo alla coda che la 4b già presta al
+prompt path dello stadio, e il tier li rivuole solo in scrittura. Quindi:
+
+- **Avvio** (`generate.cpp`, dopo `peer.open`): `ep_dense_need` = arena del pack dei soli strati `[K, 48)` (lo stesso
+  `pool_bytes` con lo `skip` di `add_foreign`) + `NativeDense::weight_bytes_for(K, 48)` (ogni matrice arrotondata al
+  granulo di `cudaMalloc`: un tetto) + 512 B; `tail_region(slots, slot_offsets, max_blob, bytes, need, g_lend_keep)`
+  dà l'offset allineato a 256 dove la regione comincia e il **primo slot che tocca** (`ep_dense_first`); la proiezione
+  del tier prima dell'open (§13.9 correzione 4) conta `need` anche per i densi, così «non entra» si decide **prima**
+  che il tier prenda la VRAM (allora i densi si caricano sulla scheda prima dell'open, come in 4b, con una riga). Il
+  caricamento è quello di sempre (`load_stage_weights` con `place`): `WeightTable::load` scrive nei primi `pool_bytes`
+  della regione; `NativeDense::set_placement` fa carvare le matrici (copie GGUF, packed, righe HC Q8) **a bump** nel
+  resto invece che con un `cudaMalloc` ciascuna (gli scratch Q8_1 e `hc_bf16_view` restano `cudaMalloc`: li legge anche
+  la scrittura, ~200 MiB dalla riserva del peer). Poi `DenseMirror::capture` (D2H una volta, RAM bloccata Portable,
+  pageable se l'allocazione fallisce, detto in riga) e **gli esperti che l'open aveva messo in quegli slot tornano
+  subito dall'arena** (`fill_slot_queued` + `sync_queued`, la via di `refill_issue`): il tier è intero prima della
+  prima finestra. Riga: `strata ep-split: CUDAn: the stage's dense weights (M MiB) live in the peer tier's last S
+  slots [first, slots) during a staged read only: loaded, mirrored … and E experts put back …`.
+- **Per lettura a stadi** (`lend`): la parte del peer è prezzata per buffer + regione LM (se c'è) + **regione dei
+  densi** (`dense_extra_for`: `kTailAlign + ep_dense_region`, i byte da `ep_dense_base` alla fine del tier), così `first
+  ≤ ep_dense_first` per costruzione (un `first` oltre è errore, mai testo diverso); i buffer del prompt (`relayout`) e la
+  regione LM ricevono i byte **prima** di `ep_dense_base`; le coppie dei posti prestati escono da `res_` come in 4b
+  (quindi anche quelle del fondo); poi `DenseMirror::restore(ep_dense_base, ep.stream)`: **H2D in coda sullo stream di
+  calcolo dello stadio**, prima del suo primo kernel della lettura (stesso stream: ordinato, nessuna attesa).
+  `STRATA_EP_SPLIT_DENSE_SYNC=1` aspetta la copia nel `lend` e ne stampa i ms. Il `refill` (prima delle finestre e a
+  fine prompt) rimette gli esperti su quei byte: in scrittura la regione **è esperti**.
+- **Costo a richiesta (S).** 2088 MiB (M, densi+flussi di `[20, 48)`) sul x16 Gen3 a 12-13 GB/s: **160-175 ms**,
+  sovrapposti al chunk 0 della padrona (2-4 s) quando la copia è in coda; ~175 ms seriali con `_DENSE_SYNC=1`; ~350 ms
+  dalla RAM pageable. Durante il prompt il tier presta ~1300 posti in più (2,1 GiB / 1,66 MiB): lo stadio EP perde
+  ~760 coppie di `[20, 48)` (+0,9 GB a chunk sul x16, circa +70 ms su ~4 s, 2 %), lo stadio 0 ne perde ~540 di
+  `[0, 20)` nella coda (+0,65 GB sull'Oculink, circa +0,1 s a chunk, 2,5 %, in sovrapposizione). RAM: **+2,1 GiB
+  bloccata** (lo specchio). Il tetto `weight_bytes_for` lascia fino a ~1 MiB a matrice di scarto nella regione
+  (~170 MiB, ~100 posti prestati per niente durante il prompt; in scrittura sono esperti).
+- **Guadagno (S).** In scrittura il tier ha ~1300 posti in più della 4b (restano fuori i ~360 della sessione dello
+  stadio, 604 MiB, §13.4): la CPU calcola meno coppie a strato-finestra e la scrittura torna verso quella dei due
+  server da soli (104,8-109,3 M). Sopra la soglia, una lettura da 32K (~20 s) paga ~2 % di streaming in più e 0-175 ms
+  di ricarica; sotto la soglia non paga nulla.
+
+### 14.2bis Le righe del drafter nella coda del prestito di CUDA0, e il costo permanente che resta (11/11 sera)
+
+Prima misura della 4c nel motore (chat principale, build `497edc7e`, due server sull'Oculink, soglia 16K): lettura
+911 / 1503 / 1724, scrittura 107 / 109 / 111; due server senza 4c 967 / 1492 / 1576, 107 / 109 / 105; 4b 845 / 1524 /
+1728, 106 / 104 / 107. La scrittura è a posto (+9-10 % a 128K); **sotto soglia la 4K perde il 6 %** (911 contro 967).
+Dal registro: `peer GPU 1: 10596 experts` contro 10969, `primary's 2360` contro 2554, prestito CUDA0 2000 slot
+(chunk 7168) contro 2119 (7680). Cause, per scheda:
+
+- **CUDA0, −194 slot e chunk 7168**: `ep_R_dev0` (320 MiB, le righe del drafter) era un `cudaMalloc` permanente dopo
+  la cache, contato nella riserva del dimensionamento automatico (`ep_rows_bytes`). Serve solo durante una lettura a
+  stadi. Ora (A2 del §13.2bis, fatto): con il prestito le righe stanno negli **ultimi slot di `xcache`** (indirizzo
+  fisso, `tail_region`), prezzate nel prestito di CUDA0 **solo dentro `lend` e solo a stadi** (`ep_rows_priced`,
+  `dense_extra_for`), mai nello scan: il chunk e il prestito sotto soglia sono quelli senza la variabile (2554 slot,
+  7680, 2119); una `lend` a stadi prende ~185 slot in più (2304 ≤ 2554 − 128) e il `relayout` segue `first`. La
+  riserva del dimensionamento non conta più le righe (`ep_rows_bytes = 0` con `ep_4c && pf_borrow`). Senza tabella di
+  residenza (nessun prestito) resta il `cudaMalloc` di prima, detto in riga.
+- **Il prestito su CUDA1 sotto soglia non scatta**: `lend` è chiamato solo nel ciclo dei tagli, dopo la decisione per
+  richiesta, e salta la parte del peer quando `!ep_staged`; la riga `CUDA1 prompt path borrows 3274 of its 10596 tier
+  slots` è dello **scan d'avvio** (il prezzo del prestito a stadi: buffer + densi), non di una richiesta.
+- **CUDA1, −373 slot (620 MiB): la sessione dello stadio, e resta.** 604 MiB (M): K/V residente 7 QSA × 32768 celle ×
+  1056 B = 231 MiB, righe pooled a `max_context` 262144 = 224 MiB, GDN 21 × 2 MiB = 42, buffer QSA/MoE/blocco, code e
+  tabelle rope ~107; più ~16 MiB di stream, cvec, mrope e scratch Q8_1 di `NativeDense`. Metterla nella coda del tier
+  come i densi (immagine «fresca» dopo `session_zero` specchiata in RAM, ripristinata a ogni `lend` a stadi,
+  `ep_sync.invalidate()` al `refill`, `to_peer(0, q)` prima di ogni lettura a stadi: ~110 ms a 128K) richiede di
+  **ricarvarla dopo `peer.open`**, perché `Prefill::bytes_needed_owned(g, ep.ss, …)` e la proiezione del tier la
+  vogliono carvata prima; e una seconda `session_init` rialloca le copie host bloccate del K/V (1,9 GB) che
+  `session_release` non libera (`layer.cpp` non ha un rilascio delle `QsaState::host`). Con quel rilascio il disegno è
+  lo stesso dei densi e vale ~364 slot in più in scrittura; **senza, la sessione resta residente: 604 MiB, ~364 slot,
+  l'unico costo permanente della 4c sulla 2080 Ti.** Non si stringe (§13.4: il mover vuole `max_cells` uguali).
+
+Che cosa aspettarsi nelle stesse righe, dopo questa correzione: `primary's 2554` (come senza 4c), `the prompt path
+borrows 2119 CUDA0 cache slots` e chunk 7680 sotto soglia; a stadi `lent … slots` di CUDA0 ≈ 2304 e la riga nuova
+`CUDA0: the drafter's row buffer (320 MiB, 7680 rows) is the last ~190 cache slots [2364, 2554), lent with the prompt
+buffers during a staged read only`; `peer GPU 1: ~10596 experts` **invariato** (la sessione). La 4K sotto soglia deve
+tornare a 967 ± 2 % se la perdita era di CUDA0 (slot e chunk, quindi anello e quota `set_peer` a `chunk·K/2`); se
+resta un divario, è la residenza del tier (−373 coppie → ~1,5 % S) e lo dice il confronto con `Xfus'` a
+`--peer-reserve-mib 3000 + 620`.
+
+### 14.3 Passaggio di stato: sovrapposto e ridotto (`STRATA_EP_SPLIT_OVERLAP`, default 1)
+
+**Cosa non si può saltare.** La scrittura (`ver.run` su `ss`, 48 strati) legge, per `[K, 48)`: il K/V di **tutte** le
+celle (attenzione sull'intero contesto; in `kv_mode 1` la verità è la copia host e il `memcpy` host→host è il
+passaggio), le righe pooled (selezione dell'indicizzatore), le righe GDN e `tail/dead/block_pos` (stato ricorrente).
+«Solo le parti che la scrittura usa» sono quindi **tutte** quelle che il mover già muove: niente da togliere a bit
+uguali. La riduzione viene da tre cose:
+
+1. **Sovrapposizione** (`on_chunk`, filo dello stadio): finito il chunk `[p0, p0+T)` (stream dello stadio
+   sincronizzato: le righe del drafter già ci contavano), `mover.to_primary(ep.ss, ss, p0, p0+T, running_state=false)`
+   muove **solo K/V e pooled** di quelle celle mentre lo stadio legge il chunk dopo. La pagina e la riga pooled a
+   cavallo di due chunk vengono scritte **due volte**: la prima con le celle del chunk precedente già definitive e il
+   resto in corso, la seconda complete (il mover arrotonda a pagine intere e riga pooled inclusa, §5). La padrona nel
+   frattempo scrive `[0, K)` di `ss` con lo stadio 0: celle di `QsaState` e righe GDN **diverse** da quelle che il mover
+   scrive (`[K, 48)`), nessuna sovrapposizione di byte; lo stream dello stadio 0 non si aspetta. Il mover è usato da
+   un filo solo per volta (il filo della richiesta aspetta in `run`). Costo: ~10 ms a chunk (S: 7 QSA × 8192 × 1056 B =
+   60 MB di `memcpy` + 7 MB di pooled), sul filo dello stadio, cioè sullo stadio più lento: 0,25 % di un chunk.
+2. **Passaggio finale ridotto** (`ep_to_primary`): se l'ultimo chunk passato in `on_chunk` finisce esattamente a `c1`,
+   `c0` sale al suo inizio: passano **l'ultimo chunk** (pagina iniziale e riga pooled a cavallo, complete) **e lo stato
+   ricorrente**. Da 123-344 ms (M, 4b) a **~20 ms** (S). La cancellazione a metà parte (§12) usa lo stesso cammino:
+   `ep_inc_to == pp_reached`.
+3. **La soglia** (§14.1) toglie i passaggi dove pesano di più in proporzione: un turno corto non ha né `to_peer` né
+   `to_primary`; la sessione dello stadio si allinea alla prossima lettura lunga, in un colpo.
+
+`ep_inc_from/ep_inc_to` si azzerano all'inizio di ogni `run`; `Sync::note` resta solo nel passaggio finale (prima,
+`ss` non ha ancora lo stato ricorrente). **Bit identici**: stessi byte negli stessi posti; cambia solo quando arrivano.
+Rischio del punto 1: se un giorno l'append del K/V in streaming passasse per uno stream diverso da quello di calcolo
+dello stadio, la pagina a cavallo potrebbe essere letta prima che atterri; si manifesta come testo diverso, e
+`STRATA_EP_SPLIT_OVERLAP=0` lo esclude; il banco 10 copre la convergenza delle pagine, non quel caso.
+
+### 14.4 Variabili e default
+
+| variabile | default | che cosa fa |
+|---|---|---|
+| `STRATA_EP_SPLIT_PREFILL` | 0 | **2** = tappa 4c (= 1 + i tre pezzi); 1 = tappa 4/4b com'è; 0 = spento |
+| `STRATA_EP_SPLIT_MIN_TOKENS` | 16384 | token nuovi da leggere perché la lettura sia a stadi; 0 = sempre (4b) |
+| `STRATA_EP_SPLIT_DENSE_LOAN` | 1 | densi dello stadio nella coda del tier solo durante le letture a stadi; 0 = residenti (4b). Vuole il prestito (`STRATA_EP_SPLIT_LOAN=1`, `pf_borrow`): senza, torna a 0 con una riga **prima** dell'open |
+| `STRATA_EP_SPLIT_OVERLAP` | 1 | passaggio delle celle chunk per chunk da `on_chunk`; 0 = un passaggio a fine parte (4b) |
+| `STRATA_EP_SPLIT_DENSE_SYNC` | 0 | 1: la ricarica dei densi è aspettata nel `lend` e cronometrata |
+| `STRATA_EP_SPLIT_TRACE` | 0 | come prima, più la riga per richiesta e una per passaggio di chunk |
+
+Le variabili di 4/4b (`_LAYER`, `_LOAN`, `_LM`, `_RESERVE_MIB`, `_PIECE_MIB`, `_THREADS`) valgono come prima. Riga di
+fine richiesta: `ep-split: N passaggi, MB, ms, lettura a stadi|sulla padrona, densi ricaricati R volte`.
+
+### 14.5 Che cosa resta identico
+
+- **Livello 1 e 0**: nessun ramo nuovo gira. Al livello 1 cambia una cosa sola nel codice che gira: `on_chunk` è
+  tenuto anche da `sp` (oltre che da `ep.sp`), ma `sp` ha sempre `next_` e `run_impl` non lo chiama mai (`:7121`):
+  stesse chiamate di prima. I tre chiamanti di `load_stage_weights` passano `nullptr, 0, nullptr`: stesso `cudaMalloc`.
+  `NativeDense::load` senza `set_placement` fa gli stessi `cudaMalloc` (`place_alloc` li delega); `DeviceFree` e il
+  distruttore saltano solo puntatori dentro una regione, che non esiste.
+- **Livello 2, sotto la soglia**: la lettura è quella dei due server **a parità di cache**, ma la cache della padrona
+  e il tier non sono quelli di `Xfus` (lo stadio tiene la sessione, 604 MiB, sul tier; `xcache` è intera dal
+  §14.2bis): testo identico a `Xfus'` con `--peer-reserve-mib 3000 + 620` come in §12, non a `Xfus`.
+- **Livello 2, sopra la soglia**: la lettura è quella della 4b a parità di residenza; la residenza durante il prompt è
+  **minore** di ~1300 coppie (i densi nel tier). Lo streaming cambia **dove** si legge un esperto, non il kernel né
+  l'ordine di somma del chunk-major; la sola differenza possibile è `MMQ_DIRECT`, che legge in posto solo gli slot
+  con la guardia. Identico alla 4b va **misurato**, non dichiarato: criterio del §14.8.
+- **Scrittura**: identica al mega-kernel a parità di tier; il tier è più grande della 4b (~1300 posti): testo diverso
+  dalla 4b per costruzione (§10), confronto con `Xfus'` a cache uguale.
+
+### 14.6 Banco (`tools/ep_split_test.cpp`, controlli 9-12)
+
+9 `tail_region` (slot uniformi e dimensionati, pavimento `keep`, regione più grande dell'arena); 10 passaggio
+sovrapposto: quattro chunk **non** allineati alle pagine senza stato ricorrente, poi l'ultimo con lo stato, contro un
+passaggio intero in `ref` e contro il contratto host, byte identici; in `kv_mode 1` il blocco residente dentro
+l'intervallo esce dalla mappa e quello fuori **resta** (il buco del §10, ora coperto); 11 `DenseMirror`: cattura,
+sovrascrittura, ripristino aspettato e in coda, indirizzo diverso rifiutato, ripristino prima della cattura rifiutato;
+12 `staged_read` e il default della soglia. Esito (chat principale, 11/11): 9-12 OK in fp, `kv_mode 1`, int8, q4.
+Due correzioni della chat principale, da tenere: nel controllo 5 un `cudaDeviceSynchronize()` dopo l'upload e dopo il
+memset (falliva su due schede anche sulla 0.2.13.1: gli stream del mover sono non-blocking), e in `on_chunk` un
+`cudaDeviceSynchronize()` sotto `OnDevice(ep.dev)` prima di `rows_to_primary`. Comandi: `cmake --build build --target ep_split_test`, poi
+`build\ep_split_test.exe 0 2 8192 0` (una scheda per ruolo o due), `build\ep_split_test.exe 0 2 40000 32768`
+(`kv_mode 1`), `STRATA_EP_SPLIT_TEST_KV=int8` e `=q4` per i formati delle corse.
+
+### 14.7 Rischi e punti probabili di errore in compilazione
+
+- `generate.cpp`: `load_stage_weights` ha tre parametri in più (`place`, `place_bytes`, `used_out`); la struct locale
+  `PlaceOff` con distruttore dentro la lambda; `(uint8_t*) ep_sb` su un `void*`; `tc.device_slot(0) + tr.offset`
+  (`uint8_t* + uint64_t`); i `.c_str()` di temporanei dentro `fprintf`/`snprintf` (vivono fino alla fine dell'espressione).
+- `native_dense.cpp`: `place_alloc` e `placed_ptr` devono stare **prima** di `DeviceFree` nel namespace anonimo (ci
+  stanno, accanto a `g_layer_lb`); `placed_lo_/placed_hi_` sono membri nuovi nell'header.
+- `ep_split.cpp`: `std::free`/`std::malloc` (`<cstdlib>` c'è); `DenseMirror::restore` con `cudaStream_t`.
+- **Funzionali**: (a) `set_stage` fra una richiesta e l'altra: `run_impl` legge la gamma a ogni corsa, ma se un pezzo di
+  `Prefill` tenesse per-strato qualcosa dimensionato all'`init` sulla gamma (`reserve_taps` lo fa: DFlash2 è escluso
+  dalla soglia), una lettura piena fallirebbe o leggerebbe fuori: lo dice il banco motore. (b) Il `PeerPrefill` di
+  `set_peer` pianifica per strato a ogni corsa (`peer_now`): in una lettura piena copre 48 strati con `cap_rows =
+  chunk·K/2`, come oggi senza la variabile. (c) La regione dei densi è in **slot prestati**: un `adapt` o una finestra
+  fused mentre è in uso sono esclusi dalla guardia del prestito (4b); un errore, non un testo. (d) La ricarica in coda
+  sullo stream di calcolo vale se il primo kernel dello stadio che legge i densi è su `ep.stream` (`Prefill::init(...,
+  stream)`); gli H2D degli esperti sul `copy` stream non leggono pesi. In dubbio, `STRATA_EP_SPLIT_DENSE_SYNC=1`
+  (175 ms seriali). (e) Gli scratch HC di `NativeDense` (~200 MiB con `STRATA_HC_Q8`) restano `cudaMalloc` **dopo**
+  l'open: escono dalla riserva del peer (3000 MiB, ~2190 liberi dopo i buffer di `set_peer`). (f) Il carico dei densi
+  dal disco avviene dopo che l'arena host da 8 GiB è mappata (WDDM): nessun `cudaMalloc` grande, solo gli scratch; da
+  guardare alla prima prova. (g) La soglia misura `n − read_from`: una richiesta tagliata in segmenti (system +
+  messaggio) decide una volta per tutta la richiesta.
+- **Non regge?** Nessuno dei tre punti è caduto in scrittura; il punto debole è il **guadagno in lettura** sopra la
+  soglia (§14.1, colonna di destra): se la lettura a stadi non supera i due server nemmeno a 128K, la 4c resta utile per
+  la sola scrittura con `STRATA_EP_SPLIT_MIN_TOKENS` molto alto, oppure si spegne e il numero da battere è quello dei
+  due server.
+
+### 14.8 Prova (chat principale)
+
+Stessa coda del §13.8, build nuova. Corse: `X4c{n}` = configurazione due server (`--peer-device 2,1`,
+`STRATA_PEER_FUSED=1`, `STRATA_PEER2_PREFILL=1`) + `STRATA_EP_SPLIT_PREFILL=2`; `X4b{n}` = stessa con `=1`;
+`Xfus{n}` = senza. Bracci: `STRATA_EP_SPLIT_MIN_TOKENS=0` (sempre a stadi: isola i pezzi 2 e 3),
+`STRATA_EP_SPLIT_DENSE_LOAN=0`, `STRATA_EP_SPLIT_OVERLAP=0`, `STRATA_EP_SPLIT_DENSE_SYNC=1` con `STRATA_EP_SPLIT_TRACE=1`
+(stampa i ms della ricarica e di ogni passaggio). Criteri: scrittura ≥ 100 t/s a 4K/32K/128K e testo identico a
+`Xfus'` (cache uguale, `--adapt-swaps 0`) sul primo turno; a 4K lettura = `Xfus` ± 2 % (sotto la soglia è lo stesso
+percorso); a 32K/128K lettura ≥ `X4b` − 3 %; riga `ep-split` con ~20 ms di passaggio finale e `densi ricaricati 1
+volte` per richiesta lunga; la riga `the stage's dense weights … live in the peer tier's last S slots` con S ≈ 1300;
+nessun `strata.exe` rimasto acceso. Poi la soglia: `X4c` a 8K, 16K, 32K con `_MIN_TOKENS=0` e con il default: il
+pareggio misurato fissa il default della prossima build.

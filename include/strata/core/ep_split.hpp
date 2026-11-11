@@ -41,8 +41,21 @@ inline constexpr const char* kEnvPieceMib = "STRATA_EP_SPLIT_PIECE_MIB";  ///< s
 inline constexpr const char* kEnvThreads = "STRATA_EP_SPLIT_THREADS";     ///< host threads for the streamed K/V's memcpy (default 4)
 inline constexpr const char* kEnvTrace = "STRATA_EP_SPLIT_TRACE";         ///< 1: one stderr line per handover (bytes, ms per part)
 inline constexpr const char* kEnvReserveMib = "STRATA_EP_SPLIT_RESERVE_MIB";   ///< bytes added to --peer-reserve-mib for the stage's prompt buffers (default: computed, s.4b)
+// Tappa 4c (docs/EP_SPLIT_PREFILL.md s.14): STRATA_EP_SPLIT_PREFILL=2 is "1 plus the three pieces below"; with 1 none of
+// them exists and the engine is tappa 4b's, bit for bit.  Each piece has its own switch, read only at level 2.
+inline constexpr const char* kEnvMinTokens = "STRATA_EP_SPLIT_MIN_TOKENS";   ///< the staged read only when a request reads at least this many fresh tokens (default kMinTokensDefault; 0: always, as tappa 4b)
+inline constexpr const char* kEnvDenseLoan = "STRATA_EP_SPLIT_DENSE_LOAN";   ///< 1 (default at level 2): the stage's dense weights live in the peer tier's tail only during a staged read
+inline constexpr const char* kEnvOverlap = "STRATA_EP_SPLIT_OVERLAP";        ///< 1 (default at level 2): a chunk's cells cross to the primary while the stage reads the next one
+inline constexpr const char* kEnvDenseSync = "STRATA_EP_SPLIT_DENSE_SYNC";   ///< 1: the dense weights' H2D is waited for in lend (default 0: queued on the stage's compute stream, which orders it before the stage's kernels)
 
 inline constexpr int64_t kLayerDefault = 20;
+/// Break-even of the staged read against today's two-server read (s.14.1, from the 11/11 figures: two servers 969 /
+/// 1489 / 1567 t/s at 4K / 32K / 128K, the layer split 897 / 1816 / 2128, a handover plus the dense weights' upload
+/// 0.2-0.4 s): the staged read is slower at 4K, even at ~12K, 5 % ahead at 16K and 36 % ahead at 128K.  The default
+/// sits at the first chunk count (two of 8192) where the two-stage pipeline overlaps at all.
+inline constexpr int64_t kMinTokensDefault = 16384;
+/// Alignment of the regions carved out of the tier's tail (the dense weights, the super-chunk): cudaMalloc's.
+inline constexpr uint64_t kTailAlign = 256;
 inline constexpr size_t kPieceBytesDefault = (size_t) 8 << 20;
 inline constexpr int kThreadsDefault = 4;
 /// Headroom added to the computed prompt-buffer bytes when the peer's reserve is raised.  THE SAME 512 MiB the chunk
@@ -63,6 +76,71 @@ size_t env_piece_bytes();      ///< STRATA_EP_SPLIT_PIECE_MIB << 20 or kPieceByt
 int env_threads();             ///< STRATA_EP_SPLIT_THREADS or kThreadsDefault (1..16)
 bool env_trace();              ///< STRATA_EP_SPLIT_TRACE=1
 int64_t env_reserve_mib();     ///< STRATA_EP_SPLIT_RESERVE_MIB, -1 when unset (then generate.cpp computes it)
+int env_level();               ///< STRATA_EP_SPLIT_PREFILL as a number (0 off, 1 tappa 4/4b, 2 tappa 4c); env_on() is level != 0
+int64_t env_min_tokens();      ///< STRATA_EP_SPLIT_MIN_TOKENS or kMinTokensDefault (floor 0)
+bool env_dense_loan();         ///< STRATA_EP_SPLIT_DENSE_LOAN, default 1
+bool env_overlap();            ///< STRATA_EP_SPLIT_OVERLAP, default 1
+bool env_dense_sync();         ///< STRATA_EP_SPLIT_DENSE_SYNC=1
+
+// ---------------------------------------------------------------- tappa 4c: pure rules (ep_split_test checks them)
+
+/// The request reads `fresh` tokens in batched parts (n - read_from): staged (two layer stages) when at least
+/// `min_tokens`; below it the primary reads every layer with the two servers' prompt shares, as without the variable.
+inline bool staged_read(int64_t fresh, int64_t min_tokens) { return min_tokens <= 0 || fresh >= min_tokens; }
+
+/// A region of `bytes` bytes at the END of an expert cache's arena (the slots are lent for the time the region is
+/// in use: the dense weights of the stage during a staged read).  `slots` slots, laid out by `slot_offsets` (slot s
+/// is [slot_offsets[s], slot_offsets[s + 1]); null: `slot_bytes` each), the arena `cache_bytes` long.
+///   offset: where the region starts, kTailAlign-aligned down, so [offset, cache_bytes) holds `bytes`;
+///   first:  the first slot the region overlaps - every slot in [first, slots) must be lent while it is in use;
+///           -1 when fewer than `keep` slots would stay (the loan's floor), or the region does not fit at all.
+struct TailRegion {
+    int64_t first = -1;
+    uint64_t offset = 0;
+    uint64_t bytes = 0;
+};
+TailRegion tail_region(int64_t slots, const uint64_t* slot_offsets, uint64_t slot_bytes, uint64_t cache_bytes,
+                       uint64_t bytes, int64_t keep);
+
+// ---------------------------------------------------------------- tappa 4c: the stage's dense weights between prompts
+
+/// The stage's dense weights (its WeightTable arena and its NativeDense matrices, laid out back to back in the
+/// tier's tail region by generate.cpp) kept in RAM between prompts: `capture` copies the region D2H once at start,
+/// `restore` puts the SAME bytes back at the SAME device address before a staged read (the WeightRefs keep their
+/// pointers: nothing is rebased), queued on the stage's compute stream so the stage's first kernel finds them.
+/// Pinned (Portable) when the allocation succeeds, pageable otherwise (`pinned()` false, said in one line by the
+/// caller: the copy then runs at the pageable rate).  Written, not compiled.
+class DenseMirror {
+public:
+    DenseMirror() = default;
+    ~DenseMirror();
+    DenseMirror(const DenseMirror&) = delete;
+    DenseMirror& operator=(const DenseMirror&) = delete;
+
+    /// D2H of [dev_base, dev_base + bytes) on `device`, synchronous.  Allocates the host copy.
+    bool capture(const void* dev_base, uint64_t bytes, int device, std::string& err);
+    /// H2D of the captured bytes to `dev_base` (the same address, checked) on `stream` of `device()`; with `wait`
+    /// the call returns when the copy is complete and `last_ms()` has its time; without, the copy is queued on the
+    /// stream (ordered before everything the caller issues on it afterwards) and `last_ms()` is 0.
+    bool restore(void* dev_base, cudaStream_t stream, bool wait, std::string& err);
+    void close();
+    bool valid() const { return host_ != nullptr; }
+    bool pinned() const { return pinned_; }
+    uint64_t bytes() const { return bytes_; }
+    int device() const { return device_; }
+    const void* dev_base() const { return dev_base_; }
+    double last_ms() const { return last_ms_; }
+    int64_t restores() const { return restores_; }
+
+private:
+    void* host_ = nullptr;
+    bool pinned_ = false;
+    uint64_t bytes_ = 0;
+    int device_ = -1;
+    const void* dev_base_ = nullptr;
+    double last_ms_ = 0;
+    int64_t restores_ = 0;
+};
 
 // ---------------------------------------------------------------- admission
 
@@ -252,5 +330,8 @@ int64_t reserve_add_mib(uint64_t prompt_bytes);
 std::string line_on(int64_t lb, int64_t le, int dev, int64_t prompt_mib, int64_t reserve0_mib, int64_t reserve1_mib);
 std::string line_off(const std::string& why);
 std::string line_trace(const char* dir, const Stats& st);
+/// Tappa 4c, per request: "strata ep-split: <fresh> tokens to read: staged read (threshold <min>)" or
+/// "... the primary reads every layer with the servers' shares (below the threshold <min>)".
+std::string line_request(int64_t fresh, int64_t min_tokens, bool staged);
 
 }  // namespace strata::core::ep_split
