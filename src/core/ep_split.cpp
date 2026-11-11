@@ -128,6 +128,11 @@ bool env_dense_sync() {
     return on;
 }
 
+bool env_session_loan() {
+    static const bool on = env_i64(kEnvSessionLoan, 1) != 0;
+    return on;
+}
+
 // ---------------------------------------------------------------- tappa 4c: pure rules
 
 TailRegion tail_region(int64_t slots, const uint64_t* slot_offsets, uint64_t slot_bytes, uint64_t cache_bytes,

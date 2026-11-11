@@ -209,6 +209,14 @@ inline cudaError_t host_alloc_guarded(void** p, size_t bytes, unsigned flags) {
     }
 }
 
+/// The matching free of a host_alloc_guarded buffer (cudaFreeHost, and the test budget's charge goes with it).
+inline void host_free_guarded(void* p) {
+    if (p == nullptr) return;
+    auto& s = pin_detail::st();
+    std::lock_guard<std::mutex> g(s.mu);
+    pin_detail::free_locked(s, p);
+}
+
 /// The sentence every hard failure ends with, so the app can recognise it in the log.
 inline std::string pin_exhausted_hint() {
     auto& s = pin_detail::st();

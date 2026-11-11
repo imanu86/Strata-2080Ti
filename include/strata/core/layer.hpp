@@ -240,6 +240,10 @@ struct QsaState {
     /// context needs - its index in layer.cpp's registry; -1: carved from the arena as before.
     int32_t kv_elastic = -1;
     strata::kernels::KvHostPools host;
+    /// The host copy's own allocation (kv_host_alloc: the HOST pointer, where `host` holds the device-mapped aliases),
+    /// so qsa_state_release can give it back; null when the layer is fully resident.
+    uint8_t* host_base = nullptr;
+    uint64_t host_bytes = 0;
     strata::kernels::KvStreamMap map;
     int64_t idx_pooled_rows = 0;     ///< rows of `idx_pooled` (a ring, which has no indexer, keeps 2)
 
@@ -328,6 +332,11 @@ inline int qsa_kv_format(const QsaState& st) {
 }
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
                         const QsaState* share_rope = nullptr, int64_t ring_cells = 0);
+/// What qsa_state_init allocated OUTSIDE the arena it carved: the pinned host copy of a streamed K/V (kv_host_alloc),
+/// the pinned step / position staging, and the RoPE table when this state built it.  The arena's bytes are the
+/// caller's.  After it the state can be initialized again at any base (the EP prefill carves the stage's session in
+/// the peer tier's tail after the tier opens: docs/EP_SPLIT_PREFILL.md s.14.2ter).  Nothing may be running on it.
+void qsa_state_release(QsaState& st);
 /// KV streaming: the pools a reader sees (the VRAM slots) and, when streamed, make the selection's blocks resident.
 strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st);
 void qsa_kv_resolve(const QsaState& st, const ModelGeometry& g, const int32_t* ids, const int32_t* steps, int64_t n_q,

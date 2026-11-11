@@ -46,6 +46,8 @@
 #include <sys/mman.h>
 #endif
 #include <memory>
+#include <mutex>
+#include <set>
 #include <vector>
 namespace strata::core {
 namespace { bool g_shared_early = true; bool g_fused_gr = false; bool g_fast_attn = true; bool g_publish_kernel = true; bool g_fused_gdn = true; bool g_fast_select = true; }
@@ -573,6 +575,12 @@ namespace {
 // KV streaming (docs/kv-streaming-design.md): 0 keeps every cell in VRAM.
 int64_t g_kv_resident = 0;
 uint64_t g_kv_host_bytes = 0;
+#ifndef _WIN32
+// kv_host_free has to know how a copy was pinned: the ones cudaHostRegister'd (anonymous mmap) are listed here, the
+// others are cudaHostAlloc's (host_alloc_guarded).  Written under the mutex by the thread that carves a session.
+std::mutex g_kv_host_mu;
+std::set<void*> g_kv_host_registered;
+#endif
 
 // The KV host copy: pinned and device-mapped. cudaHostAlloc is the default, but under WSL2 the driver caps what
 // cudaHostAlloc(Mapped) may pin at about 1 GiB in all, while cudaHostRegister of ordinary memory is not capped there:
@@ -605,6 +613,10 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
             munmap(m, (size_t) n);
             return nullptr;
         }
+        {
+            std::lock_guard<std::mutex> lk(g_kv_host_mu);
+            g_kv_host_registered.insert(m);
+        }
         static bool said = false;
         if (!said) {
             std::fprintf(stderr, "strata: KV streaming: the host copy is pinned with cudaHostRegister\n");
@@ -621,6 +633,48 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
 #endif
 }
 
+/// The copy back: unregistered and unmapped when it was registered, cudaFreeHost (through the pin budget) otherwise.
+/// `bytes` is what kv_host_alloc was asked for.  Nothing may be reading it (the stage's session is released with its
+/// card idle).
+void kv_host_free(uint8_t* h, uint64_t bytes) {
+    if (h == nullptr) return;
+#ifndef _WIN32
+    bool registered = false;
+    {
+        std::lock_guard<std::mutex> lk(g_kv_host_mu);
+        registered = g_kv_host_registered.erase((void*) h) > 0;
+    }
+    if (registered) {
+        (void) cudaHostUnregister(h);
+        (void) cudaGetLastError();
+        munmap(h, (size_t) bytes);
+        g_kv_host_bytes -= std::min<uint64_t>(g_kv_host_bytes, bytes);
+        return;
+    }
+#endif
+    strata::core::host_free_guarded(h);
+    (void) cudaGetLastError();
+    g_kv_host_bytes -= std::min<uint64_t>(g_kv_host_bytes, bytes);
+}
+
+}  // namespace (qsa_state_release is declared in layer.hpp: it must not sit in the anonymous namespace)
+
+void qsa_state_release(QsaState& st) {
+    if (st.owns_rope) {
+        strata::kernels::rope_table_release(st.cos_tab);
+        st.owns_rope = false;
+    }
+    if (st.host_base != nullptr) {
+        kv_host_free(st.host_base, st.host_bytes);
+        st.host_base = nullptr;
+        st.host_bytes = 0;
+    }
+    st.host = strata::kernels::KvHostPools{};
+    if (st.host_step != nullptr) { strata::core::host_free_guarded(st.host_step); st.host_step = nullptr; }
+    if (st.host_pos != nullptr) { strata::core::host_free_guarded(st.host_pos); st.host_pos = nullptr; }
+}
+
+namespace {
 // ---- the elastic K/V (--kv-grow): one VMM range per state, each pool array at a chunk boundary in it
 bool g_kv_elastic = false;
 int64_t g_kv_elastic_init = 16384;
@@ -931,6 +985,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
             return 0;
         }
         g_kv_host_bytes += bytes;
+        st.host_base = h;   // (qsa_state_release gives it back by this pointer, not by the mapped aliases below)
+        st.host_bytes = bytes;
         Cursor hc{d};
         if (st.kv_hybrid) {
             st.host.k_q = hc.take<int8_t>(hrows * s.head_dim);

@@ -47,6 +47,7 @@ inline constexpr const char* kEnvMinTokens = "STRATA_EP_SPLIT_MIN_TOKENS";   ///
 inline constexpr const char* kEnvDenseLoan = "STRATA_EP_SPLIT_DENSE_LOAN";   ///< 1 (default at level 2): the stage's dense weights live in the peer tier's tail only during a staged read
 inline constexpr const char* kEnvOverlap = "STRATA_EP_SPLIT_OVERLAP";        ///< 1 (default at level 2): a chunk's cells cross to the primary while the stage reads the next one
 inline constexpr const char* kEnvDenseSync = "STRATA_EP_SPLIT_DENSE_SYNC";   ///< 1: the dense weights' H2D is waited for in lend (default 0: queued on the stage's compute stream, which orders it before the stage's kernels)
+inline constexpr const char* kEnvSessionLoan = "STRATA_EP_SPLIT_SESSION_LOAN";   ///< 1 (default, with the dense loan): the stage's session too lives in the tier's tail during a staged read only (s.14.2ter)
 
 inline constexpr int64_t kLayerDefault = 20;
 /// Break-even of the staged read against today's two-server read (s.14.1, from the 11/11 figures: two servers 969 /
@@ -81,6 +82,7 @@ int64_t env_min_tokens();      ///< STRATA_EP_SPLIT_MIN_TOKENS or kMinTokensDefa
 bool env_dense_loan();         ///< STRATA_EP_SPLIT_DENSE_LOAN, default 1
 bool env_overlap();            ///< STRATA_EP_SPLIT_OVERLAP, default 1
 bool env_dense_sync();         ///< STRATA_EP_SPLIT_DENSE_SYNC=1
+bool env_session_loan();       ///< STRATA_EP_SPLIT_SESSION_LOAN, default 1
 
 // ---------------------------------------------------------------- tappa 4c: pure rules (ep_split_test checks them)
 

@@ -874,6 +874,70 @@ tornare a 967 ± 2 % se la perdita era di CUDA0 (slot e chunk, quindi anello e q
 resta un divario, è la residenza del tier (−373 coppie → ~1,5 % S) e lo dice il confronto con `Xfus'` a
 `--peer-reserve-mib 3000 + 620`.
 
+### 14.2ter La sessione dello stadio nella coda del tier (`STRATA_EP_SPLIT_SESSION_LOAN`, default 1; 11/11 notte)
+
+Dopo la correzione del §14.2bis (salvata in `da51cc27`, build `c2e31a79`): 4c 927-930 / 1491-1500 / 1757-1762 in
+lettura e 103,9-104,6 / 107,4-111,6 / 111,5-113,0 in scrittura, due server 968-969 / 1489-1496 / 1565-1577 e
+107,5-108,2 / 109,9-110,2 / 107,6-111,8 (M); `primary's 2554`, `peer GPU 1: 10599`. Resta il costo della sessione
+dello stadio (604 MiB, ~370 posti). Il pezzo lo toglie, con lo stesso meccanismo dei densi.
+
+**Che cosa deve sopravvivere fra una richiesta e l'altra nella sessione dello stadio: niente.** Verificato riga per
+riga: la verità è sempre `ss` (§6). (a) Il K/V, le righe pooled, le righe GDN e `tail/dead/block_pos` delle celle
+lette a stadi passano a `ss` con `ep_to_primary` **prima** del `refill` che segue (nel ciclo dei tagli il passaggio
+viene subito dopo `read_part`, il `refill` all'inizio del taglio successivo o a fine prompt; anche nel ramo di
+cancellazione). (b) La cache delle conversazioni (parcheggio, ripristino, prefisso prestato, slot) salva e rimette
+**solo `ss`** (`stages` vuoto, nessuna `stage_images`) e ogni ripristino già chiama `ep_sync.invalidate()`. (c) I
+checkpoint del prompt: quelli a fine prompt/coda/radice leggono `ss` dopo il passaggio; quelli a metà prompt prendono
+la parte dello stadio **durante** la lettura (`on_stage_chunk`, filo dello stadio, regione prestata) e
+`checkpoint_merge_tail` legge dalla sessione dello stadio solo ordinali e dimensioni (struttura host). (d) Le copie
+host del K/V dello stadio (RAM bloccata, `QsaState::host`) **non** stanno nel tier: sopravvivono, ma non servono
+(`to_peer(0, q)` le riscrive). (e) `upload_mrope` scrive `ep.mrope`, allocazione a parte. Quindi fra una lettura a
+stadi e l'altra la VRAM della sessione può essere esperti.
+
+**Come è fatto.**
+- `layer.cpp`: `kv_host_alloc` registra (fuori Windows) i puntatori pinnati con `cudaHostRegister`;
+  `kv_host_free(h, bytes)` fa `cudaHostUnregister` + `munmap` oppure `cudaFreeHost` via il bilancio dei pin
+  (`host_free_guarded`, nuovo in `pin_budget.hpp`), e scala `g_kv_host_bytes`. `QsaState` tiene `host_base/host_bytes`
+  (il puntatore **host**: in `host` stanno gli alias mappati). `qsa_state_release(st)`: tabella rope se propria, copia
+  host del K/V, `host_step`/`host_pos`. `session_release` scorre gli stati **per ordinale** (la vecchia scansione
+  `[0, qsa_alloc)` non rilasciava nulla di una sessione di stadio) e cancella l'array `qsa_states`: una seconda
+  `session_init` allo stesso o a un altro indirizzo parte da zero e non raddoppia 1,9 GB di RAM bloccata.
+- `generate.cpp`: la sessione carvata prima dell'open serve al dimensionamento (`bytes_needed_owned`, proiezione);
+  **subito prima di `peer.open`** viene rilasciata e `ep_sbuf` liberato (il tier prende quella VRAM). Dopo l'open la
+  regione di coda è `[sessione | densi]`: `tail_region` con `need = sessione (256-al.) + densi`; `session_init` a
+  `ep_tail_base` (stessa carve: stessi `max_context` e strati, il mover trova gli stessi formati), `session_zero`,
+  poi i densi a `ep_tail_base + sess_al`. **Il sigillo** (`ep_tail_seal`, dopo `init_prompt_paths`, prima di
+  `arm_prompt_helpers`): specchia l'immagine fresca della sessione (`ep_sess_mirror`) e i densi (`ep_mirror`), rimette
+  gli esperti della coda, `ep_sync.invalidate()`; così se l'`init` del prompt path avesse scritto nella sessione,
+  l'immagine lo tiene. Nel `lend` della parte del peer: buffer fino a `ep_tail_base`, poi `restore` della sessione
+  **aspettato** (604 MiB sul x16, ~50 ms: `run` fa subito dopo `to_peer` nella regione, con i suoi stream e il
+  `memcpy` host), poi i densi in coda come prima. Al `refill_wait` della parte del peer e al `refill` che abbassa la
+  guardia: `ep_sync.invalidate()`. `ep_zero` (richiesta con `resume == 0`) con la sessione in prestito **non scrive**
+  (la regione in quel momento è esperti): invalida e basta; l'immagine fresca del `lend` è lo zero.
+- Ogni lettura a stadi parte quindi con `to_peer(ss, ep.ss, 0, q)`: a 128K ≈ 75 ms di `memcpy` + 27 ms di pooled +
+  10 ms di stato (S, `kv_mode 1`), su una lettura ≥ 10 s: ≤ 1 %. Prima lo pagavano solo i ripristini.
+
+**Costo permanente che resta sulla 2080 Ti (S):** stream, tabelle cvec, `mrope`, lo scratch Q8_1 di `NativeDense`
+e le piccole tabelle del prompt path: **decine di MiB, ≤ 20 posti**. RAM: +604 MiB bloccata (l'immagine). La coda
+prestata a stadi sale a ~buffer + 1300 + 364 posti (≈ 3650, 34 % del tier).
+
+**Nel registro:** `strata ep-split: CUDAn: the stage's session (604 MiB) is released before the tier opens; carved again
+in the tier's tail after it …`; `peer GPU 1: ~10 960 experts` (contro 10599; i due server senza 4c hanno 10969);
+la riga del sigillo `the stage's session (604 MiB, a zeroed image) and M MiB of dense weights live in the peer tier's
+last S slots [first, slots) …` con S ≈ 3650 − buffer, cioè ~1660; `lent … slots` della parte del peer a stadi ≈
++364 rispetto a prima; nella riga di fine richiesta `densi ricaricati N volte, sessione N`; con `STRATA_EP_SPLIT_TRACE=1`
+un `to peer: cells [0, q)` a ogni lettura a stadi (prima solo dopo un ripristino). Scrittura attesa ≥ due server
+(il tier è il loro); lettura sopra soglia −0,5 % (S) per il `to_peer` pieno.
+
+**Rischi.** (i) `Prefill::init` o una sua ricostruzione a richiesta (`arm_prompt_helpers` dopo un rebuild del prompt
+path, `generate.cpp` ~18139) che scrivesse nella sessione mentre la regione è esperti: corromperebbe il tier; non ne ho
+trovato traccia (`init` legge la struttura host di `ss`), ma non è provato per costruzione. (ii) `kv_host_free` su
+Windows presume `cudaHostAlloc` (è l'unica via lì); fuori Windows il registro dei `cudaHostRegister` decide. (iii) La
+sessione ricarvata **dopo** `peer.open` e `peer2.open`: nessun `cudaMalloc` (la carve è nel tier) ma le copie host da
+1,9 GB sono riallocate dopo che l'arena da 8 GiB è mappata (WDDM): se il pin fallisce, `session_init` torna 0 ed è
+errore all'avvio, non un testo diverso. (iv) Lo stesso `session_release` ora rilascia anche a fine processo le tabelle
+rope e le copie host dello stadio (prima no): innocuo.
+
 ### 14.3 Passaggio di stato: sovrapposto e ridotto (`STRATA_EP_SPLIT_OVERLAP`, default 1)
 
 **Cosa non si può saltare.** La scrittura (`ver.run` su `ss`, 48 strati) legge, per `[K, 48)`: il K/V di **tutte** le
@@ -913,6 +977,7 @@ dello stadio, la pagina a cavallo potrebbe essere letta prima che atterri; si ma
 | `STRATA_EP_SPLIT_DENSE_LOAN` | 1 | densi dello stadio nella coda del tier solo durante le letture a stadi; 0 = residenti (4b). Vuole il prestito (`STRATA_EP_SPLIT_LOAN=1`, `pf_borrow`): senza, torna a 0 con una riga **prima** dell'open |
 | `STRATA_EP_SPLIT_OVERLAP` | 1 | passaggio delle celle chunk per chunk da `on_chunk`; 0 = un passaggio a fine parte (4b) |
 | `STRATA_EP_SPLIT_DENSE_SYNC` | 0 | 1: la ricarica dei densi è aspettata nel `lend` e cronometrata |
+| `STRATA_EP_SPLIT_SESSION_LOAN` | 1 | la sessione dello stadio nella coda del tier solo durante le letture a stadi (§14.2ter); vuole `_DENSE_LOAN=1`; 0 = residente (604 MiB) |
 | `STRATA_EP_SPLIT_TRACE` | 0 | come prima, più la riga per richiesta e una per passaggio di chunk |
 
 Le variabili di 4/4b (`_LAYER`, `_LOAN`, `_LM`, `_RESERVE_MIB`, `_PIECE_MIB`, `_THREADS`) valgono come prima. Riga di
@@ -942,7 +1007,11 @@ sovrapposto: quattro chunk **non** allineati alle pagine senza stato ricorrente,
 passaggio intero in `ref` e contro il contratto host, byte identici; in `kv_mode 1` il blocco residente dentro
 l'intervallo esce dalla mappa e quello fuori **resta** (il buco del §10, ora coperto); 11 `DenseMirror`: cattura,
 sovrascrittura, ripristino aspettato e in coda, indirizzo diverso rifiutato, ripristino prima della cattura rifiutato;
-12 `staged_read` e il default della soglia. Esito (chat principale, 11/11): 9-12 OK in fp, `kv_mode 1`, int8, q4.
+12 `staged_read` e il default della soglia; 13 (§14.2ter) `session_release` + seconda `session_init` allo stesso
+indirizzo (stessa carve, `host_base` segue il `kv_mode`), immagine fresca specchiata, sovrascritta e rimessa (le parti
+nell'arena tornano fresche; in `kv_mode 1` i pool sono le copie host, fuori dall'arena, esclusi), poi un `to_peer`
+nella sessione ricarvata contro il contratto. Esito (chat principale, 11/11): 9-12 OK in fp, `kv_mode 1`, int8, q4;
+13 non provato.
 Due correzioni della chat principale, da tenere: nel controllo 5 un `cudaDeviceSynchronize()` dopo l'upload e dopo il
 memset (falliva su due schede anche sulla 0.2.13.1: gli stream del mover sono non-blocking), e in `on_chunk` un
 `cudaDeviceSynchronize()` sotto `OnDevice(ep.dev)` prima di `rows_to_primary`. Comandi: `cmake --build build --target ep_split_test`, poi

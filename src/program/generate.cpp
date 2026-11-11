@@ -5308,6 +5308,13 @@ int main(int argc, char** argv) {
     const int64_t ep_min_tokens = ep_4c ? strata::core::ep_split::env_min_tokens() : 0;
     bool ep_dense_loan = ep_4c && ep_loan && strata::core::ep_split::env_dense_loan();   // (not const: off with the loan, below)
     const bool ep_overlap = ep_4c && strata::core::ep_split::env_overlap();
+    // Tappa 4c, STRATA_EP_SPLIT_SESSION_LOAN (s.14.2ter, default 1 with the dense loan): the stage's session too is
+    // carved in the tier's tail (before the dense weights) after the tier opens, and exists in VRAM only during a
+    // staged read: the lend puts a fresh (session_zero'd) image of it back, the stage is told it holds nothing
+    // (Sync::invalidate at every refill) and every staged read starts with to_peer(0, q).  The session carved before
+    // the open serves the sizing only and is released before the tier fills (session_release frees the host K/V copies
+    // too, so the second carve doubles no pinned RAM).  Needs the dense loan (the same tail region); off with it.
+    bool ep_sess_loan = ep_dense_loan && strata::core::ep_split::env_session_loan();
     bool ep_staged = ep_on;   ///< this request reads in two stages (4b: always; 4c: above the threshold); set per request
     if (ep_4c)
         std::fprintf(stderr, "strata ep-split: tappa 4c: staged read from %lld fresh tokens (STRATA_EP_SPLIT_MIN_TOKENS; 0: always), "
@@ -9487,10 +9494,14 @@ int main(int argc, char** argv) {
     // ep_dense_bytes: what the pack arena and the NativeDense matrices took (the mirror's size); ep_dense_need: the
     // size asked before the tier opens (the pack arena rounded to 256 + NativeDense's weight_bytes_for, an upper bound).
     uint64_t ep_dense_need = 0, ep_dense_bytes = 0;
-    uint64_t ep_dense_region = 0;   ///< bytes from ep_dense_base to the tier's end (>= ep_dense_bytes: weight_bytes_for rounds each matrix to cudaMalloc's granule); what the loan is priced for
+    uint64_t ep_dense_region = 0;   ///< bytes from ep_tail_base to the tier's end (session + dense weights; >= what they took: weight_bytes_for rounds each matrix to cudaMalloc's granule); what the loan is priced for
     uint8_t* ep_dense_base = nullptr;
+    uint8_t* ep_tail_base = nullptr;   ///< where the tail region starts: the session (ep_sess_loan) then the dense weights; the stage's prompt buffers end here
     int64_t ep_dense_first = -1;
-    strata::core::ep_split::DenseMirror ep_mirror;
+    uint64_t ep_sess_al = 0;           ///< the session's carve, 256-aligned (0 without ep_sess_loan)
+    strata::core::ep_split::DenseMirror ep_mirror;        ///< the dense weights
+    strata::core::ep_split::DenseMirror ep_sess_mirror;   ///< the session's fresh image (ep_sess_loan)
+    std::function<bool()> ep_tail_seal;   ///< after the prompt paths are laid out: mirror the tail, put the tier's experts back into it
     if (o.peer_device >= 1) {
         if (profile.empty() || srcp == nullptr || o.expert_cache <= 0) {
             std::fprintf(stderr, "strata generate: --peer-device needs --expert-profile and the expert cache\n");
@@ -9521,6 +9532,11 @@ int main(int argc, char** argv) {
             }
             ep_dense_need = (pool_d + strata::core::ep_split::kTailAlign - 1) / strata::core::ep_split::kTailAlign *
                                 strata::core::ep_split::kTailAlign + nd + 2 * strata::core::ep_split::kTailAlign;
+            if (ep_sess_loan) {   // the session's carve goes in front of the weights, in the same region (s.14.2ter)
+                ep_sess_al = (strata::core::session_bytes(g, o.max_context, K, ep_K, g.n_layers) + strata::core::ep_split::kTailAlign - 1) /
+                             strata::core::ep_split::kTailAlign * strata::core::ep_split::kTailAlign;
+                ep_dense_need += ep_sess_al;
+            }
         }
         if (ep_on) {
             uint64_t pb = 0;
@@ -9641,6 +9657,28 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // tappa 4c (ep_sess_loan, s.14.2ter): the stage's session carved above served the sizing (bytes_needed_owned, the
+        // projection); its VRAM goes back NOW, before the tier fills what is free, and the session is carved again in
+        // the tier's tail after the open.  session_release frees the pinned host copies of the K/V with it.
+        if (ep_sess_loan && !ep_dense_loan) {
+            ep_sess_loan = false;
+            ep_sess_al = 0;
+            std::fprintf(stderr, "strata ep-split: STRATA_EP_SPLIT_SESSION_LOAN needs the dense loan: the stage's session stays "
+                                 "resident on CUDA%d\n", ep_stage->dev);
+        }
+        if (ep_sess_loan) {
+            const strata::core::OnDevice on(ep_stage->dev);
+            if (cudaDeviceSynchronize() != cudaSuccess) {
+                std::fprintf(stderr, "strata generate: ep-split, CUDA%d: the device failed before the session's release\n", ep_stage->dev);
+                return 1;
+            }
+            strata::core::session_release(ep_stage->ss);
+            (void) cudaFree(ep_sbuf);
+            ep_sbuf = nullptr;
+            std::fprintf(stderr, "strata ep-split: CUDA%d: the stage's session (%llu MiB) is released before the tier opens; carved "
+                                 "again in the tier's tail after it, present in VRAM during a staged read only\n",
+                         ep_stage->dev, (unsigned long long) (ep_sess_al >> 20));
+        }
         if (!peer.open(o.peer_device, profile, xcache, *srcp, g.n_layers, g.n_expert,
                        o.peer_reserve_mib + (int) ep_reserve_add, o.peer_slots, err, nullptr, 0, peer2_share)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
@@ -9670,27 +9708,58 @@ int main(int argc, char** argv) {
                              (unsigned long long) (ep_dense_need >> 20), (long long) g_lend_keep);
                 return 1;
             }
-            ep_dense_base = tc.device_slot(0) + tr.offset;
+            ep_tail_base = tc.device_slot(0) + tr.offset;
+            ep_dense_base = ep_tail_base + ep_sess_al;   // (ep_sess_al is 0 without the session loan)
             ep_dense_first = tr.first;
             ep_dense_region = (uint64_t) tc.bytes() - tr.offset;
-            const auto td0 = Clock::now();
+            const uint64_t dense_cap = ep_dense_region - ep_sess_al;
             {
                 const strata::core::OnDevice on(ep.dev);
                 if (!peer.quiesce(err)) { std::fprintf(stderr, "strata generate: ep-split: %s\n", err.c_str()); return 1; }
-                if (!load_stage_weights(ep, ep_K, g.n_layers, /*trim=*/true, ep_dense_base, (uint64_t) tc.bytes() - tr.offset,
-                                        &ep_dense_bytes)) return 1;
+                // tappa 4c (ep_sess_loan, s.14.2ter): the session carved again, at the region's start - the same carve as
+                // before the open (same max_context, same layers: the mover's formats agree), zeroed; its fresh image is
+                // mirrored in ep_tail_seal, after the prompt paths are laid out
+                if (ep_sess_loan) {
+                    if (strata::core::session_init(g, o.max_context, K, ep_tail_base, ep.ss, ep.lb, ep.le) == 0) {
+                        std::fprintf(stderr, "strata generate: ep-split, CUDA%d: the session state failed in the tier's tail\n", ep.dev);
+                        return 1;
+                    }
+                    strata::core::session_zero(ep.ss, g, nullptr, (void*) ep.stream);
+                    if (cudaStreamSynchronize(ep.stream) != cudaSuccess) {
+                        std::fprintf(stderr, "strata generate: ep-split, CUDA%d: zeroing the session state failed\n", ep.dev);
+                        return 1;
+                    }
+                }
+                if (!load_stage_weights(ep, ep_K, g.n_layers, /*trim=*/true, ep_dense_base, dense_cap, &ep_dense_bytes)) return 1;
                 strata::core::NativeDense::set_layer_range(-1, -1);
-                if (ep_dense_bytes == 0 || ep_dense_bytes > (uint64_t) tc.bytes() - tr.offset) {
+                if (ep_dense_bytes == 0 || ep_dense_bytes > dense_cap) {
                     std::fprintf(stderr, "strata generate: ep-split: the dense weights took %llu MiB, the tail region holds %llu\n",
-                                 (unsigned long long) (ep_dense_bytes >> 20), (unsigned long long) (((uint64_t) tc.bytes() - tr.offset) >> 20));
+                                 (unsigned long long) (ep_dense_bytes >> 20), (unsigned long long) (dense_cap >> 20));
                     return 1;
                 }
-                if (cudaDeviceSynchronize() != cudaSuccess || !ep_mirror.capture(ep_dense_base, ep_dense_bytes, ep.dev, err)) {
-                    std::fprintf(stderr, "strata generate: ep-split: mirroring the stage's dense weights: %s\n",
-                                 err.empty() ? "the device failed after the load" : err.c_str());
-                    return 1;
+            }
+            // The seal, run once the prompt paths are laid out (init may have written into the session: the image must
+            // hold it): the fresh session image and the dense weights into RAM, then the tail's experts back into their
+            // slots (refill_issue's path: the blob from the arena, queued, one wait), so the tier is whole before the
+            // first window.  Until then the tail holds the session and the weights and nothing reads the tier.
+            ep_tail_seal = [&, tr]() -> bool {
+                GpuStage& ep = *ep_stage;
+                strata::core::ExpertCache& tc = peer.cache_mut();
+                const auto& lay = strata::kernels::cpu::expert_layout();
+                const auto td0 = Clock::now();
+                const strata::core::OnDevice on(ep.dev);
+                if (cudaDeviceSynchronize() != cudaSuccess) {
+                    std::fprintf(stderr, "strata generate: ep-split: the device failed before the tail was mirrored\n");
+                    return false;
                 }
-                // the tail's experts back into their slots (refill_issue's path: the blob from the arena, queued, one wait)
+                if (ep_sess_loan && !ep_sess_mirror.capture(ep_tail_base, ep_sess_al, ep.dev, err)) {
+                    std::fprintf(stderr, "strata generate: ep-split: mirroring the stage's session image: %s\n", err.c_str());
+                    return false;
+                }
+                if (!ep_mirror.capture(ep_dense_base, ep_dense_bytes, ep.dev, err)) {
+                    std::fprintf(stderr, "strata generate: ep-split: mirroring the stage's dense weights: %s\n", err.c_str());
+                    return false;
+                }
                 int32_t* res = peer.res_table_mut();
                 int64_t n_back = 0;
                 for (int64_t l = 0; l < g.n_layers; ++l)
@@ -9701,20 +9770,23 @@ int main(int argc, char** argv) {
                         if (b == nullptr || !tc.fill_slot_queued(res[i], b, err, (int64_t) lay.blob_bytes(l))) {
                             std::fprintf(stderr, "strata generate: ep-split: putting expert (%lld, %lld) back into tier slot %d: %s\n",
                                          (long long) l, (long long) ex, res[i], err.c_str());
-                            return 1;
+                            return false;
                         }
                         srcp->note_async_read(b, nullptr);   // #1237
                         ++n_back;
                     }
-                if (!tc.sync_queued(err)) { std::fprintf(stderr, "strata generate: ep-split: %s\n", err.c_str()); return 1; }
-                std::fprintf(stderr, "strata ep-split: CUDA%d: the stage's dense weights (%llu MiB) live in the peer tier's last %lld slots "
-                                     "[%lld, %lld) during a staged read only: loaded, mirrored into %s RAM and %lld experts put back there "
-                                     "in %.1f s; at each staged read the lend copies them back (%llu MiB over the card's link)\n",
-                             ep.dev, (unsigned long long) (ep_dense_bytes >> 20), (long long) (tc.slots() - tr.first), (long long) tr.first,
-                             (long long) tc.slots(), ep_mirror.pinned() ? "pinned" : "pageable (the pinned allocation failed: a slower copy)",
+                if (!tc.sync_queued(err)) { std::fprintf(stderr, "strata generate: ep-split: %s\n", err.c_str()); return false; }
+                if (ep_sess_loan) ep_sync.invalidate();   // (the tail is experts now: the stage holds nothing)
+                std::fprintf(stderr, "strata ep-split: CUDA%d: the stage's %s%llu MiB of dense weights live in the peer tier's last %lld slots "
+                                     "[%lld, %lld) during a staged read only: mirrored into %s RAM and %lld experts put back there in %.1f s; "
+                                     "at each staged read the lend copies them back (%llu MiB over the card's link)\n",
+                             ep.dev, ep_sess_loan ? ("session (" + std::to_string(ep_sess_al >> 20) + " MiB, a zeroed image) and ").c_str() : "",
+                             (unsigned long long) (ep_dense_bytes >> 20), (long long) (tc.slots() - tr.first), (long long) tr.first,
+                             (long long) tc.slots(), ep_mirror.pinned() && (!ep_sess_loan || ep_sess_mirror.pinned()) ? "pinned" : "partly pageable (a pinned allocation failed: a slower copy)",
                              (long long) n_back, std::chrono::duration<double>(Clock::now() - td0).count(),
-                             (unsigned long long) (ep_dense_bytes >> 20));
-            }
+                             (unsigned long long) ((ep_dense_bytes + ep_sess_al) >> 20));
+                return true;
+            };
         }
         // ---- the second server (docs/PEER_FUSED2.md s.2): the next ranked pairs, the ones the first did not fit,
         // fixed on its card for the run (its adapt is off unless STRATA_PEER2_ADAPT=1: the card may sit on a slow
@@ -12277,12 +12349,12 @@ int main(int argc, char** argv) {
                     // tappa 4c: the loan's end is the dense weights' region, whose address is fixed: the buffers get the
                     // bytes before it (part_slots priced both, so `first` is at or before the region's first slot)
                     if (ep_dense_loan) {
-                        if (pp->first > ep_dense_first || (uint8_t*) ep_sb > ep_dense_base) {
+                        if (pp->first > ep_dense_first || (uint8_t*) ep_sb > ep_tail_base) {
                             err = "EP prefill, CUDA" + std::to_string(ep.dev) + " prompt path: the loan (slot " + std::to_string(pp->first) +
-                                  " on) does not reach the dense weights' region (slot " + std::to_string(ep_dense_first) + " on)";
+                                  " on) does not reach the tail region (slot " + std::to_string(ep_dense_first) + " on)";
                             return 1;
                         }
-                        ep_sbb = (uint64_t) (ep_dense_base - (uint8_t*) ep_sb);
+                        ep_sbb = (uint64_t) (ep_tail_base - (uint8_t*) ep_sb);
                     }
                 }
                 if (!ep.sp.init(ep.wt, g, ep.ss, srcp, &peer.cache(), peer.res_table(), o.prefill_chunk, (void*) ep.stream,
@@ -12567,6 +12639,9 @@ int main(int argc, char** argv) {
                 }
             }
         };
+        // tappa 4c: the prompt paths are laid out - mirror the tier's tail (the session's fresh image, the dense weights)
+        // and put the tier's experts back into it, before anything reads the tier (s.14.2, s.14.2ter)
+        if (ep_tail_seal && !ep_tail_seal()) return 1;
         arm_prompt_helpers();
         mem_mark("the head and the prompt path");
         // #340: STRATA_SPLIT_SMALL_OWN=S (tokens): on a layer split, every stage that borrows keeps the slots for an
@@ -18768,6 +18843,9 @@ int main(int argc, char** argv) {
             // the peer stage's session zeroed like the main one (its stream synchronized); a zero is a rewrite (s.6)
             auto ep_zero = [&]() {
                 if (!ep_on) return;
+                // tappa 4c (ep_sess_loan): between reads the session's VRAM is the tier's (experts): NOTHING is written
+                // there; the lend's fresh image is the zero, and invalidating is all a zero means for the stage
+                if (ep_sess_loan) { ep_sync.invalidate(); return; }
                 const strata::core::OnDevice on(ep_stage->dev);
                 strata::core::session_zero(ep_stage->ss, g, nullptr, (void*) ep_stage->stream);
                 cudaStreamSynchronize(ep_stage->stream);
@@ -19218,7 +19296,12 @@ int main(int argc, char** argv) {
                 p.lent_lm_S = 0;
                 // tappa 4b: the peer tier's tail is whole again (the pairs are back in their slots, res_ restored): the
                 // tier may adapt and open fused windows again
-                if (is_ep_part(p)) peer.lend_guard(false);
+                if (is_ep_part(p)) {
+                    peer.lend_guard(false);
+                    // tappa 4c (ep_sess_loan): the experts are over the stage's session now - the stage holds nothing of
+                    // the conversation; the next staged read starts with the fresh image and to_peer(0, q) (s.14.2ter)
+                    if (ep_sess_loan) ep_sync.invalidate();
+                }
                 return true;
             };
             auto refill_one = [&](PfPart& p, std::string& e) -> bool {
@@ -19246,7 +19329,10 @@ int main(int argc, char** argv) {
                 if (n_parts > 0) res_upload();
                 // tappa 4b: a lend whose tail held no pair raised the guard with nothing to refill: every exit of the
                 // prompt passes here, so the tier is free to adapt and open windows again
-                if (ep_pi != SIZE_MAX && peer.lent()) peer.lend_guard(false);
+                if (ep_pi != SIZE_MAX && peer.lent()) {
+                    peer.lend_guard(false);
+                    if (ep_sess_loan) ep_sync.invalidate();   // (4c: the stage holds nothing between reads, s.14.2ter)
+                }
                 if (trace && n_parts > 0) {
                     std::fprintf(stderr, "strata trace: refilled %lld slots on %lld stage(s) in %.1f ms\n",
                                  (long long) n_lent, (long long) n_parts,
@@ -19353,12 +19439,12 @@ int main(int argc, char** argv) {
                     // three, so a `first` past the region's first slot is an error, never a different text.
                     const bool dense_here = is_ep_part(p) && ep_dense_loan;
                     if (dense_here) {
-                        if (first > ep_dense_first || p.cache->device_slot(first) > ep_dense_base) {
+                        if (first > ep_dense_first || p.cache->device_slot(first) > ep_tail_base) {
                             e = "prefill: STRATA_EP_SPLIT_DENSE_LOAN: the loan (slot " + std::to_string(first) + " on) does not reach the "
-                                "dense weights' region (slot " + std::to_string(ep_dense_first) + " on)";
+                                "tail region (slot " + std::to_string(ep_dense_first) + " on)";
                             return false;
                         }
-                        region = (uint64_t) (ep_dense_base - p.cache->device_slot(first));
+                        region = (uint64_t) (ep_tail_base - p.cache->device_slot(first));
                     }
                     // tappa 4c (s.14.2bis): CUDA0's loan ends with the drafter's row buffer in a staged read: the buffers
                     // get the bytes before it (part_slots priced both, with ep_rows_priced on)
@@ -19411,6 +19497,11 @@ int main(int argc, char** argv) {
                     // kernel of this read is issued on that stream after this, so it finds them (STRATA_EP_SPLIT_DENSE_SYNC=1
                     // waits here instead and times the copy).  The refill writes the experts over them again.
                     if (dense_here) {
+                        // tappa 4c (ep_sess_loan, s.14.2ter): the session's fresh image FIRST and WAITED FOR - `run` hands
+                        // the stage its state (to_peer, the mover's own stream and host memcpy into this region) right
+                        // after the lend, so the image must have landed; 604 MiB on the x16, ~50 ms.  The weights follow,
+                        // queued (disjoint bytes: the mover never touches them).
+                        if (ep_sess_loan && !ep_sess_mirror.restore(ep_tail_base, ep_stage->stream, /*wait=*/true, e)) return false;
                         const bool wait = strata::core::ep_split::env_dense_sync();
                         if (!ep_mirror.restore(ep_dense_base, ep_stage->stream, wait, e)) return false;
                         if (trace || ep_trace)
@@ -22478,7 +22569,8 @@ int main(int argc, char** argv) {
                         std::snprintf(buf, sizeof buf, " ep-split: %lld passaggi, %.0f MB, %.1f ms%s%s", (long long) mover.handovers(),
                                       (double) mover.bytes_total() / 1e6, mover.ms_total(),
                                       ep_4c ? (ep_staged ? ", lettura a stadi" : ", lettura sulla padrona") : "",
-                                      ep_dense_loan ? (", densi ricaricati " + std::to_string(ep_mirror.restores()) + " volte").c_str() : "");
+                                      ep_dense_loan ? (", densi ricaricati " + std::to_string(ep_mirror.restores()) + " volte" +
+                                                       (ep_sess_loan ? ", sessione " + std::to_string(ep_sess_mirror.restores()) : std::string{})).c_str() : "");
                         ep_note = buf;
                     }
                     // the peer's adapt(): its host time runs on the adapt thread and shows in "adapt join" when it outlasts the draft

@@ -41,6 +41,9 @@
 //   11 DenseMirror: capture, overwrite, restore (waited) gives the bytes back at the same address; another address
 //      is refused; restore before capture is refused
 //   12 staged_read and the threshold's default
+//   13 session_release frees what session_init allocated outside the arena and a second session_init at the same
+//      base gives the same carve; a DenseMirror of the zeroed session (what the lend restores) brings every part the
+//      arena holds back after it was written over, and a handover into the re-carved session is the contract's
 //
 //   ep_split_test [primary_dev=0] [peer_dev=0] [max_cells=8192] [kv_resident=0]
 //
@@ -698,6 +701,72 @@ int main(int argc, char** argv) {
         if (std::getenv(ep::kEnvMinTokens) == nullptr)
             expect(ep::env_min_tokens() == ep::kMinTokensDefault, "the default threshold is " + num(ep::env_min_tokens()) + ", want " + num(ep::kMinTokensDefault));
         if (std::getenv(ep::kEnvOn) == nullptr) expect(ep::env_level() == 0 && !ep::env_on(), "the level reads on with the variable unset");
+        ok();
+    }
+
+    // ---------------------------------------------------------------- 13: the session released and carved again (tappa 4c, s.14.2ter)
+    g_check = "13 session_release and re-init";
+    {
+        Carved tmp;
+        carve(tmp, g, max_cells, peer, kLb, kLe, "tmp");
+        {
+            const QsaState& st0 = tmp.ss.qsa_states[tmp.ss.qsa_ord0];
+            expect(st0.host.present() == (kv_mode == 1), "the host copy's presence does not follow kv_mode");
+            expect((st0.host_base != nullptr) == (kv_mode == 1) && (st0.host_bytes > 0) == (kv_mode == 1),
+                   "host_base / host_bytes do not follow the host copy (kv_mode " + num(kv_mode) + ")");
+            expect(st0.host_step != nullptr && st0.host_pos != nullptr, "a carved state has no pinned step / position staging");
+        }
+        {
+            const OnDevice on(peer);
+            cuda_ok(cudaDeviceSynchronize(), "before the release");
+            session_release(tmp.ss);
+        }
+        expect(tmp.ss.qsa_states == nullptr, "session_release left the QSA state array");
+        // carved again at the SAME base (what the EP prefill does in the tier's tail after the open): the same carve
+        {
+            const OnDevice on(peer);
+            expect(session_init(g, max_cells, kExperts, tmp.base, tmp.ss, kLb, kLe) != 0, "session_init after session_release returned 0");
+            session_zero(tmp.ss, g, nullptr, nullptr);
+            cuda_ok(cudaDeviceSynchronize(), "zero after the second carve");
+        }
+        expect(tmp.ss.qsa_states != nullptr && tmp.ss.qsa_alloc == qsa_in_range && tmp.ss.qsa_ord0 == tail.ss.qsa_ord0 &&
+               tmp.ss.gdn_alloc == gdn_in_range, "the second carve's shape differs from the first");
+        for (int64_t j = 0; j < tmp.ss.qsa_alloc; ++j) {
+            const QsaState& a = tmp.ss.qsa_states[tmp.ss.qsa_ord0 + j];
+            const QsaState& b = tail.ss.qsa_states[tail.ss.qsa_ord0 + j];
+            expect(a.kv_mode == b.kv_mode && a.max_cells == b.max_cells && a.n_pages == b.n_pages && a.idx_pooled_rows == b.idx_pooled_rows &&
+                   a.host.present() == b.host.present() && a.host_step != nullptr,
+                   "the second carve's QSA state " + num(j) + " differs from the stage's");
+        }
+        // the fresh image (what the lend restores): mirrored, the arena written over as a refill does, put back - every
+        // part the ARENA holds is the fresh one again (in kv_mode 1 the pools are the host copies, outside the arena:
+        // the engine rewrites them with to_peer(0, q) before the stage reads, so they are left out of this comparison)
+        const uint64_t sess_bytes = session_bytes(g, max_cells, kExperts, kLb, kLe);
+        ep::DenseMirror img;
+        expect(img.capture(tmp.base, sess_bytes, peer, err), "capture the fresh session image: ", err);
+        Image fresh = read_image(tmp, g);
+        write_image(tmp, g, make_image(tmp, g, 0x5E55));
+        {
+            const OnDevice on(peer);
+            cudaStream_t s = nullptr;
+            cuda_ok(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), "stream");
+            expect(img.restore(tmp.base, s, true, err), "restore the fresh session image: ", err);
+            (void) cudaStreamDestroy(s);
+        }
+        Image after = read_image(tmp, g);
+        if (kv_mode == 1)
+            for (auto* im : {&fresh, &after})
+                for (auto& [q, iq] : im->qsa)
+                    for (auto& v : iq.pool) v.clear();
+        expect(same_image(after, fresh, where), "the restored session differs from the fresh carve: " + where);
+        // a handover into the re-carved session: the contract, from the primary's full session
+        const Image before13 = read_image(tmp, g);
+        stats = ep::Stats{};
+        expect(m.to_peer(full.ss, tmp.ss, 0, kN, true, stats, err), "to_peer into the re-carved session: ", err);
+        Image want13 = before13;
+        apply_move(want13, read_image(full, g), tmp, g, 0, kN, true);
+        expect(same_image(read_image(tmp, g), want13, where), where);
+        release(tmp);
         ok();
     }
 

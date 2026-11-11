@@ -126,11 +126,16 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
 }
 
 void session_release(SessionState& s) {
-    for (int64_t j = 0; s.qsa_states != nullptr && j < s.qsa_alloc; ++j)
-        if (s.qsa_states[j].owns_rope) {
-            strata::kernels::rope_table_release(s.qsa_states[j].cos_tab);
-            s.qsa_states[j].owns_rope = false;
-        }
+    // Every QSA state the carve initialized - BY ORDINAL (a stage's session has qsa_ord0 > 0: the states below it are
+    // the value-initialized nulls, and the old loop over [0, qsa_alloc) released nothing of a stage).  Each gives back
+    // what qsa_state_init allocated outside the arena: the RoPE table it built, the pinned host copy of a streamed K/V,
+    // the pinned step / position staging (qsa_state_release).  The array goes too, so a second session_init at any
+    // base (the EP prefill's stage, docs/EP_SPLIT_PREFILL.md s.14.2ter) starts from nothing and doubles no pinned RAM.
+    // The arena's bytes stay the caller's.
+    if (s.qsa_states != nullptr)
+        for (int64_t j = 0; j < s.qsa_alloc; ++j) qsa_state_release(s.qsa_states[s.qsa_ord0 + j]);
+    delete[] s.qsa_states;
+    s.qsa_states = nullptr;
 }
 
 #if defined(STRATA_GPU_METAL)
