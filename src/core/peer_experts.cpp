@@ -101,12 +101,6 @@ bool ck(cudaError_t e, const char* what, std::string& err) {
     return false;
 }
 
-/// STRATA_PEER_DIRECT (default on): launch() scatters its rows straight into the host rows it is given.
-bool peer_direct() {
-    static const bool on = [] { const char* v = std::getenv("STRATA_PEER_DIRECT"); return v == nullptr || std::atoi(v) != 0; }();
-    return on;
-}
-
 // ---- STRATA_PEER_FUSED helpers (docs/PEER_FUSED.md)
 
 /// An integer knob, `def` when unset or malformed.
@@ -203,6 +197,8 @@ void PeerExperts::close() {
         else { if (h_x_) cudaFreeHost(h_x_); if (h_meta_) cudaFreeHost(h_meta_); }
         if (h_out_) cudaFreeHost(h_out_);
         if (h_stamp_) cudaFreeHost(h_stamp_);
+        if (d_gate_vals_) cudaFree(d_gate_vals_);
+        if (h_gate_) cudaFreeHost((void*) h_gate_);
         if (refill_ev_) cudaEventDestroy(refill_ev_);
         if (stream_) cudaStreamDestroy(stream_);
         if (refill_) cudaStreamDestroy(refill_);
@@ -214,6 +210,8 @@ void PeerExperts::close() {
     d_sx_ = d_sh_ = nullptr;
     h_stamp_ = m_stamp_ = nullptr;
     stamp_layer_ = -1;
+    d_gate_vals_ = nullptr;
+    h_gate_ = nullptr;
     stream_ = refill_ = nullptr;
     refill_ev_ = nullptr;
     lent_.store(false, std::memory_order_release);   // tappa 4b: a closed tier lends nothing
@@ -408,20 +406,24 @@ bool PeerExperts::open(int device, const std::vector<std::pair<int32_t, int32_t>
     return true;
 }
 
+bool PeerExperts::direct_mode() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_PEER_DIRECT"); return e == nullptr || std::atoi(e) != 0; }();
+    return v;
+}
+
 bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int64_t n_tok, int64_t k,
                          const int32_t* kind, std::string& err, float* out, int32_t mine) {
-    const bool direct = peer_direct() && out != nullptr;
+    const bool direct = direct_mode() && out != nullptr;
+    struct Timer {
+        double& acc;
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        ~Timer() { acc += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
+    } timer{ms_launch};
     launched_direct_ = false;
     launched_rows_ = 0;
     row_of_.clear();
     const int64_t n = n_tok * k;
     if (n > CAP) { err = "peer experts: window too large"; return false; }
-    const auto t0 = std::chrono::steady_clock::now();
-    struct Timed {   // the host time of this call, whichever way it returns
-        const std::chrono::steady_clock::time_point t0;
-        double& ms;
-        ~Timed() { ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
-    } timed{t0, ms_launch};
     Meta& m = *(Meta*) h_meta_;
     int groups = 0, rows = 0;
     // distinct experts in routing order; each one's entries become compact rows (`mine`: this server's kind code,
@@ -484,7 +486,6 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
     m.count[1] = rows;
     entries_ += rows;
     launched_rows_ = rows;
-    ++launches;
     // direct: x is the verifier's pinned (portable) doorbell row block - copied from where it is
     // (STRATA_PEER_ONE_COPY: into the shared block first, so the plan and the rows go up in one copy)
     const bool one = h_stage_ != nullptr;
@@ -564,6 +565,7 @@ bool PeerExperts::finish(float* out, std::string& err) {
         return true;
     }
     if (launched_rows_ == 0) return true;
+    ++launches;
     const auto t0 = std::chrono::steady_clock::now();
     // spin on the stream (a blocking sync would sleep the pool thread and wake it late)
     cudaError_t e = cudaErrorNotReady;
@@ -637,24 +639,87 @@ bool PeerExperts::adapt(const float* usage, const int32_t* res0, int max_swaps, 
     if (swaps.empty()) return true;
     std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
     if ((int) swaps.size() > max_swaps) swaps.resize((size_t) max_swaps);
+    const bool gated = gate_landed_ != nullptr;
+    if (gated) {   // the copies go in layer order and each layer's landing raises the gate's counter
+        std::stable_sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.layer < b.layer; });
+        gate_landed_->store(-1, std::memory_order_release);
+        if (h_gate_ != nullptr) *h_gate_ = -1;
+        gate_has_->assign((size_t) n_layers_, 0);
+        *gate_last_ = -1;
+    }
     On on(device_);
+    int32_t issued_layer = -1;   // the layer whose copies are on the stream and not yet ticked
+    auto tick = [&](int32_t layer) -> bool {
+        if ((h_gate_ != nullptr
+                 ? cudaMemcpyAsync((void*) h_gate_, d_gate_vals_ + layer, 4, cudaMemcpyDeviceToHost, refill_)
+                 : cudaLaunchHostFunc(refill_, [](void* p) {
+                auto* t = (Tick*) p;
+                int32_t cur = t->counter->load(std::memory_order_relaxed);
+                while (cur < t->layer && !t->counter->compare_exchange_weak(cur, t->layer, std::memory_order_release)) {}
+            }, &ticks_[(size_t) layer])) == cudaSuccess)
+            return true;
+        (void) cudaGetLastError();
+        cudaStreamSynchronize(refill_);   // no callback: wait here, the gate opens at once
+        gate_landed_->store((int32_t) n_layers_, std::memory_order_release);
+        return false;
+    };
     for (const Swap& s : swaps) {
         const size_t in = (size_t) (s.layer * n_expert_ + s.in), out = (size_t) (s.layer * n_expert_ + s.out);
         const int32_t slot = res_[out];
         const uint8_t* b = src_->blob(s.layer, s.in);
         if (slot < 0 || b == nullptr) continue;
+        if (gated && issued_layer >= 0 && issued_layer != s.layer) tick(issued_layer);
         if (!ck(cudaMemcpyAsync(cache_.device_slot(slot), b, (size_t) lay.blob_bytes(s.layer), cudaMemcpyHostToDevice,
                                 refill_), "refill", err))
             return false;
+        if (gated) {
+            (*gate_has_)[(size_t) s.layer] = 1;
+            *gate_last_ = std::max(*gate_last_, s.layer);
+            issued_layer = s.layer;
+        }
         res_[out] = kNotResident;              // evicted now: the CPU computes it meanwhile
         pending_.emplace_back((int32_t) in, slot);
         ++swaps_;
     }
+    if (gated && issued_layer >= 0) tick(issued_layer);
     if (!ck(cudaEventRecord(refill_ev_, refill_), "refill event", err)) return false;
-    // STRATA_PEER_REFILL_FLUSH: under WDDM the copies sit in the driver's buffer until a call flushes the stream
-    // (#2188); the query is that call, and the pool's poll_pending finds them landed during the next window
-    if (refill_flush()) (void) cudaStreamQuery(refill_);
+    // #2188: hand the copies and their landing signals to the GPU now (WDDM batches a stream's work until a driver
+    // call flushes it, and the verify window only spins on the pinned int; Linux submits at once: a no-op)
+    // STRATA_PEER_REFILL_FLUSH (ours): the same query, also without the overlap gate; the pool's poll_pending finds
+    // the copies landed during the next window
+    if ((gated && h_gate_ != nullptr && issued_layer >= 0) || refill_flush()) (void) cudaStreamQuery(refill_);
     return true;
+}
+
+volatile int32_t* PeerExperts::set_overlap_gate(std::atomic<int32_t>* landed, std::vector<uint8_t>* has, int32_t* last,
+                                                bool copy_signal) {
+    gate_landed_ = landed;
+    gate_has_ = has;
+    gate_last_ = last;
+    ticks_.resize((size_t) n_layers_);
+    for (int64_t l = 0; l < n_layers_; ++l) ticks_[(size_t) l] = {landed, (int32_t) l};
+    if (copy_signal && h_gate_ == nullptr) {
+        On on(device_);
+        std::vector<int32_t> iota((size_t) n_layers_);
+        for (size_t i = 0; i < iota.size(); ++i) iota[i] = (int32_t) i;
+        int32_t* vals = nullptr;
+        void* hp = nullptr;
+        if (cudaMalloc((void**) &vals, iota.size() * 4) == cudaSuccess &&
+            cudaMemcpy(vals, iota.data(), iota.size() * 4, cudaMemcpyHostToDevice) == cudaSuccess &&
+            cudaHostAlloc(&hp, 64, cudaHostAllocPortable) == cudaSuccess) {
+            *(volatile int32_t*) hp = -1;
+            d_gate_vals_ = vals;
+            h_gate_ = (volatile int32_t*) hp;
+        } else {   // host functions then
+            (void) cudaGetLastError();
+            if (vals) cudaFree(vals);
+        }
+    }
+    return h_gate_;
+}
+
+void PeerExperts::flip_pending() {
+    for (const auto& [i, slot] : pending_) res_[(size_t) i] = slot;
 }
 
 void PeerExperts::apply_pending(bool wait) {
@@ -729,7 +794,7 @@ bool PeerExperts::fused_open(std::string& err) {
     const bool second = ordinal_ > 0;
     if (second && env_int(kEnvOn2, 1) == 0) return refuse(std::string(kEnvOn2) + "=0: the second server keeps the per-layer path");
     if (!lay.native) return refuse("not a native pack");
-    if (!peer_direct()) return refuse("STRATA_PEER_DIRECT=0: the kernel writes the mapped rows itself");
+    if (!direct_mode()) return refuse("STRATA_PEER_DIRECT=0: the kernel writes the mapped rows itself");
     if ((int64_t) lay.fmt.size() < n_layers_) return refuse("the pack's layout has fewer layers than the model");
     if (n_layers_ <= 0) return refuse("no layers");
     // the knobs, read once here (the names are the contract's)
