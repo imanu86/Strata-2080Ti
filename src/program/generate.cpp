@@ -12964,6 +12964,20 @@ int main(int argc, char** argv) {
             peer2.fused_set_other_res(peer.valid() ? peer.res_table() : nullptr);
             ver.set_peer_fused2(peer2.fused_hook());
         }
+        // STRATA_PEER_BATCH=1 (docs/PEER_FUSED2.md s.12): the batch windows (--batch N, run_slot_rows: one step a layer with
+        // every slot's rows) go through the servers' persistent kernels too, instead of their per-layer path.  Off (the
+        // default), or without --batch or a fused server: nothing changes.  Set before init, as the hooks.
+        if ((peer.fused_on() || peer2.fused_on()) && o.batch > 0) {
+            const char* pb = std::getenv(strata::core::peer_fused::kEnvBatch);
+            if (pb != nullptr && std::atoi(pb) != 0) {
+                ver.set_peer_fused_batch(true);
+                const int rows_a = peer.fused_on() ? peer.fused_max_t() : 0, rows_b = peer2.fused_on() ? peer2.fused_max_t() : 0;
+                std::fprintf(stderr, "strata serve: %s=1: the batch windows (--batch %d) are served by the fused expert server%s with one "
+                                     "persistent kernel a window, every slot's rows in one step a layer (the servers accept up to %d%s rows a window: %s)\n",
+                             strata::core::peer_fused::kEnvBatch, o.batch, peer2.fused_on() ? "s" : "", std::max(rows_a, rows_b),
+                             rows_a > 0 && rows_b > 0 && rows_a != rows_b ? " / fewer on one of them" : "", strata::core::peer_fused::kEnvMaxT);
+            }
+        }
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2) ver.set_taps(df2.tap_layers());
         if (batch_df2) ver.set_batch_taps(true);

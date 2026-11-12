@@ -423,8 +423,18 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
     launched_rows_ = 0;
     row_of_.clear();
     const int64_t n = n_tok * k;
-    if (n > CAP) { err = "peer experts: window too large"; return false; }
-    Meta& m = *(Meta*) h_meta_;
+    // STRATA_PEER_FUSED (docs/PEER_FUSED2.md s.12): inside a window the step's entries are bounded by the kernel's own
+    // cap (STRATA_PEER_FUSED_MAX_T x 10), which may exceed the per-layer path's CAP (the build's window x 10): the host
+    // plan then only COUNTS and never writes the Meta block (sized CAP).  Outside a window, CAP as always.
+    const bool fused_step = window_open_.load(std::memory_order_relaxed);
+    if (fused_step) {
+        if (n > fused_cap_) {
+            err = "peer experts: fused: " + std::to_string((long long) n) + " entries a step (at most " + std::to_string((long long) fused_cap_) +
+                  "; STRATA_PEER_FUSED_MAX_T)";
+            return false;
+        }
+    } else if (n > CAP) { err = "peer experts: window too large"; return false; }
+    Meta* const mp = fused_step ? nullptr : (Meta*) h_meta_;   // null: count only (the kernel plans from the same ids)
     int groups = 0, rows = 0;
     // distinct experts in routing order; each one's entries become compact rows (`mine`: this server's kind code,
     // 2 for the first server as always, 3 for the second)
@@ -435,27 +445,31 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
             if (kind[j] == mine && ids[j] == ids[i]) { seen = true; break; }
         if (seen) continue;
         // STRATA_PEER_FUSED: inside a window the slot comes from the window's table (the one has() answered from)
-        const int32_t slot = window_open_ ? own_win_[(size_t) (layer * n_expert_ + ids[i])]
-                                          : res_[(size_t) (layer * n_expert_ + ids[i])];
+        const int32_t slot = fused_step ? own_win_[(size_t) (layer * n_expert_ + ids[i])]
+                                        : res_[(size_t) (layer * n_expert_ + ids[i])];
         if (slot < 0) { err = "peer experts: an entry was planned for the peer but is not resident"; return false; }
-        m.ptr[groups] = (unsigned long long) cache_.device_slot(slot);
-        m.start[groups] = rows;
+        if (mp != nullptr) {
+            mp->ptr[groups] = (unsigned long long) cache_.device_slot(slot);
+            mp->start[groups] = rows;
+        }
         for (int64_t j = i; j < n; ++j)
             if (kind[j] == mine && ids[j] == ids[i]) {
-                m.dst[rows] = rows;
-                m.tok[rows] = (int32_t) (j / k);
-                m.out_row[rows] = (int32_t) j;
+                if (mp != nullptr) {
+                    mp->dst[rows] = rows;
+                    mp->tok[rows] = (int32_t) (j / k);
+                    mp->out_row[rows] = (int32_t) j;
+                }
                 row_of_.push_back((int32_t) j);
                 ++rows;
             }
         ++groups;
         ++experts_;
     }
-    if (window_open_) {
+    if (fused_step) {
         // STRATA_PEER_FUSED: the kernel on the peer reads the same ids from the mapped page, plans with the same
         // table and writes the rows itself: here only the host's count of the step, for fused_end's check against
-        // the kernel's `cnt[s]`.  No copy, no launch, nothing on the stream.  The plan above went into h_meta_ as
-        // always; nothing reads it.
+        // the kernel's `cnt[s]`.  No copy, no launch, nothing on the stream, nothing in h_meta_ (s.12: a step may be
+        // wider than the Meta block).
         if (out == nullptr) { err = "peer experts: fused: the step has no host rows for the kernel to write"; return false; }
         if (step_ >= win_steps_) {
             err = "peer experts: fused: step " + std::to_string(step_) + " is past the window's " + std::to_string(win_steps_);
@@ -463,9 +477,6 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
         }
         expect_[(size_t) step_] = ((uint32_t) groups << 16) | (uint32_t) rows;
         if (groups > 0) {
-            m.start[groups] = rows;
-            m.count[0] = groups;
-            m.count[1] = rows;
             entries_ += rows;
             ++launches;
         } else if (skip_ && h_empty_ != nullptr) {
@@ -481,6 +492,7 @@ bool PeerExperts::launch(int64_t layer, const float* x, const int32_t* ids, int6
         return true;
     }
     if (groups == 0) return true;
+    Meta& m = *mp;   // (the per-layer path: the plan block is written above)
     m.start[groups] = rows;
     m.count[0] = groups;
     m.count[1] = rows;
@@ -833,8 +845,21 @@ bool PeerExperts::fused_open(std::string& err) {
     fused_L_ = fused_lays_[0];   // the geometry (n_embd, n_ff: the same on every layer, checked by peer_fused_shape)
     if (shape_.blocks <= 0 || shape_.blocks_per_sm <= 0) return refuse("the kernel has no resident blocks on this device");
     if (fused_L_.n_ff % 32 != 0) return refuse("n_ff " + std::to_string((long long) fused_L_.n_ff) + " is not a multiple of 32");
-    if (hq_offset(CAP, fused_L_.n_ff) + q8_bytes(CAP, fused_L_.n_ff) > strata::kernels::native_expert_scratch_bytes(CAP, fused_L_.n_ff))
+    // s.12 (several requests): the rows a window this server accepts, its own knob (the build's window constant no
+    // longer bounds it); the kernel's q8 / hq / out buffers and the xq page below are sized by it, not by CAP
+    {
+        const int asked = env_int(kEnvMaxT, kMaxTokDefault);
+        fused_max_t_ = std::max(1, std::min(asked, kMaxTok));
+        if (asked != fused_max_t_)
+            std::fprintf(stderr, "strata: %s=%d is outside 1..%d: using %d\n", kEnvMaxT, asked, kMaxTok, fused_max_t_);
+        fused_cap_ = (int64_t) fused_max_t_ * 10;   // top-10 routing, as CAP
+    }
+    if (hq_offset(fused_cap_, fused_L_.n_ff) + q8_bytes(fused_cap_, fused_L_.n_ff) > strata::kernels::native_expert_scratch_bytes(fused_cap_, fused_L_.n_ff))
         return refuse("the hq plane does not fit the scratch native_expert_grouped sizes");
+    if (!ck(cudaMalloc((void**) &d_q8_f_, q8_bytes(fused_max_t_, fused_L_.n_embd)), "fused activations", err) ||
+        !ck(cudaMalloc(&d_scratch_f_, strata::kernels::native_expert_scratch_bytes(fused_cap_, fused_L_.n_ff)), "fused scratch", err) ||
+        !ck(cudaMalloc((void**) &d_out_f_, (size_t) fused_cap_ * (size_t) fused_L_.n_embd * sizeof(float)), "fused result rows", err))
+        return false;
 
     // ---- the mapped page (s.2b): host view, the peer's view (the kernel), the primary's view of flag_out (the graph)
     if (!ck(cudaHostAlloc((void**) &h_page_, kPageBytes, cudaHostAllocPortable | cudaHostAllocMapped), "fused page", err)) return false;
@@ -853,9 +878,9 @@ bool PeerExperts::fused_open(std::string& err) {
     m_empty_ = skip_ ? (const uint32_t*) (m_page + kOffEmpty) : nullptr;
     h_xq_seq_ = stage_ ? (uint32_t*) (h_page_ + kOffXqSeq) : nullptr;
     m_xq_seq_ = stage_ ? (uint32_t*) (m_page + kOffXqSeq) : nullptr;
-    if (stage_) {   // the xq page: kMaxTok rows of n_embd/32 q8_1 blocks, written by the primary, read by the kernel
-        if (!ck(cudaHostAlloc((void**) &h_xq_, q8_bytes(kMaxTok, fused_L_.n_embd), cudaHostAllocPortable | cudaHostAllocMapped), "fused xq page", err)) return false;
-        std::memset(h_xq_, 0, q8_bytes(kMaxTok, fused_L_.n_embd));
+    if (stage_) {   // the xq page: fused_max_t_ rows of n_embd/32 q8_1 blocks, written by the primary, read by the kernel
+        if (!ck(cudaHostAlloc((void**) &h_xq_, q8_bytes(fused_max_t_, fused_L_.n_embd), cudaHostAllocPortable | cudaHostAllocMapped), "fused xq page", err)) return false;
+        std::memset(h_xq_, 0, q8_bytes(fused_max_t_, fused_L_.n_embd));
         if (!ck(cudaHostGetDevicePointer((void**) &m_xq_, h_xq_, 0), "fused xq page device pointer", err)) return false;
     }
     {
@@ -917,11 +942,12 @@ bool PeerExperts::fused_open(std::string& err) {
     fused_on_ = true;
     std::fprintf(stderr, "strata: STRATA_PEER_FUSED: the peer%s on GPU %d serves each window with one persistent kernel: %lld layers, gate/up types {%s}, "
                          "down types {%s} (n_embd %lld, n_ff %lld), minb %d, %d blocks (%d per SM x %d SMs), %zu B dynamic shared "
-                         "(grid %zu B), %s launch, waits bounded at %d ms%s%s%s%s\n",
+                         "(grid %zu B), %s launch, waits bounded at %d ms, up to %d rows a window (%s)%s%s%s%s\n",
                  second ? " (second server)" : "", device_,
                  (long long) n_layers_, mask_text(shape_.gu_mask).c_str(), mask_text(shape_.d_mask).c_str(),
                  (long long) fused_L_.n_embd, (long long) fused_L_.n_ff, shape_.minb, shape_.blocks,
                  shape_.blocks_per_sm, shape_.sms, shape_.dyn_shared, shape_.grid_bytes, shape_.cooperative ? "cooperative" : "plain", wait_ms,
+                 fused_max_t_, kEnvMaxT,
                  fused_hostwait() ? "; STRATA_PEER_FUSED_HOSTWAIT: the pool thread waits for the kernel's flag, no graph node" : "",
                  stamp() ? "; STRATA_PEER_STAMP: the spans come from the kernel's own stamps" : "",
                  skip_ ? (second ? "; STRATA_PEER2_SKIP: a step with no entry here does not hold the primary" : "; STRATA_PEER_SKIP: a step with no entry here does not hold the primary") : "",
@@ -946,6 +972,15 @@ void PeerExperts::fused_close() {
     if (d_sync_) cudaFree(d_sync_);
     if (d_lay_) cudaFree(d_lay_);
     d_lay_ = nullptr;
+    // s.12: the kernel's own working buffers
+    if (d_q8_f_) cudaFree(d_q8_f_);
+    if (d_scratch_f_) cudaFree(d_scratch_f_);
+    if (d_out_f_) cudaFree(d_out_f_);
+    d_q8_f_ = nullptr;
+    d_scratch_f_ = nullptr;
+    d_out_f_ = nullptr;
+    fused_max_t_ = 0;
+    fused_cap_ = 0;
     fused_lays_.clear();
     h_page_ = nullptr;
     h_flag_out_ = m_flag_out_ = h_abort_ = m_abort_ = h_err_ = m_err_ = h_exit_ = m_exit_ = h_cnt_ = m_cnt_ = nullptr;
@@ -1041,8 +1076,20 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
     }
     const int steps = (w.le - w.lb) * w.G;
     if (steps > kMaxSteps) { err = "peer experts: fused: " + std::to_string(steps) + " steps a window, the page holds " + std::to_string(kMaxSteps); return false; }
-    if (w.T <= 0 || w.T > kMaxTok) { err = "peer experts: fused: " + std::to_string(w.T) + " rows a window (at most " + std::to_string(kMaxTok) + ")"; return false; }
-    if (w.k <= 0 || (int64_t) w.T * w.k > CAP) { err = "peer experts: fused: " + std::to_string((long long) w.T * w.k) + " entries a step (at most " + std::to_string((long long) CAP) + ")"; return false; }
+    // s.12: the server's own limit (STRATA_PEER_FUSED_MAX_T), not the build's window constant; a step carries one group
+    // of the window's rows, so the entries a step are a group's rows x k (G = 1: the whole window, as a batch window is)
+    if (w.T <= 0 || w.T > fused_max_t_) {
+        err = "peer experts: fused: " + std::to_string(w.T) + " rows a window (at most " + std::to_string(fused_max_t_) + "; " + kEnvMaxT + ")";
+        return false;
+    }
+    if (w.k <= 0) { err = "peer experts: fused: k is " + std::to_string(w.k); return false; }
+    for (int g = 0; g < w.G; ++g) {
+        const int64_t n = (int64_t) (w.gte[g] - w.gtb[g]) * w.k;
+        if (n > fused_cap_) {
+            err = "peer experts: fused: " + std::to_string((long long) n) + " entries a step (at most " + std::to_string((long long) fused_cap_) + "; " + kEnvMaxT + ")";
+            return false;
+        }
+    }
     if (w.n_embd != fused_L_.n_embd) { err = "peer experts: fused: the verifier's n_embd " + std::to_string((long long) w.n_embd) + " is not the kernel's " + std::to_string((long long) fused_L_.n_embd); return false; }
     for (int g = 0; g < w.G; ++g)
         if (w.gtb[g] < 0 || w.gte[g] < w.gtb[g] || w.gte[g] > w.T) { err = "peer experts: fused: group " + std::to_string(g) + " rows [" + std::to_string(w.gtb[g]) + ", " + std::to_string(w.gte[g]) + ") of " + std::to_string(w.T); return false; }
@@ -1130,9 +1177,12 @@ bool PeerExperts::fused_begin(const peer_fused::WindowHost& w, std::string& err)
     win.own = d_own_;
     win.slot_ptr = d_slot_ptr_;
     win.plan = d_plan_;
-    win.q8 = d_q8_;
-    win.hq = (uint8_t*) d_scratch_ + hq_offset(CAP, fused_L_.n_ff);   // where native_expert_grouped puts hq
-    win.out = d_out_;
+    // s.12: the kernel's own buffers, sized by STRATA_PEER_FUSED_MAX_T (the per-layer path keeps d_q8_ / d_scratch_ / d_out_)
+    win.max_tok = fused_max_t_;
+    win.cap = (int) fused_cap_;
+    win.q8 = d_q8_f_;
+    win.hq = (uint8_t*) d_scratch_f_ + hq_offset(fused_cap_, fused_L_.n_ff);   // where native_expert_grouped puts hq
+    win.out = d_out_f_;
     win.sync = d_sync_;
     win.lay = d_lay_;                    // one layout a layer: the kernel picks each step's bodies from it
     win.n_layers = (int) n_layers_;

@@ -234,6 +234,14 @@ public:
     /// begin after it, one more wait node a step (its flag, after the first's), flush and end with it, aborted and
     /// released with it.  Either one may be null (a server whose pack the kernel refused keeps its per-layer path).
     void set_peer_fused2(const strata::core::peer_fused::Hook* h) { peer_hook2_ = h; }
+    /// docs/PEER_FUSED2.md s.12 (STRATA_PEER_BATCH=1): the batch windows (--batch N: run_slot_rows, one step a layer
+    /// with the rows of every slot) are served by the fused servers too - their graphs get the same wait nodes a step
+    /// (and the second server's publish node), run_slot_rows opens the window with `begin` after staging and closes it
+    /// with `end` after the sync, exactly as `run` does.  Every batch window of this verifier then needs the servers
+    /// (the graphs wait on their flags): batch_launch / batch_launch_rows (the pipelined groups of a layer split, which
+    /// a peer excludes anyway) refuse.  Off (the default): the batch windows keep the servers' per-layer path, as before.
+    /// Set before `init`, with set_peer_fused; without a hook it does nothing.
+    void set_peer_fused_batch(bool on) { peer_batch_ = on; }
     /// The next stage: `run` and `commit` continue into it (its pool calls get `next_user`); sampling settings
     /// and `final_R` are the last stage's.
     void set_next(Verifier* next, void* next_user) { next_ = next; next_user_ = next_user; }
@@ -649,6 +657,10 @@ private:
     uint32_t* hdrop_d_ = nullptr;
     const strata::core::peer_fused::Hook* peer_hook_ = nullptr;   ///< set_peer_fused: the fused peer server (null: off)
     const strata::core::peer_fused::Hook* peer_hook2_ = nullptr;  ///< set_peer_fused2: the second server's (null: one server, or its kernel off)
+    bool peer_batch_ = false;            ///< set_peer_fused_batch: the batch windows take the fused servers too (s.12)
+    /// s.12: the fused servers serve this window's graph (the wait nodes a step are recorded, begin / end are called):
+    /// the plain doorbell windows, and the batch windows with peer_batch_; never the head bet's two graphs.
+    bool peer_window(bool batch) const { return (peer_hook_ != nullptr || peer_hook2_ != nullptr) && (!batch || peer_batch_); }
     bool handoff_failed(std::string& err) const;   ///< the bounded hand-off wait timed out in the last window
     int prelaunched_ = 0;                ///< prelaunch ran for a window of this size: run skips staging + launch
     /// The overlapped split: stage this window's inputs and launch its graph now (the graph waits on the hand-off

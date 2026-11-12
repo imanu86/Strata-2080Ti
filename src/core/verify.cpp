@@ -2356,8 +2356,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             // quantized (q8_1, the quantizer of the hit path and of the server's own phase C: the same bytes), into the
             // fused server's xq page with its ring - one node a step, only where that server's hook carries the page
             // (the second server, on its slow link), in the doorbell window graphs the fused server serves (as the wait
-            // nodes of `post`: not the batch windows, not the head bet).
-            if (!batch_rec_ && rec_from_ < 0 && rec_to_ < 0) {
+            // nodes of `post`: the batch windows only with STRATA_PEER_BATCH (s.12), never the head bet).
+            if ((!batch_rec_ || peer_batch_) && rec_from_ < 0 && rec_to_ < 0) {
                 for (const strata::core::peer_fused::Hook* h : {peer_hook_, peer_hook2_}) {
                     if (h == nullptr || h->xq_dev0 == nullptr || h->xq_seq_dev0 == nullptr) continue;
                     if (!peer_fused_publish_q8(xm, n, N, h->xq_dev0 + (size_t) tb * (size_t) (N / 32) * 36, h->xq_seq_dev0,
@@ -2523,19 +2523,21 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             } else {
                 // STRATA_PEER_FUSED (docs/PEER_FUSED.md s.1, s.7): the peer's persistent kernel writes its rows of this
                 // step into the mapped m_ymiss_ rows and raises its output flag to `ring` (fence, system scope) - one
-                // wait node a step, before the CPU rows' wait, in the plain window graphs only: the batch windows and the
-                // head bet (STRUCT-A) run no fused window, so their graphs must not wait on a flag nobody raises.  The
-                // copy below stays the same: p_dst skips this GPU's hit rows, the peer's rows come with the CPU's.
+                // wait node a step, before the CPU rows' wait, in the plain window graphs: the head bet (STRUCT-A) runs
+                // no fused window, so its graphs must not wait on a flag nobody raises; the batch windows do only with
+                // STRATA_PEER_BATCH (docs/PEER_FUSED2.md s.12: run_slot_rows then opens the window as run does - one step
+                // a layer with every slot's rows, G = 1).  The copy below stays the same: p_dst skips this GPU's hit rows,
+                // the peer's rows come with the CPU's.
                 // STRATA_PEER2_SKIP (docs/PEER_FUSED2.md s.11.1): with the server's empty words the node also passes on
                 // empty[s] == ring, which the pool thread writes when the server has nothing at this step: an empty step
                 // never waits the server's round trip.  Without them (null) the node of before.
-                if (peer_hook_ != nullptr && peer_hook_->flag_out_dev0 != nullptr && !batch_rec_ && rec_from_ < 0 &&
+                if (peer_hook_ != nullptr && peer_hook_->flag_out_dev0 != nullptr && (!batch_rec_ || peer_batch_) && rec_from_ < 0 &&
                     rec_to_ < 0) {
                     if (peer_hook_->empty_dev0 != nullptr) wait_flag_ge_any(peer_hook_->flag_out_dev0, ring, peer_hook_->empty_dev0 + (ring - 1), cs);
                     else wait_flag_ge(peer_hook_->flag_out_dev0, ring, cs);   // the peer's share is in the mapped rows
                 }
                 // two servers: the second server's flag after the first's - one more node a step, a fixed order
-                if (peer_hook2_ != nullptr && peer_hook2_->flag_out_dev0 != nullptr && !batch_rec_ && rec_from_ < 0 &&
+                if (peer_hook2_ != nullptr && peer_hook2_->flag_out_dev0 != nullptr && (!batch_rec_ || peer_batch_) && rec_from_ < 0 &&
                     rec_to_ < 0) {
                     if (peer_hook2_->empty_dev0 != nullptr) wait_flag_ge_any(peer_hook2_->flag_out_dev0, ring, peer_hook2_->empty_dev0 + (ring - 1), cs);
                     else wait_flag_ge(peer_hook2_->flag_out_dev0, ring, cs);
@@ -4509,6 +4511,7 @@ bool Verifier::batch_launch_rows(const int* rows, int S, int hbase, const int32_
     const OnDevice on_device(device_);
     if (dc_rows_ < 1) { err = "verify: batch_launch_rows without init_deferred_commit"; return false; }
     if (b_running_) { err = "verify: batch_launch_rows while this stage is busy"; return false; }
+    if (peer_window(true)) { err = "verify: STRATA_PEER_BATCH does not serve the pipelined slot groups (batch_launch_rows)"; return false; }   // s.12
     if (S < 1 || hbase < 0 || hbase + S > dc_rows_) { err = "verify: a pipelined window outside the saved rows"; return false; }
     if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     staging_deferred_ = true;
@@ -4890,6 +4893,49 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     const ModelGeometry& g = *g_;
     if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     if (!stage_batch(rows, S, 0, tokens, pos, err)) return false;
+    // STRATA_PEER_BATCH (docs/PEER_FUSED2.md s.12): the fused servers serve this batch window as `run` has them serve a
+    // doorbell window - begin after the staging (h_seq_ / h_flag_ are zero again) and BEFORE the graph launch, whose
+    // wait nodes on the servers' flags were recorded with peer_batch_; one step a layer (G = 1) with the rows of every
+    // slot [0, S), entry j of the step at row j of m_ymiss_; flush in the wait loop, end after the sync, abort on every
+    // other way out (the guard).  Only the doorbell graph: the zero-doorbell one (ar_on) publishes no step and the
+    // servers serve it on their per-layer path, as run().  Without peer_batch_ nothing here runs and the graph has no
+    // such node: the servers' per-layer path, as before.
+    struct PeerWindow {
+        const strata::core::peer_fused::Hook* hook = nullptr;
+        bool open = false;
+        const strata::core::peer_fused::Hook* hook2 = nullptr;
+        bool open2 = false;
+        ~PeerWindow() {
+            if (open && hook != nullptr && hook->abort != nullptr) hook->abort(hook->ctx);
+            if (open2 && hook2 != nullptr && hook2->abort != nullptr) hook2->abort(hook2->ctx);
+        }
+    } pw;
+    if (peer_window(true) && !ar_on()) {
+        strata::core::peer_fused::WindowHost w;
+        w.T = S;
+        w.G = 1;
+        w.lb = (int) lb_;
+        w.le = (int) le_;
+        w.k = (int) ss_->k;
+        w.n_embd = g.n_embd;
+        w.gtb[0] = 0; w.gtb[1] = S;
+        w.gte[0] = S; w.gte[1] = S;
+        w.seq_h = h_seq_;
+        w.x_h = h_x_;
+        w.ids_h = h_ids_;
+        w.ymiss_h = h_ymiss_;
+        for (int which = 0; which < 2; ++which) {   // the first server, then the second (the same WindowHost)
+            const strata::core::peer_fused::Hook* h = which == 0 ? peer_hook_ : peer_hook2_;
+            if (h == nullptr) continue;
+            if (h->begin == nullptr || !h->begin(h->ctx, w, err)) {
+                if (h->begin == nullptr) err = std::string("verify batch: STRATA_PEER_BATCH: the peer hook has no begin") + (which == 1 ? " (second server)" : "");
+                if (h->abort != nullptr) h->abort(h->ctx);   // nothing may be left running (the guard aborts the other server)
+                return false;
+            }
+            if (which == 0) { pw.hook = h; pw.open = true; }
+            else { pw.hook2 = h; pw.open2 = true; }
+        }
+    }
     const cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, 0)], cs_);
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
     (void) cudaStreamQuery(cs_);
@@ -4937,6 +4983,8 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
             if (now - last_flush > std::chrono::microseconds(2000)) {
                 last_flush = now;
                 const cudaError_t q = cudaStreamQuery(cs_);
+                if (pw.open && pw.hook->flush != nullptr) pw.hook->flush(pw.hook->ctx);   // s.12: WDDM, the servers' streams too
+                if (pw.open2 && pw.hook2->flush != nullptr) pw.hook2->flush(pw.hook2->ctx);
                 if (q != cudaErrorNotReady && *seq < want) {
                     err = "verify batch: layer " + std::to_string(l) + " never rang (" +
                           (q == cudaSuccess ? std::string("graph finished") : std::string(cudaGetErrorString(q))) + ")";
@@ -4977,6 +5025,21 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     }
     const cudaError_t se = cudaStreamSynchronize(cs_);
     if (se != cudaSuccess) { err = std::string("verify batch: ") + cudaGetErrorString(se); return false; }
+    // s.12: the servers' kernels have left, no error word, their counts a step are the host's (as run's end)
+    if (pw.open) {
+        if (pw.hook->end == nullptr || !pw.hook->end(pw.hook->ctx, err)) {
+            if (pw.hook->end == nullptr) err = "verify batch: STRATA_PEER_BATCH: the peer hook has no end";
+            return false;   // (the guard aborts what may still run; the second server's too)
+        }
+        pw.open = false;
+    }
+    if (pw.open2) {
+        if (pw.hook2->end == nullptr || !pw.hook2->end(pw.hook2->ctx, err)) {
+            if (pw.hook2->end == nullptr) err = "verify batch: STRATA_PEER_BATCH: the peer hook has no end (second server)";
+            return false;
+        }
+        pw.open2 = false;
+    }
     cudaStreamSynchronize(copy_);
     if (prof_on_) collect_profile();
     ++windows;
@@ -5125,6 +5188,8 @@ bool Verifier::sample_rows(int S, std::string& err) {
 bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_t* pos, std::string& err) {
     const OnDevice on_device(device_);
     if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
+    // s.12: with peer_batch_ the batch graphs wait on the servers' flags, and only run_slot_rows opens their windows
+    if (peer_window(true)) { err = "verify: STRATA_PEER_BATCH does not serve the pipelined slot groups (batch_launch)"; return false; }
     int rows[strata::kernels::kVerifyMaxT] = {};
     for (int t = 0; t < S && t < strata::kernels::kVerifyMaxT; ++t) rows[t] = base + t;
     if (pre_launch_ && !pre_launch_(cs_, err)) return false;

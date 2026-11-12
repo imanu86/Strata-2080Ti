@@ -60,6 +60,13 @@
 //     n_tok x n_embd/32 q8_1 blocks (16 B a thread, __ldcv) into q8 instead of reading n_tok x n_embd floats and
 //     quantizing: 2 880 B a row over the link instead of 10 240.  The bytes in q8 are the same: q8_1_store on the same
 //     floats, there or here.
+//
+// docs/PEER_FUSED2.md s.12 (several requests, --batch slots through the kernels): a step may carry up to Window::max_tok
+// rows and Window::cap entries (STRATA_PEER_FUSED_MAX_T x 10; the ceiling kMaxTok / kCap sizes the Plan and phase B's
+// shared scratch).  Phase B strides the entries by kThreads (pf_plan); phases C to F were grid-stride loops already and
+// the reused bodies take a group's rows in LDS_NT chunks whatever their count, so the shared memory a block needs does
+// not grow with the rows (the plan scratch, 4 x kCap ints = 10 KiB at the ceiling, stays under the gate/up buffer of
+// a mixed pack, 20.7 KiB).  A window of up to kWindowMaxT rows runs the instructions of before.
 
 namespace pf = ::strata::core::peer_fused;
 
@@ -69,7 +76,9 @@ namespace pf = ::strata::core::peer_fused;
 #define STRATA_PEER_FUSED_BUILT 0   // HIP, or a build without the AMD layouts: the bodies the kernel reuses do not exist
 #endif
 
-static_assert(pf::kCap <= pf::kThreads, "the device plan takes one thread an entry: kCap must not exceed kThreads");
+// (docs/PEER_FUSED2.md s.12: the plan used to take one thread an entry, kCap <= kThreads; with the ceiling at kMaxTok x 10
+// entries phase B strides the entries by kThreads - a thread plans ceil(n / 256) of them - and the shared scratch holds kCap)
+static_assert(pf::kCap > 0 && pf::kMaxTok > 0, "the fused server's ceiling is positive");
 static_assert(pf::kThreads == 256, "the reused bodies (native_gu_fused_core, native_down_lds_body) are written for 256 threads");
 
 #if STRATA_PEER_FUSED_BUILT
@@ -170,12 +179,18 @@ __device__ bool pf_grid_barrier(const pf::Window& w, int nblocks, int* s_ok) {
     return *s_ok != 0;
 }
 
-/// Phase B (block 0, one thread an entry): the step's plan from the mapped ids and the ownership table, in exactly
-/// the order PeerExperts::launch plans it on the host (s.8): kind == 2 there is owned(i) here (the same own_win_
-/// table); the groups are the owned experts in order of first appearance; a group's rows are its entries in entry
-/// order; dst[r] = r, tok[r] = i / k, out_row[r] = i; start[groups] = rows.  `scratch` is kPfPlanScratchBytes of the
-/// dynamic shared buffer (the bodies are not running in this block yet).  Thread 0 leaves groups / rows in
-/// *s_groups / *s_rows; the caller fences, syncs and publishes lready.
+/// Phase B (block 0): the step's plan from the mapped ids and the ownership table, in exactly the order
+/// PeerExperts::launch plans it on the host (s.8): kind == 2 there is owned(i) here (the same own_win_ table); the
+/// groups are the owned experts in order of first appearance; a group's rows are its entries in entry order; dst[r] =
+/// r, tok[r] = i / k, out_row[r] = i; start[groups] = rows.  `scratch` is kPfPlanScratchBytes of the dynamic shared
+/// buffer (the bodies are not running in this block yet).  Thread 0 leaves groups / rows in *s_groups / *s_rows; the
+/// caller fences, syncs and publishes lready.
+///
+/// s.12 (several requests): a step may carry up to w.cap entries (kMaxTok x 10 at the ceiling), more than the block's
+/// threads, so every pass strides the entries by kThreads: thread t takes entries t, t + 256, ...  A step of up to 256
+/// entries runs the passes of before, entry for entry (one entry a thread, the same scans, the same writes): the plan of
+/// a window of up to kWindowMaxT rows is bit for bit the one of before.  Nothing here reads a word another thread of the
+/// same pass writes: the scans read s_id (complete after the first sync) and s_lead / s_size (complete after the second).
 __device__ __forceinline__ void pf_plan(const pf::Window& w, pf::Plan* plan, int l, int tb, int n, int* scratch,
                                         int* s_groups, int* s_rows, const uint32_t* empty_word, uint32_t want, int* s_skip) {
     int* s_id = scratch;                   // the entry's expert id
@@ -183,10 +198,8 @@ __device__ __forceinline__ void pf_plan(const pf::Window& w, pf::Plan* plan, int
     int* s_lead = s_first + pf::kCap;      // 1: owned and the first of its expert - a group's lead
     int* s_size = s_lead + pf::kCap;       // a lead's rows: the entries of its expert
     const int tid = threadIdx.x;
-    const bool live = tid < n;
-    int e = -1;
-    if (live) e = __ldcv(w.ids + (size_t) tb * (size_t) w.k + tid);
-    if (tid < pf::kCap) s_id[tid] = e;
+    // (n <= w.cap <= kCap: checked once by every block before the step loop, kErrBadWindow otherwise)
+    for (int i = tid; i < n; i += pf::kThreads) s_id[i] = __ldcv(w.ids + (size_t) tb * (size_t) w.k + i);
     __syncthreads();
     // s.11.1 (Window::empty): the ids are in shared, so every load of them has completed; NOW the host's empty word.
     // Raised: the host found this step empty, and the ids above may already be the next doorbell's (the primary rang
@@ -196,29 +209,37 @@ __device__ __forceinline__ void pf_plan(const pf::Window& w, pf::Plan* plan, int
     if (tid == 0) *s_skip = (empty_word != nullptr && pf_ld(empty_word) == want) ? 1 : 0;
     __syncthreads();
     const bool skip = *s_skip != 0;
-    int first = tid;
-    bool owned = false;
-    if (live) {
-        owned = !skip && e >= 0 && (int64_t) e < w.n_expert && w.own[(size_t) l * (size_t) w.n_expert + e] >= 0;
-        for (int j = 0; j < tid; ++j) if (s_id[j] == e) { first = j; break; }
+    const int32_t* own_l = w.own + (size_t) l * (size_t) w.n_expert;
+    // pass 1: the first entry of each entry's expert, the leads (owned and first), a lead's rows
+    for (int i = tid; i < n; i += pf::kThreads) {
+        const int e = s_id[i];
+        const bool owned = !skip && e >= 0 && (int64_t) e < w.n_expert && own_l[e] >= 0;
+        int first = i;
+        for (int j = 0; j < i; ++j) if (s_id[j] == e) { first = j; break; }
+        const int lead = (owned && first == i) ? 1 : 0;
+        int size = 0;
+        if (lead) for (int j = i; j < n; ++j) if (s_id[j] == e) ++size;
+        s_first[i] = first;
+        s_lead[i] = lead;
+        s_size[i] = size;
     }
-    const int lead = (live && owned && first == tid) ? 1 : 0;
-    int size = 0;
-    if (lead) for (int j = tid; j < n; ++j) if (s_id[j] == e) ++size;
-    if (tid < pf::kCap) { s_first[tid] = first; s_lead[tid] = lead; s_size[tid] = size; }
     __syncthreads();
-    if (live && owned) {
-        // the group is the rank of the entry's lead among the leads, its start the rows of the leads before it, the
-        // row that start plus the entries of the same expert before this one
+    // pass 2: the owned entries' rows.  The group is the rank of the entry's lead among the leads, its start the rows
+    // of the leads before it, the row that start plus the entries of the same expert before this one
+    for (int i = tid; i < n; i += pf::kThreads) {
+        const int e = s_id[i];
+        const bool owned = !skip && e >= 0 && (int64_t) e < w.n_expert && own_l[e] >= 0;
+        if (!owned) continue;
+        const int first = s_first[i];
         int g = 0, start = 0, before = 0;
         for (int j = 0; j < first; ++j) { g += s_lead[j]; start += s_size[j]; }
-        for (int j = 0; j < tid; ++j) if (s_id[j] == e) ++before;
+        for (int j = 0; j < i; ++j) if (s_id[j] == e) ++before;
         const int r = start + before;
         plan->dst[r] = r;
-        plan->tok[r] = tid / w.k;
-        plan->out_row[r] = tid;
-        if (lead) {
-            plan->ptr[g] = w.slot_ptr[w.own[(size_t) l * (size_t) w.n_expert + e]];
+        plan->tok[r] = i / w.k;
+        plan->out_row[r] = i;
+        if (first == i) {   // the lead
+            plan->ptr[g] = w.slot_ptr[own_l[e]];
             plan->start[g] = start;
         }
     }
@@ -262,10 +283,12 @@ __global__ void __launch_bounds__(pf::kThreads, MINB) peer_fused_kernel(const pf
                    w.stamp == nullptr || w.own == nullptr || w.slot_ptr == nullptr || w.plan == nullptr || w.q8 == nullptr ||
                    w.hq == nullptr || w.out == nullptr || w.sync == nullptr ||
                    (w.xq != nullptr) != (w.xq_seq != nullptr) ||   // s.11.2: the staged rows come with their ring, or neither
-                   (w.ahead != 0 && w.empty == nullptr);           // s.11.1: a doorbell ahead of the flags needs the host's empty words
+                   (w.ahead != 0 && w.empty == nullptr) ||         // s.11.1: a doorbell ahead of the flags needs the host's empty words
+                   // s.12: the server's own buffers (q8 / xq max_tok rows, out / hq cap entries) within the ceiling, the window within them
+                   w.max_tok <= 0 || w.max_tok > pf::kMaxTok || w.cap <= 0 || w.cap > (int) pf::kCap || w.T > w.max_tok;
         for (int g = 0; g < w.G && g < 2; ++g) {
             const int nt = w.gte[g] - w.gtb[g];
-            if (w.gtb[g] < 0 || nt < 0 || nt > pf::kMaxTok || (int64_t) nt * w.k > pf::kCap) bad = true;
+            if (w.gtb[g] < 0 || nt < 0 || w.gte[g] > w.T || nt > w.max_tok || (int64_t) nt * w.k > (int64_t) w.cap) bad = true;
         }
         if (bad) {
             if (blockIdx.x == 0 && tid == 0 && w.err != nullptr && w.sync != nullptr) pf_fail(w, pf::kErrBadWindow);

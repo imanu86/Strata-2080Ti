@@ -256,6 +256,9 @@ public:
     int64_t fused_windows() const { return fused_windows_; }   ///< windows served by the persistent kernel
     int64_t fused_steps() const { return fused_steps_; }       ///< steps (layer x group) those windows carried
     static bool fused_hostwait();                              ///< STRATA_PEER_FUSED_HOSTWAIT=1, read once
+    /// docs/PEER_FUSED2.md s.12: the rows a window this server's kernel accepts (STRATA_PEER_FUSED_MAX_T, read at
+    /// fused_open; 0 when the fused server is off).  Its q8 / hq / out buffers and its xq page are sized by it.
+    int fused_max_t() const { return fused_on_ ? fused_max_t_ : 0; }
 
 private:
     static bool hook_begin(void* ctx, const peer_fused::WindowHost& w, std::string& err);
@@ -340,12 +343,19 @@ private:
     const uint32_t* m_empty_ = nullptr;               ///< the same words as the peer's kernel reads them (Window::empty: ids first, then the word)
     const uint32_t* empty_dev0_ = nullptr;            ///< the same words as the primary sees them (the graph's wait_flag_ge_any)
     uint32_t* h_xq_seq_ = nullptr;     uint32_t* m_xq_seq_ = nullptr;   uint32_t* xq_seq_dev0_ = nullptr;   ///< kOffXqSeq: host, the peer, the primary
-    uint8_t* h_xq_ = nullptr;          uint8_t* m_xq_ = nullptr;        uint8_t* xq_dev0_ = nullptr;        ///< the xq page (kMaxTok rows of q8_1): host, the peer, the primary
+    uint8_t* h_xq_ = nullptr;          uint8_t* m_xq_ = nullptr;        uint8_t* xq_dev0_ = nullptr;        ///< the xq page (fused_max_t_ rows of q8_1): host, the peer, the primary
     // VRAM
     int32_t* d_own_ = nullptr;                        ///< n_layers x n_expert: the peer's slot or -1 (what the kernel plans with)
     unsigned long long* d_slot_ptr_ = nullptr;        ///< cache_.slots(): slot -> device address of its blob
     peer_fused::Plan* d_plan_ = nullptr;              ///< [2]: the kernel's double-buffered step plan
     peer_fused::Sync* d_sync_ = nullptr;              ///< the kernel's barrier / ready / done words
+    // ---- docs/PEER_FUSED2.md s.12: the kernel's own working buffers, sized by STRATA_PEER_FUSED_MAX_T (not the per-layer
+    // path's d_q8_ / d_scratch_ / d_out_, which follow the build's window constant and may be smaller than a step here)
+    int fused_max_t_ = 0;                             ///< rows a window the kernel accepts (kEnvMaxT, 1..peer_fused::kMaxTok)
+    int64_t fused_cap_ = 0;                           ///< entries a step: fused_max_t_ x 10
+    uint8_t* d_q8_f_ = nullptr;                       ///< fused_max_t_ rows of n_embd/32 q8_1 blocks (the kernel's phase C)
+    void* d_scratch_f_ = nullptr;                     ///< native_expert_scratch_bytes(fused_cap_, n_ff): hq at hq_offset(fused_cap_, n_ff)
+    float* d_out_f_ = nullptr;                        ///< fused_cap_ x n_embd compact rows (the kernel's phase E)
     // host
     int32_t* h_own_ = nullptr;                        ///< pinned n_layers x n_expert: the rows the per-layer copies go up from
     std::vector<int32_t> own_win_;                    ///< the window's ownership table (the one truth: has() reads it)

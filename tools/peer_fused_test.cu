@@ -37,7 +37,16 @@
 // windows behave; 2 if peer_fused_shape refuses the pack on this device (its `why` is printed).
 //
 //   peer_fused_test [device=0] [gu_type=0] [d_type=0] [n_expert=512] [n_slots=16] [windows=20] [seed]
-//                   [--primary D] [--second D2] [--skip] [--stage]
+//                   [--primary D] [--second D2] [--skip] [--stage] [--max-t N] [--wide]
+//
+// --max-t N (docs/PEER_FUSED2.md s.12, STRATA_PEER_FUSED_MAX_T; default pf::kMaxTokDefault = 32, at most pf::kMaxTok): the
+// rows a window the kernels accept (Window::max_tok, Window::cap = N x K), the bound of a window's random T here.  The
+// pages are sized at the ceiling (kMaxTok), as the engine sizes its buffers by the knob.  --wide: the windows cycle
+// T = 16, 24, 32 (clamped to --max-t) and a random one, each width with G = 1 (one step of all the rows: up to 320
+// entries, more than the block's threads - phase B strides them) and with G = 2 (two groups), so the plan, the bodies
+// and the scatter are compared bit for bit at the widths several --batch slots make, with one and two servers, with
+// --skip and --stage as well.  Without it the windows are 1..max-t random, as before (the draw of T follows the bound,
+// so a seed does not give the windows of the old bench; the arithmetic of every step is the old one).
 //
 // --skip (docs/PEER_FUSED2.md s.11.1, STRATA_PEER2_SKIP): the host (or the primary's kernel) plays the primary's node
 // of that section: a step on which a server has no entry is NOT waited for on that server's flag (the empty word of
@@ -396,8 +405,9 @@ int main(int argc, char** argv) {
     int pos[6] = {0, 0, 0, 512, 16, 20};
     uint64_t seed = (uint64_t) std::chrono::system_clock::now().time_since_epoch().count();
     int primary = -1, second = -1, npos = 0;
-    bool skip = false, stage = false;
+    bool skip = false, stage = false, wide = false;
     int skip_delay_us = 200;   // --skip: block 0's delay before it reads a step's ids (Window::test_delay_ns), 0 = none
+    int max_t = pf::kMaxTokDefault;   // --max-t: the rows a window the kernels accept (s.12), the bound of a window's T
     for (int a = 1; a < argc; ++a) {
         const std::string s = argv[a];
         if (s == "--primary" && a + 1 < argc) { primary = std::atoi(argv[++a]); continue; }
@@ -405,9 +415,12 @@ int main(int argc, char** argv) {
         if (s == "--skip") { skip = true; continue; }
         if (s == "--skip-delay" && a + 1 < argc) { skip_delay_us = std::max(0, std::atoi(argv[++a])); continue; }
         if (s == "--stage") { stage = true; continue; }
+        if (s == "--max-t" && a + 1 < argc) { max_t = std::atoi(argv[++a]); continue; }
+        if (s == "--wide") { wide = true; continue; }
         if (s == "--help" || s == "-h") {
             std::printf("peer_fused_test [device=0] [gu_type=0 (mixed model)] [d_type=0] [n_expert=512] [n_slots=16 a layer] [windows=20] [seed] "
-                        "[--primary D] [--second D2] [--skip] [--skip-delay US (200)] [--stage]\n");
+                        "[--primary D] [--second D2] [--skip] [--skip-delay US (200)] [--stage] [--max-t N (%d, at most %d)] [--wide]\n",
+                        pf::kMaxTokDefault, pf::kMaxTok);
             return 0;
         }
         if (npos < 6) pos[npos] = std::atoi(argv[a]);
@@ -430,6 +443,12 @@ int main(int argc, char** argv) {
         std::printf("--stage needs --second D2 (the staged q8_1 rows are the second server's): ignored\n");
         stage = false;
     }
+    if (max_t < 1 || max_t > pf::kMaxTok) {
+        std::printf("--max-t %d: the kernels accept 1..%d rows a window (pf::kMaxTok)\n", max_t, pf::kMaxTok);
+        return 1;
+    }
+    // --wide: the widths of several --batch slots in one step (s.12), clamped to --max-t; 0 = a random width
+    const int kWideT[4] = { std::min(16, max_t), std::min(24, max_t), std::min(32, max_t), 0 };
 
     // ---- the synthetic model: the mixed one (gu_type 0) or 4 uniform layers
     std::vector<Layer> layers;
@@ -461,6 +480,8 @@ int main(int argc, char** argv) {
         }
         if (skip) std::printf(" | --skip: an empty step is not waited for (Window::ahead on both kernels)");
         if (stage) std::printf(" | --stage: every window served twice, the second time with the second server's q8_1 rows staged");
+        std::printf(" | up to %d rows a window (%d entries a step; the ceiling is %d / %lld)", max_t, max_t * K, pf::kMaxTok, (long long) pf::kCap);
+        if (wide) std::printf(" | --wide: T %d / %d / %d / random, each with G = 1 and G = 2", kWideT[0], kWideT[1], kWideT[2]);
         std::printf("\n");
     }
 
@@ -762,6 +783,8 @@ int main(int argc, char** argv) {
     pf::Window base{};
     base.lb = 0;
     base.k = K;
+    base.max_tok = max_t;        // s.12: what the engine sets from STRATA_PEER_FUSED_MAX_T (the pages here hold the ceiling)
+    base.cap = max_t * K;
     base.n_embd = N;
     base.n_ff = FF;
     base.n_expert = n_expert;
@@ -1080,8 +1103,11 @@ int main(int argc, char** argv) {
 
     // ================================================================ the windows
     for (int win = 0; win < windows && all_ok; ++win) {
-        const int T = 1 + (int) rng.below((uint32_t) pf::kMaxTok);
-        const int G = T >= 2 && rng.below(2) ? 2 : 1;
+        // --wide (s.12): 16 / 24 / 32 / random rows, the first four windows with one group (every row in one step), the
+        // next four with two, and so on; otherwise a random width within --max-t and a random G, as before
+        int T = 1 + (int) rng.below((uint32_t) max_t);
+        if (wide && kWideT[win % 4] > 0) T = kWideT[win % 4];
+        const int G = T < 2 ? 1 : wide ? ((win / 4) % 2 == 0 ? 1 : 2) : (rng.below(2) ? 2 : 1);
         const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
         const int steps = nl * G;
         pf::Window w = base;
@@ -1244,7 +1270,7 @@ int main(int argc, char** argv) {
     // ================================================================ endurance (s.9)
     // (a) steps 0 and 1 served, step 2 never rung, abort after 100 ms: kErrAbort, exit == epoch, the stream drained in 2 s
     if (all_ok) {
-        const int T = 1 + (int) rng.below((uint32_t) pf::kMaxTok);
+        const int T = 1 + (int) rng.below((uint32_t) max_t);
         pf::Window w = base;
         w.steps = nl; w.G = 1; w.T = T;
         w.gtb[0] = 0; w.gtb[1] = T; w.gte[0] = T; w.gte[1] = T;
@@ -1359,8 +1385,8 @@ int main(int argc, char** argv) {
     cudaFreeHost(h_plan_ref);
     cudaFreeHost(P.page_h); cudaFreeHost(P.seq_h); cudaFreeHost(P.x_h); cudaFreeHost(P.ids_h);
     cudaFreeHost(P.ymiss_h); cudaFreeHost(P.ymiss_ref_h); cudaFreeHost(P.pwords_h);
-    std::printf("%s: %d finestre (%s, %d strati), %lld voci del peer", all_ok ? "PASS" : "FAIL", windows,
-                gu_type == 0 ? "modello misto" : "modello uniforme", nl, (long long) peer_entries_total);
+    std::printf("%s: %d finestre (%s, %d strati, fino a %d righe%s), %lld voci del peer", all_ok ? "PASS" : "FAIL", windows,
+                gu_type == 0 ? "modello misto" : "modello uniforme", nl, max_t, wide ? ", larghe 16/24/32" : "", (long long) peer_entries_total);
     if (second >= 0) std::printf(" + %lld del secondo server (CUDA%d)", (long long) peer2_entries_total, second);
     std::printf(", seme %llu\n", (unsigned long long) seed);
     return all_ok ? 0 : 1;

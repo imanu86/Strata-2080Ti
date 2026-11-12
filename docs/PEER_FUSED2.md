@@ -13,7 +13,9 @@ confronto con un puntatore nullo per strato nel dispatch e nell'adapt (`d.peer2 
 
 Scritto e **non compilato, non installato, non provato** (§9). Compilato e PASS al banco bit per bit il 3/11; la prima
 misura nel motore e le tre modifiche che ne seguono (salto a vuoto, righe q8_1 pubblicate dalla padrona, quota calda al
-server 2) sono in §11, anch'esse non compilate né provate.
+server 2) sono in §11, anch'esse non compilate né provate. **Più richieste** (ramo `lab/server-lotti`, 12/11: limite
+delle righe configurabile, `STRATA_PEER_FUSED_MAX_T`; finestre a lotti `--batch N` sui mega-kernel, `STRATA_PEER_BATCH`):
+§12, non compilato né provato.
 
 ## 0. In una frase
 
@@ -42,6 +44,8 @@ passo, prima quello del server 1 poi quello del server 2, poi le righe CPU come 
 | `STRATA_PEER2_STAGE` | 0 | la padrona pubblica le righe del passo già quantizzate q8_1 per il server 2: 2,9 KB a token sul riser invece di 10 (§11.2) |
 | `STRATA_PEER2_SHARE` | 0 | frazione 0..0,5: all'apertura il server 1 lascia al server 2 una coppia ogni 1/f delle sue candidate calde (§11.3) |
 | `STRATA_PEER2_PREFILL` | 0 | 1: il server 2 legge anche il prompt, col modello di costo (`PEER_PREFILL2.md`; con le sue `STRATA_PEER_PREFILL_BW_GBS`, `STRATA_PREFILL_BW_GBS`, `STRATA_PEER2_PREFILL_*`) |
+| `STRATA_PEER_FUSED_MAX_T` | **32** (tetto 64) | righe per finestra che il mega-kernel di **ogni** server accetta (§12): dimensiona i suoi buffer `q8`/`hq`/`out` e la pagina `xq`; prima era la costante di build della finestra (8 o 16) |
+| `STRATA_PEER_BATCH` | 0 | 1: anche le finestre a lotti (`--batch N`) passano dai mega-kernel, un passo per strato con le righe di tutti gli slot (§12); 0: a lotti i server restano sul percorso per-strato, come oggi |
 
 `--peer-adapt-swaps`, `--peer-prefill-rows`, `STRATA_PEER_HOT`, `STRATA_PEER_*` restano del server 1. Le variabili
 `STRATA_PEER2_*` le legge solo il `PeerExperts` aperto con `ordinal` 1 (`peer_fused.hpp`: `kEnvOn2`, `kEnvWaitMs2`,
@@ -393,3 +397,153 @@ Attesi: la riga `peer2` mostra meno strati con attesa e, con lo stage, span mino
 2 sale e quella del server 1 scende, la finestra non cresce. Punti dove la compilazione può fermarsi: la lambda
 `serve` del banco (cattura `w2` e `recs` del ciclo), `wait_flag` con argomenti di default, `std::atof` in
 `generate.cpp` (`<cstdlib>` è già incluso), `kEnvShare2` visto da `generate.cpp` tramite `peer_experts.hpp`.
+
+## 12. Più richieste (`--batch N` sui due server, finestre più larghe) — 12/11
+
+Ramo `lab/server-lotti`. Scritto e **non compilato, non installato, non provato**.
+
+**Il problema.** Il mega-kernel accettava al massimo `kWindowMaxT` righe per finestra, la costante di build della finestra
+(8 nella build in uso, 16 nelle build larghe): con la 0.2.10 una sola richiesta apriva finestre di lookup da 12 e il
+server rispondeva `peer experts: fused: 12 rows a window (at most 8)`, aggirato con `--lookup-max-t 8`. Il controllo
+era inoltre sulla `T` della finestra e non sulle righe del passo (una finestra da 12 con `G = 2` fa passi da 6). Con
+più richieste insieme (`--batch N`) una finestra a lotti porta in **un solo passo** le righe di tutti gli slot
+(`G = 1`), e le finestre a lotti non chiamavano il hook: i server le servivano sul percorso per-strato di prima.
+
+L'idea del proprietario: con più richieste i due server rendono di più nell'aggregato, perché le righe di più
+conversazioni condividono gli stessi esperti nello stesso passo (un gruppo per esperto, più righe per gruppo: la
+lettura del blob si paga una volta per passo, non una per conversazione).
+
+### 12.1 Il limite delle righe: `STRATA_PEER_FUSED_MAX_T` (default 32, tetto 64)
+
+- **Contratto** (`peer_fused.hpp`): `kMaxTok` è ora il **tetto di compilazione** del server, 64, slegato da
+  `kWindowMaxT` (`static_assert(kMaxTok >= kWindowMaxT)`); `kCap = kMaxTok × 10 = 640` dimensiona il `Plan` in VRAM
+  (~15 KiB, due copie) e lo scratch del piano in memoria condivisa. `kMaxTokDefault = 32`. Due campi nuovi in
+  `Window`: `max_tok` e `cap`, le dimensioni **vere** dei buffer del server; il kernel rifiuta (`kErrBadWindow`) una
+  finestra con `T > max_tok`, un gruppo con più righe di `max_tok` o più voci di `cap`, o valori oltre il tetto.
+- **Host** (`PeerExperts::fused_open`): legge la variabile una volta, la stringe a `1..kMaxTok` (una riga se fuori),
+  `fused_cap_ = max_t × 10` (top-10, come `CAP`). Alloca buffer **propri** del kernel, dimensionati dalla variabile e
+  non più presi dal percorso per-strato: `d_q8_f_` (`max_t` righe q8_1), `d_scratch_f_`
+  (`native_expert_scratch_bytes(cap, n_ff)`, `hq` a `hq_offset(cap, n_ff)`), `d_out_f_` (`cap × n_embd` fp32); la
+  pagina `xq` dello stage ha `max_t` righe. `fused_begin` controlla `T ≤ max_t` e, **per gruppo**, `righe × k ≤ cap`.
+  La riga di apertura dice `up to N rows a window (STRATA_PEER_FUSED_MAX_T)`.
+- **`launch()` in finestra**: conta soltanto e **non scrive più** il piano in `h_meta_` (il blocco `Meta` è dimensionato
+  da `CAP` del percorso per-strato e un passo a lotti può superarlo); fuori da una finestra tutto come prima, `CAP`
+  compreso.
+- **Kernel** (`peer_fused.cuh`): la fase B pianificava con **un thread per voce** (`static_assert(kCap ≤ 256)`); ora
+  ogni passata scorre le voci a passi di `kThreads` (il thread `t` prende `t, t + 256, …`), tre passate (id → first/lead/
+  size → righe) separate da `__syncthreads`, nessuna lettura di una parola scritta nella stessa passata. Con ≤ 256
+  voci ogni thread fa esattamente la voce di prima: stesse scansioni, stesse scritture. Le fasi C-F erano già cicli a
+  passo di griglia; i corpi riusati prendono le righe di un gruppo a blocchi di `LDS_NT` qualunque sia il loro numero
+  (`native_gu_fused_core`, `native_down_lds_body`: `for (c0 = e0; c0 < e1; c0 += LDS_NT)`).
+- **Memoria condivisa**: **non cresce con le righe**. Il buffer dinamico è `max(gate/up = attivazioni LDS_NT × N/32 × 36 +
+  tile + griglia = 20 736 B sul pack misto, down = 2 880 B, scratch del piano = 4 × kCap × 4 = 10 240 B)`: resta 20 736
+  B, 3 blocchi per SM per memoria come oggi. Non serve né il ciclo su blocchi di righe né il piano in memoria globale.
+  Se un giorno `kCap` salisse oltre ~1 300 voci lo scratch del piano supererebbe il buffer del gate/up e deciderebbe lui
+  l'occupazione: allora il piano andrebbe in VRAM (`s_id`/`s_first`/`s_lead`/`s_size` in un terzo `Plan`), non prima.
+- **VRAM per server a 32 righe**: `d_out_f_` 3,3 MB, `d_scratch_f_` ~2,7 MB, `d_q8_f_` 92 KB, `xq` 92 KB (mappata, host),
+  `Plan` 2 × 15 KiB. Trascurabile rispetto agli slot.
+- **`sm75_down_em(em0, cap)`**: con `STRATA_EXP_MODE=8` (`em0 == 8`) ritorna 8 qualunque sia `cap`; il percorso
+  per-strato con `rows` grandi prende lo stesso down LDS del kernel. `peer_fused_shape` lo richiede già.
+
+### 12.2 Le finestre a lotti sui mega-kernel: `STRATA_PEER_BATCH=1`
+
+Oggi `--batch N` con `--peer-device` **è permesso** e va per il percorso per-strato dei server: i grafi a lotti
+(`batch_rec_`) non registravano i nodi d'attesa sui flag, `run_slot_rows` non chiamava il hook, e `launch()`/`finish()`
+con `window_open_` falso facevano copie e lanci per strato. Con la variabile:
+
+- **`generate.cpp`** (percorso serve, dopo `set_peer_fused`/`set_peer_fused2`): con almeno un server fused e `--batch
+  > 0`, legge `STRATA_PEER_BATCH`; a 1 chiama `ver.set_peer_fused_batch(true)` e stampa una riga con le righe accettate.
+- **`Verifier`** (`verify.hpp`/`.cpp`): `peer_batch_` e `peer_window(batch)`. In `record_window` i nodi del `post`
+  (`wait_flag_ge` / `wait_flag_ge_any` sul flag del server 1, poi del 2) e il nodo `peer_fused_publish_q8` del `pre`
+  (stage) si registrano anche con `batch_rec_` quando `peer_batch_` è acceso; il head bet (`rec_from_`/`rec_to_`) resta
+  escluso. `run_slot_rows`: dopo `stage_batch` (che azzera `h_seq_`/`h_flag_`) e **prima** del lancio del grafo, `begin`
+  del server 1 poi del 2 sullo stesso `WindowHost{T = S, G = 1, lb, le, k, n_embd, gtb = {0, S}, gte = {S, S}, h_seq_,
+  h_x_, h_ids_, h_ymiss_}`; `flush` nel ciclo d'attesa dei 2 ms; `end` dopo la `cudaStreamSynchronize(cs_)`; una
+  guardia `PeerWindow` aborta su ogni altra uscita (il timeout di 20 s chiama già `release_gpu_waits`, che aborta i
+  hook). Solo con il grafo doorbell (`!ar_on()`), come `run`. `batch_launch` e `batch_launch_rows` (i gruppi pipelinati
+  di una divisione a strati, che un peer esclude comunque) **rifiutano** con `peer_batch_`: i loro grafi aspetterebbero
+  flag che nessuno alza.
+- **Ogni riga torna al suo slot da sola**: il passo `s` di una finestra a lotti è lo strato `lb + s`, le sue righe sono
+  `[0, S)` nell'ordine degli slot (`rows[t]`), la voce `j` sta nella riga `j` di `m_ymiss_` e `copy_rows_from_mapped`
+  della padrona la porta nella `parts_out` della riga `j / k`, che è dello slot `rows[j / k]`. Il kernel scrive
+  `ymiss[(tb·k + out_row[r]) · N]` con `tb = 0`: lo stesso indirizzo del percorso per-strato (`scatter_rows_f32` con
+  `out_row`). Niente da smistare sull'host.
+- **Il pool** (`expert_pool_dispatch_multi`) non cambia: `has()` risponde da `own_win_`, `launch()` conta le voci `kind ==
+  2`/`3` del passo e scrive `expect_[s]`, `finish()` ritorna. Con `--batch N` il pool è chiamato una volta per strato →
+  `step_ == win_steps_` a `fused_end`.
+- **Salto, stage, quota** restano corretti: le parole vuote sono per passo (256) e non dipendono dalle righe; la pagina
+  `xq` ha `max_t` righe e il nodo di pubblicazione scrive `n = S` righe a `tb = 0`; `pf_publish_q8_kernel` è un blocco
+  che scorre `n_tok × N` valori; `cnt[s]` impacchetta `rows ≤ 640` in 16 bit (`static_assert(kCap < 65536)`). La quota
+  calda agisce all'apertura. Il `done[s & 1]` del salto conta blocchi, non righe.
+- **Limiti del verificatore, non del server**: una finestra a lotti tiene al massimo `kVerifyMaxT` righe (8 nella build
+  stretta, 16 nella larga: `batch_rows_error`, `slots_in_windows` riduce `--batch` oltre); con `--batch-mtp` le finestre
+  a lotti restano a 8 righe (`batch_max_t`). Quindi oggi un passo a lotti ha **al più 8 o 16 righe** secondo la build:
+  32 è spazio per il verificatore, non ancora usato da lui. Per portare davvero 16-20 righe in un passo servono o la
+  build larga (`-DSTRATA_WINDOW_MAX_T=16`) o un allargamento del verificatore (`kVerifyMaxT`, le tabelle del pool
+  `kMaxWindowEntries` 128/256 in `expert_source.cpp`), fuori da questo ramo.
+
+### 12.3 Bit
+
+- Con **una richiesta e `T ≤ 8`** (o ≤ 16 sulla build larga) i bit sono quelli di oggi: stessi corpi, stesso ordine del
+  piano (la fase B con ≤ 256 voci fa, thread per thread, le scansioni di prima), stesso quantizzatore, stesso scatter;
+  i buffer sono altri (`d_q8_f_`, `d_out_f_`) ma i byte non dipendono dall'indirizzo. Il banco con `--max-t 8` è il
+  banco di prima (le `T` estratte cambiano con il tetto, non l'aritmetica).
+- Con `STRATA_PEER_BATCH=0` le finestre a lotti sono quelle di oggi, istruzione per istruzione (nessun nodo in più,
+  nessun `begin`).
+- Con `STRATA_PEER_BATCH=1` le righe del server in una finestra a lotti sono le stesse del percorso per-strato
+  (`PEER_FUSED.md` §8 vale passo per passo, `G = 1`), e la `combine` della padrona le somma nell'ordine delle voci come
+  prima: **stessi bit** del lotto servito per-strato. Il banco `--wide` lo verifica a 16/24/32 righe con uno e due
+  server, con `--skip` e `--stage`.
+
+### 12.4 Banco e prova nel motore
+
+```
+set CUDA_DEVICE_ORDER=PCI_BUS_ID
+set CUDA_VISIBLE_DEVICES=0,1,2
+set STRATA_EXP_MODE=8
+peer_fused_test 2 --wide                                     (un server: T 16/24/32/casuale, G 1 e 2; passi fino a 320 voci)
+peer_fused_test 2 --second 1 --wide                          (due server)
+peer_fused_test 2 --second 1 --primary 0 --wide --skip --stage
+peer_fused_test 2 --second 1 --wide --max-t 64               (il tetto)
+peer_fused_test 2 --max-t 8                                  (il banco di prima)
+```
+
+Attesi: `PASS` per finestra, `voci del peer` dell'ordine di 100-300 per passo largo; `tenuta (a)` e `(b)` PASS.
+
+Motore (replay a più conversazioni, per esempio `coda_multichat.py`), una variabile alla volta:
+
+```
+set STRATA_PEER_FUSED=1
+set STRATA_PEER2_FUSED=1
+set STRATA_PEER_FUSED_MAX_T=32        (default; senza --lookup-max-t 8: la finestra da 12 ora passa)
+strata ... --serve --batch 4 --peer-device 2,1 ...           (lotti per-strato: "windows fused" conta solo le finestre solo)
+set STRATA_PEER_BATCH=1
+strata ... --serve --batch 4 --peer-device 2,1 ...           (lotti sul kernel: riga "STRATA_PEER_BATCH=1: the batch windows ...")
+```
+
+Attesi: a `STRATA_PEER_BATCH=1` la riga `strata decode peer:` conta anche le finestre a lotti fra le `windows fused`, le
+`entries` per strato-finestra dei due server salgono con il numero di slot, e il tempo di finestra a lotti cala rispetto
+al per-strato (oggi 7-9 operazioni per strato per server sotto WDDM). Confronto bit: la stessa coda con
+`STRATA_PEER_BATCH=0` e `=1` deve dare **lo stesso testo** (stesse righe, stesso ordine di somma); con `--peer-device 2`
+sola i bit cambiano come già detto in §6.
+
+### 12.5 Non provato e rischi
+
+Compilato no, installato no, provato no. Dove la compilazione può fermarsi: `pf_plan` (le tre passate, `own_l` come
+`const int32_t*`), i campi nuovi di `Window` nel confronto `w.cap > (int) pf::kCap`, `fused_step` come `bool` da
+`std::atomic<bool>::load` in `launch()`, `Meta& m = *mp` dopo il ramo fused, `peer_window()` dichiarato fra i membri
+privati di `Verifier` e usato in `batch_launch`, `kWideT` nel banco (array locale usato nella riga d'intestazione).
+
+1. **Grafi a lotti e `ar_on()`**: il grafo di una chiave è catturato una volta con lo stato `ar` del primo passaggio;
+   `run_slot_rows` apre la finestra solo con `!ar_on()`, come `run`. Con un peer la padrona non è mai tutta residente,
+   quindi il caso «grafo con nodi, finestra senza `begin`» non dovrebbe presentarsi; se si presentasse, la finestra
+   aspetterebbe un flag mai alzato fino al release (20 s). Era già così per i doorbell a lotti senza peer.
+2. **Il server 2 sul riser con più righe**: a 16 righe un passo legge 160 KB di `x` fp32 (o 46 KB in q8_1 con lo stage)
+   e scrive 10 KB a voce: lo stage conta di più che a 4 righe. Gli stamp (`GPU span per step` della riga `peer2`) lo
+   dicono; se il server 2 rallenta la finestra, `--peer-slots A,B` o `STRATA_PEER2_FUSED=0`.
+3. **TDR** (§5): una finestra a lotti ha più lavoro per passo ma lo stesso numero di passi; il limite per attesa resta
+   1,5 s sul server 2.
+4. **`launch()` oltre `CAP` in finestra** era un trabocco di `h_meta_` in attesa: ora non scrive; fuori finestra il
+   controllo `n > CAP` è quello di prima.
+5. **Il verificatore** limita le finestre a lotti a 8/16 righe (§12.2): il guadagno aggregato va misurato con la build
+   in uso e detto per quello che è.

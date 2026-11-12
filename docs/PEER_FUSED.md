@@ -95,9 +95,9 @@ con il **puntatore device 0** (`cudaHostGetDevicePointer` sotto `On(primary_devi
 | `d_own` | `n_layers × n_expert` int32 | slot del peer o −1: **l'esperto lo calcola il peer** (= `res_ ≥ 0 && host_res < 0`) | host (`fused_begin`: solo gli strati cambiati, da `h_own_` bloccata) |
 | `d_slot_ptr` | `cache_.slots()` uint64 | indirizzo device del blob dello slot s (`cache_.device_slot(s)`) | host, a `open` (gli slot non si muovono: `adapt` riusa lo slot della vittima con lo stesso strato) |
 | `d_plan[2]` | 2 × `Plan` | il piano del passo s in `d_plan[s & 1]` (doppio buffer: §5) | kernel, blocco 0 |
-| `d_q8` | `kMaxTok × N/32` `block_q8_1` | x quantizzata (= `d_q8_` di oggi) | kernel, fase C |
-| `d_scratch` | `native_expert_scratch_bytes(kCap, n_ff)` | solo `hq` a `peer_fused::hq_offset(kCap, n_ff)` = `3 × round256(kCap × n_ff × 4)`, **lo stesso offset di `native_expert_grouped`** | kernel, fase D |
-| `d_out` | `kCap × N` fp32 | righe compatte (= `d_out_` di oggi) | kernel, fase E |
+| `d_q8_f` | `max_t × N/32` `block_q8_1` | x quantizzata; buffer **proprio** del kernel, `max_t` = `STRATA_PEER_FUSED_MAX_T` (`PEER_FUSED2.md` §12; prima era `d_q8_` del percorso per-strato, `kWindowMaxT` righe) | kernel, fase C |
+| `d_scratch_f` | `native_expert_scratch_bytes(cap, n_ff)`, `cap = max_t × 10` | solo `hq` a `peer_fused::hq_offset(cap, n_ff)` = `3 × round256(cap × n_ff × 4)`, **lo stesso offset di `native_expert_grouped`** | kernel, fase D |
+| `d_out_f` | `cap × N` fp32 | righe compatte (buffer proprio del kernel) | kernel, fase E |
 | `d_sync` | `Sync` (128 B) | contatore/generazione della barriera, `lready`, `done`, `quit`, `exited` | kernel; azzerata dall'host prima del lancio (`cudaMemsetAsync` su `stream_`) |
 | `d_lay` | `n_layers × NativeExpertLayout` | il layout di ogni strato (`native_expert_layout(gu_type, d_type, n_embd, n_ff)` di `lay.fmt[l]`): tipi, passo delle righe, offset di up e down | host, a `open` (`fused_lays_`); il kernel legge `lay[l]` a ogni passo con voci (§5a) |
 
@@ -276,7 +276,10 @@ più codice, nessun guadagno).
   `fused_end`. `window_open_` è `std::atomic<bool>`: lo scrive anche il filo del watchdog di stallo.
 - `adapt()`: con `window_open_` ritorna `true` senza fare nulla.
 - Knob (tutti letti una volta): `STRATA_PEER_FUSED`, `STRATA_PEER_FUSED_HOSTWAIT`, `STRATA_PEER_FUSED_MINB`,
-  `STRATA_PEER_FUSED_BLOCKS`, `STRATA_PEER_FUSED_COOP`, `STRATA_PEER_FUSED_WAIT_MS` (default 20 000).
+  `STRATA_PEER_FUSED_BLOCKS`, `STRATA_PEER_FUSED_COOP`, `STRATA_PEER_FUSED_WAIT_MS` (default 20 000),
+  `STRATA_PEER_FUSED_MAX_T` (default 32, tetto 64: le righe per finestra che il kernel accetta, `PEER_FUSED2.md` §12;
+  `fused_begin` controlla `T ≤ max_t` e per gruppo `righe × k ≤ max_t × 10`). `STRATA_PEER_BATCH` lo legge
+  `generate.cpp` (§12.2).
 - La riga `strata decode peer:` (`generate.cpp:18977`) stampa, con fused, `fused` e i passi serviti; gli span sono
   quelli degli stamp del kernel (flag visto → flag alzato: il lavoro vero, senza i vuoti di sottomissione).
 

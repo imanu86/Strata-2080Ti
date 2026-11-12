@@ -36,10 +36,22 @@ namespace strata::core::peer_fused {
 
 /// Threads per block of the persistent kernel (the device bodies it reuses are written for 256).
 inline constexpr int kThreads = 256;
-/// Most rows (tokens) one step can carry: a verify window's rows (the doorbell publishes a group of them a step).
-inline constexpr int kMaxTok = strata::kernels::kWindowMaxT;
-/// Entries per step the plan can hold: a window's rows x top-10 (peer_experts.cpp's CAP; the kernel refuses more).
-inline constexpr int64_t kCap = (int64_t) strata::kernels::kWindowMaxT * 10;
+/// Most rows (tokens) one step can carry, the COMPILE-TIME ceiling (docs/PEER_FUSED2.md s.12, "Piu richieste"): the
+/// Plan's arrays and phase B's shared scratch are sized by it.  It no longer follows the build's window constant
+/// (kWindowMaxT, 8 or 16): the server's limit is its own, so a 12-row lookup window on the 8-row build, or the rows
+/// of several --batch slots in one step, fit without a rebuild.  The rows a server REALLY accepts are a runtime knob,
+/// STRATA_PEER_FUSED_MAX_T (kEnvMaxT, default kMaxTokDefault, at most this), which sizes its own q8 / hq / out
+/// buffers and its xq page (Window::max_tok, Window::cap: the kernel refuses a step past them).  With a window of up
+/// to kWindowMaxT rows nothing of the arithmetic changes: the same bodies, the same plan order, the same bytes.
+inline constexpr int kMaxTok = 64;
+/// The default of STRATA_PEER_FUSED_MAX_T: four --batch slots of up to 8 rows each in one step, or any lookup window.
+inline constexpr int kMaxTokDefault = 32;
+/// Entries per step the plan can hold at the ceiling: kMaxTok rows x top-10 (the kernel refuses more; Window::cap is
+/// the server's own, max_tok x 10).  Phase B takes the entries in strides of kThreads (one thread may plan several).
+inline constexpr int64_t kCap = (int64_t) kMaxTok * 10;
+static_assert(kMaxTok >= strata::kernels::kWindowMaxT, "the fused server's ceiling must hold a whole verify window");
+static_assert(kMaxTokDefault <= kMaxTok, "the default of STRATA_PEER_FUSED_MAX_T is within the ceiling");
+static_assert(kCap < 65536, "cnt[s] packs the rows of a step into 16 bits");
 /// Steps per window the mapped page holds: (le - lb) * G, with G <= 2 groups a layer (48 layers x 2 = 96 fit).
 inline constexpr int kMaxSteps = 256;
 /// Default bound of every wait inside the kernel (ns): the host's own layer wait is 20 s (verify.cpp); a bench-like
@@ -116,6 +128,16 @@ inline constexpr const char* kEnvSkip = "STRATA_PEER_SKIP";                ///< 
 inline constexpr const char* kEnvSkip2 = "STRATA_PEER2_SKIP";              ///< the second server's skip (default 1)
 inline constexpr const char* kEnvStage2 = "STRATA_PEER2_STAGE";            ///< 1: the primary publishes q8_1 rows for the second server
 inline constexpr const char* kEnvShare2 = "STRATA_PEER2_SHARE";            ///< read by generate.cpp: the second server's share of the hot pairs
+/// docs/PEER_FUSED2.md s.12 ("Piu richieste"): several requests (--batch slots) through the two servers' kernels.
+///   STRATA_PEER_FUSED_MAX_T (default kMaxTokDefault = 32, at most kMaxTok): the rows a window a server accepts; it sizes
+///     the server's own q8 / hq / out buffers and its xq page.  One knob, read by both servers.  Below the build's window
+///     (8 or 16) the server refuses windows the verifier would still form: for bring-up and A/B only.
+///   STRATA_PEER_BATCH (default 0; read by generate.cpp, Verifier::set_peer_fused_batch): 1 = the batch windows (--batch N:
+///     one step a layer with the rows of every slot) are served by the persistent kernels too - their graphs get the same
+///     wait nodes a step, run_slot_rows opens and closes the window as run does.  0: the batch windows keep today's
+///     per-layer path on the servers, as before, instruction for instruction.
+inline constexpr const char* kEnvMaxT = "STRATA_PEER_FUSED_MAX_T";
+inline constexpr const char* kEnvBatch = "STRATA_PEER_BATCH";
 
 // ---------------------------------------------------------------- device-visible structs (VRAM / kernel argument)
 
@@ -177,8 +199,12 @@ struct Window {
     int steps = 0;           ///< (le - lb) * G; step s is layer lb + s / G, group s % G, ring s + 1
     int G = 1;               ///< row groups a layer (1 or 2)
     int lb = 0;              ///< first layer of the stage (0 with a peer: no layer split)
-    int T = 0;               ///< rows in the window
+    int T = 0;               ///< rows in the window (<= max_tok)
     int k = 0;               ///< routed experts a row
+    /// s.12: what THIS server's buffers hold - q8 and the xq page max_tok rows, out and hq cap entries (STRATA_PEER_FUSED_MAX_T x 10).
+    /// A step of more rows or entries, or a window of more than max_tok rows, is kErrBadWindow.  Both at most kMaxTok / kCap.
+    int max_tok = kMaxTok;
+    int cap = (int) kCap;
     int gtb[2] = {0, 0};     ///< first row of group g
     int gte[2] = {0, 0};     ///< one past the last row of group g
     int64_t n_embd = 0;      ///< N (2560): the same on every layer (lay[l].n_embd)
@@ -204,9 +230,9 @@ struct Window {
     const int32_t* own = nullptr;              ///< n_layers x n_expert: the peer's slot or -1 ("the peer computes it")
     const unsigned long long* slot_ptr = nullptr;   ///< slot -> device address of its blob
     Plan* plan = nullptr;                      ///< [2]: step s uses plan[s & 1]
-    void* q8 = nullptr;                        ///< kMaxTok x n_embd/32 block_q8_1
-    void* hq = nullptr;                        ///< the gate/up body's output (scratch + peer_fused_hq_offset)
-    float* out = nullptr;                      ///< kCap x n_embd compact rows
+    void* q8 = nullptr;                        ///< max_tok x n_embd/32 block_q8_1 (the server's own, sized by STRATA_PEER_FUSED_MAX_T)
+    void* hq = nullptr;                        ///< the gate/up body's output (scratch + hq_offset(cap, n_ff))
+    float* out = nullptr;                      ///< cap x n_embd compact rows
     Sync* sync = nullptr;
     /// n_layers layouts, one a layer (native_expert_layout(gu_type, d_type, n_embd, n_ff) of the pack's layer):
     /// the step's bodies are chosen from lay[l].gu_type / lay[l].d_type and read its row strides and offsets.
@@ -229,7 +255,7 @@ struct Window {
     /// A test hook (the bench only; PeerExperts never sets it): block 0 waits this long after a step's doorbell before
     /// it reads the ids, so the doorbell after it can land first - the race `empty` settles, made certain.
     unsigned long long test_delay_ns = 0;
-    /// STRATA_PEER2_STAGE: the primary's xq page as this device sees it (mapped): kMaxTok rows of n_embd/32 q8_1 blocks,
+    /// STRATA_PEER2_STAGE: the primary's xq page as this device sees it (mapped): max_tok rows of n_embd/32 q8_1 blocks,
     /// the step's rows at gtb * n_embd/32; phase C copies them into q8 instead of quantizing x.  Null: phase C of before.
     const void* xq = nullptr;
     /// With xq: the mapped ring the primary writes after the rows (kOffXqSeq); block 0 waits `>= s + 1` before lready on a
