@@ -42,6 +42,7 @@
 #include "strata/kernels/qsa_prompt_attn.hpp"
 #include "strata/kernels/fused_gr.hpp"
 #include "strata/kernels/route_prior.hpp"
+#include "strata/kernels/resident_mask.hpp"
 #include "strata/kernels/cvec.hpp"
 #include "strata/kernels/gr.hpp"
 #include "strata/kernels/kv_q4.hpp"
@@ -944,6 +945,11 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         }
     }
     rr_stats_ = route_resident_cfg().stats_on(device_);   // STRATA_ROUTE_RESIDENT: this GPU's counters, outside graph capture
+    // STRATA_RESIDENT_MASK=1: this GPU's mask table and counters, outside graph capture (a model the mask kernel
+    // does not cover refuses here rather than route unmasked)
+    if (strata::kernels::resident_mask::requested() &&
+        !strata::kernels::resident_mask::prepare_device(device_, g.n_layers, g.n_expert, err))
+        return false;
     strata::kernels::fused_gr_check();   // once per card: which bitwise-equal hyper-connection read runs there
     strata::kernels::fused_gr_persist_init();   // opt-in STRATA_HC_PERSIST=1 (HIP)
     wt_ = &wt;
@@ -2293,6 +2299,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                           NE, n, cs);
                 native_router_top10_multi(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, n, cs);
             } catch (const std::exception& e) { err = "verify router: " + std::string(e.what()); return false; }
+            // STRATA_RESIDENT_MASK=1 (opt-in, changes the output): the experts no GPU holds leave the window's top-10s
+            // before the plan / doorbell read ids_ / w_ (the other two branches mask inside moe_route / moe_route_window)
+            if (strata::kernels::resident_mask::requested() &&
+                !strata::kernels::resident_mask::apply(logits_ + tb * NE, ids_ + tb * K, w_ + tb * K, l, NE, K, n, cs, err))
+                return false;
 #if defined(STRATA_HIP_GFX906)
         } else if (dec_batch) {
             // gfx906: the Coder's 256-expert router (the native router is 512 x 10 only) for the whole window in one
@@ -3195,6 +3206,9 @@ void Verifier::stage_inputs(int T, const int32_t* tokens, int64_t pos0) {
     strata_store_fence();
     last_t_ = T;
     if (rs_on_ && T >= 1 && T <= 16) ++rs_win_[T];
+    // STRATA_RESIDENT_MASK=1: the mask follows the resident set - the tables are compared before every window and
+    // the layers an adaptive round (or an expert server's swap) changed are uploaded; nothing moved: no CUDA call
+    if (strata::kernels::resident_mask::requested()) strata::kernels::resident_mask::refresh();
     last_pos0_ = pos0;
     for (int t = 0; t < T; ++t) last_tokens_[t] = tokens[t];
     staged_ = true;
@@ -4775,6 +4789,7 @@ bool Verifier::prepare(int T, bool& no_vram, std::string& err) {
 bool Verifier::stage_batch(const int* rows, int S, int hbase, const int32_t* tokens, const int64_t* pos,
                            std::string& err) {
     using namespace strata::kernels;
+    if (resident_mask::requested()) resident_mask::refresh();   // STRATA_RESIDENT_MASK=1: as stage_inputs, for the slots' windows
     // the row layout: a slot may own a contiguous group of rows (--batch-mtp), also across the stages of a layer split,
     // whose hand-off buffers hold kVerifyNarrowT rows, or set_handoff_rows' (a stage that hands rows on or takes them); a
     // batch window keeps kVerifyMaxT rows (the row tables below) when max_t is longer (--lookup-max-t)

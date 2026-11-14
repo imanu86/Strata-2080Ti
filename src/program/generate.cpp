@@ -73,6 +73,7 @@
 #include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/native_gdn.hpp"
 #include "strata/kernels/native_router.hpp"
+#include "strata/kernels/resident_mask.hpp"
 #include "strata/kernels/native_qsa.hpp"
 #include "strata/kernels/native_qsa_indexer.hpp"
 #include "strata/kernels/native_rope.hpp"
@@ -10092,6 +10093,39 @@ int main(int argc, char** argv) {
     // 0.514 ms of CPU work per layer.  A per-layer CPU expert pool cannot be hidden behind a strictly serial
     // residual chain; the CPU term is answered by Phase 3's VRAM expert cache, not by this pipeline.
 
+    // STRATA_RESIDENT_MASK=1 (opt-in, changes the output; docs/DETAILS.md): the router may only pick experts some GPU
+    // holds.  The mask tables are made HERE, before the first graph is captured (a routing kernel recorded into a graph
+    // reads its device's table), and every expert passes until the residency tables exist (below, after host_res).
+    // A configuration a routing path of which the mask does not cover refuses the start: it is never partial.
+    if (strata::kernels::resident_mask::requested()) {
+        const char* why = nullptr;
+        if (g.n_expert != 512) why = "the mask kernel is the 512-expert / top-10 one and this model routes another shape";
+        else if (o.no_pool || o.expert_cache <= 0 || profile.empty())
+            why = "it needs a VRAM expert cache filled from --expert-profile (the resident set the mask is the complement of)";
+        else if (o.expert_cache_remote[0] > 0 || o.expert_cache_remote[1] > 0 || o.expert_cache_remote[2] > 0)
+            why = "--expert-cache-remote helpers are not among the mask's residency tables yet (use --peer-device or --layer-split)";
+        else if (std::getenv("STRATA_ROUTE_PRIOR") != nullptr && std::atof(std::getenv("STRATA_ROUTE_PRIOR")) > 0.0)
+            why = "STRATA_ROUTE_PRIOR picks the top-10 again after the mask (use one of the two)";
+        else if (std::getenv("STRATA_ROUTE_RESIDENT") != nullptr && std::atof(std::getenv("STRATA_ROUTE_RESIDENT")) > 0.0)
+            why = "STRATA_ROUTE_RESIDENT swaps tail ranks after the mask (use one of the two)";
+        else if (std::getenv("STRATA_DBG_ROUTE_OVERRIDE") != nullptr)
+            why = "STRATA_DBG_ROUTE_OVERRIDE replaces the routing after the mask";
+        if (why != nullptr) {
+            std::fprintf(stderr, "strata generate: STRATA_RESIDENT_MASK=1 refuses the start: %s\n", why);
+            return 1;
+        }
+        std::string rm_err;
+        bool rm_ok = strata::kernels::resident_mask::prepare_device(primary_device, g.n_layers, g.n_expert, rm_err);
+        for (size_t k = 0; rm_ok && k < stages.size(); ++k)
+            rm_ok = strata::kernels::resident_mask::prepare_device(stages[k]->dev, g.n_layers, g.n_expert, rm_err);
+        if (rm_ok && ep_stage)   // ep-split: the expert server's card reads a share of the prompt's layers (its Prefill routes there)
+            rm_ok = strata::kernels::resident_mask::prepare_device(ep_stage->dev, g.n_layers, g.n_expert, rm_err);
+        if (!rm_ok) {
+            std::fprintf(stderr, "strata generate: %s\n", rm_err.c_str());
+            return 1;
+        }
+    }
+
     // ---- the graphs
     strata::core::SessionGraphs gr;
     if (!o.no_capture && !native_pack) {   // plan v0.3 P6: a native pack runs verify windows only
@@ -10540,6 +10574,8 @@ int main(int argc, char** argv) {
     // (the current device's legacy stream, stream 0 - nothing else; HIP has no cudaStreamLegacy name, #550).
     auto res_put = [&host_res](int32_t* dst) -> cudaError_t {
         const cudaError_t e = cudaMemcpy(dst, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
+        // STRATA_RESIDENT_MASK=1: the table changed - the mask follows (not while a prompt's loan is out; off: not called)
+        if (strata::kernels::resident_mask::requested()) strata::kernels::resident_mask::residency_changed();
         return e != cudaSuccess ? e : cudaStreamSynchronize(nullptr);
     };
     int32_t* d_res = nullptr;
@@ -10611,6 +10647,51 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: token graph hit path: %lld resident experts, decided on the device\n",
                      (long long) resident);
     }
+    // STRATA_RESIDENT_MASK=1: the residency tables the mask is the union of - the VRAM caches' (CUDA0's and a layer
+    // split's stages' share host_res) and each expert server's own (--peer-device A[,B]).  From here on the mask is
+    // the complement of what the GPUs hold, refreshed before every verify window and after every table upload.
+    if (strata::kernels::resident_mask::requested()) {
+        if (host_res.empty()) {
+            std::fprintf(stderr, "strata generate: STRATA_RESIDENT_MASK=1 refuses the start: there is no device residency table "
+                                 "(it needs the captured hit path: an expert cache with --expert-profile, without --no-capture / "
+                                 "--no-token-graph or a layer / half dump)\n");
+            return 1;
+        }
+    }
+    // The sources are asked HERE and again right before the decode verifier is made (rmask_sources below): a table
+    // that exists by then and did not here is added, and the line says what each one holds - an expert server that
+    // is not a source would have its experts masked as if they lived in RAM.
+    auto rmask_sources = [&](const char* when) {
+        if (!strata::kernels::resident_mask::requested()) return;
+        strata::kernels::resident_mask::add_source(host_res.data(), multi_gpu ? "the VRAM expert caches of the layer split's stages"
+                                                                             : "CUDA0's VRAM expert cache");
+        if (peer.valid()) strata::kernels::resident_mask::add_source(peer.res_table(), "the expert server (--peer-device)");
+        if (peer2.valid()) strata::kernels::resident_mask::add_source(peer2.res_table(), "the second expert server (--peer-device A,B)");
+        strata::kernels::resident_mask::set_demand_sink(&drive.d.usage);
+        strata::kernels::resident_mask::refresh(/*force=*/true);
+        int64_t n0 = 0, n1 = 0, n2 = 0, any = 0;
+        for (size_t i = 0; i < host_res.size(); ++i) {
+            const bool a = host_res[i] >= 0, b = peer.valid() && peer.res_table()[i] >= 0, c = peer2.valid() && peer2.res_table()[i] >= 0;
+            n0 += a; n1 += b; n2 += c; any += (a || b || c) ? 1 : 0;
+        }
+        static int64_t said = -1;
+        if (any == said) return;
+        said = any;
+        char s1[96], s2[96];
+        if (peer.valid()) std::snprintf(s1, sizeof s1, "%lld on the expert server (GPU %d)", (long long) n1, o.peer_device);
+        else std::snprintf(s1, sizeof s1, "no expert server");
+        if (peer2.valid()) std::snprintf(s2, sizeof s2, "%lld on the second server (GPU %d)", (long long) n2, o.peer_device2);
+        else if (o.peer_device2 >= 1) std::snprintf(s2, sizeof s2, "the second server (GPU %d) is NOT open: its experts are masked", o.peer_device2);
+        else std::snprintf(s2, sizeof s2, "no second server");
+        std::fprintf(stderr, "strata generate: STRATA_RESIDENT_MASK=%d is ON (experimental, changes the output; %s): the router picks its "
+                             "top-10 among the %lld of %zu expert pairs a GPU holds (%.1f%% masked: %lld in the VRAM cache, %s, %s); %s; the "
+                             "weights are the router's softmax renormalised over the picked ones; unset or 0 turns it off\n",
+                     strata::kernels::resident_mask::mode(), when, (long long) any, host_res.size(),
+                     100.0 * (double) ((int64_t) host_res.size() - any) / (double) host_res.size(), (long long) n0, s1, s2,
+                     strata::kernels::resident_mask::prefill_masked() ? "verify windows and the prompt path are masked"
+                                                                      : "the verify windows are masked, the prompt path is not (=2)");
+    };
+    rmask_sources("at the start");
     if (!o.no_capture && !o.no_token_graph && layer_dump == nullptr && half_dump == nullptr &&
         (hit_fn == nullptr || thits.on()) && !native_pack && !multi_gpu) {   // a split's token graph cannot span stages
         if (!strata::core::session_capture_token(wt, g, ss, d_parts, loop_scratch.y_miss, loop_scratch.parts_bytes,
@@ -12968,6 +13049,7 @@ int main(int argc, char** argv) {
         if (use_df2) ver.set_taps(df2.tap_layers());
         if (batch_df2) ver.set_batch_taps(true);
 #endif
+        rmask_sources("before the decode verifier");   // STRATA_RESIDENT_MASK: every residency table that exists by now
         if (!ver.init(wt, g, ss, vh, native_head.loaded() || prefill_head_alias_bound ? &native_head : nullptr,
                       batch_max_t(), err) ||
             (use_mtp && !prefill_head_alias_bound && !mtp.bind(last_st && !mtp_off_last ? last_st->wt : wt, last_st ? &last_st->head : &native_head,
@@ -19290,6 +19372,11 @@ int main(int argc, char** argv) {
 #endif
                 p.lent.clear();
                 p.lent_chunk = 0;
+                if (strata::kernels::resident_mask::requested()) {   // STRATA_RESIDENT_MASK=1: the last loan back: the mask follows again
+                    bool out = false;
+                    for (const PfPart& q : pf_parts) out = out || !q.lent.empty();
+                    strata::kernels::resident_mask::set_lent(out);
+                }
                 // A-LM: the slots are experts again, so the super-chunk's region in them is gone (prefill.hpp's contract:
                 // null when the stage reads without a loan; the next lend sets it again)
                 if (ep_lm) p.sp->set_lm_region(nullptr, 0);
@@ -19348,6 +19435,19 @@ int main(int argc, char** argv) {
             auto lend = [&](int64_t tokens, std::string& e, int64_t exact) -> bool {
                 seg_lend = 0;
                 if (pf_parts.empty()) return true;                     // its own buffers: nothing to lend
+                // STRATA_RESIDENT_MASK=1: the lent pairs leave the residency tables until the refill, but the mask keeps
+                // the set of before the loan (the prompt is read, and other slots decode, with the reply's mask): no
+                // refresh while this edits the tables, none while a loan is out (every exit sets that)
+                struct RmaskHold {
+                    const std::vector<PfPart>& parts;
+                    explicit RmaskHold(const std::vector<PfPart>& p) : parts(p) { strata::kernels::resident_mask::hold_enter(); }
+                    ~RmaskHold() {
+                        bool out = false;
+                        for (const PfPart& q : parts) out = out || !q.lent.empty();
+                        strata::kernels::resident_mask::set_lent(out);
+                        strata::kernels::resident_mask::hold_leave();
+                    }
+                } rmask_hold(pf_parts);
                 // tappa 4c: inside a lend CUDA0's loan is priced with the drafter's rows when the read is staged
                 struct RowsPriced { bool& f; explicit RowsPriced(bool& b) : f(b) { f = true; } ~RowsPriced() { f = false; } } rows_priced(ep_rows_priced);
                 if (el_on) apply_pending(true);   // elastic fills must be published before the tail is lent
@@ -22956,6 +23056,8 @@ int main(int argc, char** argv) {
                          prompt_ms > 0 ? 1000.0 * read_n / prompt_ms : 0.0, (long long) produced_n, decode_ms,
                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
                          (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
+            // STRATA_RESIDENT_MASK=1: this request's routings - how many picks the mask replaced and the weight they carried
+            strata::kernels::resident_mask::report(stderr);
             if (serve_adapt_drain_ms >= 1.0)
                 std::fprintf(stderr, "strata serve: the request first waited %.0f ms for the adaptive tier's round in flight\n",
                              serve_adapt_drain_ms);
@@ -23228,6 +23330,7 @@ int main(int argc, char** argv) {
                 kvg_started = true;
                 kvg_start(first);
                 if (!kvg_ensure(n_prompt + o.max_new + 64, [] { cudaDeviceSynchronize(); })) return 1;
+                strata::kernels::resident_mask::set_lent(true);   // STRATA_RESIDENT_MASK=1: the mask keeps the set of before the loan
                 for (size_t i = 0; i < host_res.size(); ++i)
                     if (host_res[i] >= first) {
                         lent.emplace_back((int32_t) i, host_res[i]);
@@ -23316,6 +23419,7 @@ int main(int argc, char** argv) {
             for (const auto& [i, slot] : lent)
                 srcp->release(i / g.n_expert, i % g.n_expert);
 #endif
+            strata::kernels::resident_mask::set_lent(false);   // STRATA_RESIDENT_MASK=1: the pairs are back, the mask follows again
             res_put(d_res);
             std::fprintf(stderr, "strata generate: %zu lent slots refilled in %.1f ms\n", lent.size(),
                          std::chrono::duration<double, std::milli>(Clock::now() - tr).count());
@@ -23624,6 +23728,7 @@ int main(int argc, char** argv) {
             peer2.fused_set_other_res(peer.valid() ? peer.res_table() : nullptr);
             ver.set_peer_fused2(peer2.fused_hook());
         }
+        rmask_sources("before the decode verifier");   // STRATA_RESIDENT_MASK: every residency table that exists by now
         if (!ver.init(wt, g, ss, vh, native_head.loaded() ? &native_head : nullptr, o.spec, err)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
@@ -24506,6 +24611,7 @@ int main(int argc, char** argv) {
     for (int64_t t : produced) std::printf(" %lld", (long long) t);
     std::printf("\n");
     const double decode_ms = decoded > 0 ? total_ms / (double) decoded : 0.0;
+    strata::kernels::resident_mask::report(stderr);   // STRATA_RESIDENT_MASK=1: the run's routings (off: prints nothing)
     std::printf("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s\n", "decode", (long long) decoded, total_ms,
                 decode_ms > 0.0 ? 1000.0 / decode_ms : 0.0);
     if (n_prompt > 1)

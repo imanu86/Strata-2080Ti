@@ -29,6 +29,7 @@
 #include "strata/core/tc_sm75.hpp"
 #include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/native_qsa.hpp"
+#include "strata/kernels/resident_mask.hpp"
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 #include "strata/kernels/native_qsa_indexer.hpp"
@@ -1982,6 +1983,13 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         }
     }
     cudaGetDevice(&m.device);
+#if !defined(STRATA_GPU_METAL)
+    // STRATA_RESIDENT_MASK=1 (opt-in, changes the output): this stage's GPU reads the prompt with the same mask as the
+    // reply - its table is made here (a peer GPU that only reads prompts gets one too); off: not called
+    if (strata::kernels::resident_mask::requested() &&
+        !strata::kernels::resident_mask::prepare_device(m.device, g.n_layers, g.n_expert, err))
+        return false;
+#endif
     if (stage_le_ < 0) stage_le_ = g.n_layers;
     if (stage_lb_ < 0 || stage_lb_ >= stage_le_ || stage_le_ > g.n_layers || (stage_le_ < g.n_layers) != (next_ != nullptr)) {
         err = "prefill: the stage's layer range is wrong";
@@ -5297,6 +5305,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     pt.mark(kPfRouter, cs);
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
                     route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
+#if !defined(STRATA_GPU_METAL)
+                    // STRATA_RESIDENT_MASK=1: the chunk's top-10s among the experts a GPU holds (the decode's mask: a
+                    // prompt's loan does not change it), before anything reads m.ids / m.w
+                    // (STRATA_RESIDENT_MASK=2: the verify windows only - this path routes as without the mask)
+                    if (strata::kernels::resident_mask::prefill_masked() &&
+                        !strata::kernels::resident_mask::apply(m.logits, m.ids, m.w, l, m.g->n_expert, K, (int) T, m.cs, err,
+                                                               /*prefill=*/true))
+                        return false;
+#endif
                     // RESEARCH HOOK (141-research, opt-in, never on by default): STRATA_DBG_FEAT=<file> dumps, per MoE layer and chunk,
                     // the routed ids + weights (and for the layers in STRATA_DBG_FEAT_LAYERS the router-input hidden state, bf16);
                     // STRATA_DBG_ROUTE_OVERRIDE=<file> replaces the routing of the layers listed in that file with the file's ids + weights.
@@ -8610,6 +8627,13 @@ bool Prefill::lm_run(const std::vector<Seg>& segs, int depth, const std::vector<
                         pt.mark(kPfRouter, cs);
                         if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
                         route(m.logits, lb.ids + t0 * K, lb.w + t0 * K, T, m.g->n_expert, cs);
+#if !defined(STRATA_GPU_METAL)
+                        // STRATA_RESIDENT_MASK=1: as the chunk path above
+                        if (strata::kernels::resident_mask::prefill_masked() &&
+                            !strata::kernels::resident_mask::apply(m.logits, lb.ids + t0 * K, lb.w + t0 * K, l, m.g->n_expert, K,
+                                                                   (int) T, cs, err, /*prefill=*/true))
+                            return false;
+#endif
                         if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
                         if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
                         swiglu_pair(m.sgate, m.sup, m.sh_h, T, cs);

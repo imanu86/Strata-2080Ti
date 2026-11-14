@@ -23,6 +23,7 @@
 #include "strata/kernels/native_gdn.hpp"
 #include "strata/kernels/native_gdn_preprocess.hpp"
 #include "strata/kernels/native_router.hpp"
+#include "strata/kernels/resident_mask.hpp"
 #include "strata/kernels/native_qsa.hpp"
 #include "strata/kernels/native_qsa_indexer.hpp"
 #include "strata/kernels/mrope.hpp"
@@ -423,6 +424,11 @@ if (native_router_enabled() && g.n_expert == 512 && k == 10) {
     try { native_router_top10(b.logits, b.ids, b.weights, stream); }
     catch (const std::exception& error) { err = v.name("router") + ": " + error.what(); return false; }
 } else router_top10(b.logits, 1, (int) g.n_expert, (int) k, b.ids, b.weights, stream);
+// STRATA_RESIDENT_MASK=1 (opt-in, changes the output): the experts no GPU holds leave the top-10 and the next-best
+// resident ones take their place, before the doorbell publishes the ids (resident_mask.cu; off: not called)
+if (strata::kernels::resident_mask::requested() &&
+    !strata::kernels::resident_mask::apply(b.logits, b.ids, b.weights, layer, g.n_expert, k, 1, stream, err))
+    return false;
 // ---- THE DOORBELL, AND IT IS THE WHOLE POINT OF THE PROTOCOL.  The routed experts' INPUT (`x`) and the
 //      miss list (`ids`, `weights`) are published to the host HERE, before anything that depends on them,
 //      so a CPU pool can start on them while the GPU keeps working.  Both the copy and the ring are
@@ -465,6 +471,10 @@ bool moe_route_window(const WeightTable& tables, const ModelGeometry& g, int64_t
     else
         bf16_gemv_fp32_mmvf_cols(x, (const uint16_t*) w_router->data, logits, g.n_embd, g.n_expert, n, stream);
     router_top10(logits, n, (int) g.n_expert, (int) k, ids, weights, stream);
+    // STRATA_RESIDENT_MASK=1: as moe_route (the per-token calls above mask in moe_route itself)
+    if (strata::kernels::resident_mask::requested() &&
+        !strata::kernels::resident_mask::apply(logits, ids, weights, layer, g.n_expert, k, n, stream, err))
+        return false;
     return true;
 }
 bool moe_shared(const WeightTable& tables, const ModelGeometry& g, int64_t layer, const MoEBuffers& b,                const float* x, void* stream, std::string& err) {    using namespace strata::kernels;    const LayerView v(tables, layer);    const WeightRef* w_ginp = v.get("ffn_gate_inp_shexp.weight");    const WeightRef* w_sgate = v.get("ffn_gate_shexp.weight");    const WeightRef* w_sup = v.get("ffn_up_shexp.weight");    const WeightRef* w_sdown = v.get("ffn_down_shexp.weight");    const char* missing = !w_ginp ? "ffn_gate_inp_shexp.weight" : !w_sgate ? "ffn_gate_shexp.weight"                          : !w_sup ? "ffn_up_shexp.weight" : !w_sdown ? "ffn_down_shexp.weight" : nullptr;    if (missing) { err = v.name(missing) + " is missing"; return false; }
